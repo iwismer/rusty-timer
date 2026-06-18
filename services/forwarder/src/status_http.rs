@@ -10,7 +10,7 @@
 //!   — set epoch name for a reader stream
 //! - `GET /api/v1/config` — current config as JSON
 //! - `POST /api/v1/config/{section}` — update a config section
-//!   (general, server, auth, journal, uplink, status_http, control, update, readers)
+//!   (general, auth, journal, status_http, control, update, p2p, ups, readers)
 //! - `POST /api/v1/restart` — trigger graceful restart; 404 if config editing not enabled;
 //!   501 on non-Unix platforms
 //! - `POST /api/v1/control/restart-service` — trigger graceful service restart
@@ -40,7 +40,7 @@
 //!
 //! # Readiness contract
 //! `/readyz` reflects local prerequisites only (config + SQLite + worker loops).
-//! Uplink connectivity does NOT affect readiness.
+//! P2P session connectivity does NOT affect readiness.
 //!
 //! # Security
 //! No authentication in v1.
@@ -49,14 +49,14 @@ use crate::storage::journal::Journal;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{StatusCode, Uri, header};
+use axum::http::{StatusCode, header};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use rt_updater::UpdateStatus;
 use rt_updater::workflow::{RealChecker, WorkflowState, run_check, run_download};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
@@ -117,7 +117,7 @@ pub struct ReaderStatus {
     pub reads_total: i64,
     /// The local port the forwarder listens on to re-expose reads from this reader.
     pub local_port: u16,
-    /// The name of the current epoch (set via the server), if any.
+    /// The name of the current epoch, if any.
     pub current_epoch_name: Option<String>,
     /// Control protocol info (firmware, clock, etc.) — populated on connect.
     pub reader_info: Option<crate::reader_control::ReaderInfo>,
@@ -127,19 +127,19 @@ pub struct ReaderStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct UpsStatusState {
     pub available: bool,
-    pub status: Option<rt_protocol::UpsStatus>,
+    pub status: Option<rt_domain::UpsStatus>,
 }
 
 /// Tracks local subsystem readiness for the `/readyz` endpoint.
 ///
 /// Ready = config loaded + journal open + worker tasks started.
-/// Uplink connectivity is explicitly excluded from readiness.
+/// P2P session connectivity is explicitly excluded from readiness.
 #[derive(Debug, Clone)]
 pub struct SubsystemStatus {
     ready: bool,
     reason: Option<String>,
-    /// Uplink state is tracked for the status page but does NOT affect readiness.
-    uplink_connected: bool,
+    /// P2P session state is tracked for the status page but does NOT affect readiness.
+    p2p_connected: bool,
     forwarder_id: String,
     local_ip: Option<String>,
     readers: HashMap<String, ReaderStatus>,
@@ -158,7 +158,7 @@ impl SubsystemStatus {
         SubsystemStatus {
             ready: true,
             reason: None,
-            uplink_connected: false,
+            p2p_connected: false,
             forwarder_id: String::new(),
             local_ip: None,
             readers: HashMap::new(),
@@ -175,7 +175,7 @@ impl SubsystemStatus {
         SubsystemStatus {
             ready: false,
             reason: Some(reason),
-            uplink_connected: false,
+            p2p_connected: false,
             forwarder_id: String::new(),
             local_ip: None,
             readers: HashMap::new(),
@@ -187,9 +187,9 @@ impl SubsystemStatus {
         }
     }
 
-    /// Set the uplink connection state (does NOT affect `/readyz` result).
-    pub fn set_uplink_connected(&mut self, connected: bool) {
-        self.uplink_connected = connected;
+    /// Set the P2P session state (does NOT affect `/readyz` result).
+    pub fn set_p2p_connected(&mut self, connected: bool) {
+        self.p2p_connected = connected;
     }
 
     /// Return true if all local subsystems are ready.
@@ -197,9 +197,9 @@ impl SubsystemStatus {
         self.ready
     }
 
-    /// Return the uplink connection state.
-    pub fn uplink_connected(&self) -> bool {
-        self.uplink_connected
+    /// Return the P2P session state.
+    pub fn p2p_connected(&self) -> bool {
+        self.p2p_connected
     }
 
     /// Return whether a restart is needed to apply saved config changes.
@@ -276,7 +276,7 @@ fn subsystem_to_display_state(
     rt_eink::state::DisplayState {
         forwarder_name,
         local_ip: ss.local_ip.clone(),
-        server_connected: ss.uplink_connected(),
+        p2p_connected: ss.p2p_connected(),
         readers,
         total_reads,
         cpu_temp_celsius: cpu_temp,
@@ -405,7 +405,7 @@ impl StatusServer {
                 .ui_tx
                 .send(crate::ui_events::ForwarderUiEvent::StatusChanged {
                     ready: ss.is_ready(),
-                    uplink_connected: ss.uplink_connected(),
+                    p2p_connected: ss.p2p_connected(),
                     restart_needed: ss.restart_needed(),
                 });
         }
@@ -423,16 +423,16 @@ impl StatusServer {
         self.subsystem.lock().await.restart_needed()
     }
 
-    /// Update the uplink connection state (does not affect readiness).
-    pub async fn set_uplink_connected(&self, connected: bool) {
+    /// Update the P2P session state (does not affect readiness).
+    pub async fn set_p2p_connected(&self, connected: bool) {
         {
             let mut ss = self.subsystem.lock().await;
-            ss.set_uplink_connected(connected);
+            ss.set_p2p_connected(connected);
             let _ = self
                 .ui_tx
                 .send(crate::ui_events::ForwarderUiEvent::StatusChanged {
                     ready: ss.is_ready(),
-                    uplink_connected: connected,
+                    p2p_connected: connected,
                     restart_needed: ss.restart_needed(),
                 });
         }
@@ -1083,7 +1083,7 @@ async fn mark_restart_needed_and_emit(
     ss.set_restart_needed();
     let _ = ui_tx.send(crate::ui_events::ForwarderUiEvent::StatusChanged {
         ready: ss.is_ready(),
-        uplink_connected: ss.uplink_connected(),
+        p2p_connected: ss.p2p_connected(),
         restart_needed: true,
     });
 }
@@ -1093,8 +1093,8 @@ async fn mark_restart_needed_and_emit(
 /// Dispatches to the right mutation logic based on `section`, validates the
 /// payload, and calls `update_config_file` to persist the change.
 ///
-/// Recognised sections: `"general"`, `"server"`, `"auth"`, `"journal"`,
-/// `"uplink"`, `"status_http"`, `"control"`, `"update"`, `"ups"`, `"readers"`.
+/// Recognised sections: `"general"`, `"auth"`, `"journal"`, `"status_http"`,
+/// `"control"`, `"update"`, `"p2p"`, `"ups"`, `"readers"`.
 pub async fn apply_section_update(
     section: &str,
     payload: &serde_json::Value,
@@ -1110,29 +1110,6 @@ pub async fn apply_section_update(
             let display_name = optional_string_field(payload, "display_name")?;
             update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.display_name = display_name;
-                Ok(())
-            })
-            .await
-        }
-        "server" => {
-            let base_url_opt = optional_string_field(payload, "base_url")?;
-            let base_url =
-                require_non_empty_trimmed("base_url", base_url_opt).map_err(bad_request_error)?;
-            validate_base_url(&base_url).map_err(bad_request_error)?;
-            let forwarders_ws_path = optional_string_field(payload, "forwarders_ws_path")?
-                .and_then(|s| {
-                    let trimmed = s.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed.to_owned())
-                    }
-                });
-            update_config_file(config_state, subsystem, ui_tx, |raw| {
-                raw.server = Some(crate::config::RawServerConfig {
-                    base_url: Some(base_url),
-                    forwarders_ws_path,
-                });
                 Ok(())
             })
             .await
@@ -1189,20 +1166,6 @@ pub async fn apply_section_update(
             })
             .await
         }
-        "uplink" => {
-            let batch_flush_ms = optional_u64_field(payload, "batch_flush_ms")?;
-            let batch_max_events = optional_u32_field(payload, "batch_max_events")?;
-            let ack_timeout_secs = optional_u64_field(payload, "ack_timeout_secs")?;
-            update_config_file(config_state, subsystem, ui_tx, |raw| {
-                raw.uplink = Some(crate::config::RawUplinkConfig {
-                    batch_flush_ms,
-                    batch_max_events,
-                    ack_timeout_secs,
-                });
-                Ok(())
-            })
-            .await
-        }
         "status_http" => {
             let bind = optional_string_field(payload, "bind")?.and_then(|s| {
                 let trimmed = s.trim();
@@ -1230,6 +1193,58 @@ pub async fn apply_section_update(
             update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.control = Some(crate::config::RawControlConfig {
                     allow_power_actions,
+                });
+                Ok(())
+            })
+            .await
+        }
+        "p2p" => {
+            let enabled = optional_bool_field(payload, "enabled")?;
+            let thin_node_url = optional_string_field(payload, "thin_node_url")?.and_then(|url| {
+                let trimmed = url.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_owned())
+            });
+            let thin_node_token_file = optional_string_field(payload, "thin_node_token_file")?
+                .and_then(|path| {
+                    let trimmed = path.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+                });
+            if let Some(ref url) = thin_node_url {
+                validate_thin_node_url(url).map_err(bad_request_error)?;
+            }
+            if let Some(ref token_file) = thin_node_token_file {
+                validate_token_file(token_file).map_err(bad_request_error)?;
+            }
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
+                let previous = raw.p2p.take();
+                raw.p2p = Some(crate::config::RawP2pConfig {
+                    enabled,
+                    secret_key_path: previous
+                        .as_ref()
+                        .and_then(|cfg| cfg.secret_key_path.clone()),
+                    secret_key_seed_hex: previous
+                        .as_ref()
+                        .and_then(|cfg| cfg.secret_key_seed_hex.clone()),
+                    bind_addr_v4: previous.as_ref().and_then(|cfg| cfg.bind_addr_v4.clone()),
+                    relay_disabled: previous.as_ref().and_then(|cfg| cfg.relay_disabled),
+                    discovery_disabled: previous.as_ref().and_then(|cfg| cfg.discovery_disabled),
+                    max_concurrent_bidi_streams: previous
+                        .as_ref()
+                        .and_then(|cfg| cfg.max_concurrent_bidi_streams),
+                    static_allowed_receivers: previous
+                        .as_ref()
+                        .and_then(|cfg| cfg.static_allowed_receivers.clone()),
+                    allowlist_cache_path: previous
+                        .as_ref()
+                        .and_then(|cfg| cfg.allowlist_cache_path.clone()),
+                    thin_node_url,
+                    thin_node_token_file,
+                    allowlist_poll_interval_secs: previous
+                        .as_ref()
+                        .and_then(|cfg| cfg.allowlist_poll_interval_secs),
+                    allowlist_request_timeout_secs: previous
+                        .as_ref()
+                        .and_then(|cfg| cfg.allowlist_request_timeout_secs),
                 });
                 Ok(())
             })
@@ -1481,18 +1496,6 @@ fn optional_u64_field(
     }
 }
 
-fn optional_u32_field(
-    payload: &serde_json::Value,
-    field: &str,
-) -> Result<Option<u32>, (u16, String)> {
-    let raw = optional_u64_field(payload, field)?;
-    raw.map(|value| {
-        u32::try_from(value)
-            .map_err(|_| bad_request_error(format!("{} must be <= {}", field, u32::MAX)))
-    })
-    .transpose()
-}
-
 fn optional_u16_field(
     payload: &serde_json::Value,
     field: &str,
@@ -1526,22 +1529,6 @@ fn require_non_empty_trimmed(field: &str, value: Option<String>) -> Result<Strin
     Ok(trimmed.to_owned())
 }
 
-fn validate_base_url(base_url: &str) -> Result<(), String> {
-    let uri: Uri = base_url
-        .parse()
-        .map_err(|_| "base_url must be a valid absolute URL".to_owned())?;
-    let scheme = uri
-        .scheme_str()
-        .ok_or_else(|| "base_url must include scheme".to_owned())?;
-    if scheme != "http" && scheme != "https" {
-        return Err("base_url scheme must be http or https".to_owned());
-    }
-    if uri.authority().is_none() {
-        return Err("base_url must include host".to_owned());
-    }
-    Ok(())
-}
-
 fn validate_token_file(token_file: &str) -> Result<(), String> {
     if token_file.contains('\n') || token_file.contains('\r') {
         return Err("token_file must be a single-line path".to_owned());
@@ -1553,6 +1540,14 @@ fn validate_status_bind(bind: &str) -> Result<(), String> {
     bind.parse::<SocketAddrV4>()
         .map(|_| ())
         .map_err(|_| "bind must be a valid IPv4 address with port (e.g. 127.0.0.1:8080)".to_owned())
+}
+
+fn validate_thin_node_url(url: &str) -> Result<(), String> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Ok(())
+    } else {
+        Err("thin_node_url must start with http:// or https://".to_owned())
+    }
 }
 
 fn config_not_available() -> Response {
@@ -1984,7 +1979,7 @@ struct StatusJsonResponse {
     version: String,
     ready: bool,
     ready_reason: Option<String>,
-    uplink_connected: bool,
+    p2p_connected: bool,
     restart_needed: bool,
     ups_status: Option<UpsStatusState>,
     readers: Vec<ReaderStatusJson>,
@@ -2034,7 +2029,7 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
         version: (*state.version).clone(),
         ready: ss.is_ready(),
         ready_reason: ss.reason.clone(),
-        uplink_connected: ss.uplink_connected(),
+        p2p_connected: ss.p2p_connected(),
         restart_needed: ss.restart_needed(),
         ups_status: ss.ups_status().cloned(),
         readers,
@@ -2099,7 +2094,7 @@ async fn display_state_handler<J: JournalAccess + Send + 'static>(
         axum::Json(serde_json::json!({
             "forwarder_name": null,
             "local_ip": ss.local_ip,
-            "server_connected": ss.uplink_connected(),
+            "p2p_connected": ss.p2p_connected(),
             "readers": readers,
             "total_reads": total_reads,
             "cpu_temp_celsius": null,
@@ -3003,18 +2998,10 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             "/api/v1/config/general",
             post(post_config_general_handler::<J>),
         )
-        .route(
-            "/api/v1/config/server",
-            post(post_config_server_handler::<J>),
-        )
         .route("/api/v1/config/auth", post(post_config_auth_handler::<J>))
         .route(
             "/api/v1/config/journal",
             post(post_config_journal_handler::<J>),
-        )
-        .route(
-            "/api/v1/config/uplink",
-            post(post_config_uplink_handler::<J>),
         )
         .route(
             "/api/v1/config/status_http",
@@ -3028,6 +3015,7 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             "/api/v1/config/update",
             post(post_config_update_handler::<J>),
         )
+        .route("/api/v1/config/p2p", post(post_config_p2p_handler::<J>))
         .route("/api/v1/config/ups", post(post_config_ups_handler::<J>))
         .route(
             "/api/v1/config/readers",
@@ -3125,19 +3113,6 @@ async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct ServerStreamsResponse {
-    streams: Vec<ServerStreamInfo>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ServerStreamInfo {
-    stream_id: String,
-    forwarder_id: String,
-    reader_ip: String,
-    stream_epoch: i64,
-}
-
 async fn set_current_epoch_name_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(reader_ip): Path<String>,
@@ -3165,144 +3140,30 @@ async fn set_current_epoch_name_handler<J: JournalAccess + Send + 'static>(
         None => return text_response(StatusCode::BAD_REQUEST, "name is required"),
     };
 
-    let config_state = match &state.config_state {
-        Some(config_state) => config_state.clone(),
-        None => return config_not_available(),
+    let mut ss = state.subsystem.lock().await;
+    let Some(reader) = ss.readers.get_mut(&reader_ip) else {
+        return text_response(StatusCode::NOT_FOUND, "reader not found");
     };
 
-    let cfg = match crate::config::load_config_from_path(&config_state.path) {
-        Ok(cfg) => cfg,
-        Err(error) => {
-            return text_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to load config: {error}"),
-            );
-        }
-    };
+    reader.current_epoch_name = normalized_name;
+    let _ = state
+        .ui_tx
+        .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
+            ip: reader_ip.to_owned(),
+            state: (&reader.state).into(),
+            reads_session: reader.reads_since_restart,
+            reads_total: reader.reads_total,
+            last_seen_secs: reader.last_seen.map(|t| t.elapsed().as_secs()),
+            local_port: reader.local_port,
+            current_epoch_name: reader.current_epoch_name.clone(),
+        });
+    state.logger.log(format!(
+        "set current epoch name for {} via local API",
+        reader_ip
+    ));
+    drop(ss);
 
-    let forwarder_id = {
-        let ss = state.subsystem.lock().await;
-        ss.forwarder_id.clone()
-    };
-    if forwarder_id.is_empty() {
-        return text_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "forwarder_id is not initialized",
-        );
-    }
-
-    let base_url = cfg.server.base_url.trim_end_matches('/');
-    let client = reqwest::Client::new();
-    let streams_url = format!("{base_url}/api/v1/streams");
-    let streams_resp = match client
-        .get(&streams_url)
-        .bearer_auth(&cfg.token)
-        .send()
-        .await
-    {
-        Ok(resp) => resp,
-        Err(error) => {
-            return text_response(
-                StatusCode::BAD_GATEWAY,
-                format!("upstream stream lookup failed: {error}"),
-            );
-        }
-    };
-
-    let streams_status = streams_resp.status();
-    let streams_body = match streams_resp.text().await {
-        Ok(body) => body,
-        Err(error) => {
-            return text_response(
-                StatusCode::BAD_GATEWAY,
-                format!("upstream stream lookup body read failed: {error}"),
-            );
-        }
-    };
-    if !streams_status.is_success() {
-        return text_response(
-            StatusCode::BAD_GATEWAY,
-            format!("upstream stream lookup returned {streams_status}: {streams_body}"),
-        );
-    }
-
-    let streams = match serde_json::from_str::<ServerStreamsResponse>(&streams_body) {
-        Ok(parsed) => parsed.streams,
-        Err(error) => {
-            return text_response(
-                StatusCode::BAD_GATEWAY,
-                format!("invalid upstream stream lookup response: {error}"),
-            );
-        }
-    };
-    let maybe_stream = streams
-        .iter()
-        .find(|stream| stream.forwarder_id == forwarder_id && stream.reader_ip == reader_ip);
-    let stream = match maybe_stream {
-        Some(stream) => stream,
-        None => return text_response(StatusCode::NOT_FOUND, "stream not found"),
-    };
-
-    let epoch_name_url = format!(
-        "{base_url}/api/v1/streams/{}/epochs/{}/name",
-        stream.stream_id, stream.stream_epoch
-    );
-    let epoch_name_resp = match client
-        .put(&epoch_name_url)
-        .bearer_auth(&cfg.token)
-        .json(&serde_json::json!({ "name": normalized_name }))
-        .send()
-        .await
-    {
-        Ok(resp) => resp,
-        Err(error) => {
-            return text_response(
-                StatusCode::BAD_GATEWAY,
-                format!("upstream epoch-name update failed: {error}"),
-            );
-        }
-    };
-
-    let response_status = status_from_u16_or_internal(epoch_name_resp.status().as_u16());
-    let response_body = match epoch_name_resp.text().await {
-        Ok(body) => body,
-        Err(error) => {
-            return text_response(
-                StatusCode::BAD_GATEWAY,
-                format!("upstream epoch-name response body read failed: {error}"),
-            );
-        }
-    };
-    if response_status.is_success() {
-        state
-            .logger
-            .log(format!("set current epoch name for {} via API", reader_ip));
-
-        // Store the epoch name locally and broadcast a ReaderUpdated SSE event.
-        let mut ss = state.subsystem.lock().await;
-        if let Some(r) = ss.readers.get_mut(&reader_ip) {
-            r.current_epoch_name = normalized_name;
-            let _ = state
-                .ui_tx
-                .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
-                    ip: reader_ip.to_owned(),
-                    state: (&r.state).into(),
-                    reads_session: r.reads_since_restart,
-                    reads_total: r.reads_total,
-                    last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
-                    local_port: r.local_port,
-                    current_epoch_name: r.current_epoch_name.clone(),
-                });
-        }
-        drop(ss);
-
-        return json_response(response_status, response_body);
-    }
-
-    json_response(
-        response_status,
-        serde_json::json!({"error": response_body}).to_string(),
-    )
+    json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string())
 }
 
 fn status_from_u16_or_internal(status: u16) -> StatusCode {
@@ -3566,13 +3427,6 @@ async fn post_config_general_handler<J: JournalAccess + Send + 'static>(
     post_config_section_handler("general", state, body, None).await
 }
 
-async fn post_config_server_handler<J: JournalAccess + Send + 'static>(
-    State(state): State<AppState<J>>,
-    body: Bytes,
-) -> Response {
-    post_config_section_handler("server", state, body, None).await
-}
-
 async fn post_config_auth_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     body: Bytes,
@@ -3585,13 +3439,6 @@ async fn post_config_journal_handler<J: JournalAccess + Send + 'static>(
     body: Bytes,
 ) -> Response {
     post_config_section_handler("journal", state, body, None).await
-}
-
-async fn post_config_uplink_handler<J: JournalAccess + Send + 'static>(
-    State(state): State<AppState<J>>,
-    body: Bytes,
-) -> Response {
-    post_config_section_handler("uplink", state, body, None).await
 }
 
 async fn post_config_status_http_handler<J: JournalAccess + Send + 'static>(
@@ -3628,6 +3475,13 @@ async fn post_config_update_handler<J: JournalAccess + Send + 'static>(
     body: Bytes,
 ) -> Response {
     post_config_section_handler("update", state, body, None).await
+}
+
+async fn post_config_p2p_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    post_config_section_handler("p2p", state, body, None).await
 }
 
 fn apply_via_restart_enabled() -> bool {
@@ -3798,7 +3652,7 @@ mod tests {
         server
             .set_ups_status(UpsStatusState {
                 available: false,
-                status: Some(rt_protocol::UpsStatus {
+                status: Some(rt_domain::UpsStatus {
                     battery_percent: 42,
                     battery_voltage_mv: 3890,
                     charging: false,
@@ -3822,7 +3676,7 @@ mod tests {
         assert_eq!(body["forwarder_id"], "fwd-abc123");
         assert_eq!(body["version"], "0.2.0");
         assert_eq!(body["ready"], true);
-        assert_eq!(body["uplink_connected"], false);
+        assert_eq!(body["p2p_connected"], false);
         assert_eq!(body["restart_needed"], false);
         assert_eq!(body["ups_status"]["available"], false);
         assert_eq!(body["ups_status"]["status"]["battery_percent"], 42);
@@ -5217,8 +5071,8 @@ mod tests {
             config_file,
             r#"schema_version = 1
 display_name = "Start Line"
-[server]
-base_url = "https://timing.example.com"
+[p2p]
+thin_node_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -5276,8 +5130,8 @@ target = "192.168.1.100:10000"
         write!(
             config_file,
             r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
+[p2p]
+thin_node_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -5336,8 +5190,8 @@ target = "192.168.1.100:10000"
         write!(
             config_file,
             r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
+[p2p]
+thin_node_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -6681,8 +6535,8 @@ target = "192.168.1.100:10000"
         write!(
             config_file,
             r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
+[p2p]
+thin_node_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -6728,8 +6582,8 @@ target = "192.168.1.100:10000"
         write!(
             config_file,
             r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
+[p2p]
+thin_node_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -6772,8 +6626,8 @@ target = "192.168.1.100:10000"
         write!(
             config_file,
             r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
+[p2p]
+thin_node_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -6820,8 +6674,8 @@ target = "192.168.1.100:10000"
         write!(
             config_file,
             r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
+[p2p]
+thin_node_url = "https://timing.example.com"
 [auth]
 token_file = "{token_path}"
 [[readers]]

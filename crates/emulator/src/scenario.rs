@@ -26,8 +26,8 @@
 //!     stored_reads: 100            # default: 0
 //!     clock_offset_ms: 0           # default: 0
 //!
-//! # Forwarder mode adds:
-//! server_url: "wss://timing.example.com/ws/v1/forwarders"
+//! # Forwarder mode adds metadata for harnesses that bypass the real forwarder:
+//! server_url: "p2p://loopback"
 //! token: "<bearer-token>"
 //! forwarder_id: "emulated-fwd-1"
 //! ```
@@ -54,7 +54,7 @@ const MAX_CHIP_ID: u64 = 0xFFFF_FFFF_FFFF;
 pub enum EmulatorMode {
     /// Bind IP:port and emit IPICO reads (simulates physical reader).
     Reader,
-    /// Connect to server WS as a fake forwarder (bypasses real forwarder).
+    /// Emit reads as a harness-managed fake forwarder (bypasses real hardware).
     Forwarder,
 }
 
@@ -156,9 +156,9 @@ pub struct ScenarioConfig {
     pub readers: Vec<ReaderScenarioConfig>,
 
     // Forwarder mode only:
-    /// Server WebSocket URL (e.g. "wss://...").
+    /// Harness endpoint URL.
     pub server_url: Option<String>,
-    /// Bearer token for server authentication.
+    /// Bearer token for harness authentication.
     pub token: Option<String>,
     /// Forwarder ID to present in hello message.
     pub forwarder_id: Option<String>,
@@ -252,7 +252,7 @@ impl std::error::Error for ScenarioError {}
 // Generated event type
 // ---------------------------------------------------------------------------
 
-/// A single emulated read event (mirrors rt_protocol::ReadEvent fields).
+/// A single emulated chip-read event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmulatedEvent {
     /// Reader IP (= stream_key).

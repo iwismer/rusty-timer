@@ -3,14 +3,13 @@ import { getSection, getField, searchHelp } from "./index";
 import { FORWARDER_HELP } from "./forwarder-help";
 import { RECEIVER_HELP } from "./receiver-help";
 import { RECEIVER_ADMIN_HELP } from "./receiver-admin-help";
-import { SERVER_HELP } from "./server-help";
 import type { HelpContextName, HelpContext } from "./help-types";
 
 describe("getSection", () => {
-  it("returns the server section for forwarder context", () => {
-    const section = getSection("forwarder", "server");
+  it("returns the p2p section for forwarder context", () => {
+    const section = getSection("forwarder", "p2p");
     expect(section).toBeDefined();
-    expect(section!.title).toBe("Server Connection");
+    expect(section!.title).toBe("P2P / Thin-node");
   });
 
   it("returns undefined for a nonexistent section", () => {
@@ -19,18 +18,18 @@ describe("getSection", () => {
 });
 
 describe("getField", () => {
-  it("returns the base_url field from forwarder server section", () => {
-    const field = getField("forwarder", "server", "base_url");
+  it("returns the thin_node_url field from forwarder p2p section", () => {
+    const field = getField("forwarder", "p2p", "thin_node_url");
     expect(field).toBeDefined();
-    expect(field!.label).toBe("Base URL");
+    expect(field!.label).toBe("Thin-node URL");
   });
 
   it("returns undefined for a nonexistent field", () => {
-    expect(getField("forwarder", "server", "nonexistent")).toBeUndefined();
+    expect(getField("forwarder", "p2p", "nonexistent")).toBeUndefined();
   });
 
   it("returns undefined for a nonexistent section", () => {
-    expect(getField("forwarder", "nonexistent", "base_url")).toBeUndefined();
+    expect(getField("forwarder", "nonexistent", "thin_node_url")).toBeUndefined();
   });
 });
 
@@ -47,26 +46,26 @@ describe("searchHelp", () => {
     expect(searchHelp("zzz-no-match-xyz")).toEqual([]);
   });
 
-  it("finds forwarder server section when searching for base_url content", () => {
-    const results = searchHelp("Base URL");
+  it("finds forwarder p2p section when searching for thin-node content", () => {
+    const results = searchHelp("Thin-node URL");
     expect(results.length).toBeGreaterThan(0);
     const match = results.find(
-      (r) => r.context === "forwarder" && r.sectionKey === "server",
+      (r) => r.context === "forwarder" && r.sectionKey === "p2p",
     );
     expect(match).toBeDefined();
-    expect(match!.matchedFields.some((f) => f.fieldKey === "base_url")).toBe(true);
+    expect(match!.matchedFields.some((f) => f.fieldKey === "thin_node_url")).toBe(true);
   });
 
   it("matches section title", () => {
-    const results = searchHelp("Server Connection");
+    const results = searchHelp("P2P / Thin-node");
     const match = results.find(
-      (r) => r.context === "forwarder" && r.sectionKey === "server",
+      (r) => r.context === "forwarder" && r.sectionKey === "p2p",
     );
     expect(match).toBeDefined();
   });
 
   it("matches case-insensitively", () => {
-    const results = searchHelp("BASE URL");
+    const results = searchHelp("THIN-NODE URL");
     expect(results.length).toBeGreaterThan(0);
   });
 
@@ -81,14 +80,14 @@ describe("searchHelp", () => {
   });
 
   it("returns all fields when only section title matches", () => {
-    const results = searchHelp("Server Connection");
+    const results = searchHelp("P2P / Thin-node");
     const match = results.find(
-      (r) => r.context === "forwarder" && r.sectionKey === "server",
+      (r) => r.context === "forwarder" && r.sectionKey === "p2p",
     );
     expect(match).toBeDefined();
-    const sectionFieldCount = Object.keys(FORWARDER_HELP.server.fields).length;
+    const sectionFieldCount = Object.keys(FORWARDER_HELP.p2p.fields).length;
     expect(match!.matchedFields).toHaveLength(sectionFieldCount);
-    expect(match!.matchedFields.some((f) => f.fieldKey === "base_url")).toBe(true);
+    expect(match!.matchedFields.some((f) => f.fieldKey === "thin_node_url")).toBe(true);
   });
 
   it("matches section overview text", () => {
@@ -116,37 +115,31 @@ describe("template wiring validation", () => {
   const expectedFieldLookups: Array<{ context: HelpContextName; section: string; field: string }> = [
     // ForwarderConfig.svelte
     { context: "forwarder", section: "general", field: "display_name" },
-    { context: "forwarder", section: "server", field: "base_url" },
+    { context: "forwarder", section: "p2p", field: "enabled" },
+    { context: "forwarder", section: "p2p", field: "thin_node_url" },
+    { context: "forwarder", section: "p2p", field: "thin_node_token_file" },
     { context: "forwarder", section: "readers", field: "reader_ip" },
     { context: "forwarder", section: "readers", field: "reader_port" },
     { context: "forwarder", section: "readers", field: "enabled" },
     { context: "forwarder", section: "readers", field: "default_local_port" },
     { context: "forwarder", section: "readers", field: "local_port_override" },
     { context: "forwarder", section: "controls", field: "allow_power_actions" },
-    { context: "forwarder", section: "ws_path", field: "forwarders_ws_path" },
     { context: "forwarder", section: "auth", field: "token_file" },
     { context: "forwarder", section: "journal", field: "sqlite_path" },
     { context: "forwarder", section: "journal", field: "prune_watermark_pct" },
-    { context: "forwarder", section: "uplink", field: "batch_mode" },
-    { context: "forwarder", section: "uplink", field: "batch_flush_ms" },
-    { context: "forwarder", section: "uplink", field: "batch_max_events" },
     { context: "forwarder", section: "status_http", field: "bind" },
     { context: "forwarder", section: "update", field: "update_mode" },
-    // forwarder-ui +page.svelte & server-ui +page.svelte
+    // forwarder-ui +page.svelte & legacy dashboard +page.svelte
     { context: "forwarder", section: "read_mode", field: "read_mode" },
     { context: "forwarder", section: "read_mode", field: "timeout" },
     // receiver-ui +page.svelte
     { context: "receiver", section: "config", field: "receiver_id" },
-    { context: "receiver", section: "config", field: "server_url" },
+    { context: "receiver", section: "config", field: "thin_node_url" },
     { context: "receiver", section: "config", field: "token" },
     { context: "receiver", section: "receiver_mode", field: "mode" },
     // receiver-ui admin/+page.svelte
     { context: "receiver-admin", section: "port_overrides", field: "port_override" },
-    // server-ui +page.svelte (stream filters)
-    { context: "server", section: "stream_filters", field: "race_filter" },
-    { context: "server", section: "stream_filters", field: "hide_offline" },
-    { context: "server", section: "stream_filters", field: "forwarder_race" },
-    // server-ui +page.svelte (reader live — context is forwarder)
+    // reader live controls
     { context: "forwarder", section: "reader_live", field: "clock_drift" },
     { context: "forwarder", section: "reader_live", field: "tto_bytes" },
     { context: "forwarder", section: "reader_live", field: "sync_clock" },
@@ -154,28 +147,6 @@ describe("template wiring validation", () => {
     { context: "forwarder", section: "reader_live", field: "recording" },
     { context: "forwarder", section: "reader_live", field: "download_reads" },
     { context: "forwarder", section: "reader_live", field: "clear_records" },
-    // server-ui announcer-config/+page.svelte
-    { context: "server", section: "announcer", field: "enabled" },
-    { context: "server", section: "announcer", field: "streams" },
-    { context: "server", section: "announcer", field: "max_list_size" },
-    { context: "server", section: "announcer", field: "reset" },
-    // server-ui sbc-setup/+page.svelte
-    { context: "server", section: "sbc_identity", field: "hostname" },
-    { context: "server", section: "sbc_identity", field: "admin_username" },
-    { context: "server", section: "sbc_identity", field: "ssh_public_key" },
-    { context: "server", section: "sbc_network", field: "static_ipv4" },
-    { context: "server", section: "sbc_network", field: "gateway" },
-    { context: "server", section: "sbc_network", field: "dns_servers" },
-    { context: "server", section: "sbc_network", field: "wifi_enabled" },
-    { context: "server", section: "sbc_network", field: "wifi_ssid" },
-    { context: "server", section: "sbc_network", field: "wifi_password" },
-    { context: "server", section: "sbc_network", field: "wifi_country" },
-    { context: "server", section: "sbc_forwarder", field: "server_base_url" },
-    { context: "server", section: "sbc_forwarder", field: "auth_token" },
-    { context: "server", section: "sbc_forwarder", field: "reader_targets" },
-    { context: "server", section: "sbc_forwarder", field: "status_bind" },
-    { context: "server", section: "sbc_forwarder", field: "display_name" },
-    { context: "server", section: "sbc_advanced", field: "setup_script_url" },
   ];
 
   it.each(expectedFieldLookups)(
@@ -189,17 +160,15 @@ describe("template wiring validation", () => {
   const expectedSectionLookups: Array<{ context: HelpContextName; section: string }> = [
     // ForwarderConfig.svelte
     { context: "forwarder", section: "general" },
-    { context: "forwarder", section: "server" },
+    { context: "forwarder", section: "p2p" },
     { context: "forwarder", section: "readers" },
     { context: "forwarder", section: "controls" },
     { context: "forwarder", section: "dangerous_actions" },
-    { context: "forwarder", section: "ws_path" },
     { context: "forwarder", section: "auth" },
     { context: "forwarder", section: "journal" },
-    { context: "forwarder", section: "uplink" },
     { context: "forwarder", section: "status_http" },
     { context: "forwarder", section: "update" },
-    // forwarder-ui & server-ui +page.svelte (HelpDialog usage)
+    // forwarder-ui & legacy dashboard +page.svelte (HelpDialog usage)
     { context: "forwarder", section: "read_mode" },
     // receiver-ui +page.svelte
     { context: "receiver", section: "config" },
@@ -212,26 +181,8 @@ describe("template wiring validation", () => {
     { context: "receiver-admin", section: "purge_subscriptions" },
     { context: "receiver-admin", section: "reset_profile" },
     { context: "receiver-admin", section: "factory_reset" },
-    // server-ui +page.svelte
-    { context: "server", section: "stream_filters" },
+    // reader live controls
     { context: "forwarder", section: "reader_live" },
-    // server-ui announcer-config/+page.svelte
-    { context: "server", section: "announcer" },
-    // server-ui sbc-setup/+page.svelte
-    { context: "server", section: "sbc_identity" },
-    { context: "server", section: "sbc_network" },
-    { context: "server", section: "sbc_forwarder" },
-    { context: "server", section: "sbc_advanced" },
-    // server-ui admin/+page.svelte
-    { context: "server", section: "admin_streams" },
-    { context: "server", section: "admin_events" },
-    { context: "server", section: "admin_tokens" },
-    { context: "server", section: "admin_cursors" },
-    { context: "server", section: "admin_races" },
-    // server-ui races/+page.svelte
-    { context: "server", section: "races" },
-    // server-ui races/[raceId]/+page.svelte
-    { context: "server", section: "race_detail" },
   ];
 
   it.each(expectedSectionLookups)(
@@ -247,7 +198,6 @@ describe("seeAlso cross-reference validation", () => {
     forwarder: FORWARDER_HELP,
     receiver: RECEIVER_HELP,
     "receiver-admin": RECEIVER_ADMIN_HELP,
-    server: SERVER_HELP,
   };
 
   it("all seeAlso references resolve to existing sections", () => {

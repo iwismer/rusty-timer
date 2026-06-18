@@ -25,7 +25,7 @@ describe("forwarder api client", () => {
         version: "0.1.0",
         ready: true,
         ready_reason: null,
-        uplink_connected: true,
+        p2p_connected: true,
         restart_needed: false,
         readers: [],
       }),
@@ -51,9 +51,11 @@ describe("forwarder api client", () => {
   it("saveConfigSection posts to correct endpoint", async () => {
     const { saveConfigSection } = await import("./api");
     mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
-    await saveConfigSection("server", { base_url: "https://s.com" });
+    await saveConfigSection("p2p", {
+      thin_node_url: "https://thin.example.com",
+    });
     expect(mockFetch).toHaveBeenCalledWith(
-      "/api/v1/config/server",
+      "/api/v1/config/p2p",
       expect.objectContaining({ method: "POST" }),
     );
   });

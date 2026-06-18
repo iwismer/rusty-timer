@@ -9,7 +9,7 @@
     saveProfile,
     saveDbfConfig,
     clearDbfFile,
-    setEditServerUrl,
+    setEditThinNodeUrl,
     setEditToken,
     setEditReceiverId,
   } from "$lib/store.svelte";
@@ -58,14 +58,18 @@
     </label>
 
     <label class="block text-xs font-medium text-text-muted">
-      Server URL
-      <HelpTip fieldKey="server_url" sectionKey="config" context="receiver" />
+      Thin-node URL
+      <HelpTip
+        fieldKey="thin_node_url"
+        sectionKey="config"
+        context="receiver"
+      />
       <input
-        data-testid="server-url-input"
+        data-testid="thin-node-url-input"
         class="{inputClass} mt-1"
-        value={store.editServerUrl}
-        oninput={(e) => setEditServerUrl(e.currentTarget.value)}
-        placeholder="wss://server:8080"
+        value={store.editThinNodeUrl}
+        oninput={(e) => setEditThinNodeUrl(e.currentTarget.value)}
+        placeholder="https://thin-node.example.com"
       />
     </label>
 
@@ -120,7 +124,7 @@
           data-testid="config-connect-toggle-btn"
           class={btnPrimary}
           onclick={() => handleConnect()}
-          disabled={store.connectBusy || !store.savedServerUrl}
+          disabled={store.connectBusy || !store.savedThinNodeUrl}
         >
           Connect
         </button>

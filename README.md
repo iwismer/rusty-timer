@@ -4,102 +4,83 @@
 [![UI CI](https://github.com/iwismer/rusty-timer/actions/workflows/ui.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/ui.yml)
 [![Embed UI CI](https://github.com/iwismer/rusty-timer/actions/workflows/embed-ui.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/embed-ui.yml)
 
-Rusty Timer forwards IPICO chip-timing reads over the internet so your
-timing software doesn't need a direct cable to each reader. Use it when
-readers are far from the timing tent, at multi-site events, or as a
-remote backup for local reads.
+Rusty Timer forwards IPICO chip-timing reads over the internet so timing
+software does not need a direct cable to each reader. It is designed for
+remote timing points, multi-site races, and backup paths for local reads.
 
-It is compatible with any software that works with IPICO readers (tested
-with IPICO Connect).
+It is compatible with timing software that accepts IPICO TCP streams
+(tested with IPICO Connect).
 
 ## How It Works
 
 ```
-             ┌─── Field ───┐          ┌── Cloud ──┐        ┌── Timing Tent ──┐
-IPICO Reader ──TCP──► Forwarder ──WS──► Server ──WS──► Receiver ──TCP──► Timing Software
-                                           │
-                                      Dashboard (web)
+             ┌─── Field ───┐        ┌── Coordination ─┐        ┌── Timing Tent ──┐
+IPICO Reader ──TCP──► Forwarder ──iroh/P2P──► Thin node ◄──HTTP── Receiver ──TCP──► Timing Software
+                         │                 (registry,
+                   SQLite journal       allow-list,
+                  + replay cursor       status board)
 ```
 
-The **[Forwarder](services/forwarder/)** runs on a small computer (e.g.
-Raspberry Pi) next to each IPICO reader. It journals every read to a
-local SQLite database for power-loss safety, then forwards reads to a
-central server over WebSocket with at-least-once delivery.
+The **[Forwarder](services/forwarder/)** runs next to each IPICO reader.
+It journals every read to local SQLite, exposes a typed P2P control/data
+plane over iroh, and keeps per-stream sequence numbers monotonic across
+epoch changes.
 
-The **[Server](services/server/)** ingests reads from all forwarders,
-deduplicates them, stores them in PostgreSQL, and fans them out to
-receivers over WebSocket. It serves a web dashboard for monitoring
-streams, managing races, and exporting data.
+The **[Thin node](services/thin-node/)** is the lightweight coordination
+service. It stores endpoint registrations, distributes allow-lists,
+receives announcer/status updates, and exposes the status board. It does
+not carry chip-read data.
 
-The **[Receiver](services/receiver/)** subscribes to one or more streams
-from the server and re-exposes each as a local TCP port — so your
-existing timing software sees the data as if the reader were plugged in
-directly.
+The **[Receiver](services/receiver/)** connects directly to forwarders
+through iroh, durably stores received events and cursors, acknowledges
+only after durable writes, and replays subscribed streams as local TCP
+ports for existing timing software.
 
-If the internet drops, reads are safe: the forwarder journals locally
-and replays everything once the connection is restored.
+If a link drops, reads remain safe: the forwarder journal is the source
+of truth, receivers resume from durable cursors, and pruned cursors are
+reported as explicit gap markers.
 
-### Other Components
+## Other Components
 
-**[Streamer](services/streamer/)** — Connects to one or more IPICO
-readers over TCP and fans out reads to any number of local TCP clients.
-Useful as a standalone tool without the remote forwarding stack.
-
-**[Announcer](docs/announcer.md)** — A live public-facing screen served
-by the server that shows recent finishers. Configurable via the server
-dashboard.
-
-**[Server UI](apps/server-ui/)**, **[Receiver UI](apps/receiver-ui/)**,
-**[Forwarder UI](apps/forwarder-ui/)** — Web dashboards for each
-service (the forwarder and receiver UIs are embedded in their binaries).
-Built with SvelteKit.
+- **[Streamer](services/streamer/)** connects to IPICO readers and fans
+  out local TCP streams without the remote forwarding stack.
+- **[Emulator](services/emulator/)** simulates IPICO readers for local
+  development and deterministic tests.
+- **[Forwarder UI](apps/forwarder-ui/)** and
+  **[Receiver UI](apps/receiver-ui/)** are SvelteKit frontends embedded
+  in their service binaries.
+- **[Shared UI](apps/shared-ui/)** contains reusable UI components and
+  validation logic.
 
 ## Compatibility
 
-**Readers:** Tested with IPICO Lite readers. Should also work with IPICO
-Elite and Super Elite readers. Not compatible with non-IPICO hardware.
-
-**Timing software:** Compatible with any software that accepts IPICO TCP
-streams — tested with IPICO Connect.
-
-**Forwarder hardware:** Raspberry Pi 3, 4, or 5 (64-bit OS). Any Linux
-SBC with network access and an ARM64 or x86-64 CPU should work.
-
-**Performance:** Supports multiple readers and forwarders simultaneously
-with sub-second read forwarding latency.
+- **Readers:** tested with IPICO Lite readers; intended for IPICO Elite
+  and Super Elite readers as well.
+- **Timing software:** any software that accepts IPICO TCP streams.
+- **Forwarder hardware:** Raspberry Pi 3/4/5 with a 64-bit OS, or any
+  Linux SBC/server with an ARM64 or x86-64 CPU.
 
 ## Quick Demo
 
-Run the full stack locally with simulated readers — no hardware needed:
-
-**Prerequisites:** [Rust](https://rustup.rs/) 1.93.1 (via `rust-toolchain.toml`), [Docker](https://www.docker.com/), [Node.js](https://nodejs.org/) 24.x, Python 3.11+ with [`uv`](https://docs.astral.sh/uv/), and `tmux`.
-
-**Just want to see the server?** Run it with Docker — no Rust needed:
+Run the deterministic loopback P2P stack locally with simulated readers:
 
 ```bash
-docker compose -f deploy/quickstart/docker-compose.yml up -d
-# Open http://localhost:8080
+uv run scripts/e2e/run_stack.py
 ```
 
-See [deploy/quickstart/](deploy/quickstart/) for details.
-
-```bash
-uv run scripts/dev.py
-```
-
-This launches Postgres, the server, an emulator (simulated reader), a
-forwarder, and a receiver in tmux panes. The server dashboard is at
-`http://localhost:8080`. See [scripts/README.md](scripts/README.md) for
-all component URLs and options.
+The loopback stack starts the emulator, forwarder, receiver-headless,
+and thin-node with relay/discovery disabled and injected local addresses.
+See [scripts/README.md](scripts/README.md) for local development commands.
 
 ## Deploying for Real
 
 | Component | Guide |
 |-----------|-------|
-| Quickstart (Docker, no build) | [deploy/quickstart/](deploy/quickstart/) |
-| Server (Docker) | [deploy/server/](deploy/server/) |
 | Forwarder on Raspberry Pi | [deploy/sbc/](deploy/sbc/) |
 | Race-day operations | [docs/runbooks/race-day-operator-guide.md](docs/runbooks/race-day-operator-guide.md) |
+| Forwarder operations | [docs/runbooks/forwarder-operations.md](docs/runbooks/forwarder-operations.md) |
+| Receiver operations | [docs/runbooks/receiver-operations.md](docs/runbooks/receiver-operations.md) |
+| Thin-node operations | [docs/runbooks/thin-node-operations.md](docs/runbooks/thin-node-operations.md) |
 
 Pre-built binaries are available on the [Releases](https://github.com/iwismer/rusty-timer/releases) page.
 

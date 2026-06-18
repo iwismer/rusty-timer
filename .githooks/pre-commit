@@ -32,10 +32,6 @@ run_js_checks() {
 staged_files="$(git diff --cached --name-only --diff-filter=ACMR)"
 
 # 3. JS/TS checks for touched frontend apps (blocking)
-if echo "$staged_files" | grep -q '^apps/server-ui/'; then
-  run_js_checks "$REPO_ROOT/apps/server-ui"
-fi
-
 if echo "$staged_files" | grep -q '^apps/forwarder-ui/'; then
   run_js_checks "$REPO_ROOT/apps/forwarder-ui"
 fi

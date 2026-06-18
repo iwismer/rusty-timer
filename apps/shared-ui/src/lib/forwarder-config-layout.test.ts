@@ -4,9 +4,9 @@ import { getForwarderConfigSectionRows, upsSectionLayout } from './forwarder-con
 describe('getForwarderConfigSectionRows', () => {
   it('returns option-2 section groupings', () => {
     expect(getForwarderConfigSectionRows()).toEqual([
-      ['general', 'server'],
+      ['general', 'p2p'],
       ['auth', 'journal'],
-      ['uplink', 'status_http'],
+      ['status_http'],
       ['readers', 'ups'],
     ]);
   });

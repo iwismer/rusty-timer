@@ -253,7 +253,7 @@ fn prune_acked_removes_older_epoch_events() {
 
 /// Test: full ack-then-prune cycle — simulates the runtime pattern.
 ///
-/// This mirrors what the uplink loop does: update_ack_cursor then prune_acked.
+/// This mirrors what the P2P loop does: update_ack_cursor then prune_acked.
 #[test]
 fn ack_then_prune_cycle_clears_journal() {
     let (mut journal, _dir) = open_temp_journal();
@@ -269,7 +269,7 @@ fn ack_then_prune_cycle_clears_journal() {
         insert_event(&mut journal, stream_key, epoch, seq);
     }
 
-    // Simulate: ack cursor update followed by prune (as done in main.rs uplink loop)
+    // Simulate: ack cursor update followed by prune (as done in main.rs P2P loop)
     journal
         .update_ack_cursor(stream_key, epoch, 10)
         .expect("update ack cursor");

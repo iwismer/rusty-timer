@@ -14,7 +14,6 @@
   },
   "workspaces": [
     "apps/shared-ui",
-    "apps/server-ui",
     "apps/forwarder-ui",
     "apps/receiver-ui"
   ],

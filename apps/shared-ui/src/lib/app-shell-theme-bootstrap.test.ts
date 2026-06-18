@@ -15,14 +15,6 @@ function assertBootstrapThemeScript(appHtml: string): void {
 }
 
 describe("app shell theme bootstrap", () => {
-  it("applies saved explicit theme before hydration in server-ui", () => {
-    const appHtml = readFileSync(
-      resolve(import.meta.dirname, "../../../server-ui/src/app.html"),
-      "utf8",
-    );
-    assertBootstrapThemeScript(appHtml);
-  });
-
   it("applies saved explicit theme before hydration in forwarder-ui", () => {
     const appHtml = readFileSync(
       resolve(import.meta.dirname, "../../../forwarder-ui/src/app.html"),

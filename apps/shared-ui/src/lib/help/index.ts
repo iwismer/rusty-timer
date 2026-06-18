@@ -2,14 +2,12 @@ import type { HelpContext, HelpContextName, SectionHelp, FieldHelp, HelpSearchRe
 import { FORWARDER_HELP } from "./forwarder-help";
 import { RECEIVER_HELP } from "./receiver-help";
 import { RECEIVER_ADMIN_HELP } from "./receiver-admin-help";
-import { SERVER_HELP } from "./server-help";
 import { fieldMatchesQuery } from "./field-match";
 
 const CONTEXTS: Record<HelpContextName, HelpContext> = {
   forwarder: FORWARDER_HELP,
   receiver: RECEIVER_HELP,
   "receiver-admin": RECEIVER_ADMIN_HELP,
-  server: SERVER_HELP,
 };
 
 /** Look up a help section by context and section key. Returns undefined if not found. */

@@ -1,5 +1,5 @@
 use receiver::local_proxy::LocalProxy;
-use rt_protocol::ReadEvent;
+use rt_domain::ReadEvent;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;

@@ -12,16 +12,9 @@ export { default as ConfirmDialog } from "../components/ConfirmDialog.svelte";
 export { default as HelpDialog } from "../components/HelpDialog.svelte";
 export { default as HelpTip } from "../components/HelpTip.svelte";
 export { default as HelpSearch } from "../components/HelpSearch.svelte";
-export { default as AnnouncerConfigForm } from "../components/AnnouncerConfigForm.svelte";
 export { default as ReaderControlPanel } from "../components/ReaderControlPanel.svelte";
 export { default as BatteryIndicator } from "../components/BatteryIndicator.svelte";
 export { default as LowBatteryBanner } from "../components/LowBatteryBanner.svelte";
-export type {
-  AnnouncerConfigApi,
-  AnnouncerConfig,
-  AnnouncerConfigUpdate,
-  AnnouncerStreamEntry,
-} from "../lib/announcer-types";
 export type {
   ConfigApi,
   ConfigLoadResult,

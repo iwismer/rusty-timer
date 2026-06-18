@@ -1,11 +1,4 @@
-use axum::Router;
-use axum::extract::State;
-use axum::extract::ws::{WebSocket, WebSocketUpgrade};
-use axum::response::IntoResponse;
-use axum::routing::get;
 use receiver::headless::{HeadlessConfig, HeadlessHost};
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 fn loopback_ephemeral_config(data_dir: &std::path::Path) -> HeadlessConfig {
@@ -61,8 +54,6 @@ async fn serves_get_status() {
     host.shutdown().await.expect("shutdown headless host");
 }
 
-/// In the default (no-feature) build the test bridge must not exist: the
-/// headless host serves no `/bridge/*` routes.
 #[cfg(not(feature = "test-bridge"))]
 #[tokio::test]
 async fn bridge_absent_without_feature() {
@@ -100,8 +91,6 @@ async fn bridge_absent_without_feature() {
     host.shutdown().await.expect("shutdown headless host");
 }
 
-/// With the `test-bridge` feature enabled the headless host serves the bridge
-/// surface over its loopback control API.
 #[cfg(feature = "test-bridge")]
 #[tokio::test]
 async fn bridge_present_with_feature() {
@@ -148,17 +137,12 @@ async fn rejects_non_loopback_bind_addr() {
     );
 }
 
-/// A P2P startup failure must not leave the control server bound or its tasks
-/// running. `HeadlessHost::start` must return Err and release the control bind
-/// address promptly so it can be rebound immediately.
 #[tokio::test]
 async fn p2p_startup_failure_does_not_leak_control_server() {
     use receiver::p2p_runtime::{ForwarderPeerConfig, P2pReceiverConfig};
 
     let dir = tempfile::tempdir().expect("temp dir");
 
-    // Reserve a fixed loopback port so we can prove it is rebindable after the
-    // failed start.
     let bind_addr = {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -168,8 +152,6 @@ async fn p2p_startup_failure_does_not_leak_control_server() {
         addr
     };
 
-    // An invalid forwarder node id forces start_receiver_p2p to fail after the
-    // control listener has been bound (interval passes the minimum check).
     let config = HeadlessConfig {
         data_dir: dir.path().to_path_buf(),
         bind_addr,
@@ -194,7 +176,6 @@ async fn p2p_startup_failure_does_not_leak_control_server() {
         "error should describe the invalid forwarder node id, got: {err}"
     );
 
-    // The control bind address must be free: no leaked bound server/task.
     let rebound = tokio::net::TcpListener::bind(bind_addr)
         .await
         .expect("control API port must be released after a failed P2P start");
@@ -218,87 +199,4 @@ async fn clean_shutdown() {
         .await
         .expect("control API port should be released after shutdown");
     drop(rebound);
-}
-
-/// Server state that signals (once) when the WebSocket upgrade completes.
-#[derive(Clone)]
-struct StallState {
-    upgraded_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
-}
-
-/// Completes the WebSocket upgrade but never sends a heartbeat, so the
-/// receiver's `do_handshake` would block forever on `ws.next()` without the
-/// shutdown race.
-async fn stalling_handler(ws: WebSocketUpgrade, State(st): State<StallState>) -> impl IntoResponse {
-    ws.on_upgrade(move |mut socket: WebSocket| async move {
-        // Wait for the receiver's hello before signaling. Once the server has
-        // received it, the receiver has entered `do_handshake` and is about to
-        // park on `ws.next()`, making the stall deterministic without a sleep.
-        let _ = socket.recv().await;
-        if let Some(tx) = st.upgraded_tx.lock().expect("lock upgraded_tx").take() {
-            let _ = tx.send(());
-        }
-        // Drain further client messages without ever responding. The receiver
-        // waits indefinitely for a heartbeat that never arrives.
-        while socket.recv().await.is_some() {}
-    })
-}
-
-/// A server that completes the WebSocket upgrade but never sends the expected
-/// heartbeat must not be able to block `HeadlessHost::shutdown()` forever.
-///
-/// Without racing `do_handshake` against the shutdown signal, the receiver
-/// runtime stays parked inside the handshake loop, the runtime task never
-/// exits, and `shutdown()` hangs (the timeout below fires → test fails).
-#[tokio::test]
-async fn shutdown_completes_during_stalled_handshake() {
-    let dir = tempfile::tempdir().expect("temp dir");
-
-    // Start a server that upgrades the WS connection but never replies.
-    let (upgraded_tx, upgraded_rx) = tokio::sync::oneshot::channel::<()>();
-    let st = StallState {
-        upgraded_tx: Arc::new(Mutex::new(Some(upgraded_tx))),
-    };
-    let app = Router::new()
-        .route("/ws/v1.2/receivers", get(stalling_handler))
-        .with_state(st);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind stalling server");
-    let server_addr = listener.local_addr().expect("server local_addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-
-    // Seed a profile so the headless runtime auto-connects to the stalling
-    // server on startup. The DB connection is dropped before the host opens it.
-    {
-        let db_path = dir.path().join("receiver.sqlite3");
-        let mut db = receiver::Db::open(&db_path).expect("open receiver DB for seeding");
-        db.save_profile(
-            &format!("ws://{server_addr}"),
-            "test-token",
-            "manual",
-            Some("recv-test"),
-        )
-        .expect("seed profile");
-    }
-
-    let host = HeadlessHost::start(loopback_ephemeral_config(dir.path()))
-        .await
-        .expect("start headless host");
-
-    // Wait until the server has received the receiver's hello, proving the
-    // receiver is now parked inside the post-upgrade handshake awaiting a
-    // heartbeat that will never arrive.
-    tokio::time::timeout(Duration::from_secs(5), upgraded_rx)
-        .await
-        .expect("receiver should send hello to stalling server")
-        .expect("handshake-parked signal");
-
-    // Shutdown must complete promptly despite the stalled handshake.
-    tokio::time::timeout(Duration::from_secs(5), host.shutdown())
-        .await
-        .expect("shutdown must not hang while handshake is stalled")
-        .expect("shutdown result");
 }

@@ -468,7 +468,7 @@
           Reset Profile
         </h3>
         <p class="text-xs text-text-muted m-0 mb-3">
-          Clear server URL, token, and receiver ID back to defaults.
+          Clear thin-node URL, token, and receiver ID back to defaults.
         </p>
         <button
           onclick={() =>
@@ -492,8 +492,8 @@
       <section>
         <h3 class="text-sm font-semibold text-status-err mb-1">Clear Data</h3>
         <p class="text-xs text-text-muted m-0 mb-3">
-          Clear local subscriptions, cursors, mode, and DBF config. Keeps server
-          URL, token, receiver ID, and server-side races.
+          Clear local subscriptions, cursors, mode, and DBF config. Keeps the
+          thin-node URL, token, and receiver ID.
         </p>
         {#if confirmingClearData}
           <div class="flex items-center gap-3">

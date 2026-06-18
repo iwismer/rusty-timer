@@ -1,6 +1,6 @@
 //! Replay engine: computes the set of pending (unacked) events to send.
 //!
-//! Used by the uplink session to determine which events need to be
+//! Used by the P2P session to determine which events need to be
 //! (re-)transmitted after a reconnect or on initial connect.
 
 use crate::storage::journal::{Journal, JournalError, JournalEvent};
@@ -39,7 +39,7 @@ pub struct CursorReplayBatch {
 /// Computes pending events from the journal.
 ///
 /// "Pending" = events that exist in the journal but have NOT been acked by
-/// the server (i.e., their seq is > the acked_through_seq for that epoch).
+/// a receiver cursor (i.e., their seq is greater than the receiver's durable cursor).
 pub struct ReplayEngine;
 
 impl ReplayEngine {

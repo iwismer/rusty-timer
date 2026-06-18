@@ -1,7 +1,7 @@
 //! Headless P2P receiver runtime wiring.
 //!
 //! Drives the real loopback/headless P2P lane that T5.4 process orchestration
-//! needs. This is intentionally separate from the legacy WebSocket runtime
+//! needs. This is intentionally separate from the local UI/control runtime
 //! ([`crate::runtime::run`]): it is enabled only when explicit P2P config is
 //! present and never alters default behavior.
 //!
@@ -641,7 +641,7 @@ async fn deliver_dbf(
 #[allow(clippy::too_many_arguments)]
 async fn run_announcer_worker(
     db: Arc<Mutex<Db>>,
-    chip_lookup: Arc<tokio::sync::RwLock<crate::session::ChipLookup>>,
+    chip_lookup: Arc<tokio::sync::RwLock<crate::control_api::ChipLookup>>,
     stream_id: String,
     client: Arc<dyn AnnouncerPushClient + Send + Sync>,
     generation: i64,
@@ -683,7 +683,7 @@ async fn run_announcer_worker(
 /// retry (transport failure or task error left rows unpushed).
 async fn push_announcer(
     db: &Arc<Mutex<Db>>,
-    chip_lookup: &Arc<tokio::sync::RwLock<crate::session::ChipLookup>>,
+    chip_lookup: &Arc<tokio::sync::RwLock<crate::control_api::ChipLookup>>,
     stream_id: &str,
     client: &Arc<dyn AnnouncerPushClient + Send + Sync>,
     generation: i64,
@@ -723,7 +723,7 @@ async fn push_announcer(
 /// Resolves a chip id against a snapshot of the in-memory chip lookup, searching
 /// across all forwarders' maps.
 struct SnapshotResolver {
-    snapshot: crate::session::ChipLookup,
+    snapshot: crate::control_api::ChipLookup,
 }
 
 impl ParticipantResolver for SnapshotResolver {
@@ -774,8 +774,8 @@ pub fn node_id_for_seed(seed: [u8; 32]) -> String {
 mod tests {
     use super::*;
     use crate::announcer_push::{AnnouncerPushError, AnnouncerRow};
+    use crate::control_api::ChipLookup;
     use crate::db::{EventType, ReceivedEventInsert};
-    use crate::session::ChipLookup;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// A valid IPICO chip-read frame (chip id `000000012345`).

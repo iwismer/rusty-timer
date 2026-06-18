@@ -140,8 +140,6 @@ async fn get_config_returns_json() {
         r#"schema_version = 1
 display_name = "Start Line"
 
-[server]
-base_url = "https://timing.example.com"
 
 [auth]
 token_file = "/tmp/fake-token"
@@ -179,7 +177,10 @@ target = "192.168.1.100:10000"
     let body = response_body(&response);
     let json: serde_json::Value = serde_json::from_str(body).expect("parse JSON");
     assert_eq!(json["display_name"], "Start Line");
-    assert_eq!(json["server"]["base_url"], "https://timing.example.com");
+    assert!(
+        json.get("server").is_none(),
+        "server config was removed at P2P cutover"
+    );
 }
 
 #[tokio::test]
@@ -193,8 +194,6 @@ async fn post_config_general_updates_display_name() {
         config_file,
         r#"schema_version = 1
 
-[server]
-base_url = "https://timing.example.com"
 
 [auth]
 token_file = "/tmp/fake-token"
@@ -265,8 +264,6 @@ async fn post_config_general_updates_readonly_config_via_atomic_replace() {
         config_file,
         r#"schema_version = 1
 
-[server]
-base_url = "https://timing.example.com"
 
 [auth]
 token_file = "/tmp/fake-token"
@@ -338,8 +335,6 @@ async fn post_config_general_preserves_file_mode_on_atomic_replace() {
         config_file,
         r#"schema_version = 1
 
-[server]
-base_url = "https://timing.example.com"
 
 [auth]
 token_file = "/tmp/fake-token"
@@ -404,8 +399,6 @@ async fn post_config_general_accepts_fragmented_http_body() {
         config_file,
         r#"schema_version = 1
 
-[server]
-base_url = "https://timing.example.com"
 
 [auth]
 token_file = "/tmp/fake-token"
@@ -468,8 +461,6 @@ async fn post_config_optional_sections_reject_non_object_payloads() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -500,7 +491,6 @@ target = "192.168.1.100:10000"
     let endpoints = [
         "/api/v1/config/general",
         "/api/v1/config/journal",
-        "/api/v1/config/uplink",
         "/api/v1/config/status_http",
         "/api/v1/config/control",
     ];
@@ -518,199 +508,6 @@ target = "192.168.1.100:10000"
 }
 
 #[tokio::test]
-async fn post_config_server_updates_base_url() {
-    use forwarder::status_http::ConfigState;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    let mut config_file = NamedTempFile::new().expect("create temp file");
-    write!(
-        config_file,
-        r#"schema_version = 1
-[server]
-base_url = "https://old.example.com"
-[auth]
-token_file = "/tmp/fake-token"
-[[readers]]
-target = "192.168.1.100:10000"
-"#
-    )
-    .expect("write config");
-
-    let cfg = StatusConfig {
-        bind: "127.0.0.1:0".to_owned(),
-        forwarder_version: "0.1.0-test".to_owned(),
-    };
-    let config_path = config_file.path().to_path_buf();
-    let config_state = ConfigState::new(config_path.clone());
-    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
-    let server = StatusServer::start_with_config(
-        cfg,
-        SubsystemStatus::ready(),
-        journal,
-        std::sync::Arc::new(config_state),
-        restart_signal,
-    )
-    .await
-    .expect("start failed");
-    let addr = server.local_addr();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let (status, response) = http_post(
-        addr,
-        "/api/v1/config/server",
-        r#"{"base_url":"https://new.example.com","forwarders_ws_path":"/ws/v2/forwarders"}"#,
-    )
-    .await;
-    assert_eq!(status, 200);
-    let body = response_body(&response);
-    let json: serde_json::Value = serde_json::from_str(body).expect("parse JSON");
-    assert_eq!(json["ok"], true);
-
-    let toml_str = std::fs::read_to_string(&config_path).expect("read config");
-    assert!(
-        toml_str.contains("new.example.com"),
-        "server base_url must be updated, got: {}",
-        toml_str
-    );
-}
-
-#[tokio::test]
-async fn post_config_server_requires_base_url() {
-    use forwarder::status_http::ConfigState;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    let mut config_file = NamedTempFile::new().expect("create temp file");
-    write!(
-        config_file,
-        r#"schema_version = 1
-[server]
-base_url = "https://old.example.com"
-[auth]
-token_file = "/tmp/fake-token"
-[[readers]]
-target = "192.168.1.100:10000"
-"#
-    )
-    .expect("write config");
-
-    let cfg = StatusConfig {
-        bind: "127.0.0.1:0".to_owned(),
-        forwarder_version: "0.1.0-test".to_owned(),
-    };
-    let config_state = ConfigState::new(config_file.path().to_path_buf());
-    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
-    let server = StatusServer::start_with_config(
-        cfg,
-        SubsystemStatus::ready(),
-        journal,
-        std::sync::Arc::new(config_state),
-        restart_signal,
-    )
-    .await
-    .expect("start failed");
-    let addr = server.local_addr();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let (status, _) = http_post(
-        addr,
-        "/api/v1/config/server",
-        r#"{"forwarders_ws_path":"/ws/v2"}"#,
-    )
-    .await;
-    assert_eq!(status, 400, "missing base_url must return 400");
-}
-
-#[tokio::test]
-async fn post_config_server_rejects_empty_base_url() {
-    use forwarder::status_http::ConfigState;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    let mut config_file = NamedTempFile::new().expect("create temp file");
-    write!(
-        config_file,
-        r#"schema_version = 1
-[server]
-base_url = "https://old.example.com"
-[auth]
-token_file = "/tmp/fake-token"
-[[readers]]
-target = "192.168.1.100:10000"
-"#
-    )
-    .expect("write config");
-
-    let cfg = StatusConfig {
-        bind: "127.0.0.1:0".to_owned(),
-        forwarder_version: "0.1.0-test".to_owned(),
-    };
-    let config_state = ConfigState::new(config_file.path().to_path_buf());
-    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
-    let server = StatusServer::start_with_config(
-        cfg,
-        SubsystemStatus::ready(),
-        journal,
-        std::sync::Arc::new(config_state),
-        restart_signal,
-    )
-    .await
-    .expect("start failed");
-    let addr = server.local_addr();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let (status, _) = http_post(addr, "/api/v1/config/server", r#"{"base_url":""}"#).await;
-    assert_eq!(status, 400, "empty base_url must return 400");
-}
-
-#[tokio::test]
-async fn post_config_server_rejects_invalid_base_url() {
-    use forwarder::status_http::ConfigState;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    let mut config_file = NamedTempFile::new().expect("create temp file");
-    write!(
-        config_file,
-        r#"schema_version = 1
-[server]
-base_url = "https://old.example.com"
-[auth]
-token_file = "/tmp/fake-token"
-[[readers]]
-target = "192.168.1.100:10000"
-"#
-    )
-    .expect("write config");
-
-    let cfg = StatusConfig {
-        bind: "127.0.0.1:0".to_owned(),
-        forwarder_version: "0.1.0-test".to_owned(),
-    };
-    let config_state = ConfigState::new(config_file.path().to_path_buf());
-    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
-    let server = StatusServer::start_with_config(
-        cfg,
-        SubsystemStatus::ready(),
-        journal,
-        std::sync::Arc::new(config_state),
-        restart_signal,
-    )
-    .await
-    .expect("start failed");
-    let addr = server.local_addr();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let (status, _) = http_post(addr, "/api/v1/config/server", r#"{"base_url":"not-a-url"}"#).await;
-    assert_eq!(status, 400, "invalid base_url must return 400");
-}
-
-#[tokio::test]
 async fn post_config_auth_updates_token_file() {
     use forwarder::status_http::ConfigState;
     use std::io::Write;
@@ -720,8 +517,6 @@ async fn post_config_auth_updates_token_file() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/old-token"
 [[readers]]
@@ -779,8 +574,6 @@ async fn post_config_auth_requires_token_file() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -822,8 +615,6 @@ async fn post_config_auth_rejects_whitespace_token_file() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -865,8 +656,6 @@ async fn post_config_journal_updates_sqlite_path() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -929,8 +718,6 @@ async fn post_config_journal_rejects_out_of_range_prune_watermark() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -980,8 +767,6 @@ async fn post_config_journal_rejects_non_numeric_prune_watermark() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -1033,8 +818,6 @@ async fn start_config_server() -> (StatusServer, tempfile::NamedTempFile) {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -1061,6 +844,55 @@ target = "192.168.1.100:10000"
     .expect("start failed");
     tokio::time::sleep(Duration::from_millis(50)).await;
     (server, config_file)
+}
+
+#[tokio::test]
+async fn post_config_p2p_updates_thin_node_settings() {
+    let (server, config_file) = start_config_server().await;
+    let addr = server.local_addr();
+
+    let (status, response) = http_post(
+        addr,
+        "/api/v1/config/p2p",
+        r#"{"enabled":true,"thin_node_url":"https://thin.example.com","thin_node_token_file":"/etc/rusty-timer/forwarder.token"}"#,
+    )
+    .await;
+    assert_eq!(status, 200, "p2p config update must return 200: {response}");
+    let json: serde_json::Value =
+        serde_json::from_str(response_body(&response)).expect("parse JSON");
+    assert_eq!(json["ok"], true);
+
+    let toml_str = std::fs::read_to_string(config_file.path()).expect("read config");
+    assert!(
+        toml_str.contains("[p2p]"),
+        "p2p table persisted: {toml_str}"
+    );
+    assert!(
+        toml_str.contains("enabled = true"),
+        "enabled persisted: {toml_str}"
+    );
+    assert!(
+        toml_str.contains("thin_node_url = \"https://thin.example.com\""),
+        "thin-node URL persisted: {toml_str}"
+    );
+    assert!(
+        toml_str.contains("thin_node_token_file = \"/etc/rusty-timer/forwarder.token\""),
+        "thin-node token file persisted: {toml_str}"
+    );
+}
+
+#[tokio::test]
+async fn post_config_p2p_rejects_unsupported_thin_node_url_scheme() {
+    let (server, _config_file) = start_config_server().await;
+    let addr = server.local_addr();
+
+    let (status, _response) = http_post(
+        addr,
+        "/api/v1/config/p2p",
+        r#"{"thin_node_url":"ftp://thin.example.com"}"#,
+    )
+    .await;
+    assert_eq!(status, 400, "invalid thin-node URL scheme must return 400");
 }
 
 #[tokio::test]
@@ -1131,113 +963,6 @@ async fn post_config_journal_accepts_valid_retention() {
 }
 
 #[tokio::test]
-async fn post_config_uplink_updates_batch_settings() {
-    use forwarder::status_http::ConfigState;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    let mut config_file = NamedTempFile::new().expect("create temp file");
-    write!(
-        config_file,
-        r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
-[auth]
-token_file = "/tmp/fake-token"
-[[readers]]
-target = "192.168.1.100:10000"
-"#
-    )
-    .expect("write config");
-
-    let cfg = StatusConfig {
-        bind: "127.0.0.1:0".to_owned(),
-        forwarder_version: "0.1.0-test".to_owned(),
-    };
-    let config_path = config_file.path().to_path_buf();
-    let config_state = ConfigState::new(config_path.clone());
-    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
-    let server = StatusServer::start_with_config(
-        cfg,
-        SubsystemStatus::ready(),
-        journal,
-        std::sync::Arc::new(config_state),
-        restart_signal,
-    )
-    .await
-    .expect("start failed");
-    let addr = server.local_addr();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let (status, response) = http_post(
-        addr,
-        "/api/v1/config/uplink",
-        r#"{"batch_flush_ms":200,"batch_max_events":100}"#,
-    )
-    .await;
-    assert_eq!(status, 200);
-    let body = response_body(&response);
-    let json: serde_json::Value = serde_json::from_str(body).expect("parse JSON");
-    assert_eq!(json["ok"], true);
-
-    let toml_str = std::fs::read_to_string(&config_path).expect("read config");
-    assert!(
-        toml_str.contains("200"),
-        "batch_flush_ms must be updated, got: {}",
-        toml_str
-    );
-}
-
-#[tokio::test]
-async fn post_config_uplink_rejects_out_of_range_batch_max_events() {
-    use forwarder::status_http::ConfigState;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    let mut config_file = NamedTempFile::new().expect("create temp file");
-    write!(
-        config_file,
-        r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
-[auth]
-token_file = "/tmp/fake-token"
-[[readers]]
-target = "192.168.1.100:10000"
-"#
-    )
-    .expect("write config");
-
-    let cfg = StatusConfig {
-        bind: "127.0.0.1:0".to_owned(),
-        forwarder_version: "0.1.0-test".to_owned(),
-    };
-    let config_state = ConfigState::new(config_file.path().to_path_buf());
-    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
-    let server = StatusServer::start_with_config(
-        cfg,
-        SubsystemStatus::ready(),
-        journal,
-        std::sync::Arc::new(config_state),
-        restart_signal,
-    )
-    .await
-    .expect("start failed");
-    let addr = server.local_addr();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let (status, _) = http_post(
-        addr,
-        "/api/v1/config/uplink",
-        r#"{"batch_max_events":5000000000}"#,
-    )
-    .await;
-    assert_eq!(status, 400, "out-of-range batch_max_events must return 400");
-}
-
-#[tokio::test]
 async fn post_config_status_http_updates_bind() {
     use forwarder::status_http::ConfigState;
     use std::io::Write;
@@ -1247,8 +972,6 @@ async fn post_config_status_http_updates_bind() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -1306,8 +1029,6 @@ async fn post_config_status_http_rejects_invalid_ipv4_and_port() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -1354,8 +1075,6 @@ async fn post_config_status_http_rejects_hostname_bind() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -1402,8 +1121,6 @@ async fn post_config_status_http_rejects_ipv6_bind() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -1450,8 +1167,6 @@ async fn post_config_readers_replaces_list() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -1520,8 +1235,6 @@ async fn post_config_readers_validates_target() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -1569,8 +1282,6 @@ async fn post_config_readers_rejects_out_of_range_local_fallback_port() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -1620,8 +1331,6 @@ async fn post_config_readers_requires_at_least_one() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -1663,8 +1372,6 @@ async fn post_config_control_updates_allow_power_actions() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -1731,8 +1438,6 @@ async fn post_config_control_rejects_non_boolean_allow_power_actions() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -1785,8 +1490,6 @@ async fn post_config_control_action_restart_device_requires_allow_power_actions_
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [control]
@@ -1841,8 +1544,6 @@ async fn restart_endpoint_returns_ok() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -1917,8 +1618,6 @@ async fn control_restart_service_endpoint_returns_ok() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -1977,8 +1676,6 @@ async fn control_restart_device_requires_allow_power_actions_true() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [control]
@@ -2028,8 +1725,6 @@ async fn control_shutdown_device_requires_allow_power_actions_true() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [control]
@@ -2079,8 +1774,6 @@ async fn control_action_errors_are_written_to_ui_logs() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [control]

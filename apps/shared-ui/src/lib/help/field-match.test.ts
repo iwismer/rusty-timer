@@ -3,20 +3,20 @@ import { fieldMatchesQuery } from "./field-match";
 import type { FieldHelp } from "./help-types";
 
 const field: FieldHelp = {
-  label: "Base URL",
-  summary: "WebSocket server address.",
+  label: "Thin-node URL",
+  summary: "Thin-node coordinator address.",
   detailHtml: "The full URL including protocol.",
-  default: "ws://localhost:8080",
+  default: "https://localhost:8080",
   range: "Valid URL",
-  recommended: "Use wss:// in production",
+  recommended: "Use HTTPS in production",
 };
 
 describe("fieldMatchesQuery", () => {
   it("matches on label", () => {
-    expect(fieldMatchesQuery(field, "base url")).toBe(true);
+    expect(fieldMatchesQuery(field, "thin-node url")).toBe(true);
   });
   it("matches on summary", () => {
-    expect(fieldMatchesQuery(field, "websocket")).toBe(true);
+    expect(fieldMatchesQuery(field, "coordinator")).toBe(true);
   });
   it("matches on detail", () => {
     expect(fieldMatchesQuery(field, "protocol")).toBe(true);
@@ -28,10 +28,10 @@ describe("fieldMatchesQuery", () => {
     expect(fieldMatchesQuery(field, "valid url")).toBe(true);
   });
   it("matches on recommended", () => {
-    expect(fieldMatchesQuery(field, "wss")).toBe(true);
+    expect(fieldMatchesQuery(field, "https")).toBe(true);
   });
   it("is case-insensitive", () => {
-    expect(fieldMatchesQuery(field, "BASE URL")).toBe(true);
+    expect(fieldMatchesQuery(field, "THIN-NODE URL")).toBe(true);
   });
   it("returns false for non-match", () => {
     expect(fieldMatchesQuery(field, "zzz-no-match")).toBe(false);

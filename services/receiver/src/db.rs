@@ -1,4 +1,4 @@
-use rt_protocol::{ReceiverMode, ResumeCursor};
+use rt_domain::{ReceiverMode, ResumeCursor};
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -298,8 +298,8 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Canonical writer for earliest-epoch overrides. Legacy `forwarder_id`/
-    /// `reader_ip` columns are left NULL so the legacy WS runtime never reads a
+    /// Canonical writer for earliest-epoch overrides. Compatibility
+    /// `forwarder_id`/`reader_ip` columns are left NULL so no caller reads a
     /// canonical row as if `stream_id` were a `reader_ip`.
     pub fn save_stream_earliest_epoch(
         &self,
@@ -325,10 +325,10 @@ impl Db {
         Ok(())
     }
 
-    /// Legacy loader returning `(forwarder_id, reader_ip, earliest_epoch)` for
-    /// the old WS runtime. Only rows that carry real legacy metadata are
-    /// returned; canonical-only rows (`forwarder_id`/`reader_ip` NULL) are
-    /// skipped rather than fabricating keys from `stream_id`.
+    /// Compatibility loader returning `(forwarder_id, reader_ip, earliest_epoch)`.
+    /// Only rows that carry real display metadata are returned;
+    /// canonical-only rows (`forwarder_id`/`reader_ip` NULL) are skipped rather
+    /// than fabricating keys from `stream_id`.
     pub fn load_earliest_epochs(&self) -> DbResult<Vec<(String, String, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT forwarder_id, reader_ip, earliest_epoch FROM earliest_epochs
@@ -345,10 +345,10 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Legacy writer keyed by `(forwarder_id, reader_ip)`. Stores a
-    /// deterministic synthetic `stream_id` (the same scheme used for legacy
-    /// cursor rows) so the canonical-keyed table can hold legacy rows, and
-    /// records the real legacy metadata in the compatibility columns.
+    /// Compatibility writer keyed by `(forwarder_id, reader_ip)`. Stores a
+    /// deterministic synthetic `stream_id` so the canonical-keyed table can hold
+    /// display-metadata rows, and records the real metadata in the compatibility
+    /// columns.
     pub fn save_earliest_epoch(&self, fwd: &str, ip: &str, epoch: i64) -> DbResult<()> {
         let stream_id = legacy_cursor_stream_id(fwd, ip);
         self.conn.execute(
@@ -367,10 +367,10 @@ impl Db {
         )?;
         Ok(())
     }
-    /// Legacy loader returning `(forwarder_id, reader_ip)`-keyed subscriptions
-    /// for the old WS runtime. Canonical-only rows (`forwarder_id`/`reader_ip`
-    /// NULL) are filtered out rather than substituting `forwarder_endpoint_id`/
-    /// `stream_id`, so legacy callers never receive fabricated legacy keys.
+    /// Compatibility loader returning `(forwarder_id, reader_ip)`-keyed
+    /// subscriptions. Canonical-only rows (`forwarder_id`/`reader_ip` NULL) are
+    /// filtered out rather than substituting `forwarder_endpoint_id`/
+    /// `stream_id`, so callers never receive fabricated display keys.
     pub fn load_subscriptions(&self) -> DbResult<Vec<Subscription>> {
         let mut s = self.conn.prepare(
             "SELECT forwarder_id,
@@ -612,6 +612,31 @@ impl Db {
             rusqlite::params![stream_id, after_seq],
             received_event_from_row,
         )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn load_replay_target_epochs(
+        &self,
+        forwarder_id: &str,
+        reader_ip: &str,
+    ) -> DbResult<Vec<(i64, Option<String>)>> {
+        let mut stmt = self.conn.prepare(
+            "WITH matching_streams AS (
+                 SELECT stream_id FROM subscriptions
+                 WHERE forwarder_id = ?1 AND reader_ip = ?2
+                 UNION
+                 SELECT stream_id FROM cursors
+                 WHERE forwarder_id = ?1 AND reader_ip = ?2
+             )
+             SELECT epoch, MIN(reader_timestamp)
+             FROM received_events
+             WHERE stream_id IN (SELECT stream_id FROM matching_streams)
+             GROUP BY epoch
+             ORDER BY epoch DESC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![forwarder_id, reader_ip], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -1405,7 +1430,7 @@ mod tests {
     #[test]
     fn profile_round_trip_with_update_mode() {
         let mut db = Db::open_in_memory().unwrap();
-        db.save_profile("wss://example.com", "tok", "check-only", None)
+        db.save_profile("https://example.com", "tok", "check-only", None)
             .unwrap();
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.update_mode, "check-only");
@@ -1414,7 +1439,7 @@ mod tests {
     #[test]
     fn profile_update_mode_defaults_for_existing_db() {
         let mut db = Db::open_in_memory().unwrap();
-        db.save_profile("wss://example.com", "tok", "check-and-download", None)
+        db.save_profile("https://example.com", "tok", "check-and-download", None)
             .unwrap();
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.update_mode, "check-and-download");
@@ -1435,7 +1460,7 @@ mod tests {
     #[test]
     fn receiver_mode_round_trip() {
         let mut db = Db::open_in_memory().unwrap();
-        db.save_profile("wss://example.com", "tok", "check-and-download", None)
+        db.save_profile("https://example.com", "tok", "check-and-download", None)
             .unwrap();
         let mode = ReceiverMode::Live {
             streams: vec![],
@@ -1450,10 +1475,10 @@ mod tests {
     #[test]
     fn targeted_replay_mode_round_trips_with_targets() {
         let mut db = Db::open_in_memory().unwrap();
-        db.save_profile("wss://example.com", "tok", "check-and-download", None)
+        db.save_profile("https://example.com", "tok", "check-and-download", None)
             .unwrap();
         let targeted = ReceiverMode::TargetedReplay {
-            targets: vec![rt_protocol::ReplayTarget {
+            targets: vec![rt_domain::ReplayTarget {
                 forwarder_id: "f1".to_owned(),
                 reader_ip: "10.0.0.1".to_owned(),
                 stream_epoch: 3,
@@ -1468,7 +1493,7 @@ mod tests {
     #[test]
     fn save_profile_tolerates_invalid_stored_receiver_mode_json() {
         let mut db = Db::open_in_memory().unwrap();
-        db.save_profile("wss://example.com", "tok", "check-and-download", None)
+        db.save_profile("https://example.com", "tok", "check-and-download", None)
             .unwrap();
         db.conn
             .execute(
@@ -1477,7 +1502,7 @@ mod tests {
             )
             .unwrap();
 
-        let result = db.save_profile("wss://example.org", "tok-2", "check-only", None);
+        let result = db.save_profile("https://example.org", "tok-2", "check-only", None);
         assert!(
             result.is_ok(),
             "profile updates should not fail due to malformed stored receiver_mode_json: {result:?}"
@@ -1625,12 +1650,12 @@ mod tests {
     #[test]
     fn save_receiver_id_on_existing_profile_updates_only_receiver_id() {
         let mut db = Db::open_in_memory().unwrap();
-        db.save_profile("wss://example.com", "tok", "check-only", Some("recv-old"))
+        db.save_profile("https://example.com", "tok", "check-only", Some("recv-old"))
             .unwrap();
         db.save_receiver_id("recv-new").unwrap();
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.receiver_id, Some("recv-new".to_owned()));
-        assert_eq!(p.server_url, "wss://example.com");
+        assert_eq!(p.server_url, "https://example.com");
         assert_eq!(p.token, "tok");
         assert_eq!(p.update_mode, "check-only");
     }
@@ -1639,7 +1664,7 @@ mod tests {
     fn save_profile_round_trips_receiver_id() {
         let mut db = Db::open_in_memory().unwrap();
         db.save_profile(
-            "wss://s.com",
+            "https://thin.test",
             "t",
             "check-and-download",
             Some("recv-roundtrip"),
@@ -1652,7 +1677,7 @@ mod tests {
     #[test]
     fn save_profile_with_none_receiver_id_stores_null() {
         let mut db = Db::open_in_memory().unwrap();
-        db.save_profile("wss://s.com", "t", "check-and-download", None)
+        db.save_profile("https://thin.test", "t", "check-and-download", None)
             .unwrap();
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.receiver_id, None);
@@ -1707,7 +1732,7 @@ mod tests {
     fn reset_profile_clears_to_defaults() {
         let mut db = Db::open_in_memory().unwrap();
         db.save_profile(
-            "wss://example.com",
+            "https://example.com",
             "secret-tok",
             "check-only",
             Some("recv-1"),
@@ -1733,7 +1758,7 @@ mod tests {
     #[test]
     fn factory_reset_clears_all_tables() {
         let mut db = Db::open_in_memory().unwrap();
-        db.save_profile("wss://example.com", "tok", "check-only", Some("recv-1"))
+        db.save_profile("https://example.com", "tok", "check-only", Some("recv-1"))
             .unwrap();
         db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
         db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
@@ -1751,7 +1776,7 @@ mod tests {
     #[test]
     fn clear_data_preserves_profile_connection_fields() {
         let mut db = Db::open_in_memory().unwrap();
-        db.save_profile("wss://example.com", "tok", "check-only", Some("recv-1"))
+        db.save_profile("https://example.com", "tok", "check-only", Some("recv-1"))
             .unwrap();
         db.save_dbf_config(&DbfConfig {
             enabled: true,
@@ -1763,7 +1788,7 @@ mod tests {
         db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
         db.clear_data().unwrap();
         let p = db.load_profile().unwrap().unwrap();
-        assert_eq!(p.server_url, "wss://example.com");
+        assert_eq!(p.server_url, "https://example.com");
         assert_eq!(p.token, "tok");
         assert_eq!(p.receiver_id, Some("recv-1".to_owned()));
         // Non-profile fields should be reset
@@ -2259,6 +2284,55 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].raw_frame, b"frame-one");
         assert_eq!(rows[0].received_unix_ms, 1_700_000_000_123);
+    }
+
+    #[test]
+    fn load_replay_target_epochs_uses_local_received_events() {
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_id = "stream-a";
+        db.replace_stream_subscriptions(&[StreamSubscription {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: stream_id.to_owned(),
+            local_port_override: None,
+            event_type: EventType::Finish,
+            forwarder_id: Some("fwd-1".to_owned()),
+            reader_ip: Some("10.0.0.1:10000".to_owned()),
+        }])
+        .unwrap();
+
+        for (seq, epoch, timestamp) in [
+            (1, 1, "2026-02-01T10:00:00Z"),
+            (2, 2, "2026-02-01T11:00:00Z"),
+            (3, 2, "2026-02-01T11:05:00Z"),
+        ] {
+            db.insert_received_event(&ReceivedEventInsert {
+                stream_id,
+                seq,
+                epoch,
+                raw_frame: b"frame",
+                read_kind: "chip",
+                reader_timestamp: Some(timestamp),
+                received_unix_ms: 1_700_000_000_000 + seq,
+                dbf_delivered_unix_ms: None,
+            })
+            .unwrap();
+        }
+
+        let epochs = db
+            .load_replay_target_epochs("fwd-1", "10.0.0.1:10000")
+            .unwrap();
+        assert_eq!(
+            epochs,
+            vec![
+                (2, Some("2026-02-01T11:00:00Z".to_owned())),
+                (1, Some("2026-02-01T10:00:00Z".to_owned())),
+            ]
+        );
+        assert!(
+            db.load_replay_target_epochs("other", "10.0.0.1:10000")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

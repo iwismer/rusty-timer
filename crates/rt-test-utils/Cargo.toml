@@ -4,14 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rt-protocol = { path = "../rt-protocol" }
 rt-iroh = { path = "../rt-iroh" }
 rt-p2p-protocol = { path = "../rt-p2p-protocol" }
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.29"
-serde_json = "1"
-futures-util = "0.3"
-uuid = { version = "1", features = ["v4"] }
 prost = "0.14"
 
 [dev-dependencies]

@@ -7,7 +7,7 @@
 //! Ports open as soon as subscriptions exist, even before server connection is established.
 
 use crate::db::{Db, ReceivedEvent};
-use rt_protocol::ReadEvent;
+use rt_domain::ReadEvent;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -227,7 +227,7 @@ async fn write_received_events(
 mod tests {
     use super::*;
     use crate::db::{Db, ReceivedEventInsert};
-    use rt_protocol::ReadEvent;
+    use rt_domain::ReadEvent;
     use std::sync::Arc;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;

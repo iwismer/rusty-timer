@@ -1,10 +1,9 @@
 # Forwarder
 
 The forwarder reads chip-read data from IPICO timing hardware over TCP,
-journals every event to a local SQLite database for power-loss safety, and
-forwards events to the rusty-timer server over a WebSocket connection with
-at-least-once delivery. An embedded web UI (opt-in at build time) provides
-real-time status and configuration.
+journals every event to local SQLite for power-loss safety, and serves typed
+P2P control/data streams over iroh to allowed receivers. An embedded web UI
+(opt-in at build time) provides local status and configuration.
 
 ## Build
 
@@ -20,75 +19,53 @@ cargo build --release -p forwarder --features embed-ui
 
 ## Configuration
 
-The forwarder is configured entirely via a TOML file. No environment variable
-overrides are supported for config fields.
+The forwarder is configured entirely via TOML. No environment variable overrides
+are supported for config fields.
 
 ### Top-level fields
 
-| Field              | Type            | Required | Default | Description                                        |
-| ------------------ | --------------- | -------- | ------- | -------------------------------------------------- |
-| `schema_version`   | `u32`           | Yes      | --      | Must be `1`.                                       |
-| `display_name`     | `String`        | No       | --      | Human-readable name for this forwarder (e.g. "Start Line"). |
-
-### `[server]`
-
-| Field               | Type     | Required | Default                  | Description                            |
-| -------------------- | -------- | -------- | ------------------------ | -------------------------------------- |
-| `base_url`           | `String` | Yes      | --                       | Server URL (e.g. `https://example.com`). |
-| `forwarders_ws_path` | `String` | No       | `/ws/v1/forwarders`      | WebSocket endpoint path.               |
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `schema_version` | `u32` | Yes | -- | Must be `1`. |
+| `display_name` | `String` | No | -- | Human-readable name such as `Start Line`. |
 
 ### `[auth]`
 
-| Field        | Type     | Required | Default | Description                                              |
-| ------------ | -------- | -------- | ------- | -------------------------------------------------------- |
-| `token_file` | `String` | Yes      | --      | Path to a file containing the bearer token (single line, trimmed on read). |
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `token_file` | `String` | Yes | File containing the bearer token used for thin-node registration and allow-list fetches. |
 
 ### `[journal]`
 
-| Field                | Type   | Required | Default                                    | Description                                      |
-| -------------------- | ------ | -------- | ------------------------------------------ | ------------------------------------------------ |
-| `sqlite_path`        | `String` | No    | `/var/lib/rusty-timer/forwarder.sqlite3`   | Path to the SQLite journal database.             |
-| `prune_watermark_pct`| `u8`   | No       | `80`                                       | Disk-usage percentage at which old events are pruned. |
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `sqlite_path` | `String` | No | `/var/lib/rusty-timer/forwarder.sqlite3` | SQLite journal path. |
+| `prune_watermark_pct` | `u8` | No | `80` | Disk-usage percentage at which old events may be pruned. |
+
+### `[p2p]`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `secret_key_path` | `String` | No | Stable iroh endpoint key path. Mutually exclusive with `secret_key_seed_hex`. |
+| `secret_key_seed_hex` | `String` | No | Deterministic test seed for loopback E2E. |
+| `thin_node_url` | `String` | Yes | Coordination endpoint for registry and allow-list fetches. |
+| `thin_node_token_file` | `String` | Yes | File containing the thin-node bearer token. |
 
 ### `[status_http]`
 
-| Field  | Type     | Required | Default        | Description                              |
-| ------ | -------- | -------- | -------------- | ---------------------------------------- |
-| `bind` | `String` | No       | `127.0.0.1:8080` | Address and port for the status HTTP server. |
-
-### `[uplink]`
-
-| Field              | Type     | Required | Default       | Description                                          |
-| ------------------ | -------- | -------- | ------------- | ---------------------------------------------------- |
-| `batch_mode`       | `String` | No       | `immediate`   | Batching strategy for event delivery.                |
-| `batch_flush_ms`   | `u64`    | No       | `100`         | Flush interval in milliseconds between batch sends.  |
-| `batch_max_events` | `u32`    | No       | `50`          | Maximum number of events per batch.                  |
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `bind` | `String` | No | `127.0.0.1:8080` | Status HTTP bind address. |
 
 ### `[[readers]]`
 
-At least one `[[readers]]` entry is required.
+At least one reader entry is required.
 
-| Field                | Type     | Required | Default                          | Description                                                |
-| -------------------- | -------- | -------- | -------------------------------- | ---------------------------------------------------------- |
-| `target`             | `String` | Yes      | --                               | Reader endpoint target: single `A.B.C.D:PORT` or last-octet range `A.B.C.START-END:PORT` (CIDR is not supported). |
-| `enabled`            | `bool`   | No       | `true`                           | Set to `false` to skip this reader.                        |
-| `local_fallback_port`| `u16`    | No       | `10000 + last_octet` of reader IP | Local TCP port for the fanout listener for this reader.   |
-
-#### Read types
-
-IPICO readers can operate in two modes:
-
-- **`raw`** (streaming) — The reader sends every chip detection as it
-  happens. This is the default and recommended mode for race timing.
-  Each pass of a chip past the antenna generates a separate read.
-
-- **`fsls`** (first-seen / last-seen) — The reader batches detections
-  and sends only the first and last time a chip was seen. Useful for
-  reducing data volume in high-traffic areas, but adds latency.
-
-These are reader-side operating modes, not forwarder TOML settings. The
-`[[readers]]` config block does not support a `read_type` field today; the
-forwarder records whatever read type the physical IPICO reader emits.
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `target` | `String` | Yes | -- | Reader endpoint target: `A.B.C.D:PORT` or last-octet range `A.B.C.START-END:PORT`. |
+| `enabled` | `bool` | No | `true` | Set to `false` to skip this reader. |
+| `local_fallback_port` | `u16` | No | `10000 + last_octet` | Local TCP fanout listener for this reader. |
 
 ## Usage
 
@@ -96,17 +73,7 @@ forwarder records whatever read type the physical IPICO reader emits.
 forwarder --config <path>
 ```
 
-The `--config` flag specifies the path to the TOML configuration file. When
-omitted it defaults to `/etc/rusty-timer/forwarder.toml`.
-
-### Logging
-
-The forwarder uses the `RUST_LOG` environment variable to control log verbosity
-(via `tracing-subscriber` with `EnvFilter`). The default level is `info`.
-
-```bash
-RUST_LOG=debug forwarder --config ./forwarder.toml
-```
+The `--config` flag defaults to `/etc/rusty-timer/forwarder.toml`.
 
 ## Example config
 
@@ -114,43 +81,27 @@ RUST_LOG=debug forwarder --config ./forwarder.toml
 schema_version = 1
 display_name = "Start Line"
 
-[server]
-base_url = "https://timing.example.com"
-# forwarders_ws_path = "/ws/v1/forwarders"  # default
-
 [auth]
-token_file = "/etc/rusty-timer/token"
+token_file = "/etc/rusty-timer/forwarder-token.txt"
 
 [journal]
 sqlite_path = "/var/lib/rusty-timer/forwarder.sqlite3"
 prune_watermark_pct = 80
 
+[p2p]
+secret_key_path = "/var/lib/rusty-timer/forwarder-endpoint.key"
+thin_node_url = "https://thin-node.example.com"
+thin_node_token_file = "/etc/rusty-timer/thin-node-token.txt"
+
 [status_http]
 bind = "127.0.0.1:8080"
 
-[uplink]
-batch_mode = "immediate"
-batch_flush_ms = 100
-batch_max_events = 50
-
 [[readers]]
-target = "10.0.0.1"
-enabled = true
-# local_fallback_port = 10001  # auto-derived from last octet
-
-[[readers]]
-target = "10.0.0.2"
+target = "192.168.1.50:10000"
 enabled = true
 ```
 
-## Deployment
+## Operations
 
-The forwarder is designed to run on a single-board computer (SBC) co-located
-with the IPICO readers. See [`deploy/sbc/`](../../deploy/sbc/) for provisioning
-scripts and network configuration.
-
-## Current epoch name control
-
-- Forwarder UI operations can set the current epoch name through the server-backed path.
-- Forwarder UI operations can clear the current epoch name through the same server-backed path.
-- These controls align with server-backed race epoch workflows.
+See [Forwarder operations](../../docs/runbooks/forwarder-operations.md) for
+startup, recovery, retention, and epoch procedures.

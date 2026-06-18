@@ -1,6 +1,6 @@
 mode: forwarder
 seed: 77
-server_url: "ws://127.0.0.1:9999/ws/v1/forwarders"
+server_url: "p2p://loopback"
 token: "test-token-abc"
 forwarder_id: "emulated-fwd-1"
 readers:

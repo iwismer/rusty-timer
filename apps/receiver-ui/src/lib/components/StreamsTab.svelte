@@ -1,10 +1,6 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import {
-    AlertBanner,
-    ReaderControlPanel,
-    BatteryIndicator,
-  } from "@rusty-timer/shared-ui";
+  import { AlertBanner, BatteryIndicator } from "@rusty-timer/shared-ui";
   import { resizeWidth } from "$lib/actions/resizeWidth";
   import {
     store,
@@ -21,7 +17,7 @@
     setTargetedEpochInputs,
     markModeEdited,
   } from "$lib/store.svelte";
-  import * as api from "$lib/api";
+  import type { StreamEntry } from "$lib/api";
   import { btnPrimary, btnSecondary } from "$lib/ui-classes";
 
   let tableWidth = $state(0);
@@ -61,29 +57,9 @@
     return "bg-status-warn";
   }
 
-  let readerFetchError = $state<string | null>(null);
-
-  function toggleExpand(stream: api.StreamEntry) {
+  function toggleExpand(stream: StreamEntry) {
     const key = streamIdentity(stream);
-    const wasExpanded = expandedKey === key;
-    expandedKey = wasExpanded ? null : key;
-    readerFetchError = null;
-    if (!wasExpanded) {
-      // Reader info is a legacy (forwarder_id, reader_ip) lookup; only fetch it
-      // when the stream exposes that metadata.
-      const forwarderId = stream.forwarder_id;
-      const readerIp = stream.reader_ip;
-      if (forwarderId != null && readerIp != null) {
-        void api.readerGetInfo(forwarderId, readerIp).catch((err) => {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(
-            `Failed to fetch reader info for ${forwarderId}/${readerIp}:`,
-            err,
-          );
-          readerFetchError = `Failed to load reader info: ${msg}`;
-        });
-      }
-    }
+    expandedKey = expandedKey === key ? null : key;
   }
 
   function formatLastReadTimestamp(timestamp: string): string {
@@ -361,7 +337,7 @@
                               >
                             </div>
                             <div
-                              title="Server-reported delay since the last unique frame was received (snapshot, not live)"
+                              title="Forwarder-reported delay since the last unique frame was received (snapshot, not live)"
                             >
                               <span class="text-text-muted">Lag:</span>
                               <span class="font-mono text-text-primary ml-1"
@@ -548,77 +524,6 @@
                         {stream.subscribed ? "Unsubscribe" : "Subscribe"}
                       </button>
                     </div>
-
-                    {#if readerFetchError}
-                      <div class="mt-2">
-                        <AlertBanner
-                          variant="warn"
-                          message={readerFetchError}
-                        />
-                      </div>
-                    {/if}
-
-                    {#if stream.forwarder_id != null && stream.reader_ip != null}
-                      {@const readerFwd = stream.forwarder_id}
-                      {@const readerIpAddr = stream.reader_ip}
-                      <ReaderControlPanel
-                        readerIp={readerIpAddr}
-                        readerInfo={store.readerInfos.get(legacyKey) ?? null}
-                        readerState={store.readerStates.get(legacyKey) ??
-                          "disconnected"}
-                        downloadProgress={store.downloadProgress.get(
-                          legacyKey,
-                        ) ?? null}
-                        disabled={false}
-                        helpContext="forwarder"
-                        onSyncClock={async () => {
-                          await api.readerSyncClock(readerFwd, readerIpAddr);
-                        }}
-                        onSetReadMode={async (
-                          mode: string,
-                          timeout: number,
-                        ) => {
-                          await api.readerSetReadMode(
-                            readerFwd,
-                            readerIpAddr,
-                            mode,
-                            timeout,
-                          );
-                        }}
-                        onSetTto={async (enabled: boolean) => {
-                          await api.readerSetTto(
-                            readerFwd,
-                            readerIpAddr,
-                            enabled,
-                          );
-                        }}
-                        onSetRecording={async (enabled: boolean) => {
-                          await api.readerSetRecording(
-                            readerFwd,
-                            readerIpAddr,
-                            enabled,
-                          );
-                        }}
-                        onClearRecords={async () => {
-                          await api.readerClearRecords(readerFwd, readerIpAddr);
-                        }}
-                        onStartDownload={async () => {
-                          await api.readerStartDownload(
-                            readerFwd,
-                            readerIpAddr,
-                          );
-                        }}
-                        onStopDownload={async () => {
-                          await api.readerStopDownload(readerFwd, readerIpAddr);
-                        }}
-                        onRefresh={async () => {
-                          await api.readerRefresh(readerFwd, readerIpAddr);
-                        }}
-                        onReconnect={async () => {
-                          await api.readerReconnect(readerFwd, readerIpAddr);
-                        }}
-                      />
-                    {/if}
                   </div>
                 </td>
               </tr>

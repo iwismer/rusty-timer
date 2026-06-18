@@ -5,7 +5,6 @@
 //!
 //! # Required fields
 //! - `schema_version = 1`
-//! - `server.base_url`
 //! - `auth.token_file`
 //! - At least one `[[readers]]` entry
 //!
@@ -33,10 +32,8 @@ pub struct ForwarderConfig {
     pub token: String,
     /// Optional human-readable name for this forwarder (e.g. "Start Line").
     pub display_name: Option<String>,
-    pub server: ServerConfig,
     pub journal: JournalConfig,
     pub status_http: StatusHttpConfig,
-    pub uplink: UplinkConfig,
     pub control: ControlConfig,
     pub update: UpdateConfig,
     pub ups: UpsConfig,
@@ -44,12 +41,6 @@ pub struct ForwarderConfig {
     pub readers: Vec<ReaderConfig>,
     #[cfg(feature = "eink")]
     pub eink: Option<rt_eink::state::EinkConfig>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ServerConfig {
-    pub base_url: String,
-    pub forwarders_ws_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -76,14 +67,6 @@ impl JournalConfig {
 #[derive(Debug, Clone)]
 pub struct StatusHttpConfig {
     pub bind: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct UplinkConfig {
-    pub batch_flush_ms: u64,
-    pub batch_max_events: u32,
-    /// Seconds to wait for an ack before treating the session as stalled.
-    pub ack_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -137,11 +120,9 @@ pub struct ReaderConfig {
 pub struct RawConfig {
     pub schema_version: Option<u32>,
     pub display_name: Option<String>,
-    pub server: Option<RawServerConfig>,
     pub auth: Option<RawAuthConfig>,
     pub journal: Option<RawJournalConfig>,
     pub status_http: Option<RawStatusHttpConfig>,
-    pub uplink: Option<RawUplinkConfig>,
     pub control: Option<RawControlConfig>,
     pub update: Option<RawUpdateConfig>,
     pub ups: Option<RawUpsConfig>,
@@ -149,12 +130,6 @@ pub struct RawConfig {
     pub readers: Option<Vec<RawReaderConfig>>,
     #[cfg(feature = "eink")]
     pub eink: Option<rt_eink::state::EinkConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RawServerConfig {
-    pub base_url: Option<String>,
-    pub forwarders_ws_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,13 +150,6 @@ pub struct RawJournalConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawStatusHttpConfig {
     pub bind: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RawUplinkConfig {
-    pub batch_flush_ms: Option<u64>,
-    pub batch_max_events: Option<u32>,
-    pub ack_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,17 +232,6 @@ pub fn load_config_from_str(
         )));
     }
 
-    // Validate server
-    let raw_server = raw
-        .server
-        .ok_or_else(|| ConfigError::MissingField("server".to_owned()))?;
-    let base_url = raw_server
-        .base_url
-        .ok_or_else(|| ConfigError::MissingField("server.base_url".to_owned()))?;
-    let forwarders_ws_path = raw_server
-        .forwarders_ws_path
-        .unwrap_or_else(|| "/ws/v1/forwarders".to_owned());
-
     // Validate auth + read token file
     let raw_auth = raw
         .auth
@@ -334,20 +291,6 @@ pub fn load_config_from_str(
         },
         None => StatusHttpConfig {
             bind: "127.0.0.1:8080".to_owned(),
-        },
-    };
-
-    // Uplink defaults
-    let uplink = match raw.uplink {
-        Some(u) => UplinkConfig {
-            batch_flush_ms: u.batch_flush_ms.unwrap_or(100),
-            batch_max_events: u.batch_max_events.unwrap_or(50),
-            ack_timeout_secs: u.ack_timeout_secs.unwrap_or(30),
-        },
-        None => UplinkConfig {
-            batch_flush_ms: 100,
-            batch_max_events: 50,
-            ack_timeout_secs: 30,
         },
     };
 
@@ -428,8 +371,8 @@ pub fn load_config_from_str(
         },
     };
 
-    // P2P defaults. Disabled unless explicitly enabled, so legacy WebSocket-only
-    // deployments keep their existing startup behavior.
+    // P2P defaults. Disabled unless explicitly enabled so a forwarder can run as
+    // local-only while still using the same journal and reader ingestion path.
     let p2p = match raw.p2p {
         Some(p) => {
             let allowlist_poll_interval_secs = p.allowlist_poll_interval_secs.unwrap_or(60);
@@ -539,13 +482,8 @@ pub fn load_config_from_str(
         schema_version,
         token,
         display_name: raw.display_name,
-        server: ServerConfig {
-            base_url,
-            forwarders_ws_path,
-        },
         journal,
         status_http,
-        uplink,
         control,
         update,
         ups,
@@ -693,9 +631,6 @@ mod tests {
         let toml = format!(
             r#"
 schema_version = 1
-
-[server]
-base_url = "wss://example.com"
 
 [auth]
 token_file = '{}'

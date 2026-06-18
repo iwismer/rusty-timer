@@ -6,7 +6,6 @@
     markModeEdited,
     applyMode,
     setModeDraft,
-    setRaceIdDraft,
   } from "$lib/store.svelte";
   import type { ReceiverMode } from "$lib/api";
   import { inputClass, btnPrimary } from "$lib/ui-classes";
@@ -28,39 +27,14 @@
         disabled={store.modeBusy}
       >
         <option value="live">Live</option>
-        <option value="race">Race</option>
         <option value="targeted_replay">Targeted Replay</option>
       </select>
     </label>
-
-    {#if store.modeDraft === "race"}
-      <label class="block text-xs font-medium text-text-muted">
-        Race
-        <select
-          data-testid="race-id-select"
-          class="{inputClass} mt-1"
-          value={store.raceIdDraft}
-          onchange={(e) => {
-            setRaceIdDraft(e.currentTarget.value);
-            markModeEdited();
-          }}
-          disabled={store.modeBusy}
-        >
-          <option value="">Select race...</option>
-          {#each store.races as race (race.race_id)}
-            <option value={race.race_id}>{race.name}</option>
-          {/each}
-        </select>
-      </label>
-    {/if}
 
     <p class="text-xs text-text-muted m-0">
       {#if store.modeDraft === "live"}
         Live mode includes all available streams automatically and supports
         earliest-epoch overrides.
-      {:else if store.modeDraft === "race"}
-        Race mode follows race stream resolution from the server; earliest epoch
-        controls are shown but disabled.
       {:else}
         Targeted Replay uses per-stream epoch controls in the Streams tab.
       {/if}

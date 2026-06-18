@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# validate-packaging.sh — Validates Dockerfiles, compose files, systemd units,
-# and runbooks for the Remote Forwarding Suite packaging artifacts.
+# validate-packaging.sh — Validates release packaging artifacts for the
+# P2P Remote Forwarding Suite.
 #
 # Exits 0 if all checks pass, non-zero if any check fails.
 #
@@ -15,10 +15,6 @@ VERBOSE=false
 if [[ "${1:-}" == "--verbose" ]]; then
     VERBOSE=true
 fi
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 PASS=0
 FAIL=0
@@ -43,10 +39,20 @@ check_file_exists() {
     if [[ -f "${REPO_ROOT}/${path}" ]]; then
         check_pass "${desc}"
         return 0
-    else
-        check_fail "${desc}: file not found: ${path}"
-        return 1
     fi
+    check_fail "${desc}: file not found: ${path}"
+    return 1
+}
+
+check_file_absent() {
+    local path="$1"
+    local desc="$2"
+    if [[ ! -e "${REPO_ROOT}/${path}" ]]; then
+        check_pass "${desc}"
+        return 0
+    fi
+    check_fail "${desc}: stale path still exists: ${path}"
+    return 1
 }
 
 check_file_contains() {
@@ -60,19 +66,33 @@ check_file_contains() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# Section 1: Forwarder Dockerfile
-# ---------------------------------------------------------------------------
+check_file_not_contains() {
+    local path="$1"
+    local pattern="$2"
+    local desc="$3"
+    if grep -qE -- "${pattern}" "${REPO_ROOT}/${path}" 2>/dev/null; then
+        check_fail "${desc}: stale pattern '${pattern}' found in ${path}"
+    else
+        check_pass "${desc}"
+    fi
+}
+
+echo ""
+echo "=== Cutover removals ==="
+
+check_file_absent "services/server" "Legacy central service removed"
+check_file_absent "deploy/server" "Legacy central deployment removed"
+check_file_absent "apps/server-ui" "Legacy server dashboard removed"
+check_file_absent "crates/rt-protocol" "Legacy WebSocket protocol crate removed"
+check_file_absent "contracts/ws" "Legacy WebSocket contract removed"
 
 echo ""
 echo "=== Forwarder Dockerfile ==="
 
 FORWARDER_DF="services/forwarder/Dockerfile"
-
 check_file_exists "${FORWARDER_DF}" "Forwarder Dockerfile exists"
 
 if [[ -f "${REPO_ROOT}/${FORWARDER_DF}" ]]; then
-    # Must be multi-stage: has at least two FROM instructions.
     FROM_COUNT=$(grep -c '^FROM ' "${REPO_ROOT}/${FORWARDER_DF}" || true)
     if [[ "${FROM_COUNT}" -ge 2 ]]; then
         check_pass "Forwarder Dockerfile is multi-stage (>= 2 FROM)"
@@ -82,144 +102,41 @@ if [[ -f "${REPO_ROOT}/${FORWARDER_DF}" ]]; then
 
     check_file_contains "${FORWARDER_DF}" 'cargo build' \
         "Forwarder Dockerfile runs cargo build"
-
     check_file_contains "${FORWARDER_DF}" '--release' \
         "Forwarder Dockerfile builds in release mode"
-
     check_file_contains "${FORWARDER_DF}" 'COPY.*(forwarder|services)' \
         "Forwarder Dockerfile copies forwarder source"
-
     check_file_contains "${FORWARDER_DF}" '^(ENTRYPOINT|CMD)' \
         "Forwarder Dockerfile has ENTRYPOINT or CMD"
-
     check_file_contains "${FORWARDER_DF}" '(HEALTHCHECK|healthz|readyz)' \
         "Forwarder Dockerfile references health endpoint"
+    check_file_not_contains "${FORWARDER_DF}" 'services/server|rt-protocol|tokio-tungstenite|postgres' \
+        "Forwarder Dockerfile has no legacy server data-plane references"
 fi
-
-# ---------------------------------------------------------------------------
-# Section 2: Server Dockerfile
-# ---------------------------------------------------------------------------
-
-echo ""
-echo "=== Server Dockerfile ==="
-
-SERVER_DF="services/server/Dockerfile"
-
-check_file_exists "${SERVER_DF}" "Server Dockerfile exists"
-
-if [[ -f "${REPO_ROOT}/${SERVER_DF}" ]]; then
-    FROM_COUNT=$(grep -c '^FROM ' "${REPO_ROOT}/${SERVER_DF}" || true)
-    if [[ "${FROM_COUNT}" -ge 3 ]]; then
-        check_pass "Server Dockerfile is multi-stage (>= 3 FROM: node, rust, final)"
-    else
-        check_fail "Server Dockerfile should be multi-stage with >=3 stages, found ${FROM_COUNT}"
-    fi
-
-    check_file_contains "${SERVER_DF}" '(node|npm|pnpm|yarn)' \
-        "Server Dockerfile includes Node.js stage (SvelteKit dashboard)"
-
-    check_file_contains "${SERVER_DF}" 'cargo build' \
-        "Server Dockerfile runs cargo build"
-
-    check_file_contains "${SERVER_DF}" '--release' \
-        "Server Dockerfile builds in release mode"
-
-    check_file_contains "${SERVER_DF}" 'COPY.*(dashboard|apps|static|dist|build)' \
-        "Server Dockerfile includes dashboard build artifacts"
-
-    check_file_contains "${SERVER_DF}" '^(ENTRYPOINT|CMD)' \
-        "Server Dockerfile has ENTRYPOINT or CMD"
-fi
-
-# ---------------------------------------------------------------------------
-# Section 3: Systemd unit for forwarder
-# ---------------------------------------------------------------------------
 
 echo ""
 echo "=== Systemd Unit: rt-forwarder.service ==="
 
 SYSTEMD_UNIT="deploy/systemd/rt-forwarder.service"
-
 check_file_exists "${SYSTEMD_UNIT}" "Forwarder systemd unit exists"
 
 if [[ -f "${REPO_ROOT}/${SYSTEMD_UNIT}" ]]; then
     check_file_contains "${SYSTEMD_UNIT}" '^\[Unit\]' \
         "Systemd unit has [Unit] section"
-
     check_file_contains "${SYSTEMD_UNIT}" '^\[Service\]' \
         "Systemd unit has [Service] section"
-
     check_file_contains "${SYSTEMD_UNIT}" '^\[Install\]' \
         "Systemd unit has [Install] section"
-
     check_file_contains "${SYSTEMD_UNIT}" 'ExecStart' \
         "Systemd unit has ExecStart"
-
     check_file_contains "${SYSTEMD_UNIT}" 'Restart=' \
         "Systemd unit has Restart policy"
-
     check_file_contains "${SYSTEMD_UNIT}" 'WantedBy=(multi-user|network).target' \
         "Systemd unit targets multi-user or network"
 fi
 
-# ---------------------------------------------------------------------------
-# Section 4: Docker Compose production file
-# ---------------------------------------------------------------------------
-
-echo ""
-echo "=== docker-compose.prod.yml ==="
-
-COMPOSE_FILE="deploy/server/docker-compose.prod.yml"
-
-check_file_exists "${COMPOSE_FILE}" "Production docker-compose.prod.yml exists"
-
-if [[ -f "${REPO_ROOT}/${COMPOSE_FILE}" ]]; then
-    check_file_contains "${COMPOSE_FILE}" 'services:' \
-        "Compose file has services section"
-
-    check_file_contains "${COMPOSE_FILE}" '(postgres|db|database|postgresql)' \
-        "Compose file includes Postgres service"
-
-    check_file_contains "${COMPOSE_FILE}" '(server|rt-server)' \
-        "Compose file includes server service"
-
-    check_file_contains "${COMPOSE_FILE}" 'restart:' \
-        "Compose file has restart policy"
-
-    check_file_contains "${COMPOSE_FILE}" '(unless-stopped|always|on-failure)' \
-        "Compose file has meaningful restart policy"
-
-    check_file_contains "${COMPOSE_FILE}" '(DATABASE_URL|POSTGRES|db|postgres)' \
-        "Compose file wires Postgres URL to server"
-
-    # Validate compose syntax if docker compose is available.
-    # Set required env vars with dummy values for syntax-only validation.
-    if command -v docker &>/dev/null && docker compose version &>/dev/null 2>&1; then
-        if POSTGRES_PASSWORD=test_validate \
-            docker compose -f "${REPO_ROOT}/${COMPOSE_FILE}" config --quiet 2>/dev/null; then
-            check_pass "docker compose config validates successfully"
-        else
-            check_fail "docker compose config failed for ${COMPOSE_FILE}"
-        fi
-    else
-        check_pass "docker compose not available — skipping syntax validation"
-    fi
-fi
-
-# ---------------------------------------------------------------------------
-# Section 5: Runbooks
-# ---------------------------------------------------------------------------
-
 echo ""
 echo "=== Runbooks ==="
-
-RUNBOOK_TOPICS=(
-    "startup"
-    "recovery"
-    "epoch.reset\|reset-epoch\|epoch reset"
-    "export\|exports"
-    "delete\|retention.delete\|manual delete"
-)
 
 check_runbook() {
     local runbook_path="$1"
@@ -230,22 +147,21 @@ check_runbook() {
             "${runbook_name}: covers startup"
         check_file_contains "${runbook_path}" '(recovery|Recovery|recover|reconnect|restart)' \
             "${runbook_name}: covers recovery"
+        check_file_not_contains "${runbook_path}" '(rt-server|Postgres|WebSocket|deploy/server|services/server|rt-protocol)' \
+            "${runbook_name}: has no legacy server data-plane references"
     fi
 }
 
 check_runbook "docs/runbooks/forwarder-operations.md" "Forwarder"
-check_runbook "docs/runbooks/server-operations.md" "Server"
 check_runbook "docs/runbooks/receiver-operations.md" "Receiver"
 check_runbook "docs/runbooks/thin-node-operations.md" "Thin-node"
 
-# Forwarder runbook must cover epoch reset.
 FWRD_RUNBOOK="docs/runbooks/forwarder-operations.md"
 if [[ -f "${REPO_ROOT}/${FWRD_RUNBOOK}" ]]; then
     check_file_contains "${FWRD_RUNBOOK}" 'epoch' \
-        "Forwarder runbook: covers epoch reset"
+        "Forwarder runbook: covers epoch operations"
 fi
 
-# Thin-node runbook must cover provisioning, allow-list distribution, announcer push, and auth posture.
 THIN_RUNBOOK="docs/runbooks/thin-node-operations.md"
 if [[ -f "${REPO_ROOT}/${THIN_RUNBOOK}" ]]; then
     check_file_contains "${THIN_RUNBOOK}" '(THIN_NODE_PROVISIONING_TOKEN|provisioning token)' \
@@ -258,20 +174,19 @@ if [[ -f "${REPO_ROOT}/${THIN_RUNBOOK}" ]]; then
         "Thin-node runbook: covers auth posture"
 fi
 
-# Server runbook must cover exports and manual retention-delete.
-SRV_RUNBOOK="docs/runbooks/server-operations.md"
-if [[ -f "${REPO_ROOT}/${SRV_RUNBOOK}" ]]; then
-    check_file_contains "${SRV_RUNBOOK}" '(export|Export|EXPORT)' \
-        "Server runbook: covers exports"
-    check_file_contains "${SRV_RUNBOOK}" '(delete|Delete|DELETE|retention)' \
-        "Server runbook: covers manual retention-delete (DB-admin only)"
-    check_file_contains "${SRV_RUNBOOK}" '(admin|Admin|operator|DB-admin|database admin)' \
-        "Server runbook: restricts manual delete to DB-admin"
-fi
+echo ""
+echo "=== Release workflow ==="
 
-# ---------------------------------------------------------------------------
-# Section 6: validate-packaging.sh is executable.
-# ---------------------------------------------------------------------------
+RELEASE_WF=".github/workflows/release.yml"
+check_file_exists "${RELEASE_WF}" "Release workflow exists"
+if [[ -f "${REPO_ROOT}/${RELEASE_WF}" ]]; then
+    check_file_contains "${RELEASE_WF}" 'thin-node-v\*' \
+        "Release workflow publishes thin-node tags"
+    check_file_contains "${RELEASE_WF}" 'aarch64-unknown-linux-gnu' \
+        "Release workflow includes Linux arm64 target"
+    check_file_not_contains "${RELEASE_WF}" '(server-v\*|SERVER_DOCKER_IMAGE|rt-server|services/server|apps/server-ui|armv7)' \
+        "Release workflow has no legacy server or armv7 packaging"
+fi
 
 echo ""
 echo "=== Script Permissions ==="
@@ -283,10 +198,6 @@ else
     check_fail "validate-packaging.sh must be executable (chmod +x)"
 fi
 
-# ---------------------------------------------------------------------------
-# Summary
-# ---------------------------------------------------------------------------
-
 echo ""
 echo "=== Summary ==="
 echo "  PASS: ${PASS}"
@@ -296,7 +207,7 @@ echo ""
 if [[ "${FAIL}" -gt 0 ]]; then
     echo "Validation FAILED with ${FAIL} check(s) failing."
     exit 1
-else
-    echo "Validation PASSED. All ${PASS} checks passed."
-    exit 0
 fi
+
+echo "Validation PASSED. All ${PASS} checks passed."
+exit 0

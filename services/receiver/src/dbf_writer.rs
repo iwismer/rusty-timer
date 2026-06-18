@@ -17,7 +17,7 @@ use fs2::FileExt;
 
 use dbase::{FieldIOError, TableWriterBuilder, WritableRecord};
 use ipico_core::read::ChipRead;
-use rt_protocol::ReadEvent;
+use rt_domain::ReadEvent;
 use tokio::sync::{Mutex, broadcast, watch};
 
 use crate::db::{Db, DbError, EventType, ReceivedEvent};
@@ -1228,7 +1228,7 @@ mod tests {
         db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
 
         let db = Arc::new(Mutex::new(db));
-        let (tx, _) = broadcast::channel::<rt_protocol::ReadEvent>(16);
+        let (tx, _) = broadcast::channel::<rt_domain::ReadEvent>(16);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let rx = tx.subscribe();
         let (ui_tx, _) = broadcast::channel(16);
@@ -1240,7 +1240,7 @@ mod tests {
             run_dbf_writer(rx, db_clone, shutdown_rx, cancel_flag, path, ui_tx).await;
         });
 
-        tx.send(rt_protocol::ReadEvent {
+        tx.send(rt_domain::ReadEvent {
             forwarder_id: "f1".to_owned(),
             reader_ip: "10.0.0.1".to_owned(),
             stream_epoch: 1,
@@ -1273,7 +1273,7 @@ mod tests {
         db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
 
         let db = Arc::new(Mutex::new(db));
-        let (tx, _) = broadcast::channel::<rt_protocol::ReadEvent>(16);
+        let (tx, _) = broadcast::channel::<rt_domain::ReadEvent>(16);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let rx = tx.subscribe();
         let (ui_tx, _) = broadcast::channel(16);
@@ -1285,7 +1285,7 @@ mod tests {
             run_dbf_writer(rx, db_clone, shutdown_rx, cancel_flag, path, ui_tx).await;
         });
 
-        tx.send(rt_protocol::ReadEvent {
+        tx.send(rt_domain::ReadEvent {
             forwarder_id: "f1".to_owned(),
             reader_ip: "10.0.0.1".to_owned(),
             stream_epoch: 1,
@@ -1330,7 +1330,7 @@ mod tests {
             .unwrap();
 
         let db = Arc::new(Mutex::new(db));
-        let (tx, _) = broadcast::channel::<rt_protocol::ReadEvent>(16);
+        let (tx, _) = broadcast::channel::<rt_domain::ReadEvent>(16);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let rx = tx.subscribe();
         let (ui_tx, _) = broadcast::channel(16);
@@ -1349,7 +1349,7 @@ mod tests {
                 .unwrap();
         }
 
-        tx.send(rt_protocol::ReadEvent {
+        tx.send(rt_domain::ReadEvent {
             forwarder_id: "f1".to_owned(),
             reader_ip: "10.0.0.1".to_owned(),
             stream_epoch: 1,
@@ -1495,7 +1495,7 @@ mod tests {
         db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
 
         let db = Arc::new(Mutex::new(db));
-        let (tx, _) = broadcast::channel::<rt_protocol::ReadEvent>(16);
+        let (tx, _) = broadcast::channel::<rt_domain::ReadEvent>(16);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let rx = tx.subscribe();
         let (ui_tx, _) = broadcast::channel(16);
@@ -1508,7 +1508,7 @@ mod tests {
         });
 
         // Send event for a forwarder/reader that is NOT subscribed
-        tx.send(rt_protocol::ReadEvent {
+        tx.send(rt_domain::ReadEvent {
             forwarder_id: "f-unknown".to_owned(),
             reader_ip: "10.0.0.99".to_owned(),
             stream_epoch: 1,

@@ -66,10 +66,7 @@ fn parse_forwarder_mode_scenario() {
     assert_eq!(cfg.seed, 77);
 
     // Forwarder-mode fields
-    assert_eq!(
-        cfg.server_url.as_deref(),
-        Some("ws://127.0.0.1:9999/ws/v1/forwarders")
-    );
+    assert_eq!(cfg.server_url.as_deref(), Some("p2p://loopback"));
     assert_eq!(cfg.token.as_deref(), Some("test-token-abc"));
     assert_eq!(cfg.forwarder_id.as_deref(), Some("emulated-fwd-1"));
     assert_eq!(cfg.readers.len(), 1);

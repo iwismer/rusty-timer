@@ -4,33 +4,36 @@
 
 - Use `uv` to run Python commands in this workspace.
 - Examples:
-  - `uv run scripts/dev.py --clear`
-  - `uv run --with rich --with iterm2 python -m unittest scripts/tests/test_dev.py`
+  - `uv run scripts/e2e/run_stack.py --no-build`
+  - `uv run python -m unittest scripts/tests/test_cutover_cleanup.py`
 
 ## Repository Overview
 
-This is the **Rusty Timer Remote Forwarding Suite**, a multi-service Rust workspace with two SvelteKit frontend apps.
+This is the **Rusty Timer P2P Remote Forwarding Suite**, a multi-service Rust workspace with receiver and forwarder SvelteKit frontends.
 
 ### Components
-- `services/streamer/` — Connects to IPICO readers, fans out TCP to local clients
-- `services/emulator/` — Simulates IPICO reads for development/testing
-- `services/forwarder/` — Reads from IPICO hardware, journals to SQLite, forwards over WebSocket
-- `services/server/` — Axum/Postgres: ingest, dedup, fanout, dashboard API
-- `services/receiver/` — Windows app: subscribes to server, proxies streams to local TCP ports
-- `apps/server-ui/` — SvelteKit static web dashboard (served by the server)
-- `apps/receiver-ui/` — SvelteKit static frontend for the receiver (embedded in binary via `--features embed-ui`)
-- `crates/rt-protocol/` — Frozen WebSocket message types (WsMessage enum)
-- `crates/ipico-core/` — Frozen IPICO chip read parser
-- `crates/emulator/` — Emulator library: read generation, scenarios, fault injection
-- `crates/rt-test-utils/` — MockWsServer + MockWsClient test helpers
+- `services/streamer/` — Connects to IPICO readers and fans out TCP to local clients.
+- `services/emulator/` — Simulates IPICO reads for development/testing.
+- `services/forwarder/` — Reads from IPICO hardware, journals to SQLite, exposes status/control HTTP, and serves receiver peers over P2P iroh.
+- `services/receiver/` — Windows/headless receiver: dials forwarders over P2P, stores durable received events, proxies streams to local TCP ports, and writes DBF rows.
+- `services/thin-node/` — SQLite registry, receiver allow-list distribution, announcer push/status board, and HTTP auth boundary.
+- `apps/receiver-ui/` — Tauri v2 + SvelteKit frontend for the receiver.
+- `apps/forwarder-ui/` — SvelteKit frontend for forwarder status/control.
+- `apps/shared-ui/` — Shared frontend components and help metadata.
+- `crates/rt-p2p-protocol/` — Protobuf message types, frame codec, and negotiation.
+- `crates/rt-iroh/` — Shared iroh endpoint wrapper.
+- `crates/rt-domain/` — Shared transport-independent domain/control types.
+- `crates/ipico-core/` — Frozen IPICO chip read parser.
+- `crates/emulator/` — Emulator library: read generation, scenarios, fault injection.
+- `crates/rt-test-utils/` — P2P loopback test helpers.
 
 ### Key Decisions
-- Rust MSRV: 1.85.0; pinned toolchain: 1.93.1 (see `rust-toolchain.toml`)
-- Node 24.x / npm 11.x (see root `package.json` + `.nvmrc`)
-- Server config: env vars only (`DATABASE_URL`, `BIND_ADDR`, `LOG_LEVEL`)
-- Forwarder config: TOML only (no env var overrides)
-- sqlx 0.8 offline cache at `services/server/.sqlx/`
-- Event delivery: at-least-once; deduplicated by `(forwarder_id, reader_ip, stream_epoch, seq)`
+- Rust MSRV: 1.85.0; pinned toolchain: 1.93.1 (see `rust-toolchain.toml`).
+- Node 24.x / npm 11.x (see root `package.json` + `.nvmrc`).
+- Forwarder config: TOML only (no env var overrides).
+- Thin-node config: env vars for process deployment; SQLite for persistence.
+- Event delivery: at-least-once; receiver deduplicates durable events by `(stream_id, seq)`.
+- Deterministic CI P2P tests use loopback-only iroh with relays disabled, discovery off, seeded keys, and injected addresses.
 
 ## Git Hooks Setup (run once per clone)
 
@@ -39,10 +42,10 @@ git config core.hooksPath .githooks
 ```
 
 The pre-commit hook automatically:
-1. Strips registry URL `"resolved"` fields from all `package-lock.json` files (root and `apps/*/`), while keeping local workspace `"resolved"` paths
-2. Checks Rust formatting: `cargo fmt --all -- --check`
-3. Runs Clippy: `cargo clippy --workspace --all-targets`
-4. For touched frontend apps, runs `npm run lint` and `npm run check` (blocking)
+1. Strips registry URL `"resolved"` fields from all `package-lock.json` files while keeping local workspace `"resolved"` paths.
+2. Checks Rust formatting: `cargo fmt --all -- --check`.
+3. Runs Clippy: `cargo clippy --workspace --all-targets`.
+4. For touched frontend apps, runs `npm run lint` and `npm run check`.
 
 To run the pre-commit hook manually before committing:
 ```bash
@@ -52,14 +55,17 @@ bash .githooks/pre-commit
 ## Running Tests
 
 ```bash
-# All Rust unit tests (no Docker needed)
+# Rust unit tests
 cargo test --workspace --lib
 
-# All tests including integration (Docker required)
+# Rust integration tests
 cargo test --workspace -- --test-threads=4
 
-# Dashboard unit tests
-cd apps/server-ui && npm test
+# Deterministic loopback P2P E2E stack
+uv run scripts/e2e/run_stack.py
+
+# Receiver UI unit/type checks
+cd apps/receiver-ui && npm test && npm run check
 
 # Packaging validation
 bash scripts/validate-packaging.sh
@@ -75,22 +81,20 @@ cargo fmt --all
 cargo clippy --workspace --all-targets
 
 # Format JS/TS
-cd apps/server-ui && npm run format
 cd apps/forwarder-ui && npm run format
 cd apps/receiver-ui && npm run format
 ```
 
 ## Tools
 
-- `scripts/parse_pcap.py` — Python script that parses `.pcapng` capture files and decodes IPICO protocol frames from reassembled TCP streams. Use this when you need to understand or debug raw IPICO reader traffic captured in pcapng files (found in `docs/ipico-protocol/captures/`).
-- `tshark` — Command-line Wireshark. Use this alongside `scripts/parse_pcap.py` when you need raw packet payloads, TCP stream details, timing, or to validate capture cases the local parser does not yet decode.
+- `scripts/parse_pcap.py` — Parses `.pcapng` capture files and decodes IPICO protocol frames from reassembled TCP streams. Use this with captures in `docs/ipico-protocol/captures/`.
+- `tshark` — Use alongside `scripts/parse_pcap.py` for raw packet payloads, TCP stream details, timing, or capture validation.
+- `scripts/e2e/run_stack.py` — Boots the loopback emulator → forwarder → receiver-headless → thin-node stack and runs deterministic assertions.
 
 ## Important Notes
 
-- Integration tests require Docker (for Postgres via testcontainers-rs)
-- Never commit without running `bash .githooks/pre-commit` first
-- The `.sqlx/` offline cache is at `services/server/.sqlx/` — regenerate with `cargo sqlx prepare` if schema changes
-- **Never commit plan files.** `docs/plans/` is gitignored — do not `git add -f` or force-add any files there. Plans are local working documents only and must never be tracked in git.
-- Clippy is configured with `pedantic = warn` at the workspace level (see `Cargo.toml` `[workspace.lints.clippy]`)
-- **Never commit `package-lock.json` files with registry URL `"resolved"` fields** — they leak internal registry URLs and bloat diffs. Keep local workspace path `"resolved"` fields (for workspace links). The pre-commit hook handles this automatically, but if you bypass hooks, clean manually with: `jq 'walk(if type == "object" then with_entries(select(.key != "resolved" or (.value | type) != "string" or (.value | test("^https?://") | not))) else . end)' package-lock.json > /tmp/clean.json && mv /tmp/clean.json package-lock.json`
-
+- The data plane uses SQLite and P2P iroh; local deterministic data-plane tests do not require Docker.
+- Never commit without running `bash .githooks/pre-commit` first.
+- **Never commit plan files.** `docs/plans/` is gitignored — do not `git add -f` or force-add any files there.
+- Clippy is configured with `pedantic = warn` at the workspace level (see `Cargo.toml` `[workspace.lints.clippy]`).
+- **Never commit `package-lock.json` files with registry URL `"resolved"` fields** — they leak internal registry URLs and bloat diffs. Keep local workspace path `"resolved"` fields.

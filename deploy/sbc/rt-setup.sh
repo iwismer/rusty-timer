@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # deploy/sbc/rt-setup.sh
 #
-# Interactive setup wizard for rt-forwarder on ARM-based Linux SBCs (aarch64 and armv7).
+# Interactive setup wizard for rt-forwarder on arm64 Linux SBCs.
 #
 # Downloads the forwarder binary from GitHub Releases, prompts for
 # configuration values, generates forwarder.toml and the auth token
@@ -115,12 +115,9 @@ detect_arch() {
     aarch64|arm64)
       printf 'aarch64-unknown-linux-gnu\n'
       ;;
-    armv7l|armv7|armhf)
-      printf 'armv7-unknown-linux-gnueabihf\n'
-      ;;
     *)
       echo "Error: unsupported architecture: ${arch}" >&2
-      echo "Supported values: aarch64, arm64, armv7, armv7l, armhf." >&2
+      echo "Supported values: aarch64, arm64." >&2
       return 1
       ;;
   esac
@@ -608,28 +605,28 @@ configure() {
     fi
   fi
 
-  # Server base URL (required)
-  local server_base_url="${RT_SETUP_SERVER_BASE_URL:-}"
+  # Thin-node URL (required)
+  local thin_node_url="${RT_SETUP_THIN_NODE_URL:-}"
   if is_noninteractive_mode; then
-    if [[ -z "${server_base_url}" ]]; then
-      echo "Error: RT_SETUP_SERVER_BASE_URL is required in non-interactive mode." >&2
+    if [[ -z "${thin_node_url}" ]]; then
+      echo "Error: RT_SETUP_THIN_NODE_URL is required in non-interactive mode." >&2
       exit 1
     fi
-    if [[ ! "${server_base_url}" =~ ^https?:// ]]; then
-      echo "Error: RT_SETUP_SERVER_BASE_URL must start with http:// or https://." >&2
+    if [[ ! "${thin_node_url}" =~ ^https?:// ]]; then
+      echo "Error: RT_SETUP_THIN_NODE_URL must start with http:// or https://." >&2
       exit 1
     fi
   else
-    server_base_url=""
-    while [[ -z "${server_base_url}" ]]; do
-      read -rp "Server base URL: " server_base_url
-      if [[ -z "${server_base_url}" ]]; then
-        echo "Server base URL is required."
+    thin_node_url=""
+    while [[ -z "${thin_node_url}" ]]; do
+      read -rp "Thin-node URL: " thin_node_url
+      if [[ -z "${thin_node_url}" ]]; then
+        echo "Thin-node URL is required."
         continue
       fi
-      if [[ ! "${server_base_url}" =~ ^https?:// ]]; then
-        echo "Server base URL must start with http:// or https://"
-        server_base_url=""
+      if [[ ! "${thin_node_url}" =~ ^https?:// ]]; then
+        echo "Thin-node URL must start with http:// or https://"
+        thin_node_url=""
         continue
       fi
     done
@@ -726,11 +723,14 @@ configure() {
 schema_version = 1
 display_name = "${escaped_forwarder_display_name}"
 
-[server]
-base_url = "${server_base_url}"
-
 [auth]
 token_file = "/etc/rusty-timer/forwarder.token"
+
+[p2p]
+enabled = true
+secret_key_path = "/var/lib/rusty-timer/forwarder-endpoint.key"
+thin_node_url = "${thin_node_url}"
+thin_node_token_file = "/etc/rusty-timer/forwarder.token"
 
 [journal]
 sqlite_path = "/var/lib/rusty-timer/forwarder.sqlite3"
@@ -741,11 +741,6 @@ bind = "${STATUS_BIND}"
 
 [control]
 allow_power_actions = ${control_allow_power_actions}
-
-[uplink]
-batch_mode = "immediate"
-batch_flush_ms = 100
-batch_max_events = 50
 
 [update]
 mode = "check-only"

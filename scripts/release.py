@@ -10,11 +10,9 @@ Bumps service versions, validates release artifacts, commits/tags, and pushes.
 
 Usage:
     uv run scripts/release.py forwarder --patch
-    uv run scripts/release.py server --patch
     uv run scripts/release.py forwarder emulator --minor
-    uv run scripts/release.py server --version 2.0.0 --server-local-docker-build
-    uv run scripts/release.py server --version 2.0.0 --server-local-docker-build --server-docker-image iwismer/rt-server
     uv run scripts/release.py receiver --version 2.0.0
+    uv run scripts/release.py thin-node --patch
     uv run scripts/release.py forwarder --patch --dry-run
 
 For `receiver`, also bumps `apps/receiver-ui/src-tauri/tauri.conf.json` to the
@@ -33,15 +31,12 @@ import traceback
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-VALID_SERVICES = ("forwarder", "receiver", "streamer", "emulator", "server", "thin-node")
+VALID_SERVICES = ("forwarder", "receiver", "streamer", "emulator", "thin-node")
 EMBED_UI_SERVICES = ("forwarder",)
 UI_WORKSPACES = {
     "forwarder": "apps/forwarder-ui",
     "receiver": "apps/receiver-ui",
-    "server": "apps/server-ui",
 }
-SERVER_DOCKERFILE = "services/server/Dockerfile"
-DEFAULT_SERVER_DOCKER_IMAGE = "iwismer/rt-server"
 VERSION_FORMAT_RE = re.compile(r"^\d+\.\d+\.\d+$")
 TAURI_CONF_VERSION_RE = re.compile(
     r'^(\s*"version"\s*:\s*")\d+\.\d+\.\d+(")',
@@ -88,20 +83,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip confirmation prompt",
     )
-    parser.add_argument(
-        "--server-docker-image",
-        default=DEFAULT_SERVER_DOCKER_IMAGE,
-        help=(
-            "Docker image repository for optional local server Docker build "
-            f"(default: {DEFAULT_SERVER_DOCKER_IMAGE})"
-        ),
-    )
-    parser.add_argument(
-        "--server-local-docker-build",
-        action="store_true",
-        help="For server releases, run a local Docker build check before commit/tag",
-    )
-
     args = parser.parse_args()
 
     if args.version and not VERSION_FORMAT_RE.match(args.version):
@@ -264,16 +245,10 @@ def service_ui_workspace(service: str) -> str | None:
     return UI_WORKSPACES.get(service)
 
 
-def server_image_tags(image_repo: str, version: str) -> tuple[str, str]:
-    return f"{image_repo}:v{version}", f"{image_repo}:latest"
-
-
 def run_release_workflow_checks(
     service: str,
     *,
-    new_version: str,
-    server_docker_image: str,
-    server_local_docker_build: bool,
+    _new_version: str,
     start_step: int,
 ) -> int:
     step = start_step
@@ -286,40 +261,6 @@ def run_release_workflow_checks(
         log_command(["npm", "run", "check", "--workspace", ui_workspace], execute=True)
         log_command(["npm", "test", "--workspace", ui_workspace], execute=True)
         print(style("    UI checks passed", role="success"))
-
-    if service == "server" and server_local_docker_build:
-        image_version_tag, image_latest_tag = server_image_tags(server_docker_image, new_version)
-        print(style(f"  [{step}] Build server Docker image", role="step"))
-        step += 1
-        log_command(
-            [
-                "docker",
-                "build",
-                "-t",
-                image_version_tag,
-                "-t",
-                image_latest_tag,
-                "-f",
-                SERVER_DOCKERFILE,
-                ".",
-            ],
-            execute=True,
-        )
-        print(
-            style(
-                f"    Docker build passed ({image_version_tag}, {image_latest_tag})",
-                role="success",
-            )
-        )
-        return step
-
-    if service == "server":
-        print(
-            style(
-                "    Skipping local server Docker build (enable with --server-local-docker-build)",
-                role="warning",
-            )
-        )
 
     build_cmd = [
         "cargo",
@@ -490,9 +431,7 @@ def main() -> None:
             # Validate with the same checks/build used by release workflow.
             step = run_release_workflow_checks(
                 service,
-                new_version=new,
-                server_docker_image=args.server_docker_image,
-                server_local_docker_build=args.server_local_docker_build,
+                _new_version=new,
                 start_step=step,
             )
 

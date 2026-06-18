@@ -6,10 +6,10 @@ import ConfigTab from "./components/ConfigTab.svelte";
 const mockState = vi.hoisted(() => ({
   store: {
     editReceiverId: "recv-test",
-    editServerUrl: "wss://server.example/ws",
+    editThinNodeUrl: "https://thin-node.example.com",
     editToken: "secret",
     savedReceiverId: "recv-test",
-    savedServerUrl: "wss://server.example/ws",
+    savedThinNodeUrl: "https://thin-node.example.com",
     savedToken: "secret",
     saving: false,
     connectBusy: false,
@@ -21,7 +21,7 @@ const mockState = vi.hoisted(() => ({
   handleConnect: vi.fn(),
   handleDisconnect: vi.fn(),
   setEditReceiverId: vi.fn(),
-  setEditServerUrl: vi.fn(),
+  setEditThinNodeUrl: vi.fn(),
   setEditToken: vi.fn(),
 }));
 
@@ -33,7 +33,7 @@ vi.mock("$lib/store.svelte", () => ({
   handleConnect: mockState.handleConnect,
   handleDisconnect: mockState.handleDisconnect,
   setEditReceiverId: mockState.setEditReceiverId,
-  setEditServerUrl: mockState.setEditServerUrl,
+  setEditThinNodeUrl: mockState.setEditThinNodeUrl,
   setEditToken: mockState.setEditToken,
 }));
 
@@ -45,10 +45,10 @@ describe("ConfigTab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockState.store.editReceiverId = "recv-test";
-    mockState.store.editServerUrl = "wss://server.example/ws";
+    mockState.store.editThinNodeUrl = "https://thin-node.example.com";
     mockState.store.editToken = "secret";
     mockState.store.savedReceiverId = "recv-test";
-    mockState.store.savedServerUrl = "wss://server.example/ws";
+    mockState.store.savedThinNodeUrl = "https://thin-node.example.com";
     mockState.store.savedToken = "secret";
     mockState.store.saving = false;
     mockState.store.connectBusy = false;
@@ -61,8 +61,8 @@ describe("ConfigTab", () => {
     render(ConfigTab);
 
     expect(screen.getByTestId("receiver-id-input")).toHaveValue("recv-test");
-    expect(screen.getByTestId("server-url-input")).toHaveValue(
-      "wss://server.example/ws",
+    expect(screen.getByTestId("thin-node-url-input")).toHaveValue(
+      "https://thin-node.example.com",
     );
     expect(screen.getByTestId("token-input")).toHaveValue("secret");
     expect(screen.getByTestId("save-config-btn")).toBeDisabled();
@@ -95,9 +95,9 @@ describe("ConfigTab", () => {
     expect(mockState.handleDisconnect).toHaveBeenCalledTimes(1);
   });
 
-  it("disables connect when there is no saved server URL", () => {
-    mockState.store.editServerUrl = "wss://draft-only.example/ws";
-    mockState.store.savedServerUrl = "";
+  it("disables connect when there is no saved thin-node URL", () => {
+    mockState.store.editThinNodeUrl = "https://draft-only.example";
+    mockState.store.savedThinNodeUrl = "";
 
     render(ConfigTab);
 

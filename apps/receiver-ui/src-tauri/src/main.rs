@@ -224,17 +224,14 @@ async fn put_profile(
 }
 
 #[tauri::command]
-async fn get_mode(state: State<'_, Arc<AppState>>) -> CmdResult<rt_protocol::ReceiverMode> {
+async fn get_mode(state: State<'_, Arc<AppState>>) -> CmdResult<rt_domain::ReceiverMode> {
     control_api::get_mode(&state)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn put_mode(
-    state: State<'_, Arc<AppState>>,
-    mode: rt_protocol::ReceiverMode,
-) -> CmdResult<()> {
+async fn put_mode(state: State<'_, Arc<AppState>>, mode: rt_domain::ReceiverMode) -> CmdResult<()> {
     control_api::put_mode(&state, mode)
         .await
         .map_err(|e| e.to_string())
@@ -258,133 +255,6 @@ async fn put_earliest_epoch(
     body: control_api::EarliestEpochRequest,
 ) -> CmdResult<()> {
     control_api::put_earliest_epoch(&state, body)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn get_races(state: State<'_, Arc<AppState>>) -> CmdResult<serde_json::Value> {
-    control_api::get_races(&state)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn create_race(
-    state: State<'_, Arc<AppState>>,
-    name: String,
-) -> CmdResult<serde_json::Value> {
-    control_api::create_race(&state, name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn delete_race(state: State<'_, Arc<AppState>>, race_id: String) -> CmdResult<()> {
-    control_api::delete_race(&state, race_id)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn get_participants(
-    state: State<'_, Arc<AppState>>,
-    race_id: String,
-) -> CmdResult<serde_json::Value> {
-    control_api::get_participants(&state, race_id)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn upload_race_file(
-    state: State<'_, Arc<AppState>>,
-    race_id: String,
-    upload_type: String,
-    file_data: String,
-    file_name: String,
-) -> CmdResult<serde_json::Value> {
-    control_api::upload_race_file(&state, race_id, upload_type, file_data, file_name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn get_forwarders(state: State<'_, Arc<AppState>>) -> CmdResult<serde_json::Value> {
-    control_api::get_forwarders(&state)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn get_forwarder_race(
-    state: State<'_, Arc<AppState>>,
-    forwarder_id: String,
-) -> CmdResult<serde_json::Value> {
-    control_api::get_forwarder_race(&state, forwarder_id)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn set_forwarder_race(
-    state: State<'_, Arc<AppState>>,
-    forwarder_id: String,
-    race_id: Option<String>,
-) -> CmdResult<serde_json::Value> {
-    control_api::set_forwarder_race(&state, forwarder_id, race_id)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn get_forwarder_config(
-    state: State<'_, Arc<AppState>>,
-    forwarder_id: String,
-) -> CmdResult<serde_json::Value> {
-    control_api::get_forwarder_config(&state, forwarder_id)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn set_forwarder_config(
-    state: State<'_, Arc<AppState>>,
-    forwarder_id: String,
-    section: String,
-    data: serde_json::Value,
-) -> CmdResult<serde_json::Value> {
-    control_api::set_forwarder_config(&state, forwarder_id, section, data)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn restart_forwarder_service(
-    state: State<'_, Arc<AppState>>,
-    forwarder_id: String,
-) -> CmdResult<serde_json::Value> {
-    control_api::restart_forwarder_service(&state, forwarder_id)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn restart_forwarder_device(
-    state: State<'_, Arc<AppState>>,
-    forwarder_id: String,
-) -> CmdResult<serde_json::Value> {
-    control_api::restart_forwarder_device(&state, forwarder_id)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn shutdown_forwarder_device(
-    state: State<'_, Arc<AppState>>,
-    forwarder_id: String,
-) -> CmdResult<serde_json::Value> {
-    control_api::shutdown_forwarder_device(&state, forwarder_id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -563,151 +433,6 @@ async fn update_subscription_event_type(
     )
     .await
     .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn get_server_streams(state: State<'_, Arc<AppState>>) -> CmdResult<serde_json::Value> {
-    control_api::get_server_streams(&state)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn get_announcer_config(state: State<'_, Arc<AppState>>) -> CmdResult<serde_json::Value> {
-    control_api::get_announcer_config(&state)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn put_announcer_config(
-    state: State<'_, Arc<AppState>>,
-    body: serde_json::Value,
-) -> CmdResult<serde_json::Value> {
-    control_api::put_announcer_config(&state, body)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn reset_announcer(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
-    control_api::reset_announcer(&state)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn reader_get_info(
-    state: State<'_, Arc<AppState>>,
-    forwarder_id: String,
-    reader_ip: String,
-) -> CmdResult<serde_json::Value> {
-    control_api::reader_get_info(&state, forwarder_id, reader_ip)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn reader_sync_clock(
-    state: State<'_, Arc<AppState>>,
-    forwarder_id: String,
-    reader_ip: String,
-) -> CmdResult<serde_json::Value> {
-    control_api::reader_sync_clock(&state, forwarder_id, reader_ip)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn reader_set_read_mode(
-    state: State<'_, Arc<AppState>>,
-    forwarder_id: String,
-    reader_ip: String,
-    mode: rt_protocol::ReadMode,
-    timeout: u8,
-) -> CmdResult<serde_json::Value> {
-    control_api::reader_set_read_mode(&state, forwarder_id, reader_ip, mode, timeout)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn reader_set_tto(
-    state: State<'_, Arc<AppState>>,
-    forwarder_id: String,
-    reader_ip: String,
-    enabled: bool,
-) -> CmdResult<serde_json::Value> {
-    control_api::reader_set_tto(&state, forwarder_id, reader_ip, enabled)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn reader_set_recording(
-    state: State<'_, Arc<AppState>>,
-    forwarder_id: String,
-    reader_ip: String,
-    enabled: bool,
-) -> CmdResult<serde_json::Value> {
-    control_api::reader_set_recording(&state, forwarder_id, reader_ip, enabled)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn reader_clear_records(
-    state: State<'_, Arc<AppState>>,
-    forwarder_id: String,
-    reader_ip: String,
-) -> CmdResult<serde_json::Value> {
-    control_api::reader_clear_records(&state, forwarder_id, reader_ip)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn reader_start_download(
-    state: State<'_, Arc<AppState>>,
-    forwarder_id: String,
-    reader_ip: String,
-) -> CmdResult<serde_json::Value> {
-    control_api::reader_start_download(&state, forwarder_id, reader_ip)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn reader_stop_download(
-    state: State<'_, Arc<AppState>>,
-    forwarder_id: String,
-    reader_ip: String,
-) -> CmdResult<serde_json::Value> {
-    control_api::reader_stop_download(&state, forwarder_id, reader_ip)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn reader_refresh(
-    state: State<'_, Arc<AppState>>,
-    forwarder_id: String,
-    reader_ip: String,
-) -> CmdResult<serde_json::Value> {
-    control_api::reader_refresh(&state, forwarder_id, reader_ip)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn reader_reconnect(
-    state: State<'_, Arc<AppState>>,
-    forwarder_id: String,
-    reader_ip: String,
-) -> CmdResult<serde_json::Value> {
-    control_api::reader_reconnect(&state, forwarder_id, reader_ip)
-        .await
-        .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -964,7 +689,7 @@ fn main() {
                 let _ = state.shutdown_tx.send(ShutdownSignal::Terminate);
             }
             // Wait for receiver runtime to finish graceful cleanup
-            // (cancel WS session, stop local proxies) before the process exits.
+            // (cancel P2P sessions, stop local proxies) before the process exits.
             if let Some(guard) = app_handle.try_state::<Mutex<Option<JoinHandle<()>>>>() {
                 if let Some(handle) = guard.lock().ok().and_then(|mut g| g.take()) {
                     tauri::async_runtime::block_on(async {
@@ -1065,7 +790,7 @@ mod tests {
                 last_read_at: None,
             }),
             ReceiverUiEvent::ModeChanged {
-                mode: rt_protocol::ReceiverMode::Race {
+                mode: rt_domain::ReceiverMode::Race {
                     race_id: "r".to_owned(),
                 },
             },
@@ -1091,21 +816,6 @@ mod tests {
                 epoch_last_received_at: None,
                 epoch_lag_ms: None,
             }),
-            ReceiverUiEvent::ReaderInfoUpdated {
-                stream_id: uuid::Uuid::nil(),
-                reader_ip: "ip".to_owned(),
-                state: rt_protocol::ReaderConnectionState::Connected,
-                reader_info: None,
-            },
-            ReceiverUiEvent::ReaderDownloadProgress {
-                stream_id: uuid::Uuid::nil(),
-                reader_ip: "ip".to_owned(),
-                state: rt_protocol::DownloadState::Idle,
-                reads_received: 0,
-                progress: 0,
-                total: 0,
-                error: None,
-            },
             ReceiverUiEvent::ForwarderUpsUpdated {
                 forwarder_id: "f".to_owned(),
                 available: false,

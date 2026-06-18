@@ -25,21 +25,8 @@ pub(crate) async fn mark_reader_disconnected(status: &StatusServer, reader_ip: &
         .await;
 }
 
-async fn disconnect_and_notify(
-    status: &StatusServer,
-    stream_key: &str,
-    reader_status_tx: &tokio::sync::mpsc::UnboundedSender<rt_protocol::ReaderStatusUpdate>,
-) {
+async fn disconnect_and_notify(status: &StatusServer, stream_key: &str) {
     mark_reader_disconnected(status, stream_key).await;
-    if reader_status_tx
-        .send(rt_protocol::ReaderStatusUpdate {
-            reader_ip: stream_key.to_owned(),
-            connected: false,
-        })
-        .is_err()
-    {
-        warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
-    }
 }
 
 #[derive(Debug)]
@@ -125,7 +112,6 @@ pub(crate) async fn run_reader(
     mut shutdown_rx: watch::Receiver<bool>,
     status: StatusServer,
     logger: Arc<rt_ui_log::UiLogger<ForwarderUiEvent>>,
-    reader_status_tx: tokio::sync::mpsc::UnboundedSender<rt_protocol::ReaderStatusUpdate>,
 ) {
     let target_addr = format!("{}:{}", reader_ip, reader_port);
     let mut backoff_secs: u64 = 1;
@@ -167,7 +153,7 @@ pub(crate) async fn run_reader(
                         reader_ip, e, backoff_secs
                     ),
                 );
-                disconnect_and_notify(&status, &target_addr, &reader_status_tx).await;
+                disconnect_and_notify(&status, &target_addr).await;
                 let delay = Duration::from_secs(backoff_secs);
                 tokio::select! {
                     _ = sleep(delay) => {}
@@ -191,15 +177,6 @@ pub(crate) async fn run_reader(
         status
             .update_reader_state(&target_addr, ReaderConnectionState::Connected)
             .await;
-        if reader_status_tx
-            .send(rt_protocol::ReaderStatusUpdate {
-                reader_ip: target_addr.clone(),
-                connected: true,
-            })
-            .is_err()
-        {
-            warn!(reader_ip = %target_addr, "reader status channel closed; uplink may be down");
-        }
 
         // Ensure journal has stream state for this reader (idempotent)
         {
@@ -213,7 +190,7 @@ pub(crate) async fn run_reader(
                         reader_ip, e, backoff_secs
                     ),
                 );
-                disconnect_and_notify(&status, &target_addr, &reader_status_tx).await;
+                disconnect_and_notify(&status, &target_addr).await;
                 let delay = Duration::from_secs(backoff_secs);
                 tokio::select! {
                     _ = sleep(delay) => {}
@@ -438,7 +415,7 @@ pub(crate) async fn run_reader(
                         format!("reader {} read error during download: {}", reader_ip, e),
                     )
                     .await;
-                    disconnect_and_notify(&status, &target_addr, &reader_status_tx).await;
+                    disconnect_and_notify(&status, &target_addr).await;
                     break;
                 }
                 Ok(0) => {
@@ -451,7 +428,7 @@ pub(crate) async fn run_reader(
                         format!("reader {} connection closed during download", reader_ip),
                     )
                     .await;
-                    disconnect_and_notify(&status, &target_addr, &reader_status_tx).await;
+                    disconnect_and_notify(&status, &target_addr).await;
                     break;
                 }
                 Ok(_) => {}
@@ -527,7 +504,7 @@ pub(crate) async fn run_reader(
                         UiLogLevel::Error,
                         format!("reader {} journal error (append): {}", reader_ip, inner),
                     );
-                    disconnect_and_notify(&status, &target_addr, &reader_status_tx).await;
+                    disconnect_and_notify(&status, &target_addr).await;
                     break;
                 }
             };
@@ -549,7 +526,7 @@ pub(crate) async fn run_reader(
             let raw_bytes = frame_buf.clone();
             if let Err(e) = FanoutServer::push_to_addr(fanout_addr, raw_bytes).await {
                 warn!(reader_ip = %reader_ip, error = %e, "local fanout push failed");
-                // Non-fatal: local fanout failure doesn't break uplink path
+                // Non-fatal: local fanout failure doesn't break P2P path
             }
 
             status.record_read(&target_addr).await;

@@ -3,8 +3,9 @@
 ## Prerequisites
 
 - Rust MSRV: 1.85.0; pinned toolchain: 1.93.1 (see `rust-toolchain.toml`)
-- Docker (for server and integration tests)
 - Node.js 24.x and npm 11.x
+- Python 3.11+ with `uv`
+- Docker only for optional local tooling that explicitly asks for it; the P2P data-plane tests do not require Docker.
 
 JavaScript toolchain pinning:
 - `package.json` pins expected Node/npm via `engines`
@@ -13,14 +14,20 @@ JavaScript toolchain pinning:
 ## Running Tests
 
 ```bash
-# Rust unit tests (no Docker required)
+# Rust unit tests
 cargo test --workspace --lib
 
-# All tests including integration (Docker required)
-cargo test --workspace -- --test-threads=4
+# Workspace tests
+cargo test --workspace
 
-# Dashboard unit tests
-(cd apps/server-ui && npm test)
+# Deterministic loopback P2P stack assertions
+uv run scripts/e2e/run_stack.py
+
+# Receiver UI tests
+(cd apps/receiver-ui && npm test)
+
+# Forwarder UI tests
+(cd apps/forwarder-ui && npm test)
 
 # Packaging validation
 (cd "$(git rev-parse --show-toplevel)" && bash scripts/validate-packaging.sh)
@@ -36,7 +43,6 @@ cargo fmt --all
 cargo clippy --workspace --all-targets
 
 # Format JS/TS
-(cd apps/server-ui && npm run format)
 (cd apps/receiver-ui && npm run format)
 (cd apps/forwarder-ui && npm run format)
 ```

@@ -486,7 +486,7 @@
         helpContext="receiver-admin"
       >
         <p class="text-sm text-text-muted m-0 mb-4">
-          Clear server URL, token, and receiver ID back to defaults. The
+          Clear thin-node URL, token, and receiver ID back to defaults. The
           receiver will need to be reconfigured before connecting.
         </p>
         <button

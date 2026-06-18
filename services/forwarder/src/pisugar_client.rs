@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
-use rt_protocol::UpsStatus;
+use rt_domain::UpsStatus;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 

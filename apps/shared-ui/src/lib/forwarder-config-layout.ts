@@ -1,18 +1,17 @@
 export type ForwarderConfigSection =
   | 'general'
-  | 'server'
+  | 'p2p'
   | 'auth'
   | 'journal'
-  | 'uplink'
   | 'status_http'
   | 'readers'
   | 'ups';
 
 export function getForwarderConfigSectionRows(): ForwarderConfigSection[][] {
   return [
-    ['general', 'server'],
+    ['general', 'p2p'],
     ['auth', 'journal'],
-    ['uplink', 'status_http'],
+    ['status_http'],
     ['readers', 'ups'],
   ];
 }

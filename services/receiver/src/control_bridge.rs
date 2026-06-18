@@ -270,49 +270,6 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
         "put_earliest_epoch" => {
             ok(control_api::put_earliest_epoch(state, arg(args, "body")?).await?)
         }
-        "get_races" => ok(control_api::get_races(state).await?),
-        "create_race" => ok(control_api::create_race(state, arg(args, "name")?).await?),
-        "delete_race" => ok(control_api::delete_race(state, arg(args, "race_id")?).await?),
-        "get_participants" => {
-            ok(control_api::get_participants(state, arg(args, "race_id")?).await?)
-        }
-        "upload_race_file" => ok(control_api::upload_race_file(
-            state,
-            arg(args, "race_id")?,
-            arg(args, "upload_type")?,
-            arg(args, "file_data")?,
-            arg(args, "file_name")?,
-        )
-        .await?),
-        "get_forwarders" => ok(control_api::get_forwarders(state).await?),
-        "get_forwarder_race" => {
-            ok(control_api::get_forwarder_race(state, arg(args, "forwarder_id")?).await?)
-        }
-        "set_forwarder_race" => ok(control_api::set_forwarder_race(
-            state,
-            arg(args, "forwarder_id")?,
-            arg(args, "race_id")?,
-        )
-        .await?),
-        "get_forwarder_config" => {
-            ok(control_api::get_forwarder_config(state, arg(args, "forwarder_id")?).await?)
-        }
-        "set_forwarder_config" => ok(control_api::set_forwarder_config(
-            state,
-            arg(args, "forwarder_id")?,
-            arg(args, "section")?,
-            arg(args, "data")?,
-        )
-        .await?),
-        "restart_forwarder_service" => {
-            ok(control_api::restart_forwarder_service(state, arg(args, "forwarder_id")?).await?)
-        }
-        "restart_forwarder_device" => {
-            ok(control_api::restart_forwarder_device(state, arg(args, "forwarder_id")?).await?)
-        }
-        "shutdown_forwarder_device" => {
-            ok(control_api::shutdown_forwarder_device(state, arg(args, "forwarder_id")?).await?)
-        }
         "get_replay_target_epochs" => ok(control_api::get_replay_target_epochs(
             state,
             arg(args, "forwarder_id")?,
@@ -361,76 +318,6 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
             )
             .await?)
         }
-        "get_server_streams" => ok(control_api::get_server_streams(state).await?),
-        "get_announcer_config" => ok(control_api::get_announcer_config(state).await?),
-        "put_announcer_config" => {
-            ok(control_api::put_announcer_config(state, arg(args, "body")?).await?)
-        }
-        "reset_announcer" => ok(control_api::reset_announcer(state).await?),
-        "reader_get_info" => ok(control_api::reader_get_info(
-            state,
-            arg(args, "forwarder_id")?,
-            arg(args, "reader_ip")?,
-        )
-        .await?),
-        "reader_sync_clock" => ok(control_api::reader_sync_clock(
-            state,
-            arg(args, "forwarder_id")?,
-            arg(args, "reader_ip")?,
-        )
-        .await?),
-        "reader_set_read_mode" => ok(control_api::reader_set_read_mode(
-            state,
-            arg(args, "forwarder_id")?,
-            arg(args, "reader_ip")?,
-            arg(args, "mode")?,
-            arg(args, "timeout")?,
-        )
-        .await?),
-        "reader_set_tto" => ok(control_api::reader_set_tto(
-            state,
-            arg(args, "forwarder_id")?,
-            arg(args, "reader_ip")?,
-            arg(args, "enabled")?,
-        )
-        .await?),
-        "reader_set_recording" => ok(control_api::reader_set_recording(
-            state,
-            arg(args, "forwarder_id")?,
-            arg(args, "reader_ip")?,
-            arg(args, "enabled")?,
-        )
-        .await?),
-        "reader_clear_records" => ok(control_api::reader_clear_records(
-            state,
-            arg(args, "forwarder_id")?,
-            arg(args, "reader_ip")?,
-        )
-        .await?),
-        "reader_start_download" => ok(control_api::reader_start_download(
-            state,
-            arg(args, "forwarder_id")?,
-            arg(args, "reader_ip")?,
-        )
-        .await?),
-        "reader_stop_download" => ok(control_api::reader_stop_download(
-            state,
-            arg(args, "forwarder_id")?,
-            arg(args, "reader_ip")?,
-        )
-        .await?),
-        "reader_refresh" => ok(control_api::reader_refresh(
-            state,
-            arg(args, "forwarder_id")?,
-            arg(args, "reader_ip")?,
-        )
-        .await?),
-        "reader_reconnect" => ok(control_api::reader_reconnect(
-            state,
-            arg(args, "forwarder_id")?,
-            arg(args, "reader_ip")?,
-        )
-        .await?),
         other => Err(BridgeError::Unknown(other.to_owned())),
     }
 }
@@ -591,7 +478,7 @@ mod tests {
             axum::serve(upstream_listener, upstream_app).await.unwrap();
         });
 
-        *state.upstream_url.write().await = Some(format!("ws://{upstream_addr}"));
+        *state.upstream_url.write().await = Some(format!("https://{upstream_addr}"));
         state
             .connection_state
             .send_replace(control_api::ConnectionState::Connected);

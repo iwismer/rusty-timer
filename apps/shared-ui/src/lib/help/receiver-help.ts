@@ -3,32 +3,32 @@ import type { HelpContext } from "./help-types";
 export const RECEIVER_HELP = {
   config: {
     title: "Receiver Configuration",
-    overview: "Core connection settings for the receiver. These determine how the receiver identifies itself and connects to the remote server.",
+    overview: "Core connection settings for the receiver. These determine how the receiver identifies itself and reaches the thin-node coordinator.",
     fields: {
       receiver_id: {
         label: "Receiver ID",
         summary: "Unique identifier for this receiver instance.",
-        detailHtml: "A unique string that identifies this receiver to the server. Use a descriptive ID like 'finish-line-pc' or 'timing-tent-a' so operators can identify which receiver is which.",
+        detailHtml: "A unique string that identifies this receiver endpoint. Use a descriptive ID like 'finish-line-pc' or 'timing-tent-a' so operators can identify which receiver is which.",
         default: "None (required)",
         recommended: "Use a short, descriptive name that identifies the physical location or purpose of this receiver.",
       },
-      server_url: {
-        label: "Server URL",
-        summary: "URL of the remote timing server.",
-        detailHtml: "The full URL of the server to connect to (e.g. <code>wss://server.example.com:8080</code>). The receiver maintains a persistent connection to the server for real-time data streaming. Use <code>wss://</code> for encrypted connections.",
+      thin_node_url: {
+        label: "Thin-node URL",
+        summary: "URL of the thin-node coordinator.",
+        detailHtml: "The full URL of the thin node to connect to (e.g. <code>https://thin-node.example.com</code>). The receiver uses it for endpoint discovery, allow-list state, and status updates; chip reads flow directly over P2P sessions.",
         default: "None (required)",
-        recommended: "Use wss:// for production to encrypt data in transit.",
+        recommended: "Use HTTPS in production.",
       },
       token: {
         label: "Token",
-        summary: "Authentication token for connecting to the server.",
-        detailHtml: "The authentication token used to connect this receiver to the server. It must match a valid token configured on the server.",
-        default: "None (required for authenticated servers)",
+        summary: "Authentication token for thin-node M2M calls.",
+        detailHtml: "The authentication token used by this receiver when it calls thin-node registration, status, and announcer endpoints.",
+        default: "None (required)",
       },
     },
     tips: [
       "Save your config before connecting for the first time.",
-      "If the receiver can't connect, verify the Server URL is correct and the server is reachable from this machine.",
+      "If the receiver can't connect, verify the thin-node URL, token, and allow-list entry for this endpoint.",
     ],
     seeAlso: [{ sectionKey: "receiver_mode", label: "Receiver Mode" }],
   },
@@ -38,27 +38,20 @@ export const RECEIVER_HELP = {
     fields: {
       mode: {
         label: "Mode",
-        summary: "Operating mode: Live, Race, or Targeted Replay.",
-        detailHtml: "The receiver supports three operating modes:" +
+        summary: "Operating mode: Live or Targeted Replay.",
+        detailHtml: "The receiver supports two operator-facing modes:" +
           "<ul>" +
-          "<li><strong>Live</strong>: Auto-subscribes to all available streams. New streams are added automatically as forwarders connect. This is the default for standard race timing.</li>" +
-          "<li><strong>Race</strong>: Follows server-defined stream assignments for a selected race. Use this when the server operator has set up race definitions.</li>" +
+          "<li><strong>Live</strong>: Auto-subscribes to available streams. New streams are added automatically as forwarders connect. This is the default for standard race timing.</li>" +
           "<li><strong>Targeted Replay</strong>: Allows per-stream epoch selection for replaying historical data. Use this to re-send timing data to your timing software, for example after a crash.</li>" +
           "</ul>",
         default: "Live",
-        range: "Live, Race, Targeted Replay",
+        range: "Live, Targeted Replay",
         recommended: "Use Live mode for standard race timing. Switch to Targeted Replay only when you need to re-send historical data.",
-      },
-      race: {
-        label: "Race",
-        summary: "Select a race configuration (Race mode only).",
-        detailHtml: "When in Race mode, select the race that this receiver should follow. The server provides the list of configured races. The race definition determines which streams are assigned and their epoch settings.",
       },
     },
     tips: [
       "Use Live mode for standard race timing. It auto-subscribes to all available streams.",
       "Switch to Targeted Replay to re-send historical data to your timing software after a crash or data loss.",
-      "In Race mode, stream assignments are managed by the server operator. Contact them if streams are missing.",
       "Changing modes takes effect immediately. Active subscriptions may change.",
     ],
     seeAlso: [
@@ -78,7 +71,7 @@ export const RECEIVER_HELP = {
       subscribed: {
         label: "Subscribed",
         summary: "Whether the receiver is actively receiving data from this stream.",
-        detailHtml: "A subscribed stream actively delivers chip reads to the receiver's local port. Unsubscribing stops local delivery but does <strong>not</strong> stop the forwarder from sending data to the server. Data continues to accumulate on the server and can be replayed later.",
+        detailHtml: "A subscribed stream actively delivers chip reads to the receiver's local port. Unsubscribing stops local delivery but does <strong>not</strong> stop the forwarder from journaling data. Data continues to accumulate on the forwarder and can be replayed later.",
       },
       local_port: {
         label: "Local Port",
@@ -97,97 +90,11 @@ export const RECEIVER_HELP = {
       },
     },
     tips: [
-      "Unsubscribing a stream only stops local delivery. Data continues to accumulate on the server and can be replayed later.",
+      "Unsubscribing a stream only stops local delivery. Data continues to accumulate on the forwarder and can be replayed later.",
       "If your timing software isn't receiving reads, check that it's listening on the correct local port.",
-      "The 'degraded' indicator means the server reported an issue with this stream. Reads may still flow but check with the server operator.",
+      "The 'degraded' indicator means the receiver reported a local issue with this stream. Reads may still flow; check the receiver logs and forwarder status page.",
       "Use <strong>Admin &gt; Port Overrides</strong> to customize which local port each stream uses if the defaults don't match your timing software setup.",
     ],
     seeAlso: [{ sectionKey: "receiver_mode", label: "Receiver Mode" }],
-  },
-  races: {
-    title: "Races",
-    overview:
-      "Races organize participant and chip data for an event. Create a race, then upload participants and chip mappings so chip reads can resolve to bib numbers and names.",
-    fields: {
-      create_race: {
-        label: "Create Race",
-        summary:
-          "Creates a new race to hold participant and chip-mapping data.",
-        detailHtml:
-          "Enter a name and click <strong>Create Race</strong> to add a new race. " +
-          "Once created, open the race to upload participant and chip-mapping files." +
-          "<br><br>" +
-          "Each race has its own independent set of participants and chip mappings, so you can run multiple races on the same day without data overlap.",
-      },
-      delete_race: {
-        label: "Delete Race",
-        summary:
-          "Permanently deletes the race and all its participants and chip mappings. Any forwarder assigned to this race will be unassigned.",
-        detailHtml:
-          "<strong>This action is irreversible.</strong> Deleting a race removes all of its participant data and chip mappings. Forwarders assigned to this race will be unassigned. " +
-          "Timing data (reads/events) is not affected — only the race metadata is deleted." +
-          "<br><br>" +
-          "A race cannot be deleted while a receiver session is actively using it." +
-          "<br><br>" +
-          "You will be asked to confirm before the delete proceeds.",
-      },
-    },
-    tips: [
-      "Create one race per start. For multi-wave events, you can use a single race if all waves share the same participant list, or separate races per wave.",
-      "Upload participants and chip mappings before race day if possible — you can always update them later.",
-      "Deleting a race does not delete any timing data. Reads are preserved regardless of race assignments.",
-    ],
-    seeAlso: [
-      { sectionKey: "race_detail", label: "Race Detail" },
-      { sectionKey: "receiver_mode", label: "Receiver Mode" },
-    ],
-  },
-  race_detail: {
-    title: "Race Detail",
-    overview:
-      "Manage participant and chip-mapping data for a specific race. Upload files to populate participants and map chips to bib numbers.",
-    fields: {
-      upload_participants: {
-        label: "Upload Participants (.ppl)",
-        summary:
-          "Upload a .ppl file containing participant data: bib number, name, gender, and team.",
-        detailHtml:
-          "Upload a <code>.ppl</code> file to import participant data for this race. The file should contain bib numbers, first and last names, gender, and optionally a team/affiliation." +
-          "<br><br>" +
-          "Uploading replaces all existing participants for this race. If you need to update the list, upload the corrected file again." +
-          "<br><br>" +
-          "Participants are used together with chip mappings to resolve raw chip reads into names and bib numbers.",
-      },
-      upload_chips: {
-        label: "Upload Chip Mappings (.bibchip)",
-        summary:
-          "Upload a file mapping chip IDs to bib numbers, enabling chip-read resolution.",
-        detailHtml:
-          "Upload a <code>.bibchip</code>, <code>.csv</code>, or <code>.txt</code> file that maps chip IDs to bib numbers. Each line should contain a bib number and the corresponding chip ID." +
-          "<br><br>" +
-          "This mapping is what allows the system to show participant names instead of raw chip IDs when a read comes in. Without chip mappings, reads display as hex chip IDs only." +
-          "<br><br>" +
-          "Uploading replaces all existing chip mappings for this race.",
-      },
-      unmatched_chips: {
-        label: "Unmatched Chips",
-        summary:
-          "Chip mappings that reference bib numbers not found in the participant list.",
-        detailHtml:
-          "Shows chip-to-bib mappings where the bib number does not match any uploaded participant. This usually means:" +
-          "<ul>" +
-          "<li>The participant list is outdated or incomplete — re-upload it</li>" +
-          "<li>The chip mapping file has stale bib numbers — re-upload it</li>" +
-          "<li>A participant was added to the chip file but not the participant file</li>" +
-          "</ul>" +
-          "Unmatched chips will still record reads, but those reads won't resolve to a participant name.",
-      },
-    },
-    tips: [
-      "Upload chip mappings after participants so you can immediately see any unmatched bibs.",
-      "If you see unmatched chips, check that the participant and chip files use the same bib numbering.",
-      "You can re-upload files at any time to update the data — the new upload fully replaces the old data.",
-    ],
-    seeAlso: [{ sectionKey: "races", label: "Races" }],
   },
 } as const satisfies HelpContext;

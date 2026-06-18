@@ -53,7 +53,7 @@ To enable fully automatic first boot (no SSH setup commands), use:
 uv run scripts/sbc_cloud_init.py --auto-first-boot
 ```
 
-This mode also asks for forwarder setup values (server URL, token, reader
+This mode also asks for forwarder setup values (thin-node URL, token, reader
 targets), then embeds a one-time non-interactive `rt-setup.sh` run in
 `user-data`.
 The setup writes `display_name` to match the configured hostname.
@@ -161,8 +161,8 @@ The wizard will prompt you for:
 
 | Prompt | Example | Notes |
 |---|---|---|
-| Server base URL | `https://timing.example.com` | Must start with `http://` or `https://` |
-| Auth token | *(hidden input)* | Provided by the server operator |
+| Thin-node URL | `https://thin-node.example.com` | Must start with `http://` or `https://` |
+| Auth token | *(hidden input)* | Bearer token for thin-node registration and allow-list fetches |
 | Reader target(s) | `192.168.1.100:10000` | IP:PORT of each IPICO reader; enter one per line, blank line to finish |
 | Status HTTP bind address | `0.0.0.0:80` | Press Enter to accept the default |
 
@@ -245,5 +245,5 @@ for full configuration options and operational procedures.
 | Setup script fails to download binary | No internet access on Pi | Check the network connection. Ensure the Pi can reach the internet. |
 | Forwarder won't start | Bad config or unreachable readers | Check logs: `journalctl -u rt-forwarder -n 50` |
 | "permission denied" errors | Script not running as root | Run with `sudo bash rt-setup.sh` |
-| Forwarder starts but no events reach server | Wrong server URL or auth token | Verify `server.base_url` in `/etc/rusty-timer/forwarder.toml` and check the token in `/etc/rusty-timer/forwarder.token`. |
+| Forwarder starts but no receiver gets events | Wrong thin-node URL, token, or allow-list | Verify `p2p.thin_node_url` in `/etc/rusty-timer/forwarder.toml`, check the token in `/etc/rusty-timer/forwarder.token`, and confirm receiver allow-list entries on the thin-node. |
 | Can't reach Pi after setting static IP | Wrong subnet or IP conflict | Verify the IP/subnet in `network-config` matches your network. Check for IP conflicts. Connect a monitor to see boot logs. |

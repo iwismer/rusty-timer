@@ -20,7 +20,7 @@ async fn profile_round_trip() {
     control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "wss://s.com".to_owned(),
+            server_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: None,
         },
@@ -29,7 +29,7 @@ async fn profile_round_trip() {
     .unwrap();
 
     let profile = control_api::get_profile(&state).await.unwrap();
-    assert_eq!(profile.server_url, "wss://s.com");
+    assert_eq!(profile.server_url, "https://thin.test");
     assert_eq!(profile.token, "tok");
     assert_eq!(profile.receiver_id, "test-receiver");
 }
@@ -40,7 +40,7 @@ async fn put_profile_with_receiver_id_updates_state() {
     control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "wss://s.com".to_owned(),
+            server_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: Some("recv-new".to_owned()),
         },
@@ -61,7 +61,7 @@ async fn put_profile_with_whitespace_receiver_id_keeps_original() {
     control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "wss://s.com".to_owned(),
+            server_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: Some("  ".to_owned()),
         },
@@ -79,7 +79,7 @@ async fn mode_endpoints_round_trip() {
     control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "wss://s.com".to_owned(),
+            server_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: None,
         },
@@ -92,8 +92,8 @@ async fn mode_endpoints_round_trip() {
 
     control_api::put_mode(
         &state,
-        rt_protocol::ReceiverMode::Live {
-            streams: vec![rt_protocol::StreamRef {
+        rt_domain::ReceiverMode::Live {
+            streams: vec![rt_domain::StreamRef {
                 forwarder_id: "f1".to_owned(),
                 reader_ip: "10.0.0.1:10000".to_owned(),
             }],
@@ -104,7 +104,7 @@ async fn mode_endpoints_round_trip() {
     .unwrap();
 
     let mode = control_api::get_mode(&state).await.unwrap();
-    if let rt_protocol::ReceiverMode::Live { streams, .. } = &mode {
+    if let rt_domain::ReceiverMode::Live { streams, .. } = &mode {
         assert_eq!(streams[0].forwarder_id, "f1");
     } else {
         panic!("expected live mode");
@@ -116,7 +116,7 @@ async fn put_mode_requires_profile() {
     let state = setup();
     let result = control_api::put_mode(
         &state,
-        rt_protocol::ReceiverMode::Live {
+        rt_domain::ReceiverMode::Live {
             streams: vec![],
             earliest_epochs: vec![],
         },
@@ -131,7 +131,7 @@ async fn put_mode_rejects_invalid_race_id_format() {
     control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "wss://s.com".to_owned(),
+            server_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: None,
         },
@@ -141,7 +141,7 @@ async fn put_mode_rejects_invalid_race_id_format() {
 
     let result = control_api::put_mode(
         &state,
-        rt_protocol::ReceiverMode::Race {
+        rt_domain::ReceiverMode::Race {
             race_id: "not-a-uuid".to_owned(),
         },
     )
@@ -204,7 +204,7 @@ async fn put_mode_emits_mode_changed_event() {
     control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "wss://s.com".to_owned(),
+            server_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: None,
         },
@@ -214,7 +214,7 @@ async fn put_mode_emits_mode_changed_event() {
 
     control_api::put_mode(
         &state,
-        rt_protocol::ReceiverMode::Race {
+        rt_domain::ReceiverMode::Race {
             race_id: TEST_RACE_ID.to_owned(),
         },
     )
@@ -230,7 +230,7 @@ async fn put_mode_emits_mode_changed_event() {
         if let receiver::ui_events::ReceiverUiEvent::ModeChanged { mode } = event {
             assert_eq!(
                 mode,
-                rt_protocol::ReceiverMode::Race {
+                rt_domain::ReceiverMode::Race {
                     race_id: TEST_RACE_ID.to_owned()
                 }
             );
@@ -246,7 +246,7 @@ async fn put_profile_without_receiver_id_preserves_db_value() {
     control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "wss://s.com".to_owned(),
+            server_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: Some("recv-original".to_owned()),
         },
@@ -257,7 +257,7 @@ async fn put_profile_without_receiver_id_preserves_db_value() {
     control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "wss://s2.com".to_owned(),
+            server_url: "https://thin2.test".to_owned(),
             token: "tok2".to_owned(),
             receiver_id: None,
         },
@@ -277,7 +277,7 @@ async fn put_profile_rejects_too_long_receiver_id() {
     let result = control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "wss://s.com".to_owned(),
+            server_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: Some(long_id),
         },
@@ -292,7 +292,7 @@ async fn put_profile_rejects_receiver_id_with_special_chars() {
     let result = control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "wss://s.com".to_owned(),
+            server_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: Some("recv/bad@id".to_owned()),
         },
@@ -307,7 +307,7 @@ async fn put_profile_accepts_valid_receiver_id() {
     control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "wss://s.com".to_owned(),
+            server_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: Some("my-recv-01".to_owned()),
         },
@@ -404,7 +404,7 @@ async fn admin_reset_profile_clears_credentials() {
     let state = setup();
     {
         let mut db = state.db.lock().await;
-        db.save_profile("wss://s.com", "tok", "check-only", Some("recv-1"))
+        db.save_profile("https://thin.test", "tok", "check-only", Some("recv-1"))
             .unwrap();
     }
     control_api::admin_reset_profile(&state).await.unwrap();
@@ -420,7 +420,7 @@ async fn admin_reset_profile_disconnects_when_connected() {
     let state = setup();
     {
         let mut db = state.db.lock().await;
-        db.save_profile("wss://s.com", "tok", "check-only", Some("recv-1"))
+        db.save_profile("https://thin.test", "tok", "check-only", Some("recv-1"))
             .unwrap();
     }
     state.set_connection_state(ConnectionState::Connected).await;
@@ -436,7 +436,7 @@ async fn admin_factory_reset_clears_everything() {
     let state = setup();
     {
         let mut db = state.db.lock().await;
-        db.save_profile("wss://s.com", "tok", "check-only", Some("recv-1"))
+        db.save_profile("https://thin.test", "tok", "check-only", Some("recv-1"))
             .unwrap();
         db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
         db.save_cursor("f1", "10.0.0.1:10000", 1, 10).unwrap();
@@ -577,7 +577,7 @@ async fn put_dbf_config_allows_disabling_when_parent_directory_is_missing() {
     let state = setup();
     {
         let mut db = state.db.lock().await;
-        db.save_profile("wss://s.com", "tok", "check-only", Some("recv-1"))
+        db.save_profile("https://thin.test", "tok", "check-only", Some("recv-1"))
             .unwrap();
     }
 

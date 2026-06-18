@@ -21,13 +21,13 @@ describe("api client", () => {
   it("getProfile calls correct command", async () => {
     const { getProfile } = await import("./api");
     mockInvoke.mockResolvedValue({
-      server_url: "wss://s.com",
+      server_url: "https://thin.test",
       token: "tok",
       receiver_id: "recv-test",
     });
     const p = await getProfile();
     expect(mockInvoke).toHaveBeenCalledWith("get_profile");
-    expect(p.server_url).toBe("wss://s.com");
+    expect(p.server_url).toBe("https://thin.test");
     expect(p.receiver_id).toBe("recv-test");
   });
 
@@ -35,13 +35,13 @@ describe("api client", () => {
     const { putProfile } = await import("./api");
     mockInvoke.mockResolvedValue(undefined);
     await putProfile({
-      server_url: "wss://s.com",
+      server_url: "https://thin.test",
       token: "t",
       receiver_id: "recv-test",
     });
     expect(mockInvoke).toHaveBeenCalledWith("put_profile", {
       body: {
-        server_url: "wss://s.com",
+        server_url: "https://thin.test",
         token: "t",
         receiver_id: "recv-test",
       },
@@ -175,16 +175,6 @@ describe("api client", () => {
       streamId: "11111111-1111-1111-1111-111111111111",
       body: { event_type: "start" },
     });
-  });
-
-  it("getRaces calls races command", async () => {
-    const { getRaces } = await import("./api");
-    mockInvoke.mockResolvedValue({
-      races: [{ race_id: "r1", name: "Race 1", created_at: "now" }],
-    });
-    const result = await getRaces();
-    expect(mockInvoke).toHaveBeenCalledWith("get_races");
-    expect(result.races[0].race_id).toBe("r1");
   });
 
   it("getReplayTargetEpochs calls command with stream params", async () => {

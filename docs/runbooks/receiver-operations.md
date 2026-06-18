@@ -1,228 +1,81 @@
 # Receiver Operations Runbook
 
-This runbook covers operational procedures for the `rt-receiver` service
-running on a Windows (or Linux) timing display/management workstation.
+This runbook covers startup, recovery, and routine operations for the receiver
+service and `receiver-headless` binary.
 
-## Contents
+## Responsibilities
 
-1. [Service Overview](#service-overview)
-2. [Startup and Installation](#startup-and-installation)
-3. [Configuration](#configuration)
-4. [Monitoring and Health](#monitoring-and-health)
-5. [Recovery Procedures](#recovery-procedures)
-6. [Stream Subscription Management](#stream-subscription-management)
-7. [Exports (via Server)](#exports-via-server)
-8. [Troubleshooting](#troubleshooting)
+The receiver:
 
----
+- Discovers allowed forwarders through the thin node.
+- Connects directly to forwarders over iroh.
+- Writes received events and cursors to local SQLite before acknowledging.
+- Marks gaps when a forwarder reports that the requested cursor was pruned.
+- Replays received events to local TCP ports for timing software.
+- Writes idempotent DBF rows keyed by `(stream_id, seq)`.
+- Optionally pushes sanitized announcer rows to the thin node with generation
+  fencing and idempotency keys.
 
-## Service Overview
+## Startup
 
-The receiver is a client service that:
-- Connects to the rt-server via WebSocket.
-- Subscribes to one or more timing streams (identified by `forwarder_id + reader_ip`).
-- Maintains a local SQLite cursor for durable resume on reconnect.
-- Provides a desktop UI (Tauri app) for configuration and monitoring.
+1. Confirm the receiver data directory is writable.
+2. Configure the thin-node URL, receiver ID, and token in the receiver UI or
+   control API.
+3. Select streams by `forwarder_endpoint_id` and `stream_id`.
+4. Start the desktop app or headless binary:
 
-**Local durability**: The receiver uses SQLite with WAL+FULL sync. On startup,
-it runs `PRAGMA integrity_check` and exits if it fails.
+   ```bash
+   receiver-headless --data-dir /var/lib/rusty-timer/receiver
+   ```
 
-**At-least-once delivery**: Events may be delivered more than once (after
-reconnect). The receiver deduplicates against its local cache.
+5. Confirm local TCP ports are listening on loopback.
+6. Confirm the thin-node status board shows the receiver online.
 
----
+## Recovery
 
-## Startup and Installation
+### Reconnect/resume
 
-### Windows (standalone binary)
+The receiver resumes from durable cursors. If a process crashes, restart it and
+verify that:
 
-```powershell
-# Create the data directory.
-New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\rusty-timer\receiver"
+1. Existing subscriptions are loaded from SQLite.
+2. Each P2P session resumes at the last acknowledged sequence.
+3. DBF output has no duplicate `(stream_id, seq)` rows.
 
-# Start the receiver.
-.\rt-receiver.exe
+### Gap notice
 
-# The receiver stores its SQLite profile at:
-#   %LOCALAPPDATA%\rusty-timer\receiver\receiver.sqlite3
-```
+If retention pruned the requested cursor, the receiver records a gap marker and
+jumps to the cursor supplied by the forwarder. Operators should note the gap in
+race records and use the forwarder journal backup if a full reconstruction is
+needed.
 
-### Linux (systemd service, optional)
+### Local TCP replay
 
-```bash
-# Copy binary.
-sudo cp rt-receiver /usr/local/bin/rt-receiver
+Timing software can reconnect to the receiver TCP port at any time. The receiver
+replays durable received events for that subscription, then streams live reads.
+If a timing program misses data, restart only the local timing connection before
+restarting the receiver process.
 
-# Start manually (or add to a systemd user service).
-rt-receiver &
-```
+### DBF output
 
-### Verify startup
+DBF writes are idempotent. On restart, the receiver uses local received events
+and the `(stream_id, seq)` key to avoid duplicate rows. If the configured DBF
+path is unavailable, fix filesystem permissions and restart the receiver.
 
-Launch the Rusty Timer Receiver desktop app. If the app opens successfully,
-the receiver is running. Check the status in the UI.
+## Announcer Push
 
----
+Announcer push is optional. The receiver publishes sanitized rows to the thin
+node using a fenced generation. If an older receiver process is still running,
+its writes are rejected by generation checks.
 
-## Configuration
+## Shutdown
 
-The receiver is configured via its SQLite profile database. On first run,
-the receiver creates a default profile. Configuration is managed via the
-receiver UI (Tauri desktop app).
-
-### Profile settings
-
-| Setting | Description |
-|---|---|
-| Server URL | WebSocket URL of the rt-server |
-| Bearer token | Auth token for this receiver device |
-| Subscriptions | List of (forwarder_id, reader_ip) pairs to subscribe to |
-| Local port | Override for the default local listener port |
-
-### Port assignment
-
-Default local port: `10000 + last_octet(reader_ip)`.
-For `192.168.1.5`, the default port is `10005`.
-
-If two subscribed streams have the same last octet, a manual port override
-is required. Collisions are logged as errors at startup.
-
----
-
-## Monitoring and Health
-
-### Check connection status
-
-Check the connection status in the receiver desktop UI. The status indicator
-shows `connection_state`, DB health (`local_ok`), and stream count.
-
-### Log monitoring
-
-The receiver logs to stdout and to rolling local log files.
+Stop the receiver only after confirming timing software has flushed any local
+reads it consumed:
 
 ```bash
-# On Linux — follow logs if running in terminal.
-rt-receiver 2>&1 | tee receiver.log
-
-# Check log file location (OS-specific data directory).
-# Linux: ~/.local/share/rusty-timer/receiver/
-# Windows: %LOCALAPPDATA%\rusty-timer\receiver\
+pkill receiver-headless
 ```
 
----
-
-## Recovery Procedures
-
-### Receiver lost connection to server
-
-The receiver reconnects automatically with an exponential backoff.
-On reconnect, it sends its resume cursor (last acked seq per stream)
-to the server, which replays any missed events.
-
-```bash
-# Check logs for reconnect attempts.
-grep -i "reconnect\|resume\|cursor" receiver.log | tail -20
-```
-
-### Receiver integrity check failed at startup
-
-If the receiver exits immediately with `FATAL: integrity_check failed`,
-the local SQLite DB is corrupted.
-
-**Recovery (data loss of local cache only — server DB is intact):**
-
-```bash
-# Linux:
-rm ~/.local/share/rusty-timer/receiver/receiver.sqlite3
-
-# Windows (PowerShell):
-Remove-Item "$env:LOCALAPPDATA\rusty-timer\receiver\receiver.sqlite3"
-
-# Restart the receiver — it will create a fresh profile.
-# Re-subscribe to streams and it will replay from the server.
-rt-receiver
-```
-
-The local profile (subscriptions, display labels) must be reconfigured.
-All event data is still available on the server for replay.
-
-### Resume from a specific cursor
-
-If you need to re-receive events from a particular point in time:
-
-1. Find the `stream_id` and `stream_epoch` from the server API.
-2. Update the receiver cursor in the local SQLite DB directly:
-
-```sql
--- Connect to the receiver SQLite DB.
--- Find the appropriate stream and reset cursor to desired seq.
-UPDATE receiver_cursors
-SET last_seq = <desired_seq - 1>
-WHERE stream_id = '<stream_uuid>' AND stream_epoch = <epoch>;
-```
-
-After restarting the receiver, it will replay from `last_seq + 1`.
-
----
-
-## Stream Subscription Management
-
-### Receiver mode controls (`Mode`)
-
-`Mode: Live` subscribes to explicit streams configured by the operator.
-- Use earliest-epoch overrides to control replay start bounds per stream.
-
-`Mode: Race` subscribes to streams associated with a selected race.
-- Use this mode when operator workflow is race-centric.
-
-`Mode: Targeted Replay` replays explicit stream/epoch ranges.
-- Use this for focused backfills without enabling ongoing live fanout.
-
-### Stream list epoch visibility
-
-Receiver UI stream rows now show the current `stream epoch` and current epoch name when available from the server. Use this to confirm the active stream context before subscribing or replaying.
-
-### Subscribe to a new stream
-
-The receiver applies stream subscriptions during the v1.2 hello handshake.
-Updating subscriptions triggers reconnect-based re-resolution/replay.
-
-Use the receiver desktop UI to manage subscriptions. Updating subscriptions
-replaces the entire subscription list atomically.
-
-### View current subscriptions
-
-Current subscriptions are visible in the receiver desktop UI.
-
-### Replay modes and targeted replay semantics
-
-- Replay mode re-sends missed events according to cursor state for subscribed streams.
-- Targeted replay is scoped to one selected stream context and should be used when replaying only a specific source.
-- For targeted replay, verify the stream identity tuple before starting:
-  - `forwarder_id`
-  - `reader_ip`
-  - `stream epoch`
-- Do not start targeted replay until the stream row shows the expected epoch number/name.
-
----
-
-## Exports (via Server)
-
-Event exports are served by the rt-server, not the receiver.
-See the [Server Operations Runbook](server-operations.md#exports) for export procedures.
-
-The receiver has access to a local cache for display purposes only;
-authoritative exports come from the server's Postgres database.
-
----
-
-## Troubleshooting
-
-| Symptom | Likely Cause | Action |
-|---|---|---|
-| Not receiving events | Not connected to server | Check server URL and token in profile |
-| Integrity check failure | SQLite corruption | Delete local DB and restart |
-| Port collision | Two streams with same last octet | Set `local_port_override` in subscription |
-| Duplicate events | Normal at-least-once behavior | Receiver deduplicates from local cache |
-| Missing events after reconnect | Server replay working | Wait for replay to complete |
-| Old events replaying | Cursor reset | Check cursor in local SQLite DB |
+A clean restart preserves subscriptions, cursors, received events, gap markers,
+and DBF idempotency state.

@@ -1,192 +1,72 @@
 # Scripts Guide
 
-## `dev.py` (Rusty Timer Dev Launcher)
+## Deterministic P2P E2E Stack
 
-`dev.py` sets up and launches a full local Rusty Timer dev stack in one command:
-- Postgres (Docker)
-- Server
-- One or more emulators
-- Forwarder
-- Receiver
-
-It also prepares dev auth tokens, writes runtime config, optionally uploads race data,
-and opens services in `tmux` (preferred) or iTerm2 panes.
-
-## Prerequisites
-
-- Run from the repository root.
-- Python 3.11+ via `uv run`.
-- Installed tools: `docker`, `cargo`, `npm`, `curl`.
-- A multiplexer:
-  - `tmux` (preferred), or
-  - iTerm2 with Python API enabled.
-
-## Usage
+Use `scripts/e2e/run_stack.py` for local data-plane verification. It starts
+real OS processes for the emulator, forwarder, receiver-headless, and thin-node
+with iroh configured for deterministic loopback operation: relays disabled,
+discovery disabled, seeded keys, and injected local addresses.
 
 ```bash
-uv run scripts/dev.py [--no-build] [--clear] [--emulator SPEC ...] [--bibchip PATH] [--ppl PATH]
+uv run scripts/e2e/run_stack.py
 ```
 
-Examples:
+Common options:
 
 ```bash
-# Full setup + launch with one default emulator (port 10001)
-uv run scripts/dev.py
+# Skip rebuilding binaries when target/debug is already current
+uv run scripts/e2e/run_stack.py --no-build
 
-# Reuse prior builds and just set up/launch runtime pieces
-uv run scripts/dev.py --no-build
+# Keep the temporary run directory for inspection
+uv run scripts/e2e/run_stack.py --keep
 
-# Tear everything down
-uv run scripts/dev.py --clear
+# Run a single SIGKILL+resume lane instead of both default lanes
+uv run scripts/e2e/run_stack.py --power-loss-target receiver
+uv run scripts/e2e/run_stack.py --power-loss-target forwarder
 
-# Single emulator with custom settings
-uv run scripts/dev.py --emulator port=10001,delay=500,file=test_assets/reads.txt,type=raw
-
-# Multiple emulators
-uv run scripts/dev.py --emulator port=10001 --emulator port=10002,delay=500,type=fsls
-
-# Auto-generate emulator reads from bibchip and upload race files
-uv run scripts/dev.py --bibchip test_assets/bibchip/large.txt --ppl test_assets/ppl/large.ppl
+# Emit optional UI-agent diagnostic artifacts on the final lane
+uv run scripts/e2e/run_stack.py \
+  --agent-ui-scenario scripts/e2e/agent_ui/bridge_goal.json \
+  --agent-ui-artifacts-dir /tmp/rt-agent-ui-artifacts
 ```
 
-## Flags
+The stack writes temporary configs, SQLite databases, DBF output, logs, and UI
+agent artifacts under its run directory. The backend assertions are the hard
+gate: received event counts, DBF rows, TCP proxy replay, receiver cursors, and
+thin-node announcer/status state.
 
-- `--no-build`: skip dashboard + Rust build steps.
-- `--clear`: remove dev artifacts and exit.
-- `--emulator SPEC`: add an emulator instance. Repeat this flag for multiple emulators.
-- `--bibchip PATH`: upload chip file to a new race after startup; can also generate emulator reads.
-- `--ppl PATH`: upload participant file to a new race after startup.
-`--emulator` format:
+## Agent UI Harness
 
-```text
-port=N,delay=MS,file=PATH,type=raw|fsls
-```
+`scripts/e2e/agent_ui/run_bridge_goal.py` drives the receiver-headless
+`test-bridge` when that feature is enabled. It is a diagnostic lane only; the
+script emits screenshots/transcripts/findings, but deterministic backend
+assertions decide pass/fail.
 
-- `port` is required.
-- `delay` defaults to `2000`.
-- `type` defaults to `raw`.
-- `file` is optional.
-- If no `--emulator` is provided, default is one emulator on port `10001`.
+## Release Helper
 
-## Startup Workflow
-
-When run normally (`--clear` not set), `dev.py` does the following:
-
-1. Validates CLI/file inputs and port-collision rules.
-2. Detects any existing dev instance and prompts whether to kill/reuse/cancel.
-3. Starts or reuses Docker Postgres container `rt-postgres`.
-4. Waits for Postgres readiness (`pg_isready`).
-5. Applies SQL migrations from `services/server/migrations/`.
-6. Writes temporary dev config/token files under `/tmp/rusty-timer-dev`.
-7. Seeds forwarder/receiver dev tokens into `device_tokens`.
-8. Runs `npm install` in workspace root.
-9. Builds dashboard (`apps/server-ui`) unless `--no-build`.
-10. Builds Rust binaries unless `--no-build`.
-11. Launches panes in `tmux` (or iTerm2 fallback).
-12. Launches the receiver Tauri app with `RT_RECEIVER_ID=recv-dev` so it matches the seeded dev receiver token.
-13. Optionally creates a race and uploads bibchip/PPL files.
-
-## Generated Dev Files
-
-Created under `/tmp/rusty-timer-dev`:
-
-- `forwarder.toml`
-- `forwarder-token.txt`
-- `receiver-token.txt`
-- `forwarder.sqlite3` (forwarder journal)
-- `race-setup.log` (if race upload requested)
-- `iterm-window-id.txt` (when launched via iTerm2)
-
-Default dev tokens:
-- Forwarder token: `rusty-dev-forwarder`
-- Receiver token: `rusty-dev-receiver`
-
-## Runtime Notes
-
-- Server starts on `http://127.0.0.1:8080`.
-- Receiver runs as a Tauri desktop app (no standalone HTTP API).
-- If `apps/server-ui/build` exists, server is launched with `DASHBOARD_DIR` set to that path.
-- On startup, the script validates collisions across:
-  - emulator ports
-  - forwarder fallback ports (`emulator_port + 1000`)
-  - receiver-derived default local ports
-
-If these collide, startup stops with an error.
-
-## Dev Stack URLs
-
-After `dev.py` starts, these are the addresses for each component:
-
-| Component | URL | Notes |
-|-----------|-----|-------|
-| Server dashboard | `http://localhost:8080` | Streams, races, exports. Only available if dashboard was built (skipped with `--no-build` unless `apps/server-ui/build` already exists). |
-| Announcer config | `http://localhost:8080/announcer-config` | Enable/configure the live announcer |
-| Announcer screen | `http://localhost:8080/announcer` | Public-facing finisher display |
-| Server API | `http://localhost:8080/api/v1/...` | REST API for streams, races, tokens |
-| Server health | `http://localhost:8080/healthz` | Liveness check |
-| Receiver | Tauri desktop app | Receiver status and subscriptions (managed via UI) |
-| Forwarder status | `http://localhost:8081/healthz` | Forwarder health check (when running manually; dev.py uses default port) |
-
-The receiver and forwarder UIs are available at their respective status HTTP addresses
-when built with `--features embed-ui`. In the dev.py stack, the forwarder embeds its UI
-by default.
-
-## Bibchip/PPL Behavior
-
-- `--bibchip` and `--ppl` files must exist or startup exits early.
-- If `--bibchip` is set and the first emulator has no explicit `file=...`, the script generates
-  emulator-compatible reads at `/tmp/rusty-timer-dev/generated-reads.txt` and wires that file
-  into the first emulator.
-- Race setup runs in the background after server health is ready:
-  - creates race `Dev Race`
-  - uploads bibchip to `/api/v1/races/{race_id}/chips/upload`
-  - uploads PPL to `/api/v1/races/{race_id}/participants/upload`
-
-## Existing Instance Detection
-
-Before setup, the script checks for:
-- tmux session `rusty-dev`
-- listeners on server port `8080`
-
-If it detects a prior dev instance, it prompts to kill/restart, continue, or cancel.
-For non-dev processes using port `8080`, it refuses to kill them automatically.
-
-## Cleanup
-
-Use:
-
-```bash
-uv run scripts/dev.py --clear
-```
-
-This attempts to:
-- kill tmux session `rusty-dev`
-- remove Docker container `rt-postgres`
-- delete `/tmp/rusty-timer-dev`
-
-## `release.py` (Rusty Timer Release Helper)
-
-`release.py` automates service releases by bumping versions, validating release artifacts, creating commits/tags, and pushing the branch plus each tag separately (so GitHub runs one workflow per tag).
+`release.py` automates service releases by bumping versions, validating release
+artifacts, creating commits/tags, and pushing the branch plus each tag
+separately so GitHub runs one workflow per tag.
 
 It supports these services:
+
 - `forwarder`
 - `receiver`
 - `streamer`
 - `emulator`
-- `server`
 - `thin-node`
 
-## Prerequisites
+### Prerequisites
 
 - Run from a clean git working tree.
 - Be on the `master` branch.
 - Have push access to `origin/master`.
-- Have Rust toolchain available (`cargo build --release` is run per service).
-- For `forwarder`/`receiver` releases, have Node.js + npm available (UI lint/check/test run).
-- For optional local server Docker build checks, have Docker available.
+- Have Rust available (`cargo build --release` is run per service).
+- For `forwarder`/`receiver` releases, have Node.js + npm available for UI
+  lint/check/test.
 - Use `uv` to run the script in this repository.
 
-## Usage
+### Usage
 
 ```bash
 uv run scripts/release.py SERVICE [SERVICE ...] (--major | --minor | --patch | --version X.Y.Z) [--dry-run] [--yes]
@@ -195,143 +75,43 @@ uv run scripts/release.py SERVICE [SERVICE ...] (--major | --minor | --patch | -
 Examples:
 
 ```bash
-# Patch release for one service
 uv run scripts/release.py forwarder --patch
-
-# Minor release for multiple services in one transaction
 uv run scripts/release.py forwarder emulator --minor
-
-# Set an explicit version
 uv run scripts/release.py receiver --version 2.0.0
-
-# Preview only (no file or git changes)
-uv run scripts/release.py forwarder --patch --dry-run
-
-# Server release (Docker build/push handled by GitHub Actions on server tag)
-uv run scripts/release.py server --patch
-
-# Server release with optional local Docker build check
-uv run scripts/release.py server --version 2.0.0 --server-local-docker-build
-
-# Thin-node release (arm64 Linux artifact)
 uv run scripts/release.py thin-node --patch
+uv run scripts/release.py forwarder --patch --dry-run
 ```
 
-## Flags
-
-- `--major`: bump `X.Y.Z` to `X+1.0.0`
-- `--minor`: bump `X.Y.Z` to `X.Y+1.0`
-- `--patch`: bump `X.Y.Z` to `X.Y.Z+1`
-- `--version X.Y.Z`: set an exact semantic version (must match `^\d+\.\d+\.\d+$`)
-- `--dry-run`: run checks/builds, print mutating commands, and skip file/git mutations
-- `--yes`, `-y`: skip interactive confirmation prompt
-- `--server-local-docker-build`: for `server` releases, run a local Docker build check before commit/tag
-- `--server-docker-image IMAGE`: image repository used for the optional local server Docker build tags (default: `iwismer/rt-server`)
-
-## What the Script Does
+### What the Script Does
 
 For each requested service, the script:
+
 1. Reads `services/<service>/Cargo.toml` package version.
-2. Computes target version.
-3. Skips services already at target.
-4. Updates `services/<service>/Cargo.toml`. For `receiver`, also updates
-   `apps/receiver-ui/src-tauri/tauri.conf.json` `version` to the same semver
-   (required for the Tauri Windows release workflow).
-5. Runs release-workflow parity checks/build:
-   - `forwarder`/`receiver`: `npm ci`, UI `lint`, UI `check`, UI tests for `apps/<service>-ui`
-   - `server`: `npm ci`, UI `lint`, UI `check`, UI tests for `apps/server-ui`, then:
-     - default: `cargo build --release --package server --bin server`
-     - optional: `docker build -t <image>:v<version> -t <image>:latest -f services/server/Dockerfile .` (with `--server-local-docker-build`)
-   - `forwarder`/`streamer`/`emulator`/`thin-node`: `cargo build --release --package <service> --bin <service>` (`--features embed-ui,eink` for `forwarder`)
-6. Stages `services/<service>/Cargo.toml` and `Cargo.lock` (and for `receiver`,
-   `apps/receiver-ui/src-tauri/tauri.conf.json`).
-7. Creates commit: `chore(<service>): bump version to <new_version>`.
-8. Creates tag: `<service>-v<new_version>` (for `receiver`, the `receiver-v<new_version>`
-   tag triggers `.github/workflows/release.yml` Receiver Tauri jobs for the NSIS installer
-   and updater manifest).
+2. Computes the target version.
+3. Updates `services/<service>/Cargo.toml`. For `receiver`, it also updates
+   `apps/receiver-ui/src-tauri/tauri.conf.json`.
+4. Runs release-workflow parity checks:
+   - `forwarder`: `npm ci`, forwarder UI lint/check/test, then release build
+     with `embed-ui,eink`.
+   - `receiver`: `npm ci`, receiver UI lint/check/test, then release build.
+   - `streamer`, `emulator`, `thin-node`: release build for the service
+     binary.
+5. Stages changed version files.
+6. Creates commit `chore(<service>): bump version to <new_version>`.
+7. Creates tag `<service>-v<new_version>`.
+8. Pushes the branch and each tag separately.
 
-The script prints each step and the exact command before execution.
-In `--dry-run`, it still runs the checks/build commands, but prints and skips
-mutating commands (version file write, `git add`, `git commit`, `git tag`,
-`git push`).
-When output is a TTY, step/command/status lines are colorized for readability.
-Set `NO_COLOR=1` to force plain text output.
+The GitHub release workflow publishes arm64 Linux artifacts for Linux SBCs.
+`thin-node` releases are arm64-only.
 
-After all services succeed, it runs `git push origin master`, then pushes each
-tag with its own `git push origin <tag>` so every tag triggers its own GitHub
-Actions run (see comments in `scripts/release.py`).
+## Packaging Validation
 
-For `server` releases, Docker image build/push is handled by GitHub Actions on
-`server-v<version>` tags.
-That workflow requires repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.
-
-The GitHub release workflow no longer builds armv7 artifacts. Linux SBC release
-artifacts are arm64 (`aarch64-unknown-linux-gnu`); `thin-node` releases publish
-only that arm64 Linux artifact.
-
-## Safety and Failure Behavior
-
-- Fails fast if the working tree is dirty.
-- Fails fast if current branch is not `master`.
-- Prints the full release plan before execution.
-- Warns on explicit version downgrades (`new < current`).
-- Uses transactional rollback on failure:
-  - Deletes any tags created in this run.
-  - Resets git state back to starting `HEAD`.
-
-## Operational Notes
-
-- Duplicate service names in CLI args are de-duplicated (first occurrence wins).
-- If every selected service is already at the target version, it exits with “Nothing to release”.
-- Because rollback uses `git reset --hard`, only run this script when your tree is clean (the script enforces this).
-
-## `sbc_cloud_init.py` (SBC Cloud-Init File Wizard)
-
-`sbc_cloud_init.py` asks deployment questions and generates the two files needed
-for Raspberry Pi cloud-init setup:
-
-- `user-data`
-- `network-config`
-
-Use it when preparing an SBC image so you do not need to manually edit YAML.
-
-### Usage
+Run:
 
 ```bash
-uv run scripts/sbc_cloud_init.py
+bash scripts/validate-packaging.sh
 ```
 
-Optional output directory:
-
-```bash
-uv run scripts/sbc_cloud_init.py --output-dir /tmp/sbc-config
-```
-
-Enable full first-boot automation (no SSH setup commands required):
-
-```bash
-uv run scripts/sbc_cloud_init.py --auto-first-boot
-```
-
-In `--auto-first-boot` mode, the wizard also asks for:
-- Server base URL
-- Forwarder auth token
-- Reader targets
-- Status bind address
-
-and writes a `user-data` that runs `deploy/sbc/rt-setup.sh` non-interactively
-on first boot.
-The generated setup env also sets forwarder `display_name` to the same value as
-the configured hostname.
-
-The script prompts for:
-
-- Hostname
-- SSH admin username
-- SSH public key
-- Static IPv4/CIDR for eth0
-- Default gateway
-- DNS servers
-- Optional Wi-Fi settings (SSID/password/regulatory domain for `wlan0`)
-
-By default, generated files are written to `deploy/sbc/generated/`.
+The validator checks that cutover-only artifacts remain: no legacy central
+service paths, no legacy wire contract, forwarder Dockerfile health,
+runbook coverage, release workflow routing, and executable script permissions.

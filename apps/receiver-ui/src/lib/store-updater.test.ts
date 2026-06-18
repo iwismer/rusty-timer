@@ -20,9 +20,7 @@ const apiMocks = vi.hoisted(() => ({
     streams: [],
     earliest_epochs: [],
   }),
-  getRaces: vi.fn().mockResolvedValue({ races: [] }),
   getReplayTargetEpochs: vi.fn().mockResolvedValue({ epochs: [] }),
-  getForwarders: vi.fn().mockResolvedValue({ forwarders: [] }),
   checkForUpdate: vi.fn().mockResolvedValue({ status: "up_to_date" }),
   downloadUpdate: vi.fn().mockResolvedValue({ status: "downloaded" }),
   applyUpdate: vi.fn().mockResolvedValue(undefined),
@@ -165,7 +163,7 @@ describe("receiver updater store", () => {
 
   it("hydrates config edit fields from the saved profile on initial load", async () => {
     apiMocks.getProfile.mockResolvedValueOnce({
-      server_url: "wss://receiver.example/ws",
+      server_url: "https://receiver.example",
       token: "secret-token",
       receiver_id: "recv-live",
     });
@@ -175,10 +173,10 @@ describe("receiver updater store", () => {
     initStore();
     await flushAsyncWork();
 
-    expect(store.editServerUrl).toBe("wss://receiver.example/ws");
+    expect(store.editThinNodeUrl).toBe("https://receiver.example");
     expect(store.editToken).toBe("secret-token");
     expect(store.editReceiverId).toBe("recv-live");
-    expect(store.savedServerUrl).toBe("wss://receiver.example/ws");
+    expect(store.savedThinNodeUrl).toBe("https://receiver.example");
     expect(store.savedToken).toBe("secret-token");
     expect(store.savedReceiverId).toBe("recv-live");
   });
@@ -958,61 +956,7 @@ describe("receiver updater store", () => {
     await firstUpdate;
   });
 
-  it("maps reader control events from stream_id back to the stream key", async () => {
-    const sseState = mockSseInitWithCallbacks();
-    const { initStore, store, streamKey } = await import("./store.svelte");
-
-    initStore();
-    await flushAsyncWork();
-
-    const callbacks = sseState.callbacks;
-    expect(callbacks).toBeDefined();
-
-    store.streams = {
-      streams: [
-        {
-          forwarder_endpoint_id: "fwd-1",
-          stream_id: "stream-1",
-          forwarder_id: "fwd-1",
-          reader_ip: "10.0.0.1:10000",
-          subscribed: true,
-          local_port: 10100,
-        },
-      ],
-      degraded: false,
-      upstream_error: null,
-    } as any;
-
-    callbacks?.onReaderInfoUpdated?.({
-      stream_id: "stream-1",
-      reader_ip: "10.0.0.1:10000",
-      state: "connected",
-      reader_info: { banner: "IPICO Reader" },
-    } as any);
-
-    callbacks?.onReaderDownloadProgress?.({
-      stream_id: "stream-1",
-      reader_ip: "10.0.0.1:10000",
-      state: "downloading",
-      reads_received: 42,
-      progress: 100,
-      total: 200,
-      error: null,
-    } as any);
-
-    const key = streamKey("fwd-1", "10.0.0.1:10000");
-    expect(store.readerInfos.get(key)).toEqual({ banner: "IPICO Reader" });
-    expect(store.readerStates.get(key)).toBe("connected");
-    expect(store.downloadProgress.get(key)).toEqual({
-      state: "downloading",
-      reads_received: 42,
-      progress: 100,
-      total: 200,
-      error: undefined,
-    });
-  });
-
-  it("keeps configured-but-unavailable UPS entries when the server sends no sampled status yet", async () => {
+  it("keeps configured-but-unavailable UPS entries when no sampled status has arrived yet", async () => {
     const sseState = mockSseInitWithCallbacks();
     const { initStore, store } = await import("./store.svelte");
 
@@ -1031,21 +975,7 @@ describe("receiver updater store", () => {
     });
   });
 
-  it("drops UPS entries for forwarders that are no longer online after reload", async () => {
-    apiMocks.getForwarders.mockResolvedValueOnce({
-      forwarders: [
-        {
-          forwarder_id: "fwd-1",
-          display_name: "Start",
-          online: true,
-          readers: [],
-          unique_chips: 0,
-          total_reads: 0,
-          last_read_at: null,
-        },
-      ],
-    });
-
+  it("keeps UPS entries because refresh no longer loads a central forwarder list", async () => {
     const { initStore, loadAll, store } = await import("./store.svelte");
 
     initStore();
@@ -1075,32 +1005,9 @@ describe("receiver updater store", () => {
       ],
     ]);
 
-    apiMocks.getForwarders.mockResolvedValueOnce({
-      forwarders: [
-        {
-          forwarder_id: "fwd-1",
-          display_name: "Start",
-          online: true,
-          readers: [],
-          unique_chips: 0,
-          total_reads: 0,
-          last_read_at: null,
-        },
-        {
-          forwarder_id: "fwd-2",
-          display_name: "Finish",
-          online: false,
-          readers: [],
-          unique_chips: 0,
-          total_reads: 0,
-          last_read_at: null,
-        },
-      ],
-    });
-
     await loadAll();
 
-    expect(Array.from(store.upsState.keys())).toEqual(["fwd-1"]);
+    expect(Array.from(store.upsState.keys())).toEqual(["fwd-1", "fwd-2"]);
   });
 });
 
@@ -1184,7 +1091,7 @@ describe("canonical-only stream identity", () => {
     const payload = modePayload();
     expect(payload.mode).toBe("live");
     if (payload.mode !== "live") throw new Error("unreachable");
-    // Only the legacy stream is representable in the legacy WS payload.
+    // Only the stream with display metadata is representable in the compatibility payload.
     expect(payload.earliest_epochs).toEqual([
       { forwarder_id: "fwd-1", reader_ip: "10.0.0.1:10000", earliest_epoch: 3 },
     ]);

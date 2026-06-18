@@ -1,8 +1,6 @@
 //! Receiver-side P2P data session over the iroh transport.
 //!
-//! Replaces the legacy WebSocket *data plane*: instead of receiving
-//! [`rt_protocol::ReceiverEventBatch`] frames over a WebSocket, the receiver
-//! dials a forwarder by its iroh `EndpointId`, performs the control-plane
+//! The receiver dials a forwarder by its iroh `EndpointId`, performs the control-plane
 //! `Hello` negotiation, then opens a per-stream data stream and subscribes from
 //! its persisted cursor.
 //!

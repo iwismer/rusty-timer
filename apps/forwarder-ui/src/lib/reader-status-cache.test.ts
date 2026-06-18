@@ -21,7 +21,7 @@ function makeStatus(readers: ForwarderStatus["readers"]): ForwarderStatus {
     version: "0.1.0",
     ready: true,
     ready_reason: null,
-    uplink_connected: true,
+    p2p_connected: true,
     restart_needed: false,
     readers,
   };

@@ -4,20 +4,18 @@
   import {
     fromConfig,
     toGeneralPayload,
-    toServerPayload,
+    toP2pPayload,
     toAuthPayload,
     toJournalPayload,
-    toUplinkPayload,
     toStatusHttpPayload,
     toControlPayload,
     toUpsPayload,
     toUpdatePayload,
     toReadersPayload,
     validateGeneral,
-    validateServer,
+    validateP2p,
     validateAuth,
     validateJournal,
-    validateUplink,
     validateUps,
     validateStatusHttp,
     validateReaders,
@@ -59,14 +57,12 @@
 
   // Form fields
   let generalDisplayName = $state("");
-  let serverBaseUrl = $state("");
-  let serverForwardersWsPath = $state("");
+  let p2pEnabled = $state(false);
+  let p2pThinNodeUrl = $state("");
+  let p2pThinNodeTokenFile = $state("");
   let authTokenFile = $state("");
   let journalSqlitePath = $state("");
   let journalPruneWatermarkPct = $state("");
-  let uplinkBatchMode = $state("");
-  let uplinkBatchFlushMs = $state("");
-  let uplinkBatchMaxEvents = $state("");
   let statusHttpBind = $state("");
   let upsEnabled = $state(false);
   let upsDaemonAddr = $state("");
@@ -180,14 +176,12 @@
 
   function applyFormState(form: ForwarderConfigFormState): void {
     generalDisplayName = form.generalDisplayName;
-    serverBaseUrl = form.serverBaseUrl;
-    serverForwardersWsPath = form.serverForwardersWsPath;
+    p2pEnabled = form.p2pEnabled;
+    p2pThinNodeUrl = form.p2pThinNodeUrl;
+    p2pThinNodeTokenFile = form.p2pThinNodeTokenFile;
     authTokenFile = form.authTokenFile;
     journalSqlitePath = form.journalSqlitePath;
     journalPruneWatermarkPct = form.journalPruneWatermarkPct;
-    uplinkBatchMode = form.uplinkBatchMode;
-    uplinkBatchFlushMs = form.uplinkBatchFlushMs;
-    uplinkBatchMaxEvents = form.uplinkBatchMaxEvents;
     statusHttpBind = form.statusHttpBind;
     upsEnabled = form.upsEnabled;
     upsDaemonAddr = form.upsDaemonAddr;
@@ -202,14 +196,12 @@
   function currentFormState(): ForwarderConfigFormState {
     return {
       generalDisplayName,
-      serverBaseUrl,
-      serverForwardersWsPath,
+      p2pEnabled,
+      p2pThinNodeUrl,
+      p2pThinNodeTokenFile,
       authTokenFile,
       journalSqlitePath,
       journalPruneWatermarkPct,
-      uplinkBatchMode,
-      uplinkBatchFlushMs,
-      uplinkBatchMaxEvents,
       statusHttpBind,
       upsEnabled,
       upsDaemonAddr,
@@ -277,17 +269,14 @@
   function saveGeneral() {
     saveSectionWithValidation("general", validateGeneral, toGeneralPayload);
   }
-  function saveServer() {
-    saveSectionWithValidation("server", validateServer, toServerPayload);
+  function saveP2p() {
+    saveSectionWithValidation("p2p", validateP2p, toP2pPayload);
   }
   function saveAuth() {
     saveSectionWithValidation("auth", validateAuth, toAuthPayload);
   }
   function saveJournal() {
     saveSectionWithValidation("journal", validateJournal, toJournalPayload);
-  }
-  function saveUplink() {
-    saveSectionWithValidation("uplink", validateUplink, toUplinkPayload);
   }
   function saveStatusHttp() {
     saveSectionWithValidation("status_http", validateStatusHttp, toStatusHttpPayload);
@@ -488,29 +477,40 @@
           {/if}
         </Card>
 
-        <!-- Server -->
-        <Card title="Server" helpSection="server" helpContext="forwarder">
+        <!-- P2P / Thin-node -->
+        <Card title="P2P / Thin-node" helpSection="p2p" helpContext="forwarder">
           <div class="space-y-3">
             <label class="block text-sm font-medium text-text-secondary">
-              Base URL <HelpTip fieldKey="base_url" sectionKey="server" context="forwarder" />
-              <input type="text" bind:value={serverBaseUrl} class="mt-1 {inputClass}" />
-              <p class={hintClass}>HTTP or HTTPS URL of the server. (Automatically converted to WebSocket for communication.)</p>
+              <span class="inline-flex items-center gap-2">
+                <input type="checkbox" bind:checked={p2pEnabled} class="accent-accent" />
+                Enable P2P <HelpTip fieldKey="enabled" sectionKey="p2p" context="forwarder" />
+              </span>
+            </label>
+            <label class="block text-sm font-medium text-text-secondary">
+              Thin-node URL <HelpTip fieldKey="thin_node_url" sectionKey="p2p" context="forwarder" />
+              <input type="text" bind:value={p2pThinNodeUrl} class="mt-1 {inputClass}" />
+              <p class={hintClass}>HTTPS URL used for registration and allow-list distribution. Reads still flow directly over iroh.</p>
+            </label>
+            <label class="block text-sm font-medium text-text-secondary">
+              Thin-node Token File <HelpTip fieldKey="thin_node_token_file" sectionKey="p2p" context="forwarder" />
+              <input type="text" bind:value={p2pThinNodeTokenFile} class="mt-1 {inputClass}" />
+              <p class={hintClass}>Path to file containing the thin-node bearer token.</p>
             </label>
           </div>
           <button
             class={saveBtnClass}
-            onclick={saveServer}
-            disabled={savingSection["server"]}
+            onclick={saveP2p}
+            disabled={savingSection["p2p"]}
           >
-            {savingSection["server"] ? "Saving..." : "Save Server"}
+            {savingSection["p2p"] ? "Saving..." : "Save P2P"}
           </button>
-          {#if sectionMessages["server"]}
+          {#if sectionMessages["p2p"]}
             <p
-              class="text-xs mt-1 m-0 {sectionMessages['server'].ok
+              class="text-xs mt-1 m-0 {sectionMessages['p2p'].ok
                 ? 'text-status-ok'
                 : 'text-status-err'}"
             >
-              {sectionMessages["server"].text}
+              {sectionMessages["p2p"].text}
             </p>
           {/if}
         </Card>
@@ -754,31 +754,6 @@
       <!-- Advanced Settings -->
       {#if showAdvanced}
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <!-- Server WS Path -->
-          <Card title="Connection Path" helpSection="ws_path" helpContext="forwarder">
-            <label class="block text-sm font-medium text-text-secondary">
-              Connection Path <HelpTip fieldKey="forwarders_ws_path" sectionKey="ws_path" context="forwarder" />
-              <input type="text" bind:value={serverForwardersWsPath} class="mt-1 {inputClass}" />
-              <p class={hintClass}>Optional. Connection path on the server. Default if unset: auto-detected.</p>
-            </label>
-            <button
-              class={saveBtnClass}
-              onclick={saveServer}
-              disabled={savingSection["server"]}
-            >
-              {savingSection["server"] ? "Saving..." : "Save Server"}
-            </button>
-            {#if sectionMessages["server"]}
-              <p
-                class="text-xs mt-1 m-0 {sectionMessages['server'].ok
-                  ? 'text-status-ok'
-                  : 'text-status-err'}"
-              >
-                {sectionMessages["server"].text}
-              </p>
-            {/if}
-          </Card>
-
           <!-- Auth -->
           <Card title="Auth" helpSection="auth" helpContext="forwarder">
             <label class="block text-sm font-medium text-text-secondary">
@@ -834,47 +809,6 @@
                   : 'text-status-err'}"
               >
                 {sectionMessages["journal"].text}
-              </p>
-            {/if}
-          </Card>
-
-          <!-- Uplink -->
-          <Card title="Uplink" helpSection="uplink" helpContext="forwarder">
-            <div class="space-y-3">
-              <label class="block text-sm font-medium text-text-secondary">
-                Batch Mode <HelpTip fieldKey="batch_mode" sectionKey="uplink" context="forwarder" />
-                <select bind:value={uplinkBatchMode} class="mt-1 {selectClass}">
-                  <option value="">Default (immediate)</option>
-                  <option value="immediate">Immediate</option>
-                  <option value="batched">Batched</option>
-                </select>
-                <p class={hintClass}>How to send events to server. Default if unset: immediate.</p>
-              </label>
-              <label class="block text-sm font-medium text-text-secondary">
-                Batch Flush (ms) <HelpTip fieldKey="batch_flush_ms" sectionKey="uplink" context="forwarder" />
-                <input type="number" bind:value={uplinkBatchFlushMs} min="0" class="mt-1 {inputClass}" />
-                <p class={hintClass}>Max time to wait before sending batch. Default if unset: 100ms.</p>
-              </label>
-              <label class="block text-sm font-medium text-text-secondary">
-                Batch Max Events <HelpTip fieldKey="batch_max_events" sectionKey="uplink" context="forwarder" />
-                <input type="number" bind:value={uplinkBatchMaxEvents} min="0" class="mt-1 {inputClass}" />
-                <p class={hintClass}>Max events per batch. Default if unset: 1000.</p>
-              </label>
-            </div>
-            <button
-              class={saveBtnClass}
-              onclick={saveUplink}
-              disabled={savingSection["uplink"]}
-            >
-              {savingSection["uplink"] ? "Saving..." : "Save Uplink"}
-            </button>
-            {#if sectionMessages["uplink"]}
-              <p
-                class="text-xs mt-1 m-0 {sectionMessages['uplink'].ok
-                  ? 'text-status-ok'
-                  : 'text-status-err'}"
-              >
-                {sectionMessages["uplink"].text}
               </p>
             {/if}
           </Card>

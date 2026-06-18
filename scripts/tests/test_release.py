@@ -71,8 +71,6 @@ class TransactionTests(unittest.TestCase):
             version=None,
             dry_run=False,
             yes=True,
-            server_docker_image="iwismer/rt-server",
-            server_local_docker_build=False,
         )
 
         read_version_mock.side_effect = ["0.1.0", "0.1.0"]
@@ -126,8 +124,6 @@ class PushTests(unittest.TestCase):
             version=None,
             dry_run=False,
             yes=True,
-            server_docker_image="iwismer/rt-server",
-            server_local_docker_build=False,
         )
 
         read_version_mock.return_value = "0.1.0"
@@ -162,7 +158,7 @@ class ServiceConfigTests(unittest.TestCase):
         workflow = Path(".github/workflows/release.yml").read_text()
 
         self.assertIn('"thin-node-v*"', workflow)
-        self.assertIn("forwarder|streamer|emulator|server|thin-node", workflow)
+        self.assertIn("forwarder|streamer|emulator|thin-node", workflow)
         self.assertNotIn("armv7", workflow)
         self.assertNotIn("armv7-unknown-linux-gnueabihf", workflow)
 
@@ -189,8 +185,6 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
             version=None,
             dry_run=False,
             yes=True,
-            server_docker_image="iwismer/rt-server",
-            server_local_docker_build=False,
         )
 
         read_version_mock.return_value = "0.1.0"
@@ -260,8 +254,6 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
             version=None,
             dry_run=False,
             yes=True,
-            server_docker_image="iwismer/rt-server",
-            server_local_docker_build=False,
         )
 
         read_version_mock.return_value = "0.1.0"
@@ -314,8 +306,6 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
             version=None,
             dry_run=False,
             yes=True,
-            server_docker_image="iwismer/rt-server",
-            server_local_docker_build=False,
         )
 
         read_version_mock.return_value = "0.1.0"
@@ -369,8 +359,6 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
             version=None,
             dry_run=False,
             yes=True,
-            server_docker_image="iwismer/rt-server",
-            server_local_docker_build=False,
         )
 
         read_version_mock.return_value = "0.1.0"
@@ -409,147 +397,6 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
         self.assertIn(["git", "tag", "thin-node-v0.1.1"], calls)
         self.assertIn(["git", "push", "origin", "thin-node-v0.1.1"], calls)
 
-    @patch("scripts.release.write_version")
-    @patch("scripts.release.compute_new_version")
-    @patch("scripts.release.read_version")
-    @patch("scripts.release.git_current_branch", return_value="master")
-    @patch("scripts.release.git_is_dirty", return_value=False)
-    def test_server_runs_ui_checks_and_optional_local_docker_build(
-        self,
-        _dirty_mock,
-        _branch_mock,
-        read_version_mock,
-        compute_new_version_mock,
-        _write_version_mock,
-    ) -> None:
-        args = argparse.Namespace(
-            services=["server"],
-            major=False,
-            minor=False,
-            patch=True,
-            version=None,
-            dry_run=False,
-            yes=True,
-            server_docker_image="iwismer/rt-server",
-            server_local_docker_build=True,
-        )
-
-        read_version_mock.return_value = "0.1.0"
-        compute_new_version_mock.return_value = "0.1.1"
-
-        calls: list[list[str]] = []
-
-        def fake_run(cmd: list[str], **kwargs):  # noqa: ANN003
-            calls.append(cmd)
-            if cmd == ["git", "rev-parse", "HEAD"]:
-                return subprocess.CompletedProcess(cmd, 0, stdout="abc123\n", stderr="")
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-        with patch("scripts.release.parse_args", return_value=args), patch(
-            "scripts.release.run", side_effect=fake_run
-        ):
-            release.main()
-
-        self.assertIn(["npm", "ci"], calls)
-        self.assertIn(
-            ["npm", "run", "lint", "--workspace", "apps/server-ui"],
-            calls,
-        )
-        self.assertIn(
-            ["npm", "run", "check", "--workspace", "apps/server-ui"],
-            calls,
-        )
-        self.assertIn(
-            ["npm", "test", "--workspace", "apps/server-ui"],
-            calls,
-        )
-        self.assertIn(
-            [
-                "docker",
-                "build",
-                "-t",
-                "iwismer/rt-server:v0.1.1",
-                "-t",
-                "iwismer/rt-server:latest",
-                "-f",
-                "services/server/Dockerfile",
-                ".",
-            ],
-            calls,
-        )
-        self.assertIn(["git", "push", "origin", "master"], calls)
-        self.assertIn(["git", "push", "origin", "server-v0.1.1"], calls)
-        self.assertNotIn(["docker", "push", "iwismer/rt-server:v0.1.1"], calls)
-        self.assertNotIn(["docker", "push", "iwismer/rt-server:latest"], calls)
-
-    @patch("scripts.release.write_version")
-    @patch("scripts.release.compute_new_version")
-    @patch("scripts.release.read_version")
-    @patch("scripts.release.git_current_branch", return_value="master")
-    @patch("scripts.release.git_is_dirty", return_value=False)
-    def test_server_without_local_docker_build_runs_release_binary_build(
-        self,
-        _dirty_mock,
-        _branch_mock,
-        read_version_mock,
-        compute_new_version_mock,
-        _write_version_mock,
-    ) -> None:
-        args = argparse.Namespace(
-            services=["server"],
-            major=False,
-            minor=False,
-            patch=True,
-            version=None,
-            dry_run=False,
-            yes=True,
-            server_docker_image="iwismer/rt-server",
-            server_local_docker_build=False,
-        )
-
-        read_version_mock.return_value = "0.1.0"
-        compute_new_version_mock.return_value = "0.1.1"
-
-        calls: list[list[str]] = []
-
-        def fake_run(cmd: list[str], **kwargs):  # noqa: ANN003
-            calls.append(cmd)
-            if cmd == ["git", "rev-parse", "HEAD"]:
-                return subprocess.CompletedProcess(cmd, 0, stdout="abc123\n", stderr="")
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-        with patch("scripts.release.parse_args", return_value=args), patch(
-            "scripts.release.run", side_effect=fake_run
-        ):
-            release.main()
-
-        self.assertIn(
-            [
-                "cargo",
-                "build",
-                "--release",
-                "--package",
-                "server",
-                "--bin",
-                "server",
-            ],
-            calls,
-        )
-        self.assertNotIn(
-            [
-                "docker",
-                "build",
-                "-t",
-                "iwismer/rt-server:v0.1.1",
-                "-t",
-                "iwismer/rt-server:latest",
-                "-f",
-                "services/server/Dockerfile",
-                ".",
-            ],
-            calls,
-        )
-
 
 class DryRunBehaviorTests(unittest.TestCase):
     @patch("scripts.release.write_version")
@@ -573,8 +420,6 @@ class DryRunBehaviorTests(unittest.TestCase):
             version=None,
             dry_run=True,
             yes=True,
-            server_docker_image="iwismer/rt-server",
-            server_local_docker_build=False,
         )
 
         read_version_mock.return_value = "0.1.0"
@@ -633,6 +478,7 @@ class DryRunBehaviorTests(unittest.TestCase):
         )
         self.assertNotIn(["git", "tag", "forwarder-v0.1.1"], calls)
         self.assertNotIn(["git", "push", "origin", "master"], calls)
+
 
 if __name__ == "__main__":
     unittest.main()

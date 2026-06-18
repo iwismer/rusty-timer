@@ -8,35 +8,46 @@ export const FORWARDER_HELP = {
       display_name: {
         label: "Display Name",
         summary: "Optional friendly name to identify this forwarder in the UI.",
-        detailHtml: "An optional human-readable name for this forwarder. When set, it appears instead of the forwarder ID in the server dashboard and receiver stream list. Useful when managing multiple forwarders at a race venue.",
+        detailHtml: "An optional human-readable name for this forwarder. When set, it appears instead of the forwarder ID in receiver stream lists and thin-node status views. Useful when managing multiple forwarders at a race venue.",
         default: "None (optional)",
       },
     },
     tips: [
       "Give each forwarder a descriptive name like 'Start Line' or 'Finish Line A' to make it easy to identify on race day.",
     ],
-    seeAlso: [{ sectionKey: "server", label: "Server Connection" }],
+    seeAlso: [{ sectionKey: "p2p", label: "P2P / Thin-node" }],
   },
-  server: {
-    title: "Server Connection",
-    overview: "Configure how the forwarder connects to the remote server to send timing data.",
+  p2p: {
+    title: "P2P / Thin-node",
+    overview: "Configure iroh P2P identity and thin-node coordination for this forwarder.",
     fields: {
-      base_url: {
-        label: "Base URL",
-        summary: "The URL of the server this forwarder sends data to.",
-        detailHtml: "The base URL of your remote timing server (e.g. <code>https://server.example.com:8080</code>). Use HTTPS to encrypt timing data in transit.",
-        default: "None (required)",
-        recommended: "Use HTTPS for production to encrypt timing data in transit.",
+      enabled: {
+        label: "Enable P2P",
+        summary: "Starts the forwarder's iroh endpoint and receiver data-plane service.",
+        detailHtml: "When enabled, receivers connect directly to this forwarder over iroh. Thin-node HTTP is used only for registration, allow-list distribution, and status coordination.",
+        default: "Disabled for local-only tests",
+        recommended: "Enable for production forwarders.",
+      },
+      thin_node_url: {
+        label: "Thin-node URL",
+        summary: "HTTPS URL of the thin-node coordination service.",
+        detailHtml: "The forwarder registers its endpoint and fetches receiver allow-lists from this thin-node URL. Timing reads do not flow through this service; they move directly over iroh between forwarder and receiver.",
+        default: "None",
+        recommended: "Use HTTPS for deployed systems.",
+      },
+      thin_node_token_file: {
+        label: "Thin-node Token File",
+        summary: "Path to the bearer token used for thin-node API calls.",
+        detailHtml: "The forwarder reads this file on startup and uses it to authenticate registration and allow-list requests to the thin-node.",
+        default: "Uses the auth token file when configured that way",
+        recommended: "Store the token in a root-readable file outside the TOML config.",
       },
     },
     tips: [
-      "If the forwarder can't connect, verify the server URL is reachable from the forwarder's network. Check for firewall rules blocking the port.",
-      "The forwarder will automatically reconnect if the connection drops. Check the log for connection status.",
+      "P2P can be disabled for local-only tests, but deployed forwarders should enable it.",
+      "If receivers cannot connect, verify the endpoint is registered in thin-node and the receiver EndpointId is allow-listed.",
     ],
-    seeAlso: [
-      { sectionKey: "ws_path", label: "Connection Path" },
-      { sectionKey: "auth", label: "Authentication" },
-    ],
+    seeAlso: [{ sectionKey: "auth", label: "Authentication" }],
   },
   readers: {
     title: "Reader Devices",
@@ -138,7 +149,7 @@ export const FORWARDER_HELP = {
       restart_service: {
         label: "Restart Forwarder Service",
         summary: "Restarts the forwarder software process without rebooting the device.",
-        detailHtml: "Stops and restarts the forwarder service. The forwarder will disconnect from all readers and the server, then reconnect. No data is lost — any unsent reads are preserved and sent after reconnection.",
+        detailHtml: "Stops and restarts the forwarder service. The forwarder will disconnect from all readers and receivers, then reconnect. No data is lost — any unacknowledged reads are preserved and replayed after reconnection.",
       },
       restart_device: {
         label: "Restart Forwarder Device",
@@ -158,44 +169,27 @@ export const FORWARDER_HELP = {
     ],
     seeAlso: [{ sectionKey: "controls", label: "Forwarder Controls" }],
   },
-  ws_path: {
-    title: "Connection Path",
-    overview: "Advanced setting for the connection path used to connect to the server.",
-    fields: {
-      forwarders_ws_path: {
-        label: "Connection Path",
-        summary: "Custom connection path on the server. Usually auto-detected.",
-        detailHtml: "The path appended to the server base URL for the connection. In most setups this is auto-detected and does not need to be changed. Only modify this if your server administrator has provided a custom path.",
-        default: "Auto-detected",
-        recommended: "Leave empty unless your server admin has provided a custom path.",
-      },
-    },
-    tips: [
-      "Only change this if instructed by your server administrator. An incorrect path will prevent the forwarder from connecting.",
-    ],
-    seeAlso: [{ sectionKey: "server", label: "Server Connection" }],
-  },
   auth: {
     title: "Authentication",
-    overview: "Configure the authentication token used to connect to the server.",
+    overview: "Configure the authentication token used by forwarder control and coordination APIs.",
     fields: {
       token_file: {
         label: "Token File Path",
         summary: "Path to a file containing the authentication token.",
-        detailHtml: "The file path to the authentication token. The forwarder reads this file on startup and uses it to authenticate with the server. The token must match what the server expects.",
-        default: "None (required for authenticated servers)",
+        detailHtml: "The file path to the authentication token. The forwarder reads this file on startup and uses it for local control authorization and, when reused by <code>p2p.thin_node_token_file</code>, thin-node API authentication.",
+        default: "None (required for authenticated control APIs)",
         recommended: "Use a dedicated token file rather than embedding the token in the config file.",
       },
     },
     tips: [
       "If authentication fails, verify the token file exists at the specified path and contains the correct token.",
-      "The token must match what the server expects. Contact the server operator if you need a new token.",
+      "The token must match what the thin-node expects if this file is also used for thin-node API calls.",
     ],
-    seeAlso: [{ sectionKey: "server", label: "Server Connection" }],
+    seeAlso: [{ sectionKey: "p2p", label: "P2P / Thin-node" }],
   },
   journal: {
     title: "Journal",
-    overview: "The journal provides durable storage for chip reads, ensuring no data is lost if the server connection drops.",
+    overview: "The journal provides durable storage for chip reads, ensuring no data is lost if receiver connections drop.",
     fields: {
       sqlite_path: {
         label: "Journal File Path",
@@ -215,45 +209,10 @@ export const FORWARDER_HELP = {
     },
     tips: [
       "In-memory journal is fine for testing but <strong>always</strong> use a file path for race day to prevent data loss on restart.",
-      "If the journal file grows very large, it means reads are accumulating faster than they can be sent. Check the server connection.",
+      "If the journal file grows very large, it means reads are accumulating faster than receivers can acknowledge them. Check receiver connectivity and allow-list state.",
       "The journal provides at-least-once delivery: reads may be sent more than once but are never lost.",
     ],
-    seeAlso: [{ sectionKey: "uplink", label: "Uplink (Batching)" }],
-  },
-  uplink: {
-    title: "Uplink (Batching)",
-    overview: "Controls how reads are batched and sent from the forwarder to the server.",
-    fields: {
-      batch_mode: {
-        label: "Batch Mode",
-        summary: "Send reads immediately one at a time, or batch multiple reads together.",
-        detailHtml: "Controls whether reads are sent to the server one at a time (immediate) or collected into batches. Immediate mode has lower latency. Batched mode is more efficient when multiple readers are producing high volumes of reads.",
-        default: "Immediate",
-        range: "Immediate, Batched",
-        recommended: "Immediate for most race setups. Use Batched only if you have many readers producing very high read volumes.",
-      },
-      batch_flush_ms: {
-        label: "Send Delay (ms)",
-        summary: "Maximum time in milliseconds to wait before sending a batch.",
-        detailHtml: "In batched mode, this is the maximum time the forwarder waits before sending a batch, even if it isn't full. Lower values reduce latency; higher values allow larger, more efficient batches. Only applies when Batch Mode is set to Batched.",
-        default: "100ms",
-        range: "0+ milliseconds",
-        recommended: "100ms provides a good balance. Increase to 500ms if bandwidth is very limited.",
-      },
-      batch_max_events: {
-        label: "Max Reads per Batch",
-        summary: "Maximum number of reads per batch before it's sent immediately.",
-        detailHtml: "In batched mode, a batch is sent as soon as it reaches this many reads, regardless of the flush timer. Only applies when Batch Mode is set to Batched.",
-        default: "1000",
-        range: "1+",
-        recommended: "1000 is sufficient for most scenarios. Reduce if you need lower latency.",
-      },
-    },
-    tips: [
-      "For most race timing, keep Immediate mode. Batching is an optimization for high-throughput scenarios.",
-      "If reads appear delayed, check that Batch Flush isn't set too high.",
-    ],
-    seeAlso: [{ sectionKey: "journal", label: "Journal" }],
+    seeAlso: [{ sectionKey: "p2p", label: "P2P / Thin-node" }],
   },
   status_http: {
     title: "Status HTTP",
@@ -261,7 +220,7 @@ export const FORWARDER_HELP = {
     fields: {
       bind: {
         label: "Bind Address",
-        summary: "IP:port the status HTTP server listens on.",
+        summary: "IP:port the status HTTP listener binds to.",
         detailHtml: "The network address and port for the forwarder's built-in status endpoint. Use <code>0.0.0.0</code> to allow access from other devices on the network, or <code>127.0.0.1</code> to restrict access to this device only.",
         default: "0.0.0.0:8080",
         range: "Valid IP:port combination",
@@ -269,7 +228,7 @@ export const FORWARDER_HELP = {
       },
     },
     tips: [
-      "The status endpoint is useful for monitoring forwarder health from the server or a separate monitoring tool.",
+      "The status endpoint is useful for monitoring forwarder health from a local browser, thin-node dashboard, or separate monitoring tool.",
       "If the status port conflicts with another service, change it to an unused port.",
     ],
   },
@@ -300,7 +259,7 @@ export const FORWARDER_HELP = {
       forwarder_id: {
         label: "Forwarder ID",
         summary: "Stable identifier for this forwarder, derived from its authentication token.",
-        detailHtml: "A unique identifier automatically derived from the forwarder's authentication token (e.g. <code>fwd-3a9f1c2b8e4d07f1</code>). The ID is stable across restarts as long as the token doesn't change. The server uses this ID to identify the forwarder in the dashboard and receiver stream list.",
+        detailHtml: "A unique identifier automatically derived from the forwarder's authentication token (e.g. <code>fwd-3a9f1c2b8e4d07f1</code>). The ID is stable across restarts as long as the token doesn't change. Thin-node and receivers use this ID to identify the forwarder in status and stream lists.",
       },
       version: {
         label: "Version",
@@ -312,31 +271,31 @@ export const FORWARDER_HELP = {
         summary: "Whether the forwarder has finished starting up and is operating normally.",
         detailHtml:
           "<ul>" +
-          "<li><strong>Ready</strong>: The forwarder is collecting reads from configured readers and forwarding them when the server connection is available.</li>" +
+          "<li><strong>Ready</strong>: The forwarder is collecting reads from configured readers and serving them to allow-listed receivers when P2P sessions are available.</li>" +
           "<li><strong>Not ready</strong>: The forwarder is still starting up or encountered an initialization error. The reason is shown next to the badge. This is normal for a few seconds after the service starts. If it persists, check the log for errors.</li>" +
           "</ul>" +
-          "Readiness does not depend on the server connection — a forwarder can be ready and collecting reads even while the server is unreachable.",
+          "Readiness does not depend on receiver connectivity — a forwarder can be ready and collecting reads even while no receiver is connected.",
       },
     },
     tips: [
-      "The Forwarder ID is tied to the authentication token. If you rotate the token, the ID will change and the server will treat this as a new forwarder.",
+      "The Forwarder ID is tied to the authentication token. If you rotate the token, thin-node and receivers will treat this as a new forwarder.",
       "'Not ready' is expected for a few seconds after the service starts or restarts. If it persists, check the Logs section for errors.",
-      "Readiness does not depend on the server connection. A forwarder can be ready and collecting reads even while disconnected — reads accumulate in the journal and are sent when the connection is restored.",
+      "Readiness does not depend on receiver connectivity. A forwarder can be ready and collecting reads even while no receiver is connected — reads accumulate in the journal and are replayed when receivers reconnect.",
     ],
     seeAlso: [
       { sectionKey: "auth", label: "Authentication" },
       { sectionKey: "journal", label: "Journal" },
-      { sectionKey: "server", label: "Server Connection" },
+      { sectionKey: "p2p", label: "P2P / Thin-node" },
     ],
   },
   service_overview: {
     title: "Service",
-    overview: "Live status of the forwarder service and its connection to the remote server.",
+    overview: "Live status of the forwarder service and receiver data-plane availability.",
     fields: {
-      uplink: {
-        label: "Uplink",
-        summary: "Whether the forwarder is currently connected to the remote server.",
-        detailHtml: "<strong>Connected</strong>: The forwarder is actively sending reads to the server.<br><br><strong>Disconnected</strong>: The forwarder is not currently connected. Reads continue to accumulate in the journal and will be sent automatically when the connection is restored.",
+      p2p_sessions: {
+        label: "P2P Sessions",
+        summary: "Whether receivers currently have active P2P sessions with this forwarder.",
+        detailHtml: "<strong>Connected</strong>: At least one receiver is actively subscribed over iroh.<br><br><strong>Disconnected</strong>: No receiver is currently connected. Reads continue to accumulate in the journal and will replay from each receiver cursor when sessions resume.",
       },
       restart_needed: {
         label: "Restart Needed",
@@ -345,13 +304,13 @@ export const FORWARDER_HELP = {
       },
     },
     tips: [
-      "A disconnected uplink does not lose reads. The journal stores all reads and replays them once the connection recovers.",
-      "If the uplink stays disconnected, verify the server URL and authentication token are correct, and that the server is reachable from the forwarder's network.",
+      "Disconnected receivers do not lose reads. The journal stores all reads and replays them from each durable cursor once receivers reconnect.",
+      "If receivers stay disconnected, verify thin-node registration, receiver allow-list state, and local network reachability.",
       "'Restart Now' restarts the forwarder service, not the physical device. Readers will briefly disconnect and reconnect. No reads are lost.",
       "On race day, apply any config changes and restart before the first race so the forwarder is stable during timing.",
     ],
     seeAlso: [
-      { sectionKey: "server", label: "Server Connection" },
+      { sectionKey: "p2p", label: "P2P / Thin-node" },
       { sectionKey: "journal", label: "Journal" },
       { sectionKey: "dangerous_actions", label: "Dangerous Actions" },
     ],
@@ -373,7 +332,7 @@ export const FORWARDER_HELP = {
       local_port: {
         label: "Local Port",
         summary: "Port on this device where the reader's chip reads are available for local timing software.",
-        detailHtml: "The forwarder makes reads from this reader available on this port, so timing software on the local network can receive them directly — independent of the server connection.<br><br>The port is either auto-calculated as <strong>10000 + the last octet of the reader's IP address</strong> (e.g. a reader at 192.168.0.50 uses port 10050), or a custom value if a Local Port Override is configured.",
+        detailHtml: "The forwarder makes reads from this reader available on this port, so timing software on the local network can receive them directly — independent of receiver P2P sessions.<br><br>The port is either auto-calculated as <strong>10000 + the last octet of the reader's IP address</strong> (e.g. a reader at 192.168.0.50 uses port 10050), or a custom value if a Local Port Override is configured.",
       },
       last_seen: {
         label: "Last Seen",
@@ -383,12 +342,12 @@ export const FORWARDER_HELP = {
       epoch_name: {
         label: "Epoch Name",
         summary: "Optional label for the current epoch on this reader, e.g. 'Race 1' or 'Wave 2'.",
-        detailHtml: "Assigns a human-readable name to the reader's current epoch. The name is saved to the server and displayed as the active epoch label. Clearing the field and saving removes the name. The name applies to the current epoch only — after advancing to a new epoch, set a new name to identify it.",
+        detailHtml: "Assigns a human-readable name to the reader's current epoch and displays it as the active epoch label. Clearing the field and saving removes the name. The name applies to the current epoch only — after advancing to a new epoch, set a new name to identify it.",
       },
       advance_epoch: {
         label: "Advance Epoch",
         summary: "Starts a new epoch for this reader, separating subsequent reads from previous ones.",
-        detailHtml: "Advances the reader's stream to a new epoch. All reads from this point forward are recorded under the new epoch, allowing the server and receiver to distinguish them from previous reads.<br><br>Reads already captured in earlier epochs are not deleted and will still be delivered if not yet received. Use this at the start of each race or wave to create a clean separation in the read stream. After advancing, set an epoch name to identify the new segment.",
+        detailHtml: "Advances the reader's stream to a new epoch. All reads from this point forward are recorded under the new epoch, allowing receivers to distinguish them from previous reads.<br><br>Reads already captured in earlier epochs are not deleted and will still be delivered if not yet received. Use this at the start of each race or wave to create a clean separation in the read stream. After advancing, set an epoch name to identify the new segment.",
       },
       clock_drift: {
         label: "Clock Drift",
@@ -441,13 +400,13 @@ export const FORWARDER_HELP = {
           "<li><strong>Recording on</strong>: The reader stores each chip read in its internal memory in addition to streaming reads live to the forwarder.</li>" +
           "<li><strong>Recording off</strong>: The reader streams reads but does not save them to onboard storage.</li>" +
           "</ul>" +
-          "Onboard recording is independent of the live data stream — reads are forwarded to the server regardless. Use recording as a safety net: if the forwarder loses its connection mid-race, reads are preserved on the reader and can be retrieved later with <strong>Download Reads</strong>.",
+          "Onboard recording is independent of the live data stream — reads continue through the forwarder regardless. Use recording as a safety net: if connectivity is lost mid-race, reads are preserved on the reader and can be retrieved later with <strong>Download Reads</strong>.",
         recommended: "Turn recording on before each race as a safety net. Download and clear records after each event.",
       },
       download_reads: {
         label: "Download Reads",
         summary: "Downloads all chip reads stored in the reader's onboard memory to the forwarder.",
-        detailHtml: "Transfers all records stored in the reader's onboard memory to the forwarder. A progress bar shows the download status. Downloaded reads are delivered to the server just like live reads.<br><br>This is the primary recovery path after a connection outage: if the forwarder lost its connection during a race, use Download Reads once connectivity is restored to retrieve any reads that were captured to onboard storage.<br><br>Only one download can run at a time per reader. After a successful download, use <strong>Clear Records</strong> to free the reader's storage for the next race.",
+        detailHtml: "Transfers all records stored in the reader's onboard memory to the forwarder. A progress bar shows the download status. Downloaded reads are journaled and replayed to receivers just like live reads.<br><br>This is the primary recovery path after a reader or network outage: use Download Reads once connectivity is restored to retrieve any reads that were captured to onboard storage.<br><br>Only one download can run at a time per reader. After a successful download, use <strong>Clear Records</strong> to free the reader's storage for the next race.",
       },
       clear_records: {
         label: "Clear Records",

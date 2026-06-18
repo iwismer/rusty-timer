@@ -13,7 +13,7 @@ export const RECEIVER_ADMIN_HELP = {
     },
     tips: [
       "Reset a cursor when you need to replay all historical data for a specific stream.",
-      "Resetting a cursor only changes where the receiver starts reading on the next connection. It does not affect the server.",
+      "Resetting a cursor only changes where the receiver starts reading on the next connection. It does not affect the forwarder's journal.",
       "After resetting, the receiver will re-deliver all reads from the start. Your timing software may see duplicate reads.",
       "Try cursor reset before more drastic actions like purge subscriptions or factory reset.",
     ],
@@ -34,7 +34,7 @@ export const RECEIVER_ADMIN_HELP = {
     },
     tips: [
       "Clear epoch overrides when you need to access historical data that was previously filtered.",
-      "This only affects the receiver's filtering. The server always has all data available.",
+      "This only affects the receiver's filtering. The forwarder's journal still has all retained data available.",
       "After clearing, the receiver may re-deliver older reads. Combine with a cursor reset if needed.",
     ],
     seeAlso: [
@@ -69,7 +69,7 @@ export const RECEIVER_ADMIN_HELP = {
     fields: {},
     tips: [
       "Purging subscriptions stops all data delivery. The receiver will have zero active streams.",
-      "Stream data is NOT deleted from the server. You can re-subscribe to streams after purging.",
+      "Received stream data is NOT deleted. You can re-subscribe to streams after purging.",
       "In Live mode, the receiver will automatically re-subscribe to available streams after purging.",
       "Try this when streams are in a bad state and you want a clean start without a full factory reset.",
       "Cursor positions and epoch overrides are also cleared when subscriptions are purged.",
@@ -81,12 +81,12 @@ export const RECEIVER_ADMIN_HELP = {
   },
   reset_profile: {
     title: "Reset Profile",
-    overview: "Clear the receiver's connection profile (server URL, token, and receiver ID) back to defaults. Subscriptions and cursors are preserved.",
+    overview: "Clear the receiver's connection profile (thin-node URL, token, and receiver ID) back to defaults. Subscriptions and cursors are preserved.",
     fields: {},
     tips: [
-      "Use this when you need to point the receiver at a different server.",
+      "Use this when you need to point the receiver at a different thin-node.",
       "Subscriptions and cursor positions are preserved. Only connection settings are cleared.",
-      "After resetting, you must reconfigure the Server URL, Token, and Receiver ID before connecting.",
+      "After resetting, you must reconfigure the thin-node URL, token, and receiver ID before connecting.",
       "The receiver will disconnect automatically when the profile is reset.",
     ],
     seeAlso: [
@@ -98,8 +98,8 @@ export const RECEIVER_ADMIN_HELP = {
     overview: "Erase ALL local data and return the receiver to a fresh state. This is irreversible.",
     fields: {},
     tips: [
-      "Before factory reset, try these less destructive alternatives first:<ul><li><strong>Cursor Reset</strong> — if you just need to replay data from the beginning.</li><li><strong>Purge Subscriptions</strong> — if streams are in a bad state and you want a clean start.</li><li><strong>Reset Profile</strong> — if you just need to change the server connection.</li></ul>",
-      "Factory reset deletes: profile (server URL, token, ID), all subscriptions, all cursors, all epoch overrides, and all port overrides.",
+      "Before factory reset, try these less destructive alternatives first:<ul><li><strong>Cursor Reset</strong> — if you just need to replay data from the beginning.</li><li><strong>Purge Subscriptions</strong> — if streams are in a bad state and you want a clean start.</li><li><strong>Reset Profile</strong> — if you just need to change the thin-node connection.</li></ul>",
+      "Factory reset deletes: profile (thin-node URL, token, ID), all subscriptions, all cursors, all epoch overrides, and all port overrides.",
       "After factory reset, the receiver must be fully reconfigured from scratch.",
       "This action <strong>cannot be undone</strong>. All local state is permanently deleted.",
       "The receiver will disconnect immediately and return to the initial setup state.",

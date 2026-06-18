@@ -16,8 +16,7 @@ pub struct HeadlessConfig {
     pub bind_addr: SocketAddr,
     pub receiver_id: Option<String>,
     /// Optional P2P receiver runtime. When present, the headless host runs the
-    /// real loopback P2P lane alongside the legacy WebSocket runtime. When
-    /// `None`, behavior is identical to before this lane existed.
+    /// real loopback P2P lane. When `None`, only the local control API starts.
     pub p2p: Option<P2pReceiverConfig>,
 }
 

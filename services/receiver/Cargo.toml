@@ -12,12 +12,11 @@ default = []
 test-bridge = []
 
 [dependencies]
-rt-protocol = { path = "../../crates/rt-protocol" }
+rt-domain = { path = "../../crates/rt-domain" }
 rt-ui-log = { path = "../../crates/rt-ui-log" }
 rt-updater = { path = "../../crates/rt-updater" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -39,7 +38,7 @@ dbase = { version = "0.7", features = ["serde", "yore"] }
 fs2 = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 tempfile = "3"
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8" }
 
 [dev-dependencies]
 rusqlite = { version = "0.37", features = ["bundled"] }

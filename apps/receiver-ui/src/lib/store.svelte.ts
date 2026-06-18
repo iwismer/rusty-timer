@@ -4,7 +4,6 @@
 import * as api from "./api";
 import type {
   LastRead,
-  RaceEntry,
   ReceiverMode,
   StatusResponse,
   StreamCountUpdate,
@@ -22,15 +21,7 @@ import {
 
 // --------------- Tab enum ---------------
 
-export type TabId =
-  | "streams"
-  | "forwarders"
-  | "announcer"
-  | "races"
-  | "mode"
-  | "config"
-  | "logs"
-  | "admin";
+export type TabId = "streams" | "mode" | "config" | "logs" | "admin";
 
 export type UpdateState = {
   status: "available" | "downloaded";
@@ -64,26 +55,15 @@ export const store = $state({
   forwarders: null as api.ForwarderEntry[] | null,
   forwardersError: null as string | null,
   selectedForwarderId: null as string | null,
-  forwarderRaceId: null as string | null,
-  forwarderRaceLoading: false,
-  forwarderRaceSaving: false,
-  forwarderRaceError: null as string | null,
-
-  // Races
-  selectedRaceId: null as string | null,
-  raceParticipants: null as api.ParticipantEntry[] | null,
-  raceUnmatchedChips: null as api.UnmatchedChip[] | null,
-  raceDetailLoading: false,
-  raceDetailError: null as string | null,
 
   // Logs
   logEntries: [] as string[],
 
   // Config (edit + saved for dirty detection)
-  editServerUrl: "",
+  editThinNodeUrl: "",
   editToken: "",
   editReceiverId: "",
-  savedServerUrl: "",
+  savedThinNodeUrl: "",
   savedToken: "",
   savedReceiverId: "",
   saving: false,
@@ -103,7 +83,6 @@ export const store = $state({
   updateState: null as UpdateState | null,
 
   // Mode
-  races: [] as RaceEntry[],
   modeDraft: "live" as ReceiverMode["mode"],
   raceIdDraft: "",
   earliestEpochInputs: {} as Record<string, string>,
@@ -120,20 +99,6 @@ export const store = $state({
   // Stream action state
   streamActionBusy: false,
   streamEventTypeBusy: {} as Record<string, boolean>,
-
-  // Reader control state (keyed by "forwarder_id/reader_ip")
-  readerInfos: new Map<string, api.ReaderInfo | null>(),
-  readerStates: new Map<string, api.ReaderConnectionState>(),
-  downloadProgress: new Map<
-    string,
-    {
-      state: api.DownloadState;
-      reads_received: number;
-      progress: number;
-      total: number;
-      error?: string;
-    }
-  >(),
 
   // UPS state (keyed by forwarder_id)
   upsState: new Map<
@@ -163,7 +128,7 @@ let tauriUnlistenFns: (() => void)[] = [];
 
 export function getConfigDirty(): boolean {
   return (
-    store.editServerUrl !== store.savedServerUrl ||
+    store.editThinNodeUrl !== store.savedThinNodeUrl ||
     store.editToken !== store.savedToken ||
     store.editReceiverId !== store.savedReceiverId
   );
@@ -214,8 +179,8 @@ function setUpdateState(
   };
 }
 
-export function setEditServerUrl(value: string): void {
-  store.editServerUrl = value;
+export function setEditThinNodeUrl(value: string): void {
+  store.editThinNodeUrl = value;
 }
 
 export function setEditToken(value: string): void {
@@ -259,7 +224,7 @@ export function streamIdentity(stream: {
 }
 
 /// Build a lookup from canonical stream identity to the live `StreamEntry`,
-/// used to translate canonical-keyed input maps back to legacy WS refs.
+/// used to translate canonical-keyed input maps back to display metadata refs.
 function streamsByIdentity(): Map<string, api.StreamEntry> {
   return new Map(
     (store.streams?.streams ?? []).map((s) => [streamIdentity(s), s]),
@@ -308,22 +273,6 @@ export function parseStreamKey(value: string): api.StreamRef | null {
   const reader_ip = value.slice(separator + 1).trim();
   if (!forwarder_id || !reader_ip) return null;
   return { forwarder_id, reader_ip };
-}
-
-function resolveReaderControlStreamKey(
-  streamId: string,
-  readerIp: string,
-): string | null {
-  const stream = store.streams?.streams.find(
-    (entry) => entry.stream_id === streamId && entry.reader_ip === readerIp,
-  );
-  if (!stream) {
-    console.warn(
-      `reader event for unknown stream_id=${streamId}, reader_ip=${readerIp}`,
-    );
-    return null;
-  }
-  return streamKey(stream.forwarder_id, stream.reader_ip);
 }
 
 export function parseNonNegativeInt(raw: unknown): number | null {
@@ -432,7 +381,7 @@ export function modePayload(): ReceiverMode {
   if (store.modeDraft === "race") {
     return { mode: "race", race_id: store.raceIdDraft.trim() };
   }
-  // The input maps are keyed by canonical stream identity. The legacy WS
+  // The input maps are keyed by canonical stream identity. The compatibility
   // `ReceiverMode` payload is keyed by (forwarder_id, reader_ip), so resolve
   // each input back to its stream and only emit streams that still carry real
   // legacy metadata (canonical-only streams are not representable here).
@@ -458,8 +407,8 @@ export function modePayload(): ReceiverMode {
       .filter((t): t is api.ReplayTarget => t !== null);
     return { mode: "targeted_replay", targets };
   }
-  // Legacy WS live mode is keyed by (forwarder_id, reader_ip); only include
-  // streams that expose real legacy metadata rather than fabricating refs from
+  // Compatibility live mode is keyed by (forwarder_id, reader_ip); only include
+  // streams that expose real display metadata rather than fabricating refs from
   // canonical identifiers.
   const liveStreams: api.StreamRef[] = (store.streams?.streams ?? [])
     .filter(
@@ -668,16 +617,6 @@ export function applyHydratedMode(mode: ReceiverMode): void {
   modeHydrationVersion += 1;
 }
 
-function syncSelectedForwarder(): void {
-  if (!store.selectedForwarderId || !store.forwarders) return;
-  const stillExists = store.forwarders.some(
-    (fwd) => fwd.forwarder_id === store.selectedForwarderId,
-  );
-  if (!stillExists) {
-    store.selectedForwarderId = null;
-  }
-}
-
 export function markModeEdited(): void {
   store.modeEditedSinceHydration = true;
   modeEditVersion += 1;
@@ -720,35 +659,20 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
     const modeEditVersionAtStart = modeEditVersion;
     const modeMutationVersionAtStart = modeMutationVersion;
     const streamRefreshVersionAtStart = streamRefreshVersion;
-    const [
-      nextStatus,
-      nextStreams,
-      nextLogs,
-      nextMode,
-      nextRaces,
-      nextForwarders,
-      nextMetrics,
-    ] = await Promise.all([
-      api.getStatus(),
-      api.getStreams(),
-      api.getLogs(),
-      api.getMode().catch(() => null),
-      api.getRaces().catch(() => null),
-      api
-        .getForwarders()
-        .then((forwarders) => ({ ok: true as const, forwarders }))
-        .catch((error: unknown) => ({
-          ok: false as const,
-          error: String(error),
-        })),
-      api.getStreamMetrics().catch((e: unknown) => {
-        console.warn(
-          "getStreamMetrics failed, will rely on real-time updates:",
-          e,
-        );
-        return [] as api.StreamMetrics[];
-      }),
-    ]);
+    const [nextStatus, nextStreams, nextLogs, nextMode, nextMetrics] =
+      await Promise.all([
+        api.getStatus(),
+        api.getStreams(),
+        api.getLogs(),
+        api.getMode().catch(() => null),
+        api.getStreamMetrics().catch((e: unknown) => {
+          console.warn(
+            "getStreamMetrics failed, will rely on real-time updates:",
+            e,
+          );
+          return [] as api.StreamMetrics[];
+        }),
+      ]);
 
     await loadDbfConfig();
 
@@ -769,28 +693,9 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
       store.streamMetrics = merged;
     }
     store.logEntries = nextLogs.entries;
-    if (nextRaces) {
-      const prevRaceId = store.raceIdDraft;
-      store.races = nextRaces.races;
-      if (
-        store.modeDraft === "race" &&
-        prevRaceId.length > 0 &&
-        store.races.some((r) => r.race_id === prevRaceId)
-      ) {
-        store.raceIdDraft = prevRaceId;
-      }
-    }
-    if (nextForwarders.ok) {
-      store.forwarders = nextForwarders.forwarders.forwarders;
-      pruneUpsStateForOnlineForwarders(store.forwarders);
-      store.forwardersError = null;
-      syncSelectedForwarder();
-    } else {
-      store.forwarders = null;
-      pruneUpsStateForOnlineForwarders(null);
-      store.forwardersError = nextForwarders.error;
-      store.selectedForwarderId = null;
-    }
+    store.forwarders = null;
+    store.forwardersError = null;
+    store.selectedForwarderId = null;
     if (
       options.forceHydrateMode ||
       (!getModeDirty() &&
@@ -808,12 +713,12 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
     const p = await api.getProfile().catch(() => null);
     if (p) {
       const configWasDirty = getConfigDirty();
-      store.savedServerUrl = p.server_url;
+      store.savedThinNodeUrl = p.server_url;
       store.savedToken = p.token;
       store.savedReceiverId = p.receiver_id;
       // Only overwrite edit fields if the user hasn't made unsaved changes.
       if (!configWasDirty) {
-        store.editServerUrl = p.server_url;
+        store.editThinNodeUrl = p.server_url;
         store.editToken = p.token;
         store.editReceiverId = p.receiver_id;
       }
@@ -825,105 +730,6 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
     if (loadAllQueued) {
       loadAllQueued = false;
       void loadAll();
-    }
-  }
-}
-
-export async function loadForwarders(): Promise<void> {
-  store.forwardersError = null;
-  try {
-    const result = await api.getForwarders();
-    store.forwarders = result.forwarders;
-    pruneUpsStateForOnlineForwarders(store.forwarders);
-    syncSelectedForwarder();
-  } catch (error) {
-    console.error("Failed to load forwarders:", error);
-    store.forwarders = null;
-    pruneUpsStateForOnlineForwarders(null);
-    store.forwardersError = String(error);
-    store.selectedForwarderId = null;
-  }
-}
-
-export function selectForwarder(forwarderId: string | null): void {
-  store.selectedForwarderId = forwarderId;
-  store.forwarderRaceId = null;
-  store.forwarderRaceLoading = false;
-  store.forwarderRaceSaving = false;
-  store.forwarderRaceError = null;
-  if (forwarderId) {
-    void loadForwarderRace(forwarderId);
-  }
-}
-
-export async function loadForwarderRace(forwarderId: string): Promise<void> {
-  store.forwarderRaceLoading = true;
-  store.forwarderRaceError = null;
-  try {
-    const result = await api.getForwarderRace(forwarderId);
-    if (store.selectedForwarderId === forwarderId) {
-      store.forwarderRaceId = result.race_id;
-    }
-  } catch (e) {
-    if (store.selectedForwarderId === forwarderId) {
-      store.forwarderRaceError = `Failed to load race assignment: ${String(e)}`;
-    }
-  } finally {
-    if (store.selectedForwarderId === forwarderId) {
-      store.forwarderRaceLoading = false;
-    }
-  }
-}
-
-export async function setForwarderRace(
-  forwarderId: string,
-  raceId: string | null,
-): Promise<void> {
-  store.forwarderRaceSaving = true;
-  store.forwarderRaceError = null;
-  try {
-    const result = await api.setForwarderRace(forwarderId, raceId);
-    if (store.selectedForwarderId === forwarderId) {
-      store.forwarderRaceId = result.race_id;
-    }
-  } catch (e) {
-    if (store.selectedForwarderId === forwarderId) {
-      store.forwarderRaceError = `Failed to save race assignment: ${String(e)}`;
-      void loadForwarderRace(forwarderId);
-    }
-  } finally {
-    if (store.selectedForwarderId === forwarderId) {
-      store.forwarderRaceSaving = false;
-    }
-  }
-}
-
-export function selectRace(raceId: string | null): void {
-  store.selectedRaceId = raceId;
-  store.raceParticipants = null;
-  store.raceUnmatchedChips = null;
-  store.raceDetailError = null;
-  if (raceId) {
-    void loadRaceDetail(raceId);
-  }
-}
-
-export async function loadRaceDetail(raceId: string): Promise<void> {
-  store.raceDetailLoading = true;
-  store.raceDetailError = null;
-  try {
-    const resp = await api.getParticipants(raceId);
-    if (store.selectedRaceId === raceId) {
-      store.raceParticipants = resp.participants;
-      store.raceUnmatchedChips = resp.chips_without_participant;
-    }
-  } catch (e) {
-    if (store.selectedRaceId === raceId) {
-      store.raceDetailError = String(e);
-    }
-  } finally {
-    if (store.selectedRaceId === raceId) {
-      store.raceDetailLoading = false;
     }
   }
 }
@@ -1063,7 +869,7 @@ export async function replayStream(stream: api.StreamEntry): Promise<void> {
     store.error = "Select a valid target epoch before replaying.";
     return;
   }
-  // Targeted replay is a legacy (forwarder_id, reader_ip)-keyed WS mode.
+  // Targeted replay still uses display metadata keyed by (forwarder_id, reader_ip).
   const { forwarder_id, reader_ip } = stream;
   if (forwarder_id == null || reader_ip == null) {
     store.error = "Stream is missing legacy metadata required for replay.";
@@ -1127,13 +933,13 @@ export async function replayAll(): Promise<void> {
 export async function saveProfile(): Promise<void> {
   store.saving = true;
   const payload = {
-    server_url: store.editServerUrl,
+    server_url: store.editThinNodeUrl,
     token: store.editToken,
     receiver_id: store.editReceiverId,
   };
   try {
     await api.putProfile(payload);
-    store.savedServerUrl = payload.server_url;
+    store.savedThinNodeUrl = payload.server_url;
     store.savedToken = payload.token;
     store.savedReceiverId = payload.receiver_id;
   } catch (e) {
@@ -1410,35 +1216,6 @@ export function initStore(): void {
       const next = new Map(store.streamMetrics);
       next.set(key, metrics);
       store.streamMetrics = next;
-    },
-    onReaderInfoUpdated: (payload) => {
-      const key = resolveReaderControlStreamKey(
-        payload.stream_id,
-        payload.reader_ip,
-      );
-      if (!key) return;
-      const nextInfos = new Map(store.readerInfos);
-      nextInfos.set(key, payload.reader_info);
-      store.readerInfos = nextInfos;
-      const nextStates = new Map(store.readerStates);
-      nextStates.set(key, payload.state);
-      store.readerStates = nextStates;
-    },
-    onReaderDownloadProgress: (payload) => {
-      const key = resolveReaderControlStreamKey(
-        payload.stream_id,
-        payload.reader_ip,
-      );
-      if (!key) return;
-      const next = new Map(store.downloadProgress);
-      next.set(key, {
-        state: payload.state,
-        reads_received: payload.reads_received,
-        progress: payload.progress,
-        total: payload.total,
-        error: payload.error ?? undefined,
-      });
-      store.downloadProgress = next;
     },
     onForwarderUpsUpdated: (payload) => {
       applyForwarderUpsUpdate(

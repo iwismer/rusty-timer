@@ -6,22 +6,26 @@ on:
     paths:
       - "**/*.rs"
       - "**/Cargo.toml"
+      - "**/*.md"
       - "Cargo.lock"
       - "rustfmt.toml"
       - "rust-toolchain.toml"
       - "scripts/e2e/**"
       - "scripts/tests/**"
+      - "scripts/validate-packaging.sh"
       - ".github/workflows/*.yml"
   pull_request:
     branches: [master]
     paths:
       - "**/*.rs"
       - "**/Cargo.toml"
+      - "**/*.md"
       - "Cargo.lock"
       - "rustfmt.toml"
       - "rust-toolchain.toml"
       - "scripts/e2e/**"
       - "scripts/tests/**"
+      - "scripts/validate-packaging.sh"
       - ".github/workflows/*.yml"
   workflow_dispatch:
 
@@ -59,6 +63,16 @@ jobs:
 
       - name: Run library tests
         run: cargo test --workspace --lib
+
+      - name: Run repository script tests
+        run: >-
+          python -m unittest
+          scripts/tests/test_cutover_cleanup.py
+          scripts/tests/test_release.py
+          scripts/tests/test_sbc_cloud_init.py
+
+      - name: Validate packaging layout
+        run: bash scripts/validate-packaging.sh
 
   receiver-windows-lib:
     name: Receiver library (Windows)
@@ -109,10 +123,8 @@ jobs:
 
       - name: Run no-Docker data-plane integration tests
         run: |
-          # T5.6 intentionally gates the new P2P data plane without Docker.
-          # Legacy server/Postgres/testcontainers coverage is out of this lane
-          # until cutover; receiver legacy WS/session tests are not part of the
-          # P2P seam surface and are intentionally not enumerated here.
+          # This lane gates the P2P data plane without Docker; browser-driven
+          # full-stack scenarios remain in the nightly E2E workflow.
           cargo test -p forwarder --tests
           cargo test -p receiver --test p2p_runtime
           cargo test -p receiver --test headless

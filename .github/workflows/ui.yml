@@ -31,7 +31,6 @@ jobs:
     outputs:
       forwarder-ui: ${{ steps.filter.outputs.forwarder-ui }}
       receiver-ui: ${{ steps.filter.outputs.receiver-ui }}
-      server-ui: ${{ steps.filter.outputs.server-ui }}
       shared-ui: ${{ steps.filter.outputs.shared-ui }}
     steps:
       - name: Checkout
@@ -49,11 +48,6 @@ jobs:
               - "package-lock.json"
             receiver-ui:
               - "apps/receiver-ui/**"
-              - "apps/shared-ui/**"
-              - "package.json"
-              - "package-lock.json"
-            server-ui:
-              - "apps/server-ui/**"
               - "apps/shared-ui/**"
               - "package.json"
               - "package-lock.json"
@@ -129,41 +123,6 @@ jobs:
       - name: Vitest
         run: npm test
         working-directory: apps/receiver-ui
-
-  server-ui:
-    name: Server UI Tests
-    needs: changes
-    if: needs.changes.outputs.server-ui == 'true'
-    runs-on: self-hosted
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Install Rollup Linux optional dependency workaround
-        if: runner.os == 'Linux'
-        run: npm install --no-save @rollup/rollup-linux-x64-gnu lightningcss-linux-x64-gnu @tailwindcss/oxide-linux-x64-gnu
-
-      - name: Prettier check
-        run: npm run lint
-        working-directory: apps/server-ui
-
-      - name: Svelte type check
-        run: npm run check
-        working-directory: apps/server-ui
-
-      - name: Vitest
-        run: npm test
-        working-directory: apps/server-ui
 
   shared-ui:
     name: Shared UI Tests

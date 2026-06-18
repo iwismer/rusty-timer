@@ -620,7 +620,7 @@
           status = {
             ...status,
             ready: data.ready,
-            uplink_connected: data.uplink_connected,
+            p2p_connected: data.p2p_connected,
             restart_needed: data.restart_needed,
           };
         }
@@ -796,11 +796,11 @@
         helpContext="forwarder"
       >
         <dl class="grid gap-2 text-sm" style="grid-template-columns: auto 1fr;">
-          <dt class="text-text-muted">Uplink</dt>
+          <dt class="text-text-muted">P2P</dt>
           <dd>
             <StatusBadge
-              label={status.uplink_connected ? "connected" : "disconnected"}
-              state={status.uplink_connected ? "ok" : "err"}
+              label={status.p2p_connected ? "connected" : "disconnected"}
+              state={status.p2p_connected ? "ok" : "err"}
             />
           </dd>
           <dt class="text-text-muted">Restart Needed</dt>

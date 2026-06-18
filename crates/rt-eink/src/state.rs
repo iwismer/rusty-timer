@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub struct DisplayState {
     pub forwarder_name: Option<String>,
     pub local_ip: Option<String>,
-    pub server_connected: bool,
+    pub p2p_connected: bool,
     pub readers: Vec<ReaderDisplayState>,
     pub total_reads: u64,
     pub cpu_temp_celsius: Option<f32>,
@@ -21,7 +21,7 @@ impl DisplayState {
         Self {
             forwarder_name: None,
             local_ip: None,
-            server_connected: false,
+            p2p_connected: false,
             readers: vec![],
             total_reads: 0,
             cpu_temp_celsius: None,
@@ -116,7 +116,7 @@ mod tests {
         assert_eq!(state.total_reads, 0);
         assert!(state.readers.is_empty());
         assert!(state.local_ip.is_none());
-        assert!(!state.server_connected);
+        assert!(!state.p2p_connected);
         assert!(state.cpu_temp_celsius.is_none());
         assert!(state.battery.is_none());
     }

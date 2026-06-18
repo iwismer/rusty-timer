@@ -7,10 +7,12 @@
 use crate::db::{DEFAULT_UPDATE_MODE, Db, StreamSubscription};
 use crate::error::ReceiverError;
 use crate::ui_events::ReceiverUiEvent;
-use rt_protocol::ReceiverMode;
+use rt_domain::ReceiverMode;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
+
+pub type ChipLookup = HashMap<String, HashMap<String, (String, String)>>;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
 use tracing::warn;
@@ -51,10 +53,7 @@ pub struct AppState {
     pub receiver_id: Arc<RwLock<String>>,
     pub db_integrity_ok: bool,
     pub http_client: reqwest::Client,
-    pub chip_lookup: Arc<tokio::sync::RwLock<crate::session::ChipLookup>>,
-    /// Channel for sending WS commands from Tauri handlers into the active session.
-    /// `None` when no session is active.
-    pub ws_cmd_tx: RwLock<Option<tokio::sync::mpsc::Sender<crate::session::WsCommand>>>,
+    pub chip_lookup: Arc<tokio::sync::RwLock<ChipLookup>>,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
     /// Monotonic counter incremented when DBF config changes; subscribers
@@ -101,8 +100,7 @@ impl AppState {
             receiver_id: Arc::new(RwLock::new(receiver_id)),
             db_integrity_ok,
             http_client,
-            chip_lookup: Arc::new(tokio::sync::RwLock::new(crate::session::ChipLookup::new())),
-            ws_cmd_tx: RwLock::new(None),
+            chip_lookup: Arc::new(tokio::sync::RwLock::new(ChipLookup::new())),
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
             dbf_config_version,
@@ -228,7 +226,7 @@ impl AppState {
         self.emit_connection_state_side_effects(new_state).await;
     }
 
-    /// Build the merged streams response from local subscriptions and upstream server.
+    /// Build the streams response from durable local subscriptions and cursors.
     pub async fn build_streams_response(&self) -> StreamsResponse {
         let counts_snapshot = self.stream_counts.snapshot();
         let db = self.db.lock().await;
@@ -255,73 +253,9 @@ impl AppState {
         let cursor_map: HashMap<&str, &crate::db::StreamCursorRecord> =
             cursors.iter().map(|c| (c.stream_id.as_str(), c)).collect();
 
-        let sub_map: HashMap<(&str, &str), &StreamSubscription> = subs
-            .iter()
-            .map(|s| ((s.forwarder_endpoint_id.as_str(), s.stream_id.as_str()), s))
-            .collect();
-
-        let upstream_url = self.upstream_url.read().await.clone();
-        let conn_state = self.connection_state.borrow().clone();
-
-        let (server_streams, upstream_error) = match (&upstream_url, &conn_state) {
-            (None, _) => (None, Some("no profile configured".to_owned())),
-            (_, cs) if *cs != ConnectionState::Connected => {
-                (None, Some(format!("connection state: {cs:?}")))
-            }
-            (Some(url), _) => match fetch_server_streams(&self.http_client, url).await {
-                Ok(streams) => (Some(streams), None),
-                Err(e) => {
-                    warn!(error = %e, "failed to fetch server streams");
-                    (None, Some(e))
-                }
-            },
-        };
-
         let mut streams: Vec<StreamEntry> = Vec::new();
-        let mut seen: HashSet<(String, String)> = HashSet::new();
-
-        if let Some(ref server_streams) = server_streams {
-            for si in server_streams {
-                let forwarder_endpoint_id = si.forwarder_id.clone();
-                let key = (forwarder_endpoint_id.clone(), si.stream_id.clone());
-                let local = sub_map.get(&(forwarder_endpoint_id.as_str(), si.stream_id.as_str()));
-                let port = local
-                    .and_then(|s| s.local_port_override)
-                    .or_else(|| crate::ports::default_port(&si.reader_ip));
-                let sk =
-                    crate::cache::StreamKey::new(si.forwarder_id.as_str(), si.reader_ip.as_str());
-                let counts = if local.is_some() {
-                    counts_snapshot.get(&sk)
-                } else {
-                    None
-                };
-                let cursor = cursor_map.get(si.stream_id.as_str());
-                streams.push(StreamEntry {
-                    forwarder_endpoint_id: forwarder_endpoint_id.clone(),
-                    stream_id: si.stream_id.clone(),
-                    forwarder_id: Some(si.forwarder_id.clone()),
-                    reader_ip: Some(si.reader_ip.clone()),
-                    subscribed: local.is_some(),
-                    local_port: port,
-                    event_type: local.map(|s| s.event_type),
-                    online: Some(si.online),
-                    reader_connected: Some(si.reader_connected),
-                    display_alias: si.display_alias.clone(),
-                    stream_epoch: Some(si.stream_epoch),
-                    current_epoch_name: si.current_epoch_name.clone(),
-                    reads_total: counts.as_ref().map(|c| c.total),
-                    reads_epoch: counts.as_ref().map(|c| c.epoch),
-                    cursor_epoch: cursor.and_then(|c| c.stream_epoch),
-                    cursor_seq: cursor.map(|c| c.last_seq),
-                });
-                seen.insert(key);
-            }
-        }
 
         for sub in &subs {
-            if seen.contains(&(sub.forwarder_endpoint_id.clone(), sub.stream_id.clone())) {
-                continue;
-            }
             let port = sub.local_port_override.or_else(|| {
                 sub.reader_ip
                     .as_deref()
@@ -356,12 +290,8 @@ impl AppState {
             });
         }
 
-        let degraded = upstream_error.is_some() || cursors_degraded;
-        let upstream_error = if cursors_degraded && upstream_error.is_none() {
-            Some("failed to load cursors".to_owned())
-        } else {
-            upstream_error
-        };
+        let degraded = cursors_degraded;
+        let upstream_error = cursors_degraded.then(|| "failed to load cursors".to_owned());
         StreamsResponse {
             streams,
             degraded,
@@ -524,323 +454,9 @@ pub struct ReplayTargetEpochsResponse {
     pub epochs: Vec<ReplayTargetEpochOption>,
 }
 
-#[derive(Debug, Deserialize)]
-struct UpstreamStreamEpochOption {
-    epoch: i64,
-    name: Option<String>,
-    first_event_at: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct UpstreamRacesResponse {
-    races: Vec<UpstreamRaceEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct UpstreamRaceEntry {
-    race_id: String,
-    name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct UpstreamRaceEpochMappingsResponse {
-    mappings: Vec<UpstreamRaceEpochMapping>,
-}
-
-#[derive(Debug, Deserialize)]
-struct UpstreamRaceEpochMapping {
-    stream_id: String,
-    stream_epoch: i64,
-}
-
-#[derive(Debug, Deserialize)]
-struct UpstreamRaceStreamMappingsResponse {
-    mappings: Vec<UpstreamRaceStreamMapping>,
-}
-
-#[derive(Debug, Deserialize)]
-struct UpstreamRaceStreamMapping {
-    forwarder_id: String,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EventTypeRequest {
     pub event_type: crate::db::EventType,
-}
-
-// ---------------------------------------------------------------------------
-// Server stream fetching helpers
-// ---------------------------------------------------------------------------
-
-/// Response shape from the server's `GET /api/v1/streams`.
-#[derive(Debug, Deserialize)]
-struct ServerStreamsResponse {
-    streams: Vec<UpstreamStreamInfo>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UpstreamStreamInfo {
-    pub stream_id: String,
-    pub forwarder_id: String,
-    pub reader_ip: String,
-    pub display_alias: Option<String>,
-    pub stream_epoch: i64,
-    pub online: bool,
-    #[serde(default)]
-    pub reader_connected: bool,
-    pub current_epoch_name: Option<String>,
-}
-
-/// Normalize a server URL by prepending `ws://` if no scheme is present.
-/// Use `wss://` explicitly in the URL for a TLS connection.
-pub fn normalize_server_url(raw: &str) -> String {
-    let trimmed = raw.trim().trim_end_matches('/');
-    if trimmed.starts_with("ws://") || trimmed.starts_with("wss://") {
-        trimmed.to_owned()
-    } else {
-        format!("ws://{trimmed}")
-    }
-}
-
-/// Derive the HTTP base URL from the stored server base URL.
-///
-/// `ws://host:port`  -> `http://host:port`
-/// `wss://host:port` -> `https://host:port`
-pub fn http_base_url(base_url: &str) -> Option<String> {
-    let url = reqwest::Url::parse(base_url).ok()?;
-    let scheme = match url.scheme() {
-        "ws" => "http",
-        "wss" => "https",
-        _ => return None,
-    };
-    let host = url.host_str()?;
-    match url.port() {
-        Some(port) => Some(format!("{scheme}://{host}:{port}")),
-        None => Some(format!("{scheme}://{host}")),
-    }
-}
-
-/// Fetch available streams from the upstream server.
-pub async fn fetch_server_streams(
-    client: &reqwest::Client,
-    ws_url: &str,
-) -> Result<Vec<UpstreamStreamInfo>, String> {
-    let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
-    let url = format!("{base}/api/v1/streams");
-
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("fetch failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("server returned {}", resp.status()));
-    }
-
-    let body: ServerStreamsResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("invalid JSON: {e}"))?;
-
-    Ok(body.streams)
-}
-
-/// Flat chip_id -> (bib, name) map for a single race.
-type FlatChipMap = HashMap<String, (String, String)>;
-
-/// Parse a participants JSON response into a flat chip_id -> (bib, name) map.
-fn parse_participants(body: &serde_json::Value) -> FlatChipMap {
-    let mut map = FlatChipMap::new();
-    if let Some(participants) = body.get("participants").and_then(|v| v.as_array()) {
-        for p in participants {
-            let bib = match p.get("bib").and_then(|v| v.as_i64()) {
-                Some(b) => b.to_string(),
-                None => {
-                    tracing::debug!("skipping participant without bib field");
-                    continue;
-                }
-            };
-            let first = p.get("first_name").and_then(|v| v.as_str()).unwrap_or("");
-            let last = p.get("last_name").and_then(|v| v.as_str()).unwrap_or("");
-            let name = format!("{first} {last}").trim().to_owned();
-
-            if let Some(chip_ids) = p.get("chip_ids").and_then(|v| v.as_array()) {
-                for chip_val in chip_ids {
-                    if let Some(chip_id) = chip_val.as_str() {
-                        map.insert(chip_id.to_owned(), (bib.clone(), name.clone()));
-                    }
-                }
-            }
-        }
-    }
-    map
-}
-
-/// Fetch a flat chip map for a single race from the upstream server.
-async fn fetch_race_chips(
-    client: &reqwest::Client,
-    base: &str,
-    token: &str,
-    race_id: &str,
-) -> Result<FlatChipMap, String> {
-    let url = format!("{base}/api/v1/races/{race_id}/participants");
-    let resp = client
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| format!("fetch participants failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("server returned {}", resp.status()));
-    }
-
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("invalid JSON: {e}"))?;
-
-    Ok(parse_participants(&body))
-}
-
-/// Build a per-forwarder chip lookup for Race mode.  All forwarders that
-/// sent the receiver a hello for the given race share the same chip map.
-pub async fn fetch_chip_lookup_for_race(
-    client: &reqwest::Client,
-    ws_url: &str,
-    token: &str,
-    race_id: &str,
-    forwarder_ids: &[String],
-) -> Result<crate::session::ChipLookup, String> {
-    let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
-    let chips = fetch_race_chips(client, &base, token, race_id).await?;
-    let mut lookup = crate::session::ChipLookup::new();
-    for fwd in forwarder_ids {
-        lookup.insert(fwd.clone(), chips.clone());
-    }
-    Ok(lookup)
-}
-
-pub async fn fetch_forwarder_ids_for_race(
-    client: &reqwest::Client,
-    ws_url: &str,
-    token: &str,
-    race_id: &str,
-) -> Result<Vec<String>, String> {
-    let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
-    let url = format!("{base}/api/v1/races/{race_id}/stream-epochs");
-    let resp = client
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| format!("fetch race stream mappings failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("server returned {}", resp.status()));
-    }
-
-    let body: UpstreamRaceStreamMappingsResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("invalid race stream mappings JSON: {e}"))?;
-
-    let mut forwarder_ids: Vec<String> = body
-        .mappings
-        .into_iter()
-        .map(|mapping| mapping.forwarder_id)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    forwarder_ids.sort();
-    Ok(forwarder_ids)
-}
-
-/// Build a per-forwarder chip lookup for Live mode by querying the server's
-/// `forwarder_races` assignments.  Only forwarders with an assigned race get
-/// entries; reads from unassigned forwarders will not be enriched.
-pub async fn fetch_chip_lookup_for_forwarders(
-    client: &reqwest::Client,
-    ws_url: &str,
-    token: &str,
-    forwarder_ids: &[String],
-) -> Result<crate::session::ChipLookup, String> {
-    if forwarder_ids.is_empty() {
-        return Ok(crate::session::ChipLookup::new());
-    }
-
-    let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
-
-    // Fetch all forwarder->race assignments in one call.
-    let url = format!("{base}/api/v1/forwarder-races");
-    let resp = client
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| format!("fetch forwarder-races failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("server returned {}", resp.status()));
-    }
-
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("invalid forwarder-races JSON: {e}"))?;
-
-    // Build forwarder_id -> race_id mapping for our subscribed forwarders.
-    let forwarder_set: std::collections::HashSet<&str> =
-        forwarder_ids.iter().map(|s| s.as_str()).collect();
-    let mut fwd_to_race: HashMap<String, String> = HashMap::new();
-
-    if let Some(assignments) = body.get("assignments").and_then(|v| v.as_array()) {
-        for a in assignments {
-            let fwd = a.get("forwarder_id").and_then(|v| v.as_str()).unwrap_or("");
-            if forwarder_set.contains(fwd)
-                && let Some(rid) = a.get("race_id").and_then(|v| v.as_str())
-            {
-                fwd_to_race.insert(fwd.to_owned(), rid.to_owned());
-            }
-        }
-    }
-
-    // Fetch participants per unique race, caching to avoid duplicate requests.
-    let mut race_chips: HashMap<String, FlatChipMap> = HashMap::new();
-    for race_id in fwd_to_race.values() {
-        if !race_chips.contains_key(race_id) {
-            let url = format!("{base}/api/v1/races/{race_id}/participants");
-            let chips = match client.get(&url).bearer_auth(token).send().await {
-                Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
-                    Ok(b) => parse_participants(&b),
-                    Err(e) => {
-                        warn!(race_id = %race_id, error = %e, "failed to parse participants JSON for chip lookup");
-                        FlatChipMap::new()
-                    }
-                },
-                Ok(r) => {
-                    warn!(race_id = %race_id, status = %r.status(), "failed to fetch participants for chip lookup");
-                    FlatChipMap::new()
-                }
-                Err(e) => {
-                    warn!(race_id = %race_id, error = %e, "HTTP request failed for participants chip lookup");
-                    FlatChipMap::new()
-                }
-            };
-            race_chips.insert(race_id.clone(), chips);
-        }
-    }
-
-    // Build the per-forwarder lookup.
-    let mut lookup = crate::session::ChipLookup::new();
-    for (fwd, race_id) in &fwd_to_race {
-        if let Some(chips) = race_chips.get(race_id) {
-            lookup.insert(fwd.clone(), chips.clone());
-        }
-    }
-
-    Ok(lookup)
 }
 
 // ---------------------------------------------------------------------------
@@ -871,7 +487,7 @@ pub async fn get_mode(state: &AppState) -> Result<ReceiverMode, ReceiverError> {
 }
 
 pub async fn put_profile(state: &AppState, body: ProfileRequest) -> Result<(), ReceiverError> {
-    let url = normalize_server_url(&body.server_url);
+    let url = body.server_url.trim().trim_end_matches('/').to_owned();
 
     let new_receiver_id = body
         .receiver_id
@@ -976,721 +592,26 @@ pub async fn get_stream_metrics(state: &AppState) -> Vec<crate::ui_events::Strea
     state.get_stream_metrics_snapshot().await
 }
 
-// ---------------------------------------------------------------------------
-// Race management (via WS proxy session)
-// ---------------------------------------------------------------------------
-
-pub async fn get_races(state: &AppState) -> Result<serde_json::Value, ReceiverError> {
-    let msg = rt_protocol::WsMessage::ReceiverProxyRacesListRequest(
-        rt_protocol::ReceiverProxyRacesListRequest {
-            request_id: generate_request_id(),
-        },
-    );
-    let response = send_ws_command(state, msg).await?;
-    match response {
-        rt_protocol::WsMessage::ReceiverProxyRacesListResponse(r) => {
-            if !r.ok {
-                return Err(ReceiverError::UpstreamError(
-                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
-                ));
-            }
-            Ok(serde_json::json!({ "races": r.races }))
-        }
-        _ => Err(ReceiverError::UpstreamError(
-            "unexpected response type".to_owned(),
-        )),
-    }
-}
-
-pub async fn create_race(
-    state: &AppState,
-    name: String,
-) -> Result<serde_json::Value, ReceiverError> {
-    let msg = rt_protocol::WsMessage::ReceiverProxyRaceCreateRequest(
-        rt_protocol::ReceiverProxyRaceCreateRequest {
-            request_id: generate_request_id(),
-            name,
-        },
-    );
-    let response = send_ws_command(state, msg).await?;
-    match response {
-        rt_protocol::WsMessage::ReceiverProxyRaceCreateResponse(r) => {
-            if !r.ok {
-                return Err(ReceiverError::UpstreamError(
-                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
-                ));
-            }
-            match r.race {
-                Some(race) => Ok(serde_json::json!(race)),
-                None => Err(ReceiverError::UpstreamError(
-                    "server returned success but no race data".to_owned(),
-                )),
-            }
-        }
-        _ => Err(ReceiverError::UpstreamError(
-            "unexpected response type".to_owned(),
-        )),
-    }
-}
-
-pub async fn delete_race(state: &AppState, race_id: String) -> Result<(), ReceiverError> {
-    let msg = rt_protocol::WsMessage::ReceiverProxyRaceDeleteRequest(
-        rt_protocol::ReceiverProxyRaceDeleteRequest {
-            request_id: generate_request_id(),
-            race_id,
-        },
-    );
-    let response = send_ws_command(state, msg).await?;
-    match response {
-        rt_protocol::WsMessage::ReceiverProxyRaceDeleteResponse(r) => {
-            if !r.ok {
-                return Err(ReceiverError::UpstreamError(
-                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
-                ));
-            }
-            Ok(())
-        }
-        _ => Err(ReceiverError::UpstreamError(
-            "unexpected response type".to_owned(),
-        )),
-    }
-}
-
-pub async fn get_participants(
-    state: &AppState,
-    race_id: String,
-) -> Result<serde_json::Value, ReceiverError> {
-    let msg = rt_protocol::WsMessage::ReceiverProxyParticipantsGetRequest(
-        rt_protocol::ReceiverProxyParticipantsGetRequest {
-            request_id: generate_request_id(),
-            race_id,
-        },
-    );
-    let response = send_ws_command(state, msg).await?;
-    match response {
-        rt_protocol::WsMessage::ReceiverProxyParticipantsGetResponse(r) => {
-            if !r.ok {
-                return Err(ReceiverError::UpstreamError(
-                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
-                ));
-            }
-            Ok(serde_json::json!({
-                "participants": r.participants,
-                "chips_without_participant": r.chips_without_participant,
-            }))
-        }
-        _ => Err(ReceiverError::UpstreamError(
-            "unexpected response type".to_owned(),
-        )),
-    }
-}
-
-pub async fn upload_race_file(
-    state: &AppState,
-    race_id: String,
-    upload_type: String,
-    file_data: String,
-    file_name: String,
-) -> Result<serde_json::Value, ReceiverError> {
-    let upload_type_enum = match upload_type.as_str() {
-        "participants" => rt_protocol::UploadType::Participants,
-        "chips" => rt_protocol::UploadType::Chips,
-        other => {
-            return Err(ReceiverError::BadRequest(format!(
-                "invalid upload_type: {other}, expected 'participants' or 'chips'"
-            )));
-        }
-    };
-    let msg = rt_protocol::WsMessage::ReceiverProxyFileUploadRequest(
-        rt_protocol::ReceiverProxyFileUploadRequest {
-            request_id: generate_request_id(),
-            race_id,
-            upload_type: upload_type_enum,
-            file_data,
-            file_name,
-        },
-    );
-    let response = send_ws_command(state, msg).await?;
-    match response {
-        rt_protocol::WsMessage::ReceiverProxyFileUploadResponse(r) => {
-            if !r.ok {
-                return Err(ReceiverError::UpstreamError(
-                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
-                ));
-            }
-            Ok(serde_json::json!({ "imported": r.imported }))
-        }
-        _ => Err(ReceiverError::UpstreamError(
-            "unexpected response type".to_owned(),
-        )),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Forwarder list (via HTTP to server) + proxy commands (via WS session:
-// config, restart, device control, race assignment) + shared proxy helpers
-// ---------------------------------------------------------------------------
-
-/// Generate a process-unique request ID for WS proxy commands.
-fn generate_request_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("req-{ts}-{seq}")
-}
-
-pub async fn get_forwarders(state: &AppState) -> Result<serde_json::Value, ReceiverError> {
-    let profile = {
-        let db = state.db.lock().await;
-        match db.load_profile() {
-            Ok(Some(p)) => p,
-            Ok(None) => return Err(ReceiverError::NotFound("no profile".to_owned())),
-            Err(e) => return Err(ReceiverError::Internal(e.to_string())),
-        }
-    };
-
-    let Some(base) = http_base_url(&profile.server_url) else {
-        return Err(ReceiverError::BadRequest("invalid upstream URL".to_owned()));
-    };
-    let url = format!("{base}/api/v1/forwarders");
-
-    let response = match state
-        .http_client
-        .get(&url)
-        .bearer_auth(profile.token)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return Err(ReceiverError::UpstreamError(format!("fetch failed: {e}")));
-        }
-    };
-
-    if !response.status().is_success() {
-        return Err(ReceiverError::UpstreamError(format!(
-            "server returned {}",
-            response.status()
-        )));
-    }
-
-    match response.json::<serde_json::Value>().await {
-        Ok(body) => Ok(body),
-        Err(e) => Err(ReceiverError::UpstreamError(format!(
-            "invalid JSON from upstream: {e}"
-        ))),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Announcer proxy (WS → server)
-// ---------------------------------------------------------------------------
-
-pub async fn get_server_streams(state: &AppState) -> Result<serde_json::Value, ReceiverError> {
-    let msg = rt_protocol::WsMessage::ReceiverProxyStreamsListRequest(
-        rt_protocol::ReceiverProxyStreamsListRequest {
-            request_id: generate_request_id(),
-        },
-    );
-    let response = send_ws_command(state, msg).await?;
-    match response {
-        rt_protocol::WsMessage::ReceiverProxyStreamsListResponse(r) => {
-            if !r.ok {
-                return Err(ReceiverError::UpstreamError(
-                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
-                ));
-            }
-            // Wrap in {"streams": [...]} to match the HTTP API shape expected by the frontend
-            let streams_json = serde_json::to_value(&r.streams).map_err(|e| {
-                ReceiverError::UpstreamError(format!("failed to serialize streams: {e}"))
-            })?;
-            Ok(serde_json::json!({ "streams": streams_json }))
-        }
-        _ => Err(ReceiverError::UpstreamError(
-            "unexpected response type".to_owned(),
-        )),
-    }
-}
-
-pub async fn get_announcer_config(state: &AppState) -> Result<serde_json::Value, ReceiverError> {
-    let msg = rt_protocol::WsMessage::ReceiverProxyAnnouncerConfigGetRequest(
-        rt_protocol::ReceiverProxyAnnouncerConfigGetRequest {
-            request_id: generate_request_id(),
-        },
-    );
-    let response = send_ws_command(state, msg).await?;
-    match response {
-        rt_protocol::WsMessage::ReceiverProxyAnnouncerConfigResponse(r) => {
-            if !r.ok {
-                return Err(ReceiverError::UpstreamError(
-                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
-                ));
-            }
-            Ok(r.config)
-        }
-        _ => Err(ReceiverError::UpstreamError(
-            "unexpected response type".to_owned(),
-        )),
-    }
-}
-
-pub async fn put_announcer_config(
-    state: &AppState,
-    body: serde_json::Value,
-) -> Result<serde_json::Value, ReceiverError> {
-    let msg = rt_protocol::WsMessage::ReceiverProxyAnnouncerConfigSetRequest(
-        rt_protocol::ReceiverProxyAnnouncerConfigSetRequest {
-            request_id: generate_request_id(),
-            payload: body,
-        },
-    );
-    let response = send_ws_command(state, msg).await?;
-    match response {
-        rt_protocol::WsMessage::ReceiverProxyAnnouncerConfigResponse(r) => {
-            if !r.ok {
-                return Err(ReceiverError::UpstreamError(
-                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
-                ));
-            }
-            Ok(r.config)
-        }
-        _ => Err(ReceiverError::UpstreamError(
-            "unexpected response type".to_owned(),
-        )),
-    }
-}
-
-pub async fn reset_announcer(state: &AppState) -> Result<(), ReceiverError> {
-    let msg = rt_protocol::WsMessage::ReceiverProxyAnnouncerResetRequest(
-        rt_protocol::ReceiverProxyAnnouncerResetRequest {
-            request_id: generate_request_id(),
-        },
-    );
-    let response = send_ws_command(state, msg).await?;
-    match response {
-        rt_protocol::WsMessage::ReceiverProxyAnnouncerResetResponse(r) => {
-            if !r.ok {
-                return Err(ReceiverError::UpstreamError(
-                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
-                ));
-            }
-            Ok(())
-        }
-        _ => Err(ReceiverError::UpstreamError(
-            "unexpected response type".to_owned(),
-        )),
-    }
-}
-
-pub async fn get_forwarder_race(
-    state: &AppState,
-    forwarder_id: String,
-) -> Result<serde_json::Value, ReceiverError> {
-    let msg = rt_protocol::WsMessage::ReceiverProxyForwarderRaceGetRequest(
-        rt_protocol::ReceiverProxyForwarderRaceGetRequest {
-            request_id: generate_request_id(),
-            forwarder_id: forwarder_id.clone(),
-        },
-    );
-    let response = send_ws_command(state, msg).await?;
-    match response {
-        rt_protocol::WsMessage::ReceiverProxyForwarderRaceGetResponse(r) => {
-            if !r.ok {
-                return Err(ReceiverError::UpstreamError(
-                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
-                ));
-            }
-            Ok(serde_json::json!({
-                "forwarder_id": r.forwarder_id,
-                "race_id": r.race_id,
-            }))
-        }
-        _ => Err(ReceiverError::UpstreamError(
-            "unexpected response type".to_owned(),
-        )),
-    }
-}
-
-pub async fn set_forwarder_race(
-    state: &AppState,
-    forwarder_id: String,
-    race_id: Option<String>,
-) -> Result<serde_json::Value, ReceiverError> {
-    let msg = rt_protocol::WsMessage::ReceiverProxyForwarderRaceSetRequest(
-        rt_protocol::ReceiverProxyForwarderRaceSetRequest {
-            request_id: generate_request_id(),
-            forwarder_id: forwarder_id.clone(),
-            race_id,
-        },
-    );
-    let response = send_ws_command(state, msg).await?;
-    match response {
-        rt_protocol::WsMessage::ReceiverProxyForwarderRaceSetResponse(r) => {
-            if !r.ok {
-                return Err(ReceiverError::UpstreamError(
-                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
-                ));
-            }
-            Ok(serde_json::json!({
-                "forwarder_id": r.forwarder_id,
-                "race_id": r.race_id,
-            }))
-        }
-        _ => Err(ReceiverError::UpstreamError(
-            "unexpected response type".to_owned(),
-        )),
-    }
-}
-
-/// Send a WS command through the active session and wait for a response.
-///
-/// Uses a 25s timeout. For forwarder proxy requests, the server applies a 10s
-/// `PROXY_TIMEOUT` to both send and reply phases independently, so the server's
-/// total timeout can reach ~20s in degenerate cases. Reader control requests
-/// use a dedicated proxy path in `ws_receiver.rs::proxy_reader_control_reply`
-/// with its own 10s timeout per phase, consistent with but separate from the
-/// `forwarder_proxy.rs` implementation. Non-forwarder proxy requests (announcer,
-/// stream-list, race management) are handled server-side with no explicit
-/// timeout beyond the database query time.
-async fn send_ws_command(
-    state: &AppState,
-    message: rt_protocol::WsMessage,
-) -> Result<rt_protocol::WsMessage, ReceiverError> {
-    let tx = {
-        let guard = state.ws_cmd_tx.read().await;
-        guard
-            .clone()
-            .ok_or_else(|| ReceiverError::NotConnected("no active WS session".to_owned()))?
-    };
-
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let cmd = crate::session::WsCommand::new(message, reply_tx).map_err(|_| {
-        ReceiverError::Internal("send_ws_command called with non-proxy message".to_owned())
-    })?;
-
-    tx.send(cmd)
-        .await
-        .map_err(|_| ReceiverError::NotConnected("WS session closed".to_owned()))?;
-
-    let reply = tokio::time::timeout(std::time::Duration::from_secs(25), reply_rx)
-        .await
-        .map_err(|_| ReceiverError::UpstreamError("upstream response timeout (25s)".to_owned()))?
-        .map_err(|_| ReceiverError::UpstreamError("session closed before reply".to_owned()))?;
-
-    // Surface structured errors from the session loop (e.g. WS_SEND_FAILED,
-    // SERIALIZE_ERROR, SESSION_CLOSED) instead of falling through to the
-    // caller's catch-all "unexpected response type" branch.
-    if let rt_protocol::WsMessage::Error(err) = reply {
-        return if err.retryable {
-            Err(ReceiverError::NotConnected(err.message))
-        } else {
-            Err(ReceiverError::UpstreamError(err.message))
-        };
-    }
-
-    Ok(reply)
-}
-
-pub async fn get_forwarder_config(
-    state: &AppState,
-    forwarder_id: String,
-) -> Result<serde_json::Value, ReceiverError> {
-    let msg = rt_protocol::WsMessage::ReceiverProxyConfigGetRequest(
-        rt_protocol::ReceiverProxyConfigGetRequest {
-            request_id: generate_request_id(),
-            forwarder_id,
-        },
-    );
-    let response = send_ws_command(state, msg).await?;
-    match response {
-        rt_protocol::WsMessage::ReceiverProxyConfigGetResponse(r) => Ok(serde_json::json!({
-            "ok": r.ok,
-            "error": r.error,
-            "config": r.config,
-            "restart_needed": r.restart_needed,
-        })),
-        _ => Err(ReceiverError::UpstreamError(
-            "unexpected response type".to_owned(),
-        )),
-    }
-}
-
-pub async fn set_forwarder_config(
-    state: &AppState,
-    forwarder_id: String,
-    section: String,
-    data: serde_json::Value,
-) -> Result<serde_json::Value, ReceiverError> {
-    let msg = rt_protocol::WsMessage::ReceiverProxyConfigSetRequest(
-        rt_protocol::ReceiverProxyConfigSetRequest {
-            request_id: generate_request_id(),
-            forwarder_id,
-            section,
-            payload: data,
-        },
-    );
-    let response = send_ws_command(state, msg).await?;
-    match response {
-        rt_protocol::WsMessage::ReceiverProxyConfigSetResponse(r) => Ok(serde_json::json!({
-            "ok": r.ok,
-            "error": r.error,
-            "restart_needed": r.restart_needed,
-        })),
-        _ => Err(ReceiverError::UpstreamError(
-            "unexpected response type".to_owned(),
-        )),
-    }
-}
-
-pub async fn restart_forwarder_service(
-    state: &AppState,
-    forwarder_id: String,
-) -> Result<serde_json::Value, ReceiverError> {
-    let msg = rt_protocol::WsMessage::ReceiverProxyRestartRequest(
-        rt_protocol::ReceiverProxyRestartRequest {
-            request_id: generate_request_id(),
-            forwarder_id,
-        },
-    );
-    let response = send_ws_command(state, msg).await?;
-    match response {
-        rt_protocol::WsMessage::ReceiverProxyControlResponse(r) => Ok(serde_json::json!({
-            "ok": r.ok,
-            "error": r.error,
-        })),
-        _ => Err(ReceiverError::UpstreamError(
-            "unexpected response type".to_owned(),
-        )),
-    }
-}
-
-pub async fn restart_forwarder_device(
-    state: &AppState,
-    forwarder_id: String,
-) -> Result<serde_json::Value, ReceiverError> {
-    let msg = rt_protocol::WsMessage::ReceiverProxyDeviceControlRequest(
-        rt_protocol::ReceiverProxyDeviceControlRequest {
-            request_id: generate_request_id(),
-            forwarder_id,
-            action: rt_protocol::DeviceControlAction::RestartDevice,
-        },
-    );
-    let response = send_ws_command(state, msg).await?;
-    match response {
-        rt_protocol::WsMessage::ReceiverProxyControlResponse(r) => Ok(serde_json::json!({
-            "ok": r.ok,
-            "error": r.error,
-        })),
-        _ => Err(ReceiverError::UpstreamError(
-            "unexpected response type".to_owned(),
-        )),
-    }
-}
-
-pub async fn shutdown_forwarder_device(
-    state: &AppState,
-    forwarder_id: String,
-) -> Result<serde_json::Value, ReceiverError> {
-    let msg = rt_protocol::WsMessage::ReceiverProxyDeviceControlRequest(
-        rt_protocol::ReceiverProxyDeviceControlRequest {
-            request_id: generate_request_id(),
-            forwarder_id,
-            action: rt_protocol::DeviceControlAction::ShutdownDevice,
-        },
-    );
-    let response = send_ws_command(state, msg).await?;
-    match response {
-        rt_protocol::WsMessage::ReceiverProxyControlResponse(r) => Ok(serde_json::json!({
-            "ok": r.ok,
-            "error": r.error,
-        })),
-        _ => Err(ReceiverError::UpstreamError(
-            "unexpected response type".to_owned(),
-        )),
-    }
-}
-
 pub async fn get_replay_target_epochs(
     state: &AppState,
     forwarder_id: String,
     reader_ip: String,
 ) -> Result<ReplayTargetEpochsResponse, ReceiverError> {
-    let profile = {
-        let db = state.db.lock().await;
-        match db.load_profile() {
-            Ok(Some(p)) => p,
-            Ok(None) => return Err(ReceiverError::NotFound("no profile".to_owned())),
-            Err(e) => return Err(ReceiverError::Internal(e.to_string())),
-        }
-    };
-
-    let Some(base) = http_base_url(&profile.server_url) else {
-        return Err(ReceiverError::BadRequest("invalid upstream URL".to_owned()));
-    };
-
-    let streams_url = format!("{base}/api/v1/streams");
-    let streams_response = match state
-        .http_client
-        .get(&streams_url)
-        .bearer_auth(&profile.token)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return Err(ReceiverError::UpstreamError(format!("fetch failed: {e}")));
-        }
-    };
-    if !streams_response.status().is_success() {
-        return Err(ReceiverError::UpstreamError(format!(
-            "upstream streams returned {}",
-            streams_response.status()
-        )));
-    }
-    let upstream_streams = match streams_response.json::<ServerStreamsResponse>().await {
-        Ok(body) => body.streams,
-        Err(e) => {
-            return Err(ReceiverError::UpstreamError(format!(
-                "invalid streams JSON from upstream: {e}"
-            )));
-        }
-    };
-    let Some(stream) = upstream_streams
-        .iter()
-        .find(|stream| stream.forwarder_id == forwarder_id && stream.reader_ip == reader_ip)
-    else {
-        return Err(ReceiverError::NotFound("stream not found".to_owned()));
-    };
-
-    let epochs_url = format!("{base}/api/v1/streams/{}/epochs", stream.stream_id);
-    let epochs_response = match state
-        .http_client
-        .get(&epochs_url)
-        .bearer_auth(&profile.token)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return Err(ReceiverError::UpstreamError(format!("fetch failed: {e}")));
-        }
-    };
-    if !epochs_response.status().is_success() {
-        return Err(ReceiverError::UpstreamError(format!(
-            "upstream epochs returned {}",
-            epochs_response.status()
-        )));
-    }
-    let upstream_epochs = match epochs_response
-        .json::<Vec<UpstreamStreamEpochOption>>()
-        .await
-    {
-        Ok(body) => body,
-        Err(e) => {
-            return Err(ReceiverError::UpstreamError(format!(
-                "invalid epochs JSON from upstream: {e}"
-            )));
-        }
-    };
-
-    let races_url = format!("{base}/api/v1/races");
-    let races_response = match state
-        .http_client
-        .get(&races_url)
-        .bearer_auth(&profile.token)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return Err(ReceiverError::UpstreamError(format!("fetch failed: {e}")));
-        }
-    };
-    if !races_response.status().is_success() {
-        return Err(ReceiverError::UpstreamError(format!(
-            "upstream races returned {}",
-            races_response.status()
-        )));
-    }
-    let races = match races_response.json::<UpstreamRacesResponse>().await {
-        Ok(body) => body.races,
-        Err(e) => {
-            return Err(ReceiverError::UpstreamError(format!(
-                "invalid races JSON from upstream: {e}"
-            )));
-        }
-    };
-
-    let race_mapping_fetches = races.iter().map(|race| {
-        let client = state.http_client.clone();
-        let base = base.clone();
-        let token = profile.token.clone();
-        let race_id = race.race_id.clone();
-        let race_name = race.name.clone();
-        async move {
-            let mappings_url = format!("{base}/api/v1/races/{race_id}/stream-epochs");
-            let mappings_response = match client.get(&mappings_url).bearer_auth(&token).send().await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    return Err(format!("fetch failed: {e}"));
-                }
-            };
-            if !mappings_response.status().is_success() {
-                return Err(format!(
-                    "upstream stream-epochs for race {} returned {}",
-                    race_id,
-                    mappings_response.status()
-                ));
-            }
-            let mappings = match mappings_response
-                .json::<UpstreamRaceEpochMappingsResponse>()
-                .await
-            {
-                Ok(body) => body.mappings,
-                Err(e) => {
-                    return Err(format!("invalid stream-epochs JSON from upstream: {e}"));
-                }
-            };
-            Ok((race_name, mappings))
-        }
-    });
-
-    let race_mappings = futures_util::future::join_all(race_mapping_fetches).await;
-    let mut race_names_by_epoch: HashMap<i64, BTreeSet<String>> = HashMap::new();
-    for race_mappings_result in race_mappings {
-        let (race_name, mappings) = match race_mappings_result {
-            Ok(value) => value,
-            Err(message) => return Err(ReceiverError::UpstreamError(message)),
-        };
-        for mapping in mappings {
-            if mapping.stream_id == stream.stream_id {
-                race_names_by_epoch
-                    .entry(mapping.stream_epoch)
-                    .or_default()
-                    .insert(race_name.clone());
-            }
-        }
-    }
-
-    let epochs = upstream_epochs
-        .into_iter()
-        .map(|epoch| ReplayTargetEpochOption {
-            stream_epoch: epoch.epoch,
-            name: epoch.name,
-            first_seen_at: epoch.first_event_at,
-            race_names: race_names_by_epoch
-                .remove(&epoch.epoch)
-                .map_or_else(Vec::new, |names| names.into_iter().collect()),
-        })
-        .collect();
-
-    Ok(ReplayTargetEpochsResponse { epochs })
+    let db = state.db.lock().await;
+    let rows = db
+        .load_replay_target_epochs(&forwarder_id, &reader_ip)
+        .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    Ok(ReplayTargetEpochsResponse {
+        epochs: rows
+            .into_iter()
+            .map(|(stream_epoch, first_seen_at)| ReplayTargetEpochOption {
+                stream_epoch,
+                name: None,
+                first_seen_at,
+                race_names: Vec::new(),
+            })
+            .collect(),
+    })
 }
 
 pub async fn put_subscriptions(
@@ -2056,176 +977,6 @@ pub async fn admin_update_port(
     }
 }
 
-/// Send a reader control action and return the response.
-async fn send_reader_control(
-    state: &AppState,
-    forwarder_id: String,
-    reader_ip: String,
-    action: rt_protocol::ReaderControlAction,
-) -> Result<serde_json::Value, ReceiverError> {
-    let msg = rt_protocol::WsMessage::ReceiverProxyReaderControlRequest(
-        rt_protocol::ReceiverProxyReaderControlRequest {
-            request_id: generate_request_id(),
-            forwarder_id,
-            reader_ip,
-            action,
-        },
-    );
-    let response = send_ws_command(state, msg).await?;
-    match response {
-        rt_protocol::WsMessage::ReceiverProxyReaderControlResponse(r) => {
-            serde_json::to_value(&r).map_err(|e| ReceiverError::Internal(e.to_string()))
-        }
-        _ => Err(ReceiverError::UpstreamError(
-            "unexpected response type".to_owned(),
-        )),
-    }
-}
-
-pub async fn reader_get_info(
-    state: &AppState,
-    forwarder_id: String,
-    reader_ip: String,
-) -> Result<serde_json::Value, ReceiverError> {
-    send_reader_control(
-        state,
-        forwarder_id,
-        reader_ip,
-        rt_protocol::ReaderControlAction::GetInfo,
-    )
-    .await
-}
-
-pub async fn reader_sync_clock(
-    state: &AppState,
-    forwarder_id: String,
-    reader_ip: String,
-) -> Result<serde_json::Value, ReceiverError> {
-    send_reader_control(
-        state,
-        forwarder_id,
-        reader_ip,
-        rt_protocol::ReaderControlAction::SyncClock,
-    )
-    .await
-}
-
-pub async fn reader_set_read_mode(
-    state: &AppState,
-    forwarder_id: String,
-    reader_ip: String,
-    mode: rt_protocol::ReadMode,
-    timeout: u8,
-) -> Result<serde_json::Value, ReceiverError> {
-    send_reader_control(
-        state,
-        forwarder_id,
-        reader_ip,
-        rt_protocol::ReaderControlAction::SetReadMode { mode, timeout },
-    )
-    .await
-}
-
-pub async fn reader_set_tto(
-    state: &AppState,
-    forwarder_id: String,
-    reader_ip: String,
-    enabled: bool,
-) -> Result<serde_json::Value, ReceiverError> {
-    send_reader_control(
-        state,
-        forwarder_id,
-        reader_ip,
-        rt_protocol::ReaderControlAction::SetTto { enabled },
-    )
-    .await
-}
-
-pub async fn reader_set_recording(
-    state: &AppState,
-    forwarder_id: String,
-    reader_ip: String,
-    enabled: bool,
-) -> Result<serde_json::Value, ReceiverError> {
-    send_reader_control(
-        state,
-        forwarder_id,
-        reader_ip,
-        rt_protocol::ReaderControlAction::SetRecording { enabled },
-    )
-    .await
-}
-
-pub async fn reader_clear_records(
-    state: &AppState,
-    forwarder_id: String,
-    reader_ip: String,
-) -> Result<serde_json::Value, ReceiverError> {
-    send_reader_control(
-        state,
-        forwarder_id,
-        reader_ip,
-        rt_protocol::ReaderControlAction::ClearRecords,
-    )
-    .await
-}
-
-pub async fn reader_start_download(
-    state: &AppState,
-    forwarder_id: String,
-    reader_ip: String,
-) -> Result<serde_json::Value, ReceiverError> {
-    send_reader_control(
-        state,
-        forwarder_id,
-        reader_ip,
-        rt_protocol::ReaderControlAction::StartDownload,
-    )
-    .await
-}
-
-pub async fn reader_stop_download(
-    state: &AppState,
-    forwarder_id: String,
-    reader_ip: String,
-) -> Result<serde_json::Value, ReceiverError> {
-    send_reader_control(
-        state,
-        forwarder_id,
-        reader_ip,
-        rt_protocol::ReaderControlAction::StopDownload,
-    )
-    .await
-}
-
-pub async fn reader_refresh(
-    state: &AppState,
-    forwarder_id: String,
-    reader_ip: String,
-) -> Result<serde_json::Value, ReceiverError> {
-    send_reader_control(
-        state,
-        forwarder_id,
-        reader_ip,
-        rt_protocol::ReaderControlAction::Refresh,
-    )
-    .await
-}
-
-pub async fn reader_reconnect(
-    state: &AppState,
-    forwarder_id: String,
-    reader_ip: String,
-) -> Result<serde_json::Value, ReceiverError> {
-    send_reader_control(
-        state,
-        forwarder_id,
-        reader_ip,
-        rt_protocol::ReaderControlAction::Reconnect,
-    )
-    .await
-}
-
 // ---------------------------------------------------------------------------
 // Command & event registry (single source of truth)
 //
@@ -2291,31 +1042,6 @@ macro_rules! receiver_command_list {
             get_streams() -> "StreamsResponse",
             get_stream_metrics() -> "Vec<StreamMetricsPayload>",
             put_earliest_epoch(body: "EarliestEpochRequest") -> "()",
-            get_races() -> "serde_json::Value",
-            create_race(name: "String") -> "serde_json::Value",
-            delete_race(race_id: "String") -> "()",
-            get_participants(race_id: "String") -> "serde_json::Value",
-            upload_race_file(
-                race_id: "String",
-                upload_type: "String",
-                file_data: "String",
-                file_name: "String"
-            ) -> "serde_json::Value",
-            get_forwarders() -> "serde_json::Value",
-            get_forwarder_race(forwarder_id: "String") -> "serde_json::Value",
-            set_forwarder_race(
-                forwarder_id: "String",
-                race_id: "Option<String>"
-            ) -> "serde_json::Value",
-            get_forwarder_config(forwarder_id: "String") -> "serde_json::Value",
-            set_forwarder_config(
-                forwarder_id: "String",
-                section: "String",
-                data: "serde_json::Value"
-            ) -> "serde_json::Value",
-            restart_forwarder_service(forwarder_id: "String") -> "serde_json::Value",
-            restart_forwarder_device(forwarder_id: "String") -> "serde_json::Value",
-            shutdown_forwarder_device(forwarder_id: "String") -> "serde_json::Value",
             get_replay_target_epochs(
                 forwarder_id: "String",
                 reader_ip: "String"
@@ -2344,54 +1070,6 @@ macro_rules! receiver_command_list {
                 stream_id: "String",
                 body: "EventTypeRequest"
             ) -> "()",
-            get_server_streams() -> "serde_json::Value",
-            get_announcer_config() -> "serde_json::Value",
-            put_announcer_config(body: "serde_json::Value") -> "serde_json::Value",
-            reset_announcer() -> "()",
-            reader_get_info(
-                forwarder_id: "String",
-                reader_ip: "String"
-            ) -> "serde_json::Value",
-            reader_sync_clock(
-                forwarder_id: "String",
-                reader_ip: "String"
-            ) -> "serde_json::Value",
-            reader_set_read_mode(
-                forwarder_id: "String",
-                reader_ip: "String",
-                mode: "ReadMode",
-                timeout: "u8"
-            ) -> "serde_json::Value",
-            reader_set_tto(
-                forwarder_id: "String",
-                reader_ip: "String",
-                enabled: "bool"
-            ) -> "serde_json::Value",
-            reader_set_recording(
-                forwarder_id: "String",
-                reader_ip: "String",
-                enabled: "bool"
-            ) -> "serde_json::Value",
-            reader_clear_records(
-                forwarder_id: "String",
-                reader_ip: "String"
-            ) -> "serde_json::Value",
-            reader_start_download(
-                forwarder_id: "String",
-                reader_ip: "String"
-            ) -> "serde_json::Value",
-            reader_stop_download(
-                forwarder_id: "String",
-                reader_ip: "String"
-            ) -> "serde_json::Value",
-            reader_refresh(
-                forwarder_id: "String",
-                reader_ip: "String"
-            ) -> "serde_json::Value",
-            reader_reconnect(
-                forwarder_id: "String",
-                reader_ip: "String"
-            ) -> "serde_json::Value",
         }
     };
 }
@@ -2452,8 +1130,6 @@ pub const EVENT_NAMES: &[&str] = &[
     "mode_changed",
     "last_read",
     "stream_metrics_updated",
-    "reader_info_updated",
-    "reader_download_progress",
     "forwarder_ups_updated",
 ];
 
@@ -2473,8 +1149,6 @@ pub fn event_name(event: &ReceiverUiEvent) -> &'static str {
         ReceiverUiEvent::ModeChanged { .. } => "mode_changed",
         ReceiverUiEvent::LastRead(_) => "last_read",
         ReceiverUiEvent::StreamMetricsUpdated(_) => "stream_metrics_updated",
-        ReceiverUiEvent::ReaderInfoUpdated { .. } => "reader_info_updated",
-        ReceiverUiEvent::ReaderDownloadProgress { .. } => "reader_download_progress",
         ReceiverUiEvent::ForwarderUpsUpdated { .. } => "forwarder_ups_updated",
     }
 }
@@ -2483,10 +1157,6 @@ pub fn event_name(event: &ReceiverUiEvent) -> &'static str {
 mod tests {
     use super::*;
     use crate::db::Db;
-    use axum::routing::get;
-    use axum::{Json, Router};
-    use serde_json::json;
-    use tokio::net::TcpListener;
 
     #[test]
     fn command_registry_names_are_unique() {
@@ -2600,30 +1270,6 @@ mod tests {
                 "event name {name:?} is not snake_case"
             );
         }
-    }
-
-    #[test]
-    fn http_base_url_ws_with_port() {
-        assert_eq!(
-            http_base_url("ws://127.0.0.1:8080"),
-            Some("http://127.0.0.1:8080".to_owned())
-        );
-    }
-
-    #[test]
-    fn http_base_url_wss_with_port() {
-        assert_eq!(
-            http_base_url("wss://server.example.com:8443"),
-            Some("https://server.example.com:8443".to_owned())
-        );
-    }
-
-    #[test]
-    fn normalize_server_url_defaults_ws_scheme() {
-        assert_eq!(
-            normalize_server_url("127.0.0.1:4000/"),
-            "ws://127.0.0.1:4000".to_owned()
-        );
     }
 
     #[tokio::test]
@@ -2831,67 +1477,11 @@ mod tests {
         );
     }
 
-    async fn run_test_server(router: Router) -> std::net::SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
-        addr
-    }
-
-    #[tokio::test]
-    async fn fetch_forwarder_ids_for_race_deduplicates_mapped_forwarders() {
-        let race_id = "11111111-1111-1111-1111-111111111111";
-        let router = Router::new().route(
-            &format!("/api/v1/races/{race_id}/stream-epochs"),
-            get(move || async move {
-                Json(json!({
-                    "mappings": [
-                        {
-                            "stream_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                            "forwarder_id": "fwd-a",
-                            "reader_ip": "10.0.0.1:10000",
-                            "stream_epoch": 1,
-                            "race_id": race_id,
-                        },
-                        {
-                            "stream_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-                            "forwarder_id": "fwd-b",
-                            "reader_ip": "10.0.0.2:10000",
-                            "stream_epoch": 2,
-                            "race_id": race_id,
-                        },
-                        {
-                            "stream_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
-                            "forwarder_id": "fwd-a",
-                            "reader_ip": "10.0.0.3:10000",
-                            "stream_epoch": 3,
-                            "race_id": race_id,
-                        }
-                    ]
-                }))
-            }),
-        );
-        let addr = run_test_server(router).await;
-
-        let ids = fetch_forwarder_ids_for_race(
-            &reqwest::Client::new(),
-            &format!("ws://{addr}"),
-            "test-token",
-            race_id,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(ids, vec!["fwd-a", "fwd-b"]);
-    }
-
     #[tokio::test]
     async fn admin_clear_data_notifies_dbf_watchers_and_requests_ui_resync() {
         let mut db = Db::open_in_memory().unwrap();
         db.save_profile(
-            "wss://example.com",
+            "https://thin-node.example.com",
             "tok",
             DEFAULT_UPDATE_MODE,
             Some("recv-1"),

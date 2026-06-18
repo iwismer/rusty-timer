@@ -36,7 +36,7 @@ pub struct StreamMetricsPayload {
 }
 
 impl StreamMetricsPayload {
-    pub fn from_ws(msg: &rt_protocol::ReceiverStreamMetrics) -> Self {
+    pub fn from_ws(msg: &rt_domain::ReceiverStreamMetrics) -> Self {
         Self {
             forwarder_id: msg.forwarder_id.clone(),
             reader_ip: msg.reader_ip.clone(),
@@ -100,29 +100,14 @@ pub enum ReceiverUiEvent {
     },
     ForwarderMetricsUpdated(ForwarderMetricsUpdate),
     ModeChanged {
-        mode: rt_protocol::ReceiverMode,
+        mode: rt_domain::ReceiverMode,
     },
     LastRead(LastRead),
     StreamMetricsUpdated(StreamMetricsPayload),
-    ReaderInfoUpdated {
-        stream_id: uuid::Uuid,
-        reader_ip: String,
-        state: rt_protocol::ReaderConnectionState,
-        reader_info: Option<rt_protocol::ReaderInfo>,
-    },
-    ReaderDownloadProgress {
-        stream_id: uuid::Uuid,
-        reader_ip: String,
-        state: rt_protocol::DownloadState,
-        reads_received: u32,
-        progress: u64,
-        total: u64,
-        error: Option<String>,
-    },
     ForwarderUpsUpdated {
         forwarder_id: String,
         available: bool,
-        status: Option<rt_protocol::UpsStatus>,
+        status: Option<rt_domain::UpsStatus>,
     },
 }
 
@@ -195,7 +180,7 @@ mod tests {
     #[test]
     fn mode_changed_serializes_with_type_tag() {
         let event = ReceiverUiEvent::ModeChanged {
-            mode: rt_protocol::ReceiverMode::Race {
+            mode: rt_domain::ReceiverMode::Race {
                 race_id: "race-1".to_owned(),
             },
         };
@@ -291,7 +276,7 @@ mod tests {
         let event = ReceiverUiEvent::ForwarderUpsUpdated {
             forwarder_id: "fwd-01".to_owned(),
             available: true,
-            status: Some(rt_protocol::UpsStatus {
+            status: Some(rt_domain::UpsStatus {
                 battery_percent: 73,
                 battery_voltage_mv: 3870,
                 charging: true,

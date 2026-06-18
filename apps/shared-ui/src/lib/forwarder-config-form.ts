@@ -71,14 +71,12 @@ export function buildTarget(reader: ReaderEntry): string {
 
 export interface ForwarderConfigFormState {
   generalDisplayName: string;
-  serverBaseUrl: string;
-  serverForwardersWsPath: string;
+  p2pEnabled: boolean;
+  p2pThinNodeUrl: string;
+  p2pThinNodeTokenFile: string;
   authTokenFile: string;
   journalSqlitePath: string;
   journalPruneWatermarkPct: string;
-  uplinkBatchMode: string;
-  uplinkBatchFlushMs: string;
-  uplinkBatchMaxEvents: string;
   statusHttpBind: string;
   upsEnabled: boolean;
   upsDaemonAddr: string;
@@ -107,10 +105,9 @@ function asTrimmedString(value: unknown): string {
 }
 
 export function fromConfig(cfg: Record<string, unknown>): ForwarderConfigFormState {
-  const server = asRecord(cfg.server);
+  const p2p = asRecord(cfg.p2p);
   const auth = asRecord(cfg.auth);
   const journal = asRecord(cfg.journal);
-  const uplink = asRecord(cfg.uplink);
   const statusHttp = asRecord(cfg.status_http);
   const ups = asRecord(cfg.ups);
   const update = asRecord(cfg.update);
@@ -136,19 +133,15 @@ export function fromConfig(cfg: Record<string, unknown>): ForwarderConfigFormSta
 
   return {
     generalDisplayName: asString(cfg.display_name),
-    serverBaseUrl: asString(server.base_url),
-    serverForwardersWsPath: asString(server.forwarders_ws_path),
+    p2pEnabled: p2p.enabled === true,
+    p2pThinNodeUrl: asString(p2p.thin_node_url),
+    p2pThinNodeTokenFile: asString(p2p.thin_node_token_file),
     authTokenFile: asString(auth.token_file),
     journalSqlitePath: asString(journal.sqlite_path),
     journalPruneWatermarkPct:
       journal.prune_watermark_pct != null
         ? String(journal.prune_watermark_pct)
         : "",
-    uplinkBatchMode: asString(uplink.batch_mode),
-    uplinkBatchFlushMs:
-      uplink.batch_flush_ms != null ? String(uplink.batch_flush_ms) : "",
-    uplinkBatchMaxEvents:
-      uplink.batch_max_events != null ? String(uplink.batch_max_events) : "",
     statusHttpBind: asString(statusHttp.bind),
     upsEnabled: ups.enabled === true,
     upsDaemonAddr: asString(ups.daemon_addr),
@@ -170,12 +163,13 @@ export function toGeneralPayload(
   return { display_name: form.generalDisplayName || null };
 }
 
-export function toServerPayload(
+export function toP2pPayload(
   form: ForwarderConfigFormState,
 ): Record<string, unknown> {
   return {
-    base_url: form.serverBaseUrl,
-    forwarders_ws_path: form.serverForwardersWsPath || null,
+    enabled: form.p2pEnabled,
+    thin_node_url: form.p2pThinNodeUrl.trim() || null,
+    thin_node_token_file: form.p2pThinNodeTokenFile.trim() || null,
   };
 }
 
@@ -192,20 +186,6 @@ export function toJournalPayload(
     sqlite_path: form.journalSqlitePath || null,
     prune_watermark_pct: form.journalPruneWatermarkPct
       ? Number(form.journalPruneWatermarkPct)
-      : null,
-  };
-}
-
-export function toUplinkPayload(
-  form: ForwarderConfigFormState,
-): Record<string, unknown> {
-  return {
-    batch_mode: form.uplinkBatchMode || null,
-    batch_flush_ms: form.uplinkBatchFlushMs
-      ? Number(form.uplinkBatchFlushMs)
-      : null,
-    batch_max_events: form.uplinkBatchMaxEvents
-      ? Number(form.uplinkBatchMaxEvents)
       : null,
   };
 }
@@ -275,11 +255,14 @@ export function validateGeneral(form: ForwarderConfigFormState): string | null {
   return null;
 }
 
-export function validateServer(form: ForwarderConfigFormState): string | null {
-  const url = form.serverBaseUrl.trim();
-  if (!url) return "Base URL is required.";
-  if (!/^https?:\/\/.+/.test(url)) {
-    return "Base URL must start with http:// or https://.";
+export function validateP2p(form: ForwarderConfigFormState): string | null {
+  const url = form.p2pThinNodeUrl.trim();
+  if (url && !/^https?:\/\/.+/.test(url)) {
+    return "Thin-node URL must start with http:// or https://.";
+  }
+  const tokenFile = form.p2pThinNodeTokenFile.trim();
+  if (tokenFile.includes("\n") || tokenFile.includes("\r")) {
+    return "Thin-node token file path must be a single-line path.";
   }
   return null;
 }
@@ -298,22 +281,6 @@ export function validateJournal(form: ForwarderConfigFormState): string | null {
     const pct = Number(form.journalPruneWatermarkPct);
     if (!Number.isFinite(pct) || !Number.isInteger(pct) || pct < 0 || pct > 100) {
       return "Prune watermark must be an integer between 0 and 100.";
-    }
-  }
-  return null;
-}
-
-export function validateUplink(form: ForwarderConfigFormState): string | null {
-  if (form.uplinkBatchFlushMs) {
-    const ms = Number(form.uplinkBatchFlushMs);
-    if (!Number.isFinite(ms) || ms < 0 || !Number.isInteger(ms)) {
-      return "Batch flush must be a non-negative integer.";
-    }
-  }
-  if (form.uplinkBatchMaxEvents) {
-    const max = Number(form.uplinkBatchMaxEvents);
-    if (!Number.isFinite(max) || max < 0 || !Number.isInteger(max)) {
-      return "Batch max events must be a non-negative integer.";
     }
   }
   return null;

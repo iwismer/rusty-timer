@@ -1,4 +1,4 @@
-use rt_protocol::{ReceiverMode, ReplayTarget};
+use rt_domain::{ReceiverMode, ReplayTarget};
 use rusqlite::Connection;
 use std::path::Path;
 
@@ -18,13 +18,13 @@ fn profile_stored_and_loaded() {
     let c = open_db(&d.path().join("r.db"));
     c.execute(
         "INSERT INTO profile (server_url, token) VALUES (?1, ?2)",
-        rusqlite::params!["wss://s.com", "t"],
+        rusqlite::params!["https://thin.test", "t"],
     )
     .unwrap();
     let url: String = c
         .query_row("SELECT server_url FROM profile", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(url, "wss://s.com");
+    assert_eq!(url, "https://thin.test");
 }
 
 #[test]
@@ -53,7 +53,7 @@ fn receiver_mode_persists_via_receiver_db() {
     let db_path = d.path().join("receiver.db");
 
     let mut db = receiver::db::Db::open(&db_path).unwrap();
-    db.save_profile("wss://persist.example", "tok", "check-and-download", None)
+    db.save_profile("https://persist.example", "tok", "check-and-download", None)
         .unwrap();
     db.save_receiver_mode(&ReceiverMode::Race {
         race_id: "race-1".to_owned(),
@@ -72,7 +72,7 @@ fn receiver_mode_persists_via_receiver_db() {
 #[test]
 fn targeted_replay_mode_round_trips_with_targets() {
     let mut db = receiver::db::Db::open_in_memory().unwrap();
-    db.save_profile("wss://persist.example", "tok", "check-and-download", None)
+    db.save_profile("https://persist.example", "tok", "check-and-download", None)
         .unwrap();
     let mode = ReceiverMode::TargetedReplay {
         targets: vec![ReplayTarget {
@@ -112,7 +112,7 @@ fn profile_persists_across_db_reopen() {
         let c = open_db(&p);
         c.execute(
             "INSERT INTO profile (server_url, token) VALUES (?1, ?2)",
-            rusqlite::params!["wss://p.com", "t"],
+            rusqlite::params!["https://p.com", "t"],
         )
         .unwrap();
     }
@@ -120,7 +120,7 @@ fn profile_persists_across_db_reopen() {
     let url: String = c
         .query_row("SELECT server_url FROM profile", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(url, "wss://p.com");
+    assert_eq!(url, "https://p.com");
 }
 
 #[test]
@@ -128,13 +128,13 @@ fn subscriptions_stored_and_loaded() {
     let d = tempfile::tempdir().unwrap();
     let c = open_db(&d.path().join("r.db"));
     c.execute(
-        "INSERT INTO subscriptions (forwarder_id, reader_ip) VALUES (?1, ?2)",
-        rusqlite::params!["f", "192.168.1.100"],
+        "INSERT INTO subscriptions (forwarder_endpoint_id, stream_id, forwarder_id, reader_ip) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params!["endpoint-1", "stream-100", "f", "192.168.1.100"],
     )
     .unwrap();
     c.execute(
-        "INSERT INTO subscriptions (forwarder_id, reader_ip) VALUES (?1, ?2)",
-        rusqlite::params!["f", "192.168.1.200"],
+        "INSERT INTO subscriptions (forwarder_endpoint_id, stream_id, forwarder_id, reader_ip) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params!["endpoint-1", "stream-200", "f", "192.168.1.200"],
     )
     .unwrap();
     let n: i64 = c
@@ -147,10 +147,10 @@ fn subscriptions_stored_and_loaded() {
 fn cursor_stored_and_loaded() {
     let d = tempfile::tempdir().unwrap();
     let c = open_db(&d.path().join("r.db"));
-    c.execute("INSERT INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq) VALUES (?1, ?2, ?3, ?4)", rusqlite::params!["f","i",3i64,17i64]).unwrap();
+    c.execute("INSERT INTO cursors (stream_id, forwarder_id, reader_ip, stream_epoch, last_seq) VALUES (?1, ?2, ?3, ?4, ?5)", rusqlite::params!["stream-1", "f", "i", 3i64, 17i64]).unwrap();
     let (e, s): (i64, i64) = c
         .query_row(
-            "SELECT stream_epoch, acked_through_seq FROM cursors WHERE forwarder_id='f' AND reader_ip='i'",
+            "SELECT stream_epoch, last_seq FROM cursors WHERE stream_id='stream-1'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )

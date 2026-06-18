@@ -48,7 +48,7 @@ export interface ForwarderStatus {
   version: string;
   ready: boolean;
   ready_reason: string | null;
-  uplink_connected: boolean;
+  p2p_connected: boolean;
   restart_needed: boolean;
   ups_status?: {
     available: boolean;
@@ -67,9 +67,10 @@ export interface ForwarderStatus {
 export interface ForwarderConfig {
   schema_version?: number;
   display_name?: string;
-  server?: {
-    base_url?: string;
-    forwarders_ws_path?: string;
+  p2p?: {
+    enabled?: boolean;
+    thin_node_url?: string;
+    thin_node_token_file?: string;
   };
   auth?: {
     token_file?: string;
@@ -83,11 +84,6 @@ export interface ForwarderConfig {
   };
   control?: {
     allow_power_actions?: boolean;
-  };
-  uplink?: {
-    batch_mode?: string;
-    batch_flush_ms?: number;
-    batch_max_events?: number;
   };
   update?: {
     mode?: string;

@@ -91,12 +91,12 @@ where
         info_y += SMALL_CHAR_H as i32 + 2;
     }
 
-    // Server status: indicator square + "Server".
+    // P2P status: indicator square + "P2P".
     {
         let sq_y = info_y - INDICATOR_SIZE as i32 + 2;
-        draw_filled_square(target, Point::new(RIGHT_X, sq_y), state.server_connected)?;
+        draw_filled_square(target, Point::new(RIGHT_X, sq_y), state.p2p_connected)?;
         let text_x = RIGHT_X + INDICATOR_SIZE as i32 + INDICATOR_GAP as i32;
-        Text::new("Server", Point::new(text_x, info_y), small_style).draw(target)?;
+        Text::new("P2P", Point::new(text_x, info_y), small_style).draw(target)?;
         info_y += SMALL_CHAR_H as i32 + 2;
     }
 
@@ -239,7 +239,7 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Helper: draw a boolean filled/empty square (e.g., server connected)
+// Helper: draw a boolean filled/empty square (e.g., P2P connected)
 // ---------------------------------------------------------------------------
 
 fn draw_filled_square<D>(target: &mut D, top_left: Point, filled: bool) -> Result<(), D::Error>
@@ -313,7 +313,7 @@ mod tests {
         let state = DisplayState {
             forwarder_name: Some("fwd-01".to_string()),
             local_ip: Some("192.168.1.100".to_string()),
-            server_connected: true,
+            p2p_connected: true,
             readers: vec![
                 make_reader(
                     "192.168.1.10",
@@ -382,7 +382,7 @@ mod tests {
         let state = DisplayState {
             forwarder_name: Some("edge-node".to_string()),
             local_ip: Some("10.0.0.50".to_string()),
-            server_connected: false,
+            p2p_connected: false,
             readers: vec![make_reader(
                 "10.0.0.1",
                 ReaderConnectionState::Connected,
@@ -408,7 +408,7 @@ mod tests {
         let state = DisplayState {
             forwarder_name: None,
             local_ip: None,
-            server_connected: false,
+            p2p_connected: false,
             readers: vec![],
             total_reads: 0,
             cpu_temp_celsius: None,

@@ -1,48 +1,41 @@
-/// Integration tests for forwarder config loading.
-///
-/// Tests config precedence, default values, required field validation,
-/// and token file reading.
-use forwarder::config::load_config_from_str;
+use forwarder::config::{load_config_from_str, validate_retention_settings};
 use std::io::Write;
 
-// ---------------------------------------------------------------------------
-// Helper
-// ---------------------------------------------------------------------------
-
-/// Write a TOML string to a temp file and return the path.
 fn write_token_file(token: &str) -> tempfile::NamedTempFile {
-    let mut f = tempfile::NamedTempFile::new().expect("create temp file");
-    write!(f, "{}", token).expect("write token");
-    f
+    let mut file = tempfile::NamedTempFile::new().expect("create temp file");
+    write!(file, "{token}").expect("write token");
+    file
 }
 
-// ---------------------------------------------------------------------------
-// Required fields
-// ---------------------------------------------------------------------------
-
-#[test]
-fn valid_minimal_config_loads_ok() {
+fn minimal_config(extra: &str) -> (String, tempfile::NamedTempFile) {
     let token_file = write_token_file("my-bearer-token");
     let toml = format!(
         r#"
 schema_version = 1
-
-[server]
-base_url = "https://timing.example.com"
 
 [auth]
 token_file = "{}"
 
 [[readers]]
 target = "192.168.2.156:10000"
+
+{extra}
 "#,
         token_file.path().display()
     );
+    (toml, token_file)
+}
+
+#[test]
+fn valid_minimal_config_loads_ok() {
+    let (toml, token_file) = minimal_config("");
+
     let cfg = load_config_from_str(&toml, token_file.path()).expect("should load");
+
     assert_eq!(cfg.schema_version, 1);
-    assert_eq!(cfg.server.base_url, "https://timing.example.com");
     assert_eq!(cfg.token, "my-bearer-token");
     assert_eq!(cfg.readers.len(), 1);
+    assert_eq!(cfg.readers[0].target, "192.168.2.156:10000");
 }
 
 #[test]
@@ -50,9 +43,6 @@ fn missing_schema_version_fails() {
     let token_file = write_token_file("tok");
     let toml = format!(
         r#"
-[server]
-base_url = "https://timing.example.com"
-
 [auth]
 token_file = "{}"
 
@@ -61,49 +51,20 @@ target = "192.168.2.156:10000"
 "#,
         token_file.path().display()
     );
+
     let result = load_config_from_str(&toml, token_file.path());
+
     assert!(result.is_err(), "missing schema_version must fail");
 }
 
 #[test]
 fn wrong_schema_version_fails() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
-        r#"
-schema_version = 2
+    let (toml, token_file) = minimal_config("");
+    let toml = toml.replace("schema_version = 1", "schema_version = 2");
 
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
-[[readers]]
-target = "192.168.2.156:10000"
-"#,
-        token_file.path().display()
-    );
     let result = load_config_from_str(&toml, token_file.path());
+
     assert!(result.is_err(), "schema_version != 1 must fail");
-}
-
-#[test]
-fn missing_server_base_url_fails() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
-        r#"
-schema_version = 1
-
-[auth]
-token_file = "{}"
-
-[[readers]]
-target = "192.168.2.156:10000"
-"#,
-        token_file.path().display()
-    );
-    let result = load_config_from_str(&toml, token_file.path());
-    assert!(result.is_err(), "missing server.base_url must fail");
 }
 
 #[test]
@@ -111,14 +72,12 @@ fn missing_auth_token_file_fails() {
     let toml = r#"
 schema_version = 1
 
-[server]
-base_url = "https://timing.example.com"
-
 [[readers]]
 target = "192.168.2.156:10000"
 "#;
-    // We pass a dummy path (won't be used for token_file lookup if auth section missing)
+
     let result = load_config_from_str(toml, std::path::Path::new("/nonexistent"));
+
     assert!(result.is_err(), "missing auth.token_file must fail");
 }
 
@@ -129,15 +88,14 @@ fn missing_readers_section_fails() {
         r#"
 schema_version = 1
 
-[server]
-base_url = "https://timing.example.com"
-
 [auth]
 token_file = "{}"
 "#,
         token_file.path().display()
     );
+
     let result = load_config_from_str(&toml, token_file.path());
+
     assert!(result.is_err(), "missing readers section must fail");
 }
 
@@ -148,9 +106,6 @@ fn empty_readers_array_fails() {
         r#"
 schema_version = 1
 
-[server]
-base_url = "https://timing.example.com"
-
 [auth]
 token_file = "{}"
 
@@ -158,13 +113,11 @@ readers = []
 "#,
         token_file.path().display()
     );
+
     let result = load_config_from_str(&toml, token_file.path());
+
     assert!(result.is_err(), "empty readers array must fail");
 }
-
-// ---------------------------------------------------------------------------
-// display_name
-// ---------------------------------------------------------------------------
 
 #[test]
 fn display_name_is_loaded_when_present() {
@@ -174,9 +127,6 @@ fn display_name_is_loaded_when_present() {
 schema_version = 1
 display_name = "Start Line"
 
-[server]
-base_url = "https://timing.example.com"
-
 [auth]
 token_file = "{}"
 
@@ -185,158 +135,43 @@ target = "192.168.2.156:10000"
 "#,
         token_file.path().display()
     );
+
     let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
+
     assert_eq!(cfg.display_name.as_deref(), Some("Start Line"));
 }
 
 #[test]
-fn display_name_defaults_to_none() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
-        r#"
-schema_version = 1
+fn journal_defaults_match_p2p_cutover_policy() {
+    let (toml, token_file) = minimal_config("");
 
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
-[[readers]]
-target = "192.168.2.156:10000"
-"#,
-        token_file.path().display()
-    );
     let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
-    assert!(cfg.display_name.is_none());
-}
 
-// ---------------------------------------------------------------------------
-// Default values
-// ---------------------------------------------------------------------------
-
-#[test]
-fn default_forwarders_ws_path() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
-        r#"
-schema_version = 1
-
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
-[[readers]]
-target = "192.168.2.156:10000"
-"#,
-        token_file.path().display()
-    );
-    let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
-    assert_eq!(cfg.server.forwarders_ws_path, "/ws/v1/forwarders");
-}
-
-#[test]
-fn default_journal_sqlite_path() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
-        r#"
-schema_version = 1
-
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
-[[readers]]
-target = "192.168.2.156:10000"
-"#,
-        token_file.path().display()
-    );
-    let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
     assert_eq!(
         cfg.journal.sqlite_path,
         "/var/lib/rusty-timer/forwarder.sqlite3"
     );
-}
-
-#[test]
-fn default_prune_watermark_pct() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
-        r#"
-schema_version = 1
-
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
-[[readers]]
-target = "192.168.2.156:10000"
-"#,
-        token_file.path().display()
-    );
-    let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
     assert_eq!(cfg.journal.prune_watermark_pct, 80);
-}
-
-#[test]
-fn default_retention_config() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
-        r#"
-schema_version = 1
-
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
-[[readers]]
-target = "192.168.2.156:10000"
-"#,
-        token_file.path().display()
-    );
-    let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
     assert_eq!(cfg.journal.min_retention_secs, 7 * 24 * 60 * 60);
     assert_eq!(cfg.journal.max_retention_secs, 30 * 24 * 60 * 60);
     assert_eq!(cfg.journal.emergency_free_disk_bytes, 1_000_000_000);
     assert_eq!(cfg.journal.emergency_max_rows, 1_000_000);
-    let policy = cfg.journal.retention_policy();
-    assert_eq!(policy.min_retention_ms, 7 * 24 * 60 * 60 * 1000);
-    assert_eq!(policy.max_retention_ms, 30 * 24 * 60 * 60 * 1000);
 }
 
 #[test]
-fn custom_retention_config() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
+fn custom_retention_config_loads() {
+    let (toml, token_file) = minimal_config(
         r#"
-schema_version = 1
-
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
 [journal]
 min_retention = "2d"
 max_retention = "9d"
 emergency_free_disk_bytes = 1234
 emergency_max_rows = 42
-
-[[readers]]
-target = "192.168.2.156:10000"
 "#,
-        token_file.path().display()
     );
+
     let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
+
     assert_eq!(cfg.journal.min_retention_secs, 2 * 24 * 60 * 60);
     assert_eq!(cfg.journal.max_retention_secs, 9 * 24 * 60 * 60);
     assert_eq!(cfg.journal.emergency_free_disk_bytes, 1234);
@@ -345,354 +180,133 @@ target = "192.168.2.156:10000"
 
 #[test]
 fn invalid_retention_suffix_fails() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
+    let (toml, token_file) = minimal_config(
         r#"
-schema_version = 1
-
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
 [journal]
 min_retention = "7x"
-
-[[readers]]
-target = "192.168.2.156:10000"
 "#,
-        token_file.path().display()
     );
+
     let result = load_config_from_str(&toml, token_file.path());
-    assert!(
-        result.is_err(),
-        "invalid retention duration suffix must fail"
-    );
+
+    assert!(result.is_err(), "invalid retention suffix must fail");
 }
 
 #[test]
-fn retention_min_max_inversion_fails() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
+fn max_retention_less_than_min_fails() {
+    let (toml, token_file) = minimal_config(
         r#"
-schema_version = 1
-
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
 [journal]
-min_retention = "30d"
-max_retention = "7d"
-
-[[readers]]
-target = "192.168.2.156:10000"
+min_retention = "10d"
+max_retention = "2d"
 "#,
-        token_file.path().display()
     );
+
     let result = load_config_from_str(&toml, token_file.path());
-    assert!(result.is_err(), "max_retention < min_retention must fail");
+
+    assert!(result.is_err(), "max < min retention must fail");
 }
 
 #[test]
-fn zero_emergency_max_rows_fails() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
-        r#"
-schema_version = 1
+fn validate_retention_settings_rejects_non_positive_emergency_rows() {
+    let err = validate_retention_settings(None, None, Some(0)).unwrap_err();
 
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
-[journal]
-emergency_max_rows = 0
-
-[[readers]]
-target = "192.168.2.156:10000"
-"#,
-        token_file.path().display()
-    );
-    let result = load_config_from_str(&toml, token_file.path());
-    assert!(result.is_err(), "zero emergency_max_rows must fail");
+    assert!(err.contains("emergency_max_rows"));
 }
 
 #[test]
-fn default_ack_timeout_secs() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
-        r#"
-schema_version = 1
+fn status_http_defaults_to_loopback() {
+    let (toml, token_file) = minimal_config("");
 
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
-[[readers]]
-target = "192.168.2.156:10000"
-"#,
-        token_file.path().display()
-    );
     let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
-    assert_eq!(cfg.uplink.ack_timeout_secs, 30);
-}
 
-#[test]
-fn default_status_http_bind() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
-        r#"
-schema_version = 1
-
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
-[[readers]]
-target = "192.168.2.156:10000"
-"#,
-        token_file.path().display()
-    );
-    let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
     assert_eq!(cfg.status_http.bind, "127.0.0.1:8080");
 }
 
 #[test]
-fn control_allow_power_actions_defaults_to_false() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
-        r#"
-schema_version = 1
+fn control_power_actions_default_to_disabled() {
+    let (toml, token_file) = minimal_config("");
 
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
-[[readers]]
-target = "192.168.2.156:10000"
-"#,
-        token_file.path().display()
-    );
     let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
+
     assert!(!cfg.control.allow_power_actions);
 }
 
 #[test]
-fn control_allow_power_actions_true_is_loaded() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
-        r#"
-schema_version = 1
+fn p2p_defaults_to_disabled_local_only_mode() {
+    let (toml, token_file) = minimal_config("");
 
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
-[control]
-allow_power_actions = true
-
-[[readers]]
-target = "192.168.2.156:10000"
-"#,
-        token_file.path().display()
-    );
     let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
-    assert!(cfg.control.allow_power_actions);
+
+    assert!(!cfg.p2p.enabled);
+    assert_eq!(cfg.p2p.bind_addr_v4, "0.0.0.0:0");
+    assert!(cfg.p2p.static_allowed_receivers.is_empty());
 }
 
 #[test]
-fn default_reader_enabled() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
+fn p2p_parses_loopback_deterministic_options() {
+    let (toml, token_file) = minimal_config(
         r#"
-schema_version = 1
-
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
-[[readers]]
-target = "192.168.2.156:10000"
+[p2p]
+enabled = true
+secret_key_seed_hex = "0101010101010101010101010101010101010101010101010101010101010101"
+bind_addr_v4 = "127.0.0.1:0"
+relay_disabled = true
+discovery_disabled = true
+max_concurrent_bidi_streams = 64
+static_allowed_receivers = ["receiver-node-id"]
+allowlist_cache_path = "/tmp/forwarder-p2p-allowlist.cache"
+thin_node_url = "http://127.0.0.1:9999"
+thin_node_token_file = "/tmp/thin-token"
+allowlist_poll_interval_secs = 5
 "#,
-        token_file.path().display()
     );
+
     let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
-    let r = &cfg.readers[0];
-    assert!(r.enabled);
+
+    assert!(cfg.p2p.enabled);
+    assert_eq!(cfg.p2p.bind_addr_v4, "127.0.0.1:0");
+    assert!(cfg.p2p.relay_disabled);
+    assert!(cfg.p2p.discovery_disabled);
+    assert_eq!(cfg.p2p.max_concurrent_bidi_streams, Some(64));
+    assert_eq!(cfg.p2p.static_allowed_receivers, ["receiver-node-id"]);
+    assert_eq!(cfg.p2p.allowlist_poll_interval_secs, 5);
 }
 
 #[test]
-fn default_reader_local_fallback_port_is_10000_plus_last_octet() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
+fn p2p_rejects_mutually_exclusive_secret_key_sources() {
+    let (toml, token_file) = minimal_config(
         r#"
-schema_version = 1
-
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
-[[readers]]
-target = "192.168.2.156:10000"
+[p2p]
+enabled = true
+secret_key_path = "/tmp/key"
+secret_key_seed_hex = "0101010101010101010101010101010101010101010101010101010101010101"
+static_allowed_receivers = ["receiver-node-id"]
 "#,
-        token_file.path().display()
     );
-    let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
-    // 192.168.2.156 → last_octet = 156, default fallback port = 10000 + 156 = 10156
-    // But target port is 10000. The local_fallback_port is a separate concept.
-    // For a single-IP target, last octet of IP = 156, so default local_fallback_port = 10156
-    let r = &cfg.readers[0];
-    // local_fallback_port is derived at expansion time via discovery module
-    // Config stores None (unset), expansion provides default
+
+    let result = load_config_from_str(&toml, token_file.path());
+
     assert!(
-        r.local_fallback_port.is_none(),
-        "should be None when not explicitly set"
+        result.is_err(),
+        "mutually exclusive P2P key sources must fail"
     );
 }
 
 #[test]
-fn explicit_local_fallback_port_is_used() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
+fn disabled_reader_is_retained_for_status_visibility() {
+    let (toml, token_file) = minimal_config(
         r#"
-schema_version = 1
-
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
 [[readers]]
-target = "192.168.2.156:10000"
-local_fallback_port = 9999
+target = "192.168.2.157:10000"
+enabled = false
+local_fallback_port = 12000
 "#,
-        token_file.path().display()
     );
+
     let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
-    let r = &cfg.readers[0];
-    assert_eq!(r.local_fallback_port, Some(9999));
-}
 
-// ---------------------------------------------------------------------------
-// Token file reading
-// ---------------------------------------------------------------------------
-
-#[test]
-fn token_is_read_and_trimmed() {
-    let token_file = write_token_file("  my-token-with-whitespace  \n");
-    let toml = format!(
-        r#"
-schema_version = 1
-
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
-[[readers]]
-target = "192.168.2.156:10000"
-"#,
-        token_file.path().display()
-    );
-    let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
-    assert_eq!(cfg.token, "my-token-with-whitespace");
-}
-
-#[test]
-fn nonexistent_token_file_fails() {
-    let toml = r#"
-schema_version = 1
-
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "/nonexistent/path/to/token"
-
-[[readers]]
-target = "192.168.2.156:10000"
-"#;
-    let result = load_config_from_str(toml, std::path::Path::new("/nonexistent/path/to/token"));
-    assert!(result.is_err(), "nonexistent token file must fail");
-}
-
-// ---------------------------------------------------------------------------
-// load_config_from_path
-// ---------------------------------------------------------------------------
-
-#[test]
-fn load_config_from_path_reads_toml_file() {
-    let token_file = write_token_file("dev-token");
-    let toml = format!(
-        r#"
-schema_version = 1
-
-[server]
-base_url = "ws://127.0.0.1:8080"
-
-[auth]
-token_file = "{}"
-
-[[readers]]
-target = "127.0.0.1:10001"
-"#,
-        token_file.path().display()
-    );
-    let mut config_file = tempfile::NamedTempFile::new().unwrap();
-    config_file.write_all(toml.as_bytes()).unwrap();
-
-    let cfg = forwarder::config::load_config_from_path(config_file.path())
-        .expect("should load from arbitrary path");
-    assert_eq!(cfg.server.base_url, "ws://127.0.0.1:8080");
-    assert_eq!(cfg.token, "dev-token");
-    assert_eq!(cfg.readers[0].target, "127.0.0.1:10001");
-}
-
-// ---------------------------------------------------------------------------
-// Multiple readers
-// ---------------------------------------------------------------------------
-
-#[test]
-fn multiple_readers_are_loaded() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
-        r#"
-schema_version = 1
-
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
-[[readers]]
-target = "192.168.2.150:10000"
-
-[[readers]]
-target = "192.168.2.151:10000"
-read_type = "fsls"
-"#,
-        token_file.path().display()
-    );
-    let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
     assert_eq!(cfg.readers.len(), 2);
+    assert!(!cfg.readers[1].enabled);
+    assert_eq!(cfg.readers[1].local_fallback_port, Some(12000));
 }

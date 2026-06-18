@@ -1,12 +1,12 @@
 # rt-test-utils
 
-Mock WebSocket infrastructure for integration testing.
+Shared test helpers for the Rusty Timer P2P stack.
 
-## Purpose
+## Contents
 
-Provides mock WebSocket server and client implementations for testing the forwarder, server, and receiver components without running real services. The mock server implements the v1 protocol handshake (hello/heartbeat) and event batch acknowledgement. Used in integration tests.
+- `p2p::MockForwarder` helpers for deterministic receiver-side P2P tests.
+- Loopback iroh helpers with relay/discovery disabled and injected addresses.
+- `poll_until` for bounded async assertions.
 
-## Key types
-
-- **`MockWsServer`** -- A lightweight WebSocket server that binds to a random port and handles the forwarder v1 / receiver v1.2 handshake flow. Responds to `ForwarderHello` and `ReceiverHelloV12` with `Heartbeat` messages, acks `ForwarderEventBatch` messages, and rejects protocol violations with `ErrorMessage`. Start with `MockWsServer::start().await`.
-- **`MockWsClient`** -- A WebSocket client for connecting to a `MockWsServer` (or any v1-compatible server). Provides `send_message(&WsMessage)` and `recv_message() -> WsMessage` for typed protocol communication. Connect with `MockWsClient::connect(url).await`.
+The helpers are intentionally local/deterministic so unit and seam tests can run
+without external infrastructure.

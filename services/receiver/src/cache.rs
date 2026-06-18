@@ -1,4 +1,4 @@
-use rt_protocol::ReadEvent;
+use rt_domain::ReadEvent;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
@@ -163,7 +163,7 @@ impl Default for EventBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rt_protocol::ReadEvent;
+    use rt_domain::ReadEvent;
     fn ev(f: &str, i: &str, s: i64) -> ReadEvent {
         ReadEvent {
             forwarder_id: f.to_owned(),

@@ -75,7 +75,7 @@ fn main() {
         let state = DisplayState {
             forwarder_name: Some("Start Line".to_owned()),
             local_ip: Some("192.168.0.100".to_owned()),
-            server_connected: true,
+            p2p_connected: true,
             readers: vec![
                 ReaderDisplayState {
                     ip: "192.168.0.155".to_owned(),

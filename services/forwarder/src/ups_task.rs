@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use rt_protocol::{ForwarderUpsStatus, UpsStatus};
+use rt_domain::{ForwarderUpsStatus, UpsStatus};
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 
@@ -12,7 +12,7 @@ use crate::ui_events::ForwarderUiEvent;
 
 /// Handle returned by [`spawn_ups_task`] carrying the upstream status channel.
 pub struct UpsTaskHandle {
-    /// Receives [`ForwarderUpsStatus`] messages destined for the uplink.
+    /// Receives [`ForwarderUpsStatus`] messages destined for P2P control sessions.
     pub ups_status_rx: mpsc::UnboundedReceiver<ForwarderUpsStatus>,
 }
 

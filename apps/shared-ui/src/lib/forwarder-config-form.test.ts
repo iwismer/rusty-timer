@@ -10,11 +10,11 @@ import {
   toReadersPayload,
   toUpsPayload,
   toUpdatePayload,
+  toP2pPayload,
   validateGeneral,
-  validateServer,
+  validateP2p,
   validateAuth,
   validateJournal,
-  validateUplink,
   validateUps,
   validateStatusHttp,
   validateReaders,
@@ -41,14 +41,12 @@ const makeReader = makeSingleReader;
 function makeForm(overrides: Partial<ForwarderConfigFormState> = {}): ForwarderConfigFormState {
   return {
     generalDisplayName: "",
-    serverBaseUrl: "http://localhost:8080",
-    serverForwardersWsPath: "",
+    p2pEnabled: true,
+    p2pThinNodeUrl: "http://localhost:8080",
+    p2pThinNodeTokenFile: "/tmp/token.txt",
     authTokenFile: "/tmp/token.txt",
     journalSqlitePath: "",
     journalPruneWatermarkPct: "",
-    uplinkBatchMode: "",
-    uplinkBatchFlushMs: "",
-    uplinkBatchMaxEvents: "",
     statusHttpBind: "",
     upsEnabled: false,
     upsDaemonAddr: "",
@@ -219,9 +217,24 @@ describe("parseTarget/buildTarget round-trip", () => {
 describe("fromConfig", () => {
   it("normalizes missing sections to empty form defaults", () => {
     const form = fromConfig({});
-    expect(form.serverBaseUrl).toBe("");
+    expect(form.p2pEnabled).toBe(false);
+    expect(form.p2pThinNodeUrl).toBe("");
+    expect(form.p2pThinNodeTokenFile).toBe("");
     expect(form.controlAllowPowerActions).toBe(false);
     expect(form.readers).toEqual([]);
+  });
+
+  it("loads p2p thin-node settings when present", () => {
+    const form = fromConfig({
+      p2p: {
+        enabled: true,
+        thin_node_url: "https://thin.example.com",
+        thin_node_token_file: "/etc/rusty-timer/forwarder.token",
+      },
+    });
+    expect(form.p2pEnabled).toBe(true);
+    expect(form.p2pThinNodeUrl).toBe("https://thin.example.com");
+    expect(form.p2pThinNodeTokenFile).toBe("/etc/rusty-timer/forwarder.token");
   });
 
   it("loads control.allow_power_actions when present", () => {
@@ -418,6 +431,34 @@ describe("payload builders", () => {
     expect(payload.readers[0].target).toBeNull();
   });
 
+  it("serializes p2p thin-node settings", () => {
+    expect(
+      toP2pPayload({
+        p2pEnabled: true,
+        p2pThinNodeUrl: " https://thin.example.com/ ",
+        p2pThinNodeTokenFile: " /etc/rusty-timer/forwarder.token ",
+      } as ForwarderConfigFormState),
+    ).toEqual({
+      enabled: true,
+      thin_node_url: "https://thin.example.com/",
+      thin_node_token_file: "/etc/rusty-timer/forwarder.token",
+    });
+  });
+
+  it("serializes blank p2p optional fields as null", () => {
+    expect(
+      toP2pPayload({
+        p2pEnabled: false,
+        p2pThinNodeUrl: "",
+        p2pThinNodeTokenFile: "",
+      } as ForwarderConfigFormState),
+    ).toEqual({
+      enabled: false,
+      thin_node_url: null,
+      thin_node_token_file: null,
+    });
+  });
+
   it("serializes control allow_power_actions boolean", () => {
     const form = {
       controlAllowPowerActions: true,
@@ -487,25 +528,29 @@ describe("validateGeneral", () => {
   });
 });
 
-describe("validateServer", () => {
+describe("validateP2p", () => {
+  it("accepts blank thin-node URL for local-only tests", () => {
+    expect(validateP2p(makeForm({ p2pThinNodeUrl: "" }))).toBeNull();
+  });
+
   it("passes for valid http URL", () => {
-    expect(validateServer(makeForm({ serverBaseUrl: "http://example.com" }))).toBeNull();
+    expect(validateP2p(makeForm({ p2pThinNodeUrl: "http://example.com" }))).toBeNull();
   });
 
   it("passes for valid https URL", () => {
-    expect(validateServer(makeForm({ serverBaseUrl: "https://example.com:8443" }))).toBeNull();
+    expect(validateP2p(makeForm({ p2pThinNodeUrl: "https://example.com:8443" }))).toBeNull();
   });
 
-  it("rejects empty URL", () => {
-    expect(validateServer(makeForm({ serverBaseUrl: "" }))).toBeTruthy();
-  });
-
-  it("rejects ws:// URL", () => {
-    expect(validateServer(makeForm({ serverBaseUrl: "ws://example.com" }))).toBeTruthy();
+  it("rejects unsupported URL schemes", () => {
+    expect(validateP2p(makeForm({ p2pThinNodeUrl: "ftp://example.com" }))).toBeTruthy();
   });
 
   it("rejects URL without scheme", () => {
-    expect(validateServer(makeForm({ serverBaseUrl: "example.com" }))).toBeTruthy();
+    expect(validateP2p(makeForm({ p2pThinNodeUrl: "example.com" }))).toBeTruthy();
+  });
+
+  it("rejects multiline thin-node token file", () => {
+    expect(validateP2p(makeForm({ p2pThinNodeTokenFile: "/tmp/\ntoken.txt" }))).toBeTruthy();
   });
 });
 
@@ -542,24 +587,6 @@ describe("validateJournal", () => {
 
   it("rejects non-integer percentage", () => {
     expect(validateJournal(makeForm({ journalPruneWatermarkPct: "80.5" }))).toBeTruthy();
-  });
-});
-
-describe("validateUplink", () => {
-  it("passes when all empty (uses defaults)", () => {
-    expect(validateUplink(makeForm())).toBeNull();
-  });
-
-  it("passes for valid values", () => {
-    expect(validateUplink(makeForm({ uplinkBatchFlushMs: "200", uplinkBatchMaxEvents: "100" }))).toBeNull();
-  });
-
-  it("rejects negative batch flush", () => {
-    expect(validateUplink(makeForm({ uplinkBatchFlushMs: "-1" }))).toBeTruthy();
-  });
-
-  it("rejects non-integer batch max events", () => {
-    expect(validateUplink(makeForm({ uplinkBatchMaxEvents: "3.5" }))).toBeTruthy();
   });
 });
 

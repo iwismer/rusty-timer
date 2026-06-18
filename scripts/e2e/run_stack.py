@@ -323,7 +323,7 @@ def preseed_receiver_db(db_path: Path, forwarder_node_id: str, stream_id: str,
             "INSERT INTO profile "
             "(server_url, token, update_mode, receiver_mode_json, receiver_id, "
             " dbf_enabled, dbf_path) VALUES (?,?,?,?,?,?,?)",
-            ("ws://127.0.0.1:9/ws/v1", "e2e-token", "check-and-download", None,
+            ("p2p://loopback", "e2e-token", "check-and-download", None,
              "rx-e2e", 1, str(dbf_path)),
         )
         conn.execute(
@@ -615,9 +615,6 @@ def run(
     forwarder_config = tmp / "forwarder.toml"
     forwarder_config.write_text(
         f"""schema_version = 1
-
-[server]
-base_url = "ws://127.0.0.1:9/ws/v1"
 
 [auth]
 token_file = "{token_file}"

@@ -4,7 +4,7 @@ import type { ReaderInfo, ReaderStatus, UpdateStatusResponse } from "./api";
 export type ForwarderSseCallbacks = {
   onStatusChanged: (data: {
     ready: boolean;
-    uplink_connected: boolean;
+    p2p_connected: boolean;
     restart_needed: boolean;
   }) => void;
   onReaderUpdated: (reader: ReaderStatus) => void;
@@ -31,7 +31,7 @@ export function initSSE(callbacks: ForwarderSseCallbacks): void {
     {
       status_changed: (data: {
         ready: boolean;
-        uplink_connected: boolean;
+        p2p_connected: boolean;
         restart_needed: boolean;
       }) => {
         callbacks.onStatusChanged(data);

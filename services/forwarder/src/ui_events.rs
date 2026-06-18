@@ -13,7 +13,7 @@ pub enum ReaderConnectionState {
 pub enum ForwarderUiEvent {
     StatusChanged {
         ready: bool,
-        uplink_connected: bool,
+        p2p_connected: bool,
         restart_needed: bool,
     },
     ReaderUpdated {
@@ -38,7 +38,7 @@ pub enum ForwarderUiEvent {
     },
     UpsStatusChanged {
         available: bool,
-        status: Option<rt_protocol::UpsStatus>,
+        status: Option<rt_domain::UpsStatus>,
     },
 }
 
@@ -50,7 +50,7 @@ mod tests {
     fn status_changed_serializes_with_type_tag() {
         let event = ForwarderUiEvent::StatusChanged {
             ready: true,
-            uplink_connected: false,
+            p2p_connected: false,
             restart_needed: false,
         };
         let json: serde_json::Value = serde_json::to_value(&event).unwrap();
@@ -101,7 +101,7 @@ mod tests {
     fn ups_status_changed_serializes_with_type_tag() {
         let event = ForwarderUiEvent::UpsStatusChanged {
             available: true,
-            status: Some(rt_protocol::UpsStatus {
+            status: Some(rt_domain::UpsStatus {
                 battery_percent: 85,
                 battery_voltage_mv: 4050,
                 charging: true,

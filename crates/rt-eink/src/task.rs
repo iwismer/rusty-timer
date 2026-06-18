@@ -39,7 +39,7 @@ pub async fn run_eink_task<F>(
         info!(
             total_reads = state.total_reads,
             readers = state.readers.len(),
-            server_connected = state.server_connected,
+            p2p_connected = state.p2p_connected,
             "eink: performing initial full refresh"
         );
         draw_fn(&state, true);

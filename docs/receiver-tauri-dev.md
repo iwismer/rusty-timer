@@ -18,12 +18,6 @@ via Tauri IPC (invoke/listen), not HTTP.
 cd apps/receiver-ui && cargo tauri dev
 ```
 
-Or with `dev.py`:
-
-```bash
-uv run scripts/dev.py
-```
-
 In Tauri dev mode, the SvelteKit frontend is served by Vite (with hot-reload)
 and the receiver library runs in-process.
 

@@ -33,8 +33,8 @@ COPY rust-toolchain.toml ./
 # Copy all workspace crates (needed for workspace build).
 COPY crates/ crates/
 COPY services/forwarder/ services/forwarder/
-COPY services/server/ services/server/
 COPY services/receiver/ services/receiver/
+COPY services/thin-node/ services/thin-node/
 COPY services/streamer/ services/streamer/
 COPY services/emulator/ services/emulator/
 COPY src/ src/

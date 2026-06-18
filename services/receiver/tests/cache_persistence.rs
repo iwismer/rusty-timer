@@ -11,20 +11,23 @@ fn db_integrity_check_passes_on_fresh_db() {
 #[test]
 fn profile_save_and_load() {
     let mut db = Db::open_in_memory().unwrap();
-    db.save_profile("wss://e.com", "t", "check-and-download", None)
+    db.save_profile("https://e.com", "t", "check-and-download", None)
         .unwrap();
     let p = db.load_profile().unwrap().unwrap();
-    assert_eq!(p.server_url, "wss://e.com");
+    assert_eq!(p.server_url, "https://e.com");
     assert_eq!(p.token, "t");
 }
 #[test]
 fn profile_update_replaces_existing() {
     let mut db = Db::open_in_memory().unwrap();
-    db.save_profile("wss://old", "old", "check-and-download", None)
+    db.save_profile("https://old", "old", "check-and-download", None)
         .unwrap();
-    db.save_profile("wss://new", "new", "check-and-download", None)
+    db.save_profile("https://new", "new", "check-and-download", None)
         .unwrap();
-    assert_eq!(db.load_profile().unwrap().unwrap().server_url, "wss://new");
+    assert_eq!(
+        db.load_profile().unwrap().unwrap().server_url,
+        "https://new"
+    );
 }
 #[test]
 fn profile_load_returns_none_when_empty() {
@@ -165,14 +168,14 @@ fn db_profile_persists_to_file() {
     let p = dir.path().join("r.sqlite3");
     {
         let mut db = Db::open(&p).unwrap();
-        db.save_profile("wss://p.com", "t", "check-and-download", None)
+        db.save_profile("https://p.com", "t", "check-and-download", None)
             .unwrap();
         db.save_cursor("f", "i", 5, 200).unwrap();
     }
     {
         let db = Db::open(&p).unwrap();
         let pr = db.load_profile().unwrap().unwrap();
-        assert_eq!(pr.server_url, "wss://p.com");
+        assert_eq!(pr.server_url, "https://p.com");
         assert_eq!(db.load_cursors().unwrap()[0].last_seq, 200);
     }
 }

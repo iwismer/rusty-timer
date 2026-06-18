@@ -155,13 +155,13 @@ fn profile_insert_and_read() {
     let conn = open_memory_db();
     conn.execute(
         "INSERT INTO profile (server_url, token) VALUES (?1,?2)",
-        rusqlite::params!["wss://example.com", "tok"],
+        rusqlite::params!["https://example.com", "tok"],
     )
     .unwrap();
     let url: String = conn
         .query_row("SELECT server_url FROM profile", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(url, "wss://example.com");
+    assert_eq!(url, "https://example.com");
 }
 
 #[test]
@@ -172,7 +172,7 @@ fn profile_write_survives_reopen() {
         let c = open_file_db(&p);
         c.execute(
             "INSERT INTO profile (server_url,token) VALUES(?1,?2)",
-            rusqlite::params!["wss://p.com", "t"],
+            rusqlite::params!["https://p.com", "t"],
         )
         .unwrap();
     }
@@ -180,7 +180,7 @@ fn profile_write_survives_reopen() {
     let url: String = c
         .query_row("SELECT server_url FROM profile", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(url, "wss://p.com");
+    assert_eq!(url, "https://p.com");
 }
 
 // ---------------------------------------------------------------------------

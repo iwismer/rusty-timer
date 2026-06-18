@@ -2,7 +2,7 @@
 //!
 //! Tests:
 //! 1. /healthz returns 200
-//! 2. /readyz returns 200 when local subsystems ready (not dependent on uplink)
+//! 2. /readyz returns 200 when local subsystems ready (not dependent on P2P)
 //! 3. /readyz returns 503 when subsystems not initialized
 //! 4. POST /api/v1/streams/{reader_ip}/reset-epoch triggers epoch bump
 //! 5. epoch reset preserves old-epoch unacked events
@@ -89,6 +89,10 @@ async fn http_with_method(addr: SocketAddr, method: &str, path: &str, body: &str
     (status, response)
 }
 
+fn response_body(response: &str) -> &str {
+    response.split_once("\r\n\r\n").map_or("", |(_, body)| body)
+}
+
 #[tokio::test]
 async fn healthz_returns_200() {
     let cfg = StatusConfig {
@@ -149,16 +153,16 @@ async fn readyz_returns_503_when_not_ready() {
 }
 
 #[tokio::test]
-async fn readyz_independent_of_uplink() {
-    // Key contract: /readyz should be ready even if uplink is NOT connected.
+async fn readyz_independent_of_p2p() {
+    // Key contract: /readyz should be ready even if P2P is NOT connected.
     // SubsystemStatus represents local readiness only (config + journal + loops).
     let cfg = StatusConfig {
         bind: "127.0.0.1:0".to_owned(),
         forwarder_version: "0.1.0-test".to_owned(),
     };
     let mut subsystem = SubsystemStatus::ready();
-    // Simulate uplink being disconnected — this must NOT affect readyz
-    subsystem.set_uplink_connected(false);
+    // Simulate P2P being disconnected — this must NOT affect readyz
+    subsystem.set_p2p_connected(false);
 
     let server = StatusServer::start(cfg, subsystem)
         .await
@@ -170,7 +174,7 @@ async fn readyz_independent_of_uplink() {
     let (status, _body) = http_get(addr, "/readyz").await;
     assert_eq!(
         status, 200,
-        "/readyz must return 200 regardless of uplink state"
+        "/readyz must return 200 regardless of P2P state"
     );
 }
 
@@ -328,113 +332,17 @@ async fn epoch_reset_unknown_stream_returns_404() {
 }
 
 #[tokio::test]
-async fn set_current_epoch_name_proxies_to_server_with_stream_lookup() {
-    use axum::extract::{Path, State};
-    use axum::http::{HeaderMap, StatusCode};
-    use axum::routing::{get, put};
-    use axum::{Json, Router};
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-    use tokio::net::TcpListener;
-    use tokio::sync::Mutex;
-
-    #[derive(Clone, Default)]
-    struct UpstreamCapture {
-        auth_header: Arc<Mutex<Option<String>>>,
-        stream_id: Arc<Mutex<Option<String>>>,
-        epoch: Arc<Mutex<Option<i64>>>,
-        name: Arc<Mutex<Option<Value>>>,
-    }
-
-    async fn list_streams_handler() -> Json<Value> {
-        Json(serde_json::json!({
-            "streams": [
-                {
-                    "stream_id": "11111111-1111-1111-1111-111111111111",
-                    "forwarder_id": "fwd-abc123",
-                    "reader_ip": "192.168.1.5",
-                    "stream_epoch": 7,
-                    "online": true,
-                }
-            ]
-        }))
-    }
-
-    async fn put_epoch_name_handler(
-        State(capture): State<UpstreamCapture>,
-        Path((stream_id, epoch)): Path<(String, i64)>,
-        headers: HeaderMap,
-        Json(body): Json<Value>,
-    ) -> (StatusCode, Json<Value>) {
-        let auth = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .map(ToOwned::to_owned);
-        *capture.auth_header.lock().await = auth;
-        *capture.stream_id.lock().await = Some(stream_id.clone());
-        *capture.epoch.lock().await = Some(epoch);
-        *capture.name.lock().await = body.get("name").cloned();
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "stream_id": stream_id,
-                "stream_epoch": epoch,
-                "name": body.get("name").cloned(),
-            })),
-        )
-    }
-
-    let capture = UpstreamCapture::default();
-    let app = Router::new()
-        .route("/api/v1/streams", get(list_streams_handler))
-        .route(
-            "/api/v1/streams/{stream_id}/epochs/{epoch}/name",
-            put(put_epoch_name_handler),
-        )
-        .with_state(capture.clone());
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind upstream");
-    let upstream_addr = listener.local_addr().expect("upstream addr");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve upstream");
-    });
-
-    let mut token_file = NamedTempFile::new().expect("create token file");
-    writeln!(token_file, "test-token").expect("write token");
-
-    let mut config_file = NamedTempFile::new().expect("create config file");
-    write!(
-        config_file,
-        r#"schema_version = 1
-[server]
-base_url = "http://{}"
-[auth]
-token_file = "{}"
-[[readers]]
-target = "192.168.1.5:10000"
-"#,
-        upstream_addr,
-        token_file.path().display()
-    )
-    .expect("write config");
-
+async fn set_current_epoch_name_updates_local_reader_state() {
     let cfg = StatusConfig {
         bind: "127.0.0.1:0".to_owned(),
         forwarder_version: "0.1.0-test".to_owned(),
     };
-    let server = StatusServer::start_with_config(
-        cfg,
-        SubsystemStatus::ready(),
-        Arc::new(tokio::sync::Mutex::new(NoJournalForNameApi)),
-        Arc::new(forwarder::status_http::ConfigState::new(
-            config_file.path().to_path_buf(),
-        )),
-        Arc::new(tokio::sync::Notify::new()),
-    )
-    .await
-    .expect("start failed");
-    server.set_forwarder_id("fwd-abc123").await;
+    let server = StatusServer::start(cfg, SubsystemStatus::ready())
+        .await
+        .expect("start failed");
+    server
+        .init_readers(&[("192.168.1.5".to_owned(), 10005)])
+        .await;
     let addr = server.local_addr();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -450,114 +358,33 @@ target = "192.168.1.5:10000"
         "set current epoch name endpoint must return 200"
     );
 
-    assert_eq!(
-        *capture.auth_header.lock().await,
-        Some("Bearer test-token".to_owned())
-    );
-    assert_eq!(
-        *capture.stream_id.lock().await,
-        Some("11111111-1111-1111-1111-111111111111".to_owned())
-    );
-    assert_eq!(*capture.epoch.lock().await, Some(7));
-    assert_eq!(
-        *capture.name.lock().await,
-        Some(Value::String("Lap 2".to_owned()))
-    );
+    let (status, response) = http_get(addr, "/api/v1/status").await;
+    assert_eq!(status, 200);
+    let body: Value = serde_json::from_str(response_body(&response)).expect("status JSON");
+    assert_eq!(body["readers"][0]["current_epoch_name"], "Lap 2");
 }
 
 #[tokio::test]
 async fn clear_current_epoch_name_sends_null_name() {
-    use axum::extract::{Path, State};
-    use axum::http::StatusCode;
-    use axum::routing::{get, put};
-    use axum::{Json, Router};
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-    use tokio::net::TcpListener;
-    use tokio::sync::Mutex;
-
-    #[derive(Clone, Default)]
-    struct UpstreamCapture {
-        name: Arc<Mutex<Option<Value>>>,
-    }
-
-    async fn list_streams_handler() -> Json<Value> {
-        Json(serde_json::json!({
-            "streams": [
-                {
-                    "stream_id": "22222222-2222-2222-2222-222222222222",
-                    "forwarder_id": "fwd-clear",
-                    "reader_ip": "10.0.0.8",
-                    "stream_epoch": 3,
-                    "online": true,
-                }
-            ]
-        }))
-    }
-
-    async fn put_epoch_name_handler(
-        State(capture): State<UpstreamCapture>,
-        Path((_stream_id, _epoch)): Path<(String, i64)>,
-        Json(body): Json<Value>,
-    ) -> (StatusCode, Json<Value>) {
-        *capture.name.lock().await = body.get("name").cloned();
-        (StatusCode::OK, Json(serde_json::json!({"ok": true})))
-    }
-
-    let capture = UpstreamCapture::default();
-    let app = Router::new()
-        .route("/api/v1/streams", get(list_streams_handler))
-        .route(
-            "/api/v1/streams/{stream_id}/epochs/{epoch}/name",
-            put(put_epoch_name_handler),
-        )
-        .with_state(capture.clone());
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind upstream");
-    let upstream_addr = listener.local_addr().expect("upstream addr");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve upstream");
-    });
-
-    let mut token_file = NamedTempFile::new().expect("create token file");
-    writeln!(token_file, "clear-token").expect("write token");
-
-    let mut config_file = NamedTempFile::new().expect("create config file");
-    write!(
-        config_file,
-        r#"schema_version = 1
-[server]
-base_url = "http://{}"
-[auth]
-token_file = "{}"
-[[readers]]
-target = "10.0.0.8:10000"
-"#,
-        upstream_addr,
-        token_file.path().display()
-    )
-    .expect("write config");
-
     let cfg = StatusConfig {
         bind: "127.0.0.1:0".to_owned(),
         forwarder_version: "0.1.0-test".to_owned(),
     };
-    let server = StatusServer::start_with_config(
-        cfg,
-        SubsystemStatus::ready(),
-        Arc::new(tokio::sync::Mutex::new(NoJournalForNameApi)),
-        Arc::new(forwarder::status_http::ConfigState::new(
-            config_file.path().to_path_buf(),
-        )),
-        Arc::new(tokio::sync::Notify::new()),
-    )
-    .await
-    .expect("start failed");
-    server.set_forwarder_id("fwd-clear").await;
+    let server = StatusServer::start(cfg, SubsystemStatus::ready())
+        .await
+        .expect("start failed");
+    server.init_readers(&[("10.0.0.8".to_owned(), 10008)]).await;
     let addr = server.local_addr();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _body) = http_put(
+        addr,
+        "/api/v1/streams/10.0.0.8/current-epoch/name",
+        r#"{"name":"Lap 1"}"#,
+    )
+    .await;
+    assert_eq!(status, 200);
 
     let (status, _body) = http_put(
         addr,
@@ -566,101 +393,31 @@ target = "10.0.0.8:10000"
     )
     .await;
     assert_eq!(status, 200);
-    assert_eq!(*capture.name.lock().await, Some(Value::Null));
+
+    let (status, response) = http_get(addr, "/api/v1/status").await;
+    assert_eq!(status, 200);
+    let body: Value = serde_json::from_str(response_body(&response)).expect("status JSON");
+    assert!(body["readers"][0]["current_epoch_name"].is_null());
 }
 
 /// Validates that `%3A` (percent-encoded colon) in the reader IP path segment is decoded
-/// correctly by Axum and the request reaches the upstream — not rejected with 400.
+/// correctly by Axum and reaches the local reader map — not rejected with 400.
 #[tokio::test]
 async fn set_current_epoch_name_accepts_percent_encoded_reader_ip() {
-    use axum::extract::{Path, State};
-    use axum::http::StatusCode;
-    use axum::routing::{get, put};
-    use axum::{Json, Router};
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-    use tokio::net::TcpListener;
-    use tokio::sync::Mutex;
-
-    #[derive(Clone, Default)]
-    struct Capture {
-        name: Arc<Mutex<Option<Value>>>,
-    }
-
-    async fn list_streams_pct() -> Json<Value> {
-        Json(serde_json::json!({
-            "streams": [{
-                "stream_id": "33333333-3333-3333-3333-333333333333",
-                "forwarder_id": "fwd-pct",
-                "reader_ip": "192.168.1.7:10000",
-                "stream_epoch": 1,
-                "online": true,
-            }]
-        }))
-    }
-
-    async fn put_name_pct(
-        State(cap): State<Capture>,
-        Path((_id, _epoch)): Path<(String, i64)>,
-        Json(body): Json<Value>,
-    ) -> (StatusCode, Json<Value>) {
-        *cap.name.lock().await = body.get("name").cloned();
-        (StatusCode::OK, Json(serde_json::json!({"ok": true})))
-    }
-
-    let capture = Capture::default();
-    let app = Router::new()
-        .route("/api/v1/streams", get(list_streams_pct))
-        .route(
-            "/api/v1/streams/{id}/epochs/{epoch}/name",
-            put(put_name_pct),
-        )
-        .with_state(capture.clone());
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let upstream_addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
-
-    let mut token_file = NamedTempFile::new().expect("token file");
-    write!(token_file, "pct-token").expect("write token");
-
-    let mut config_file = NamedTempFile::new().expect("config file");
-    write!(
-        config_file,
-        r#"schema_version = 1
-[server]
-base_url = "http://{}"
-[auth]
-token_file = "{}"
-[[readers]]
-target = "192.168.1.7:10000"
-"#,
-        upstream_addr,
-        token_file.path().display()
-    )
-    .expect("write config");
-
     let cfg = StatusConfig {
         bind: "127.0.0.1:0".to_owned(),
         forwarder_version: "0.1.0-test".to_owned(),
     };
-    let server = StatusServer::start_with_config(
-        cfg,
-        SubsystemStatus::ready(),
-        Arc::new(tokio::sync::Mutex::new(NoJournalForNameApi)),
-        Arc::new(forwarder::status_http::ConfigState::new(
-            config_file.path().to_path_buf(),
-        )),
-        Arc::new(tokio::sync::Notify::new()),
-    )
-    .await
-    .expect("start failed");
-    server.set_forwarder_id("fwd-pct").await;
+    let server = StatusServer::start(cfg, SubsystemStatus::ready())
+        .await
+        .expect("start failed");
+    server
+        .init_readers(&[("192.168.1.7:10000".to_owned(), 10007)])
+        .await;
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // %3A is a percent-encoded colon; Axum decodes it to ":" before the handler runs.
-    // The old code incorrectly rejected any reader_ip still containing '%' — this
-    // verifies that the fix allows correctly-encoded IPs through to the upstream.
     let (status, _body) = http_put(
         addr,
         "/api/v1/streams/192.168.1.7%3A10000/current-epoch/name",
@@ -671,10 +428,11 @@ target = "192.168.1.7:10000"
         status, 200,
         "percent-encoded colon in reader IP must be accepted"
     );
-    assert_eq!(
-        *capture.name.lock().await,
-        Some(Value::String("Pct Test".to_owned()))
-    );
+
+    let (status, response) = http_get(addr, "/api/v1/status").await;
+    assert_eq!(status, 200);
+    let body: Value = serde_json::from_str(response_body(&response)).expect("status JSON");
+    assert_eq!(body["readers"][0]["current_epoch_name"], "Pct Test");
 }
 
 #[tokio::test]
@@ -689,8 +447,8 @@ async fn set_current_epoch_name_returns_400_when_name_field_missing() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "http://127.0.0.1:1"
+[p2p]
+thin_node_url = "http://127.0.0.1:1"
 [auth]
 token_file = "{}"
 [[readers]]
@@ -741,8 +499,8 @@ async fn set_current_epoch_name_returns_400_when_name_is_wrong_type() {
     write!(
         config_file,
         r#"schema_version = 1
-[server]
-base_url = "http://127.0.0.1:1"
+[p2p]
+thin_node_url = "http://127.0.0.1:1"
 [auth]
 token_file = "{}"
 [[readers]]
@@ -781,98 +539,25 @@ target = "10.0.0.1:10000"
     assert_eq!(status, 400, "non-string name must return 400");
 }
 
-/// Verifies that when the upstream epoch-name update fails, the error response from the
-/// forwarder uses JSON content-type (not text/plain).
 #[tokio::test]
-async fn set_current_epoch_name_error_response_has_json_content_type() {
-    use axum::extract::Path;
-    use axum::http::StatusCode;
-    use axum::routing::{get, put};
-    use axum::{Json, Router};
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-    use tokio::net::TcpListener;
-
-    async fn list_streams_ct() -> Json<Value> {
-        Json(serde_json::json!({
-            "streams": [{
-                "stream_id": "44444444-4444-4444-4444-444444444444",
-                "forwarder_id": "fwd-ct",
-                "reader_ip": "10.0.0.9",
-                "stream_epoch": 5,
-                "online": true,
-            }]
-        }))
-    }
-
-    async fn put_name_error(Path((_id, _epoch)): Path<(String, i64)>) -> (StatusCode, String) {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "upstream error".to_owned(),
-        )
-    }
-
-    let app = Router::new()
-        .route("/api/v1/streams", get(list_streams_ct))
-        .route(
-            "/api/v1/streams/{id}/epochs/{epoch}/name",
-            put(put_name_error),
-        );
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let upstream_addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
-
-    let mut token_file = NamedTempFile::new().expect("token file");
-    write!(token_file, "ct-token").expect("write token");
-
-    let mut config_file = NamedTempFile::new().expect("config file");
-    write!(
-        config_file,
-        r#"schema_version = 1
-[server]
-base_url = "http://{}"
-[auth]
-token_file = "{}"
-[[readers]]
-target = "10.0.0.9:10000"
-"#,
-        upstream_addr,
-        token_file.path().display()
-    )
-    .expect("write config");
-
+async fn set_current_epoch_name_returns_404_for_unknown_reader() {
     let cfg = StatusConfig {
         bind: "127.0.0.1:0".to_owned(),
         forwarder_version: "0.1.0-test".to_owned(),
     };
-    let server = StatusServer::start_with_config(
-        cfg,
-        SubsystemStatus::ready(),
-        Arc::new(tokio::sync::Mutex::new(NoJournalForNameApi)),
-        Arc::new(forwarder::status_http::ConfigState::new(
-            config_file.path().to_path_buf(),
-        )),
-        Arc::new(tokio::sync::Notify::new()),
-    )
-    .await
-    .expect("start failed");
-    server.set_forwarder_id("fwd-ct").await;
+    let server = StatusServer::start(cfg, SubsystemStatus::ready())
+        .await
+        .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let (status, response) = http_put(
+    let (status, _response) = http_put(
         addr,
         "/api/v1/streams/10.0.0.9/current-epoch/name",
         r#"{"name":"test"}"#,
     )
     .await;
-    assert_eq!(status, 500, "upstream error must propagate as 500");
-    assert!(
-        response
-            .to_lowercase()
-            .contains("content-type: application/json"),
-        "error response must have JSON content-type, got: {response}",
-    );
+    assert_eq!(status, 404, "unknown local reader must return 404");
 }
 
 struct NoJournalForNameApi;
