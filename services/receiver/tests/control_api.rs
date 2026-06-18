@@ -20,7 +20,7 @@ async fn profile_round_trip() {
     control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "https://thin.test".to_owned(),
+            thin_node_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: None,
         },
@@ -29,7 +29,7 @@ async fn profile_round_trip() {
     .unwrap();
 
     let profile = control_api::get_profile(&state).await.unwrap();
-    assert_eq!(profile.server_url, "https://thin.test");
+    assert_eq!(profile.thin_node_url, "https://thin.test");
     assert_eq!(profile.token, "tok");
     assert_eq!(profile.receiver_id, "test-receiver");
 }
@@ -40,7 +40,7 @@ async fn put_profile_with_receiver_id_updates_state() {
     control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "https://thin.test".to_owned(),
+            thin_node_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: Some("recv-new".to_owned()),
         },
@@ -61,7 +61,7 @@ async fn put_profile_with_whitespace_receiver_id_keeps_original() {
     control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "https://thin.test".to_owned(),
+            thin_node_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: Some("  ".to_owned()),
         },
@@ -79,7 +79,7 @@ async fn mode_endpoints_round_trip() {
     control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "https://thin.test".to_owned(),
+            thin_node_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: None,
         },
@@ -131,7 +131,7 @@ async fn put_mode_rejects_invalid_race_id_format() {
     control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "https://thin.test".to_owned(),
+            thin_node_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: None,
         },
@@ -204,7 +204,7 @@ async fn put_mode_emits_mode_changed_event() {
     control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "https://thin.test".to_owned(),
+            thin_node_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: None,
         },
@@ -246,7 +246,7 @@ async fn put_profile_without_receiver_id_preserves_db_value() {
     control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "https://thin.test".to_owned(),
+            thin_node_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: Some("recv-original".to_owned()),
         },
@@ -257,7 +257,7 @@ async fn put_profile_without_receiver_id_preserves_db_value() {
     control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "https://thin2.test".to_owned(),
+            thin_node_url: "https://thin2.test".to_owned(),
             token: "tok2".to_owned(),
             receiver_id: None,
         },
@@ -277,7 +277,7 @@ async fn put_profile_rejects_too_long_receiver_id() {
     let result = control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "https://thin.test".to_owned(),
+            thin_node_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: Some(long_id),
         },
@@ -292,7 +292,7 @@ async fn put_profile_rejects_receiver_id_with_special_chars() {
     let result = control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "https://thin.test".to_owned(),
+            thin_node_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: Some("recv/bad@id".to_owned()),
         },
@@ -307,7 +307,7 @@ async fn put_profile_accepts_valid_receiver_id() {
     control_api::put_profile(
         &state,
         ProfileRequest {
-            server_url: "https://thin.test".to_owned(),
+            thin_node_url: "https://thin.test".to_owned(),
             token: "tok".to_owned(),
             receiver_id: Some("my-recv-01".to_owned()),
         },
@@ -411,7 +411,7 @@ async fn admin_reset_profile_clears_credentials() {
 
     // After reset, profile should have empty values
     let profile = control_api::get_profile(&state).await.unwrap();
-    assert_eq!(profile.server_url, "");
+    assert_eq!(profile.thin_node_url, "");
     assert_eq!(profile.token, "");
 }
 
@@ -445,7 +445,7 @@ async fn admin_factory_reset_clears_everything() {
     control_api::admin_factory_reset(&state).await.unwrap();
 
     let profile = control_api::get_profile(&state).await.unwrap();
-    assert_eq!(profile.server_url, "");
+    assert_eq!(profile.thin_node_url, "");
     assert_eq!(profile.token, "");
 }
 

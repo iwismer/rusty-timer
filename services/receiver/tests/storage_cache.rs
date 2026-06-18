@@ -154,12 +154,12 @@ fn integrity_check_passes_on_fresh_db() {
 fn profile_insert_and_read() {
     let conn = open_memory_db();
     conn.execute(
-        "INSERT INTO profile (server_url, token) VALUES (?1,?2)",
+        "INSERT INTO profile (thin_node_url, token) VALUES (?1,?2)",
         rusqlite::params!["https://example.com", "tok"],
     )
     .unwrap();
     let url: String = conn
-        .query_row("SELECT server_url FROM profile", [], |r| r.get(0))
+        .query_row("SELECT thin_node_url FROM profile", [], |r| r.get(0))
         .unwrap();
     assert_eq!(url, "https://example.com");
 }
@@ -171,14 +171,14 @@ fn profile_write_survives_reopen() {
     {
         let c = open_file_db(&p);
         c.execute(
-            "INSERT INTO profile (server_url,token) VALUES(?1,?2)",
+            "INSERT INTO profile (thin_node_url,token) VALUES(?1,?2)",
             rusqlite::params!["https://p.com", "t"],
         )
         .unwrap();
     }
     let c = reopen_file_db(&p);
     let url: String = c
-        .query_row("SELECT server_url FROM profile", [], |r| r.get(0))
+        .query_row("SELECT thin_node_url FROM profile", [], |r| r.get(0))
         .unwrap();
     assert_eq!(url, "https://p.com");
 }
@@ -191,13 +191,13 @@ fn profile_write_survives_reopen() {
 fn subscriptions_insert_and_read() {
     let conn = open_memory_db();
     conn.execute(
-        "INSERT INTO subscriptions (forwarder_id,reader_ip) VALUES(?1,?2)",
-        rusqlite::params!["f", "192.168.1.100"],
+        "INSERT INTO subscriptions (forwarder_endpoint_id,stream_id) VALUES(?1,?2)",
+        rusqlite::params!["endpoint-a", "192.168.1.100:10000"],
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO subscriptions (forwarder_id,reader_ip) VALUES(?1,?2)",
-        rusqlite::params!["f", "192.168.1.200"],
+        "INSERT INTO subscriptions (forwarder_endpoint_id,stream_id) VALUES(?1,?2)",
+        rusqlite::params!["endpoint-a", "192.168.1.200:10000"],
     )
     .unwrap();
     let n: i64 = conn
@@ -210,17 +210,17 @@ fn subscriptions_insert_and_read() {
 fn subscriptions_pk_rejects_duplicate() {
     let conn = open_memory_db();
     conn.execute(
-        "INSERT INTO subscriptions (forwarder_id,reader_ip) VALUES(?1,?2)",
-        rusqlite::params!["f", "192.168.1.100"],
+        "INSERT INTO subscriptions (forwarder_endpoint_id,stream_id) VALUES(?1,?2)",
+        rusqlite::params!["endpoint-a", "192.168.1.100:10000"],
     )
     .unwrap();
     let result = conn.execute(
-        "INSERT INTO subscriptions (forwarder_id,reader_ip) VALUES(?1,?2)",
-        rusqlite::params!["f", "192.168.1.100"],
+        "INSERT INTO subscriptions (forwarder_endpoint_id,stream_id) VALUES(?1,?2)",
+        rusqlite::params!["endpoint-a", "192.168.1.100:10000"],
     );
     assert!(
         result.is_err(),
-        "duplicate (forwarder_id, reader_ip) must be rejected"
+        "duplicate (forwarder_endpoint_id, stream_id) must be rejected"
     );
 }
 
@@ -231,31 +231,56 @@ fn subscriptions_pk_rejects_duplicate() {
 #[test]
 fn cursor_insert_and_read() {
     let conn = open_memory_db();
-    conn.execute("INSERT INTO cursors (forwarder_id,reader_ip,stream_epoch,acked_through_seq) VALUES(?1,?2,?3,?4)", rusqlite::params!["f","i",3i64,17i64]).unwrap();
-    let (e,s): (i64,i64) = conn.query_row("SELECT stream_epoch, acked_through_seq FROM cursors WHERE forwarder_id='f' AND reader_ip='i'", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
-    assert_eq!(e, 3);
+    conn.execute(
+        "INSERT INTO cursors (stream_id,last_seq,stream_epoch) VALUES(?1,?2,?3)",
+        rusqlite::params!["192.168.1.10:10000", 17i64, 3i64],
+    )
+    .unwrap();
+    let (s, e): (i64, i64) = conn
+        .query_row(
+            "SELECT last_seq, stream_epoch FROM cursors WHERE stream_id='192.168.1.10:10000'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
     assert_eq!(s, 17);
+    assert_eq!(e, 3);
 }
 
 #[test]
 fn cursor_pk_rejects_duplicate() {
     let conn = open_memory_db();
-    conn.execute("INSERT INTO cursors (forwarder_id,reader_ip,stream_epoch,acked_through_seq) VALUES(?1,?2,?3,?4)", rusqlite::params!["f","i",1i64,10i64]).unwrap();
-    let result = conn.execute("INSERT INTO cursors (forwarder_id,reader_ip,stream_epoch,acked_through_seq) VALUES(?1,?2,?3,?4)", rusqlite::params!["f","i",2i64,20i64]);
+    conn.execute(
+        "INSERT INTO cursors (stream_id,last_seq,stream_epoch) VALUES(?1,?2,?3)",
+        rusqlite::params!["s1", 10i64, 1i64],
+    )
+    .unwrap();
+    let result = conn.execute(
+        "INSERT INTO cursors (stream_id,last_seq,stream_epoch) VALUES(?1,?2,?3)",
+        rusqlite::params!["s1", 20i64, 2i64],
+    );
     assert!(
         result.is_err(),
-        "duplicate (forwarder_id, reader_ip) in cursors must be rejected"
+        "duplicate stream_id in cursors must be rejected"
     );
 }
 
 #[test]
 fn cursor_upsert_advances_position() {
     let conn = open_memory_db();
-    conn.execute("INSERT INTO cursors (forwarder_id,reader_ip,stream_epoch,acked_through_seq) VALUES(?1,?2,?3,?4)", rusqlite::params!["f","i",1i64,5i64]).unwrap();
-    conn.execute("INSERT OR REPLACE INTO cursors (forwarder_id,reader_ip,stream_epoch,acked_through_seq) VALUES(?1,?2,?3,?4)", rusqlite::params!["f","i",1i64,25i64]).unwrap();
+    conn.execute(
+        "INSERT INTO cursors (stream_id,last_seq,stream_epoch) VALUES(?1,?2,?3)",
+        rusqlite::params!["s1", 5i64, 1i64],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO cursors (stream_id,last_seq,stream_epoch) VALUES(?1,?2,?3)",
+        rusqlite::params!["s1", 25i64, 1i64],
+    )
+    .unwrap();
     let s: i64 = conn
         .query_row(
-            "SELECT acked_through_seq FROM cursors WHERE forwarder_id='f' AND reader_ip='i'",
+            "SELECT last_seq FROM cursors WHERE stream_id='s1'",
             [],
             |r| r.get(0),
         )
@@ -269,12 +294,16 @@ fn cursor_survives_reopen() {
     let p = dir.path().join("r.db");
     {
         let c = open_file_db(&p);
-        c.execute("INSERT INTO cursors (forwarder_id,reader_ip,stream_epoch,acked_through_seq) VALUES(?1,?2,?3,?4)", rusqlite::params!["f","i",1i64,99i64]).unwrap();
+        c.execute(
+            "INSERT INTO cursors (stream_id,last_seq,stream_epoch) VALUES(?1,?2,?3)",
+            rusqlite::params!["s1", 99i64, 1i64],
+        )
+        .unwrap();
     }
     let c = reopen_file_db(&p);
     let s: i64 = c
         .query_row(
-            "SELECT acked_through_seq FROM cursors WHERE forwarder_id='f' AND reader_ip='i'",
+            "SELECT last_seq FROM cursors WHERE stream_id='s1'",
             [],
             |r| r.get(0),
         )

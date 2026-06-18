@@ -294,7 +294,7 @@ def derive_node_id(seed_hex: str) -> str:
 # ---------------------------------------------------------------------------
 PRESEED_SQL = """
 CREATE TABLE IF NOT EXISTS profile (
-    server_url  TEXT NOT NULL,
+    thin_node_url  TEXT NOT NULL,
     token       TEXT NOT NULL,
     update_mode TEXT NOT NULL DEFAULT 'check-and-download',
     receiver_mode_json TEXT,
@@ -321,7 +321,7 @@ def preseed_receiver_db(db_path: Path, forwarder_node_id: str, stream_id: str,
         conn.executescript(PRESEED_SQL)
         conn.execute(
             "INSERT INTO profile "
-            "(server_url, token, update_mode, receiver_mode_json, receiver_id, "
+            "(thin_node_url, token, update_mode, receiver_mode_json, receiver_id, "
             " dbf_enabled, dbf_path) VALUES (?,?,?,?,?,?,?)",
             ("p2p://loopback", "e2e-token", "check-and-download", None,
              "rx-e2e", 1, str(dbf_path)),

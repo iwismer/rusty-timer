@@ -5,7 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export interface Profile {
-  server_url: string;
+  thin_node_url: string;
   token: string;
   receiver_id: string;
 }

@@ -45,7 +45,6 @@ pub struct AppState {
     _conn_state_keepalive: watch::Receiver<ConnectionState>,
     pub logger: Arc<rt_ui_log::UiLogger<ReceiverUiEvent>>,
     pub shutdown_tx: watch::Sender<ShutdownSignal>,
-    pub upstream_url: Arc<RwLock<Option<String>>>,
     pub ui_tx: broadcast::Sender<ReceiverUiEvent>,
     pub stream_counts: crate::cache::StreamCounts,
     pub stream_metrics_cache:
@@ -93,7 +92,6 @@ impl AppState {
                 500,
             )),
             shutdown_tx,
-            upstream_url: Arc::new(RwLock::new(None)),
             ui_tx,
             stream_counts: crate::cache::StreamCounts::new(),
             stream_metrics_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -321,7 +319,7 @@ impl AppState {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProfileRequest {
-    pub server_url: String,
+    pub thin_node_url: String,
     pub token: String,
     #[serde(default)]
     pub receiver_id: Option<String>,
@@ -348,7 +346,7 @@ fn is_uuid_format(value: &str) -> bool {
 
 #[derive(Debug, Serialize)]
 pub struct ProfileResponse {
-    pub server_url: String,
+    pub thin_node_url: String,
     pub token: String,
     pub receiver_id: String,
 }
@@ -468,7 +466,7 @@ pub async fn get_profile(state: &AppState) -> Result<ProfileResponse, ReceiverEr
     let db = state.db.lock().await;
     match db.load_profile() {
         Ok(Some(p)) => Ok(ProfileResponse {
-            server_url: p.server_url,
+            thin_node_url: p.thin_node_url,
             token: p.token,
             receiver_id,
         }),
@@ -487,7 +485,7 @@ pub async fn get_mode(state: &AppState) -> Result<ReceiverMode, ReceiverError> {
 }
 
 pub async fn put_profile(state: &AppState, body: ProfileRequest) -> Result<(), ReceiverError> {
-    let url = body.server_url.trim().trim_end_matches('/').to_owned();
+    let url = body.thin_node_url.trim().trim_end_matches('/').to_owned();
 
     let new_receiver_id = body
         .receiver_id
@@ -517,7 +515,6 @@ pub async fn put_profile(state: &AppState, body: ProfileRequest) -> Result<(), R
     ) {
         Ok(()) => {
             drop(db);
-            *state.upstream_url.write().await = Some(url);
             if let Some(id) = new_receiver_id {
                 *state.receiver_id.write().await = id;
             }
@@ -907,7 +904,6 @@ pub async fn admin_reset_profile(state: &AppState) -> Result<(), ReceiverError> 
     match db.reset_profile() {
         Ok(()) => {
             drop(db);
-            *state.upstream_url.write().await = None;
             *state.receiver_id.write().await = String::new();
             state.emit_streams_snapshot().await;
             Ok(())
@@ -949,7 +945,6 @@ pub async fn admin_factory_reset(state: &AppState) -> Result<(), ReceiverError> 
     match db.factory_reset() {
         Ok(()) => {
             drop(db);
-            *state.upstream_url.write().await = None;
             *state.receiver_id.write().await = String::new();
             state.emit_streams_snapshot().await;
             Ok(())

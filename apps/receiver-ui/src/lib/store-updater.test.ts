@@ -163,7 +163,7 @@ describe("receiver updater store", () => {
 
   it("hydrates config edit fields from the saved profile on initial load", async () => {
     apiMocks.getProfile.mockResolvedValueOnce({
-      server_url: "https://receiver.example",
+      thin_node_url: "https://receiver.example",
       token: "secret-token",
       receiver_id: "recv-live",
     });

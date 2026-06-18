@@ -17,12 +17,12 @@ fn profile_stored_and_loaded() {
     let d = tempfile::tempdir().unwrap();
     let c = open_db(&d.path().join("r.db"));
     c.execute(
-        "INSERT INTO profile (server_url, token) VALUES (?1, ?2)",
+        "INSERT INTO profile (thin_node_url, token) VALUES (?1, ?2)",
         rusqlite::params!["https://thin.test", "t"],
     )
     .unwrap();
     let url: String = c
-        .query_row("SELECT server_url FROM profile", [], |r| r.get(0))
+        .query_row("SELECT thin_node_url FROM profile", [], |r| r.get(0))
         .unwrap();
     assert_eq!(url, "https://thin.test");
 }
@@ -111,14 +111,14 @@ fn profile_persists_across_db_reopen() {
     {
         let c = open_db(&p);
         c.execute(
-            "INSERT INTO profile (server_url, token) VALUES (?1, ?2)",
+            "INSERT INTO profile (thin_node_url, token) VALUES (?1, ?2)",
             rusqlite::params!["https://p.com", "t"],
         )
         .unwrap();
     }
     let c = Connection::open(&p).unwrap();
     let url: String = c
-        .query_row("SELECT server_url FROM profile", [], |r| r.get(0))
+        .query_row("SELECT thin_node_url FROM profile", [], |r| r.get(0))
         .unwrap();
     assert_eq!(url, "https://p.com");
 }

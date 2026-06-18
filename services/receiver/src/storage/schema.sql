@@ -14,7 +14,7 @@
 -- stream_id directly.
 
 CREATE TABLE IF NOT EXISTS profile (
-    server_url  TEXT NOT NULL,
+    thin_node_url  TEXT NOT NULL,
     token       TEXT NOT NULL,
     update_mode TEXT NOT NULL DEFAULT 'check-and-download',
     receiver_mode_json TEXT,

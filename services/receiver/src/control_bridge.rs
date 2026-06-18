@@ -328,7 +328,6 @@ mod tests {
     use crate::db::Db;
     use crate::ui_events::ReceiverUiEvent;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -369,7 +368,7 @@ mod tests {
     /// for required arguments or `Handler` errors for unmet preconditions).
     ///
     /// The seeded DB keeps the dispatch side-effect-free: an unparseable
-    /// `server_url` makes network-backed commands fail fast with no I/O, and a
+    /// `thin_node_url` makes network-backed commands fail fast with no I/O, and a
     /// temp DBF path keeps `clear_dbf` writes inside a tempdir.
     #[tokio::test]
     async fn dispatch_table_covers_registry() {
@@ -455,43 +454,6 @@ mod tests {
         // … and stream-related state.
         assert!(body["streams"]["streams"].is_array());
         assert!(body["streams"].get("degraded").is_some());
-    }
-
-    #[tokio::test]
-    async fn state_snapshot_does_not_fetch_upstream() {
-        let (addr, state) = spawn_bridge().await;
-        let upstream_hits = Arc::new(AtomicUsize::new(0));
-        let hits_for_handler = Arc::clone(&upstream_hits);
-        let upstream_app = Router::new().route(
-            "/api/v1/streams",
-            get(move || {
-                let hits = Arc::clone(&hits_for_handler);
-                async move {
-                    hits.fetch_add(1, Ordering::SeqCst);
-                    Json(serde_json::json!({ "streams": [] }))
-                }
-            }),
-        );
-        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let upstream_addr = upstream_listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(upstream_listener, upstream_app).await.unwrap();
-        });
-
-        *state.upstream_url.write().await = Some(format!("https://{upstream_addr}"));
-        state
-            .connection_state
-            .send_replace(control_api::ConnectionState::Connected);
-
-        let resp = reqwest::get(format!("http://{addr}/bridge/state"))
-            .await
-            .expect("GET /bridge/state");
-        assert!(resp.status().is_success());
-        assert_eq!(
-            upstream_hits.load(Ordering::SeqCst),
-            0,
-            "/bridge/state must not fetch upstream streams"
-        );
     }
 
     /// Open the SSE stream over a raw TCP connection, wait until the response

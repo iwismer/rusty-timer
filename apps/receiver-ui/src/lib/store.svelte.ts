@@ -713,12 +713,12 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
     const p = await api.getProfile().catch(() => null);
     if (p) {
       const configWasDirty = getConfigDirty();
-      store.savedThinNodeUrl = p.server_url;
+      store.savedThinNodeUrl = p.thin_node_url;
       store.savedToken = p.token;
       store.savedReceiverId = p.receiver_id;
       // Only overwrite edit fields if the user hasn't made unsaved changes.
       if (!configWasDirty) {
-        store.editThinNodeUrl = p.server_url;
+        store.editThinNodeUrl = p.thin_node_url;
         store.editToken = p.token;
         store.editReceiverId = p.receiver_id;
       }
@@ -933,13 +933,13 @@ export async function replayAll(): Promise<void> {
 export async function saveProfile(): Promise<void> {
   store.saving = true;
   const payload = {
-    server_url: store.editThinNodeUrl,
+    thin_node_url: store.editThinNodeUrl,
     token: store.editToken,
     receiver_id: store.editReceiverId,
   };
   try {
     await api.putProfile(payload);
-    store.savedThinNodeUrl = payload.server_url;
+    store.savedThinNodeUrl = payload.thin_node_url;
     store.savedToken = payload.token;
     store.savedReceiverId = payload.receiver_id;
   } catch (e) {
