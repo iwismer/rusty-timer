@@ -218,20 +218,24 @@ def wait_tcp(port: int, timeout: float, what: str) -> None:
 # Build
 # ---------------------------------------------------------------------------
 def cargo_build() -> None:
-    print("[build] cargo build -p emulator -p forwarder -p thin-node -p receiver ...")
+    # Build the forwarder UI first so the forwarder can embed it (the forwarder
+    # serves its web UI only when built with `--features embed-ui`, which embeds
+    # `apps/forwarder-ui/build` at compile time).
+    print("[build] forwarder UI (npm run build --workspace apps/forwarder-ui) ...")
     subprocess.run(
-        [
-            "cargo",
-            "build",
-            "-p",
-            "emulator",
-            "-p",
-            "forwarder",
-            "-p",
-            "thin-node",
-            "-p",
-            "receiver",
-        ],
+        ["npm", "run", "build", "--workspace", "apps/forwarder-ui"],
+        cwd=str(REPO_ROOT),
+        check=True,
+    )
+    print("[build] cargo build -p emulator -p thin-node -p receiver ...")
+    subprocess.run(
+        ["cargo", "build", "-p", "emulator", "-p", "thin-node", "-p", "receiver"],
+        cwd=str(REPO_ROOT),
+        check=True,
+    )
+    print("[build] cargo build -p forwarder --features embed-ui ...")
+    subprocess.run(
+        ["cargo", "build", "-p", "forwarder", "--features", "embed-ui"],
         cwd=str(REPO_ROOT),
         check=True,
     )
@@ -491,6 +495,7 @@ def main() -> int:
             receiver_data_dir=receiver_data_dir,
             thin_node_url=thin_node_url,
             forwarder_status_port=forwarder_status_port,
+            emulator_port=emulator_port,
             proxy_port=proxy_port,
             stream_id=stream_id,
             dbf_path=dbf_path,
@@ -571,9 +576,10 @@ def print_summary(**kw) -> None:
     print("\n" + "=" * 70)
     print("  Rusty Timer — local P2P dev stack is UP")
     print("=" * 70)
-    print(f"  Thin-node status:   {kw['thin_node_url']}/status")
+    print(f"  Thin-node status:   {kw['thin_node_url']}/status   (JSON; no web UI yet)")
     print(f"  Thin-node health:   {kw['thin_node_url']}/healthz")
-    print(f"  Forwarder status:   http://127.0.0.1:{kw['forwarder_status_port']}/api/v1/status")
+    print(f"  Forwarder UI:       http://127.0.0.1:{kw['forwarder_status_port']}/   (status API at /api/v1/status)")
+    print(f"  Emulator (reads):   127.0.0.1:{kw['emulator_port']}   (log: {kw['work_dir']}/emulator.log)")
     print(f"  Local TCP output:   127.0.0.1:{kw['proxy_port']}  (timing-software feed)")
     print(f"  Stream id:          {kw['stream_id']}")
     print(f"  Forwarder node id:  {kw['forwarder_node_id'][:16]}...")
