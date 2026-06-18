@@ -37,6 +37,7 @@ type CmdResult<T> = Result<T, String>;
 const APP_IDENTIFIER: &str = "com.rusty-timer.receiver";
 const CRASH_LOG_FILENAME: &str = "crash.log";
 const DEV_RECEIVER_ID_ENV: &str = "RT_RECEIVER_ID";
+const DEV_DATA_DIR_ENV: &str = "RT_RECEIVER_DATA_DIR";
 
 enum BridgeAction {
     EmitEvent {
@@ -148,6 +149,18 @@ fn parsed_receiver_id_override(raw: Option<String>) -> Option<String> {
 
 fn receiver_id_override_from_env() -> Option<String> {
     parsed_receiver_id_override(std::env::var(DEV_RECEIVER_ID_ENV).ok())
+}
+
+/// Optional data-directory override for local development / the manual dev
+/// stack. When `RT_RECEIVER_DATA_DIR` is set, the receiver stores its SQLite
+/// state there instead of the OS app-local data dir, so a dev run can use an
+/// isolated, disposable directory.
+fn data_dir_override_from_env() -> Option<PathBuf> {
+    std::env::var(DEV_DATA_DIR_ENV)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn fallback_app_local_data_dir() -> Option<PathBuf> {
@@ -648,8 +661,14 @@ fn main() {
             // block_on is safe here because setup() runs before the Tauri event
             // loop starts, so we won't deadlock the async runtime.
             let receiver_id_override = receiver_id_override_from_env();
+            let data_dir_override = data_dir_override_from_env();
             let (state, shutdown_rx) = tauri::async_runtime::block_on(async {
-                receiver::runtime::init(receiver_id_override).await
+                match data_dir_override {
+                    Some(dir) => {
+                        receiver::runtime::init_with_data_dir(receiver_id_override, dir).await
+                    }
+                    None => receiver::runtime::init(receiver_id_override).await,
+                }
             })
             .map_err(|e| -> Box<dyn std::error::Error> {
                 let msg = format!("Fatal: failed to initialize receiver runtime: {e}");
@@ -662,6 +681,32 @@ fn main() {
 
             // Start event bridge
             spawn_event_bridge(handle, &state);
+
+            // Optional local/dev P2P lane: when the RT_P2P_* env vars are
+            // present, start the same P2P receiver runtime as
+            // `receiver-headless` so the desktop app connects to a forwarder
+            // over iroh. Inert (no P2P) when the env vars are absent.
+            let p2p_handle = app.handle().clone();
+            match receiver::p2p_runtime::p2p_config_from_env() {
+                Ok(Some(p2p_config)) => {
+                    let p2p_state = state.clone();
+                    let p2p_runtime = tauri::async_runtime::block_on(async {
+                        receiver::p2p_runtime::start_receiver_p2p(p2p_state, p2p_config).await
+                    })
+                    .map_err(|e| -> Box<dyn std::error::Error> {
+                        let msg = format!("Fatal: failed to start P2P receiver runtime: {e}");
+                        record_app_failure(&p2p_handle, &msg);
+                        Box::new(std::io::Error::other(msg))
+                    })?;
+                    app.manage(Mutex::new(Some(p2p_runtime)));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let msg = format!("Fatal: invalid P2P env configuration: {e}");
+                    record_app_failure(&p2p_handle, &msg);
+                    return Err(Box::new(std::io::Error::other(msg)));
+                }
+            }
 
             // Spawn receiver runtime, keeping the handle so we can await
             // graceful shutdown (cancel session, stop proxies) before exit.
@@ -687,6 +732,20 @@ fn main() {
         if let RunEvent::Exit = event {
             if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
                 let _ = state.shutdown_tx.send(ShutdownSignal::Terminate);
+            }
+            // Shut down the optional P2P runtime first (cancel sessions,
+            // proxies, and workers) before draining the housekeeping task.
+            if let Some(guard) =
+                app_handle.try_state::<Mutex<Option<receiver::p2p_runtime::P2pReceiverRuntime>>>()
+                && let Some(p2p_runtime) = guard.lock().ok().and_then(|mut g| g.take())
+            {
+                tauri::async_runtime::block_on(async {
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        p2p_runtime.shutdown(),
+                    )
+                    .await;
+                });
             }
             // Wait for receiver runtime to finish graceful cleanup
             // (cancel P2P sessions, stop local proxies) before the process exits.

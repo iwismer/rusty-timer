@@ -770,6 +770,118 @@ pub fn node_id_for_seed(seed: [u8; 32]) -> String {
     SecretKey::from_bytes(&seed).public().to_string()
 }
 
+// ---------------------------------------------------------------------------
+// Local/dev P2P config (env var) builder
+//
+// Shared by the desktop (Tauri) receiver app to start the same P2P lane as
+// `receiver-headless` without CLI flags. This is an explicit local-config
+// affordance for development and the manual dev stack; production forwarder
+// discovery via the thin node is a separate concern. P2P stays disabled unless
+// at least one of these keys is present.
+// ---------------------------------------------------------------------------
+
+/// Env var naming the forwarder's iroh endpoint (string node id) to dial.
+pub const ENV_P2P_FORWARDER_NODE_ID: &str = "RT_P2P_FORWARDER_NODE_ID";
+/// Env var giving a direct `ip:port` socket address for the forwarder peer.
+pub const ENV_P2P_FORWARDER_DIRECT_ADDR: &str = "RT_P2P_FORWARDER_DIRECT_ADDR";
+/// Env var holding the receiver's 64-hex-character secret-key seed.
+pub const ENV_P2P_SECRET_KEY_SEED_HEX: &str = "RT_P2P_SECRET_KEY_SEED_HEX";
+/// Env var for the optional thin-node base URL (set with the token).
+pub const ENV_P2P_THIN_NODE_URL: &str = "RT_P2P_THIN_NODE_URL";
+/// Env var for the optional thin-node bearer token (set with the URL).
+pub const ENV_P2P_THIN_NODE_TOKEN: &str = "RT_P2P_THIN_NODE_TOKEN";
+/// Env var overriding the subscription reconcile interval, in milliseconds.
+pub const ENV_P2P_RECONCILE_MS: &str = "RT_P2P_RECONCILE_MS";
+
+/// Build an optional [`P2pReceiverConfig`] from a key->value lookup (e.g. env).
+///
+/// Mirrors the `receiver-headless` CLI validation: P2P is enabled only when at
+/// least one key is present; the forwarder node id, forwarder direct address,
+/// and secret-key seed are then all required; the thin-node URL and token must
+/// be supplied together; and the reconcile interval defaults to 1000ms and must
+/// be at least [`MIN_RECONCILE_INTERVAL`]. Empty/whitespace-only values are
+/// treated as absent.
+pub fn p2p_config_from_lookup(
+    get: impl Fn(&str) -> Option<String>,
+) -> Result<Option<P2pReceiverConfig>, String> {
+    let trimmed = |key: &str| {
+        get(key)
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+    };
+
+    let forwarder_node_id = trimmed(ENV_P2P_FORWARDER_NODE_ID);
+    let forwarder_direct_addr = trimmed(ENV_P2P_FORWARDER_DIRECT_ADDR);
+    let secret_key_seed_hex = trimmed(ENV_P2P_SECRET_KEY_SEED_HEX);
+    let thin_node_url = trimmed(ENV_P2P_THIN_NODE_URL);
+    let thin_node_token = trimmed(ENV_P2P_THIN_NODE_TOKEN);
+    let reconcile_ms_raw = trimmed(ENV_P2P_RECONCILE_MS);
+
+    let any_present = forwarder_node_id.is_some()
+        || forwarder_direct_addr.is_some()
+        || secret_key_seed_hex.is_some()
+        || thin_node_url.is_some()
+        || thin_node_token.is_some()
+        || reconcile_ms_raw.is_some();
+    if !any_present {
+        return Ok(None);
+    }
+
+    let forwarder_node_id = forwarder_node_id.ok_or_else(|| {
+        format!("{ENV_P2P_FORWARDER_NODE_ID} is required when any P2P env var is set")
+    })?;
+    let direct_addr_raw = forwarder_direct_addr.ok_or_else(|| {
+        format!("{ENV_P2P_FORWARDER_DIRECT_ADDR} is required when any P2P env var is set")
+    })?;
+    let direct_addr: SocketAddr = direct_addr_raw
+        .parse()
+        .map_err(|e| format!("invalid {ENV_P2P_FORWARDER_DIRECT_ADDR}: {e}"))?;
+    let secret_key_seed_hex = secret_key_seed_hex.ok_or_else(|| {
+        format!("{ENV_P2P_SECRET_KEY_SEED_HEX} is required when any P2P env var is set")
+    })?;
+    let secret_key_seed = parse_secret_key_seed_hex(&secret_key_seed_hex)?;
+
+    let thin_node = match (thin_node_url, thin_node_token) {
+        (Some(url), Some(token)) => Some(ThinNodeClientConfig { url, token }),
+        (None, None) => None,
+        _ => {
+            return Err(format!(
+                "{ENV_P2P_THIN_NODE_URL} and {ENV_P2P_THIN_NODE_TOKEN} must be set together"
+            ));
+        }
+    };
+
+    let reconcile_ms = match reconcile_ms_raw {
+        Some(raw) => raw
+            .parse::<u64>()
+            .map_err(|e| format!("invalid {ENV_P2P_RECONCILE_MS}: {e}"))?,
+        None => 1000,
+    };
+    let reconcile_interval = Duration::from_millis(reconcile_ms);
+    if reconcile_interval < MIN_RECONCILE_INTERVAL {
+        return Err(format!(
+            "{ENV_P2P_RECONCILE_MS} must be at least {} ms",
+            MIN_RECONCILE_INTERVAL.as_millis()
+        ));
+    }
+
+    Ok(Some(P2pReceiverConfig {
+        secret_key_seed,
+        forwarder: ForwarderPeerConfig {
+            node_id: forwarder_node_id,
+            direct_addr,
+        },
+        thin_node,
+        reconcile_interval,
+    }))
+}
+
+/// Build an optional [`P2pReceiverConfig`] from process environment variables.
+/// See [`p2p_config_from_lookup`] for the validation rules.
+pub fn p2p_config_from_env() -> Result<Option<P2pReceiverConfig>, String> {
+    p2p_config_from_lookup(|key| std::env::var(key).ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -780,6 +892,89 @@ mod tests {
 
     /// A valid IPICO chip-read frame (chip id `000000012345`).
     const SAMPLE_FRAME: &[u8] = b"aa400000000123450a2a01123018455927a7";
+
+    /// A valid 64-hex-character secret-key seed for config-builder tests.
+    const TEST_SEED_HEX: &str = "abababababababababababababababababababababababababababababababab";
+
+    /// Build a `get(key)` closure from `(key, value)` pairs for the lookup-based
+    /// P2P config builder, so tests need not mutate process-global env vars.
+    fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        move |key: &str| map.get(key).cloned()
+    }
+
+    #[test]
+    fn p2p_config_from_lookup_none_when_no_keys() {
+        assert!(p2p_config_from_lookup(lookup(&[])).unwrap().is_none());
+    }
+
+    #[test]
+    fn p2p_config_from_lookup_builds_minimal_config() {
+        let cfg = p2p_config_from_lookup(lookup(&[
+            (ENV_P2P_FORWARDER_NODE_ID, "endpoint-x"),
+            (ENV_P2P_FORWARDER_DIRECT_ADDR, "127.0.0.1:5000"),
+            (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
+        ]))
+        .unwrap()
+        .expect("config present");
+        assert_eq!(cfg.forwarder.node_id, "endpoint-x");
+        assert_eq!(cfg.forwarder.direct_addr, "127.0.0.1:5000".parse().unwrap());
+        assert_eq!(cfg.secret_key_seed, [0xab; 32]);
+        assert!(cfg.thin_node.is_none());
+        assert_eq!(cfg.reconcile_interval, Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn p2p_config_from_lookup_errors_on_partial_required_keys() {
+        let err = p2p_config_from_lookup(lookup(&[(ENV_P2P_FORWARDER_NODE_ID, "endpoint-x")]))
+            .unwrap_err();
+        assert!(err.contains(ENV_P2P_FORWARDER_DIRECT_ADDR), "got: {err}");
+    }
+
+    #[test]
+    fn p2p_config_from_lookup_thin_node_requires_both() {
+        let err = p2p_config_from_lookup(lookup(&[
+            (ENV_P2P_FORWARDER_NODE_ID, "endpoint-x"),
+            (ENV_P2P_FORWARDER_DIRECT_ADDR, "127.0.0.1:5000"),
+            (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
+            (ENV_P2P_THIN_NODE_URL, "http://127.0.0.1:8080"),
+        ]))
+        .unwrap_err();
+        assert!(err.contains(ENV_P2P_THIN_NODE_TOKEN), "got: {err}");
+    }
+
+    #[test]
+    fn p2p_config_from_lookup_accepts_thin_node_pair_and_reconcile_override() {
+        let cfg = p2p_config_from_lookup(lookup(&[
+            (ENV_P2P_FORWARDER_NODE_ID, "endpoint-x"),
+            (ENV_P2P_FORWARDER_DIRECT_ADDR, "127.0.0.1:5000"),
+            (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
+            (ENV_P2P_THIN_NODE_URL, "http://127.0.0.1:8080"),
+            (ENV_P2P_THIN_NODE_TOKEN, "tok"),
+            (ENV_P2P_RECONCILE_MS, "200"),
+        ]))
+        .unwrap()
+        .expect("config present");
+        let thin = cfg.thin_node.expect("thin node configured");
+        assert_eq!(thin.url, "http://127.0.0.1:8080");
+        assert_eq!(thin.token, "tok");
+        assert_eq!(cfg.reconcile_interval, Duration::from_millis(200));
+    }
+
+    #[test]
+    fn p2p_config_from_lookup_rejects_below_min_reconcile() {
+        let err = p2p_config_from_lookup(lookup(&[
+            (ENV_P2P_FORWARDER_NODE_ID, "endpoint-x"),
+            (ENV_P2P_FORWARDER_DIRECT_ADDR, "127.0.0.1:5000"),
+            (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
+            (ENV_P2P_RECONCILE_MS, "10"),
+        ]))
+        .unwrap_err();
+        assert!(err.contains(ENV_P2P_RECONCILE_MS), "got: {err}");
+    }
 
     fn insert_chip_event(db: &Db, stream_id: &str, seq: i64, received_unix_ms: i64) {
         db.insert_received_event(&ReceivedEventInsert {
