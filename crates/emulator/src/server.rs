@@ -1,5 +1,6 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use timer_core::models::Message;
 use timer_core::workers::{ClientConnector, ClientPool};
@@ -28,6 +29,69 @@ pub use timer_core::util::{is_delay, is_file, is_port};
 struct ReadFrame {
     data: Arc<str>,
     ack: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct ReadBroadcast {
+    tx: broadcast::Sender<ReadFrame>,
+    active_clients: ActiveClients,
+}
+
+#[derive(Clone, Default)]
+struct ActiveClients {
+    next_id: Arc<AtomicU64>,
+    active_ids: Arc<StdMutex<HashSet<u64>>>,
+}
+
+impl ActiveClients {
+    fn register(&self) -> ActiveClient {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.active_ids
+            .lock()
+            .expect("active-client registry poisoned")
+            .insert(id);
+        ActiveClient {
+            id,
+            active_clients: self.clone(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.active_ids
+            .lock()
+            .expect("active-client registry poisoned")
+            .is_empty()
+    }
+
+    fn snapshot(&self) -> HashSet<u64> {
+        self.active_ids
+            .lock()
+            .expect("active-client registry poisoned")
+            .clone()
+    }
+
+    fn any_active(&self, ids: &HashSet<u64>) -> bool {
+        let active_ids = self
+            .active_ids
+            .lock()
+            .expect("active-client registry poisoned");
+        ids.iter().any(|id| active_ids.contains(id))
+    }
+}
+
+struct ActiveClient {
+    id: u64,
+    active_clients: ActiveClients,
+}
+
+impl Drop for ActiveClient {
+    fn drop(&mut self) {
+        self.active_clients
+            .active_ids
+            .lock()
+            .expect("active-client registry poisoned")
+            .remove(&self.id);
+    }
 }
 
 pub struct EmulatorConfig {
@@ -151,12 +215,13 @@ pub async fn run(config: EmulatorConfig) {
 async fn broadcast_reads(
     delay: u64,
     file_reads: Vec<String>,
-    tx: broadcast::Sender<ReadFrame>,
+    read_broadcast: ReadBroadcast,
     read_type: ReadType,
     verbatim: bool,
     once: bool,
     pause_when_unsubscribed: bool,
 ) {
+    let ReadBroadcast { tx, active_clients } = read_broadcast;
     // In bounded (`once`) scenarios, reads emitted before any client connects are
     // dropped by the broadcast channel and lost. Wait for the first consumer so
     // the exact, finite read set is delivered deterministically. The infinite
@@ -197,9 +262,10 @@ async fn broadcast_reads(
             // already flushed marks the ack before its receiver drops, so a
             // clean disconnect after delivery still advances.
             'deliver: loop {
-                while tx.receiver_count() == 0 {
+                while active_clients.is_empty() {
                     sleep(Duration::from_millis(10)).await;
                 }
+                let recipients = active_clients.snapshot();
                 let ack = Arc::new(AtomicBool::new(false));
                 let _ = tx.send(ReadFrame {
                     data: Arc::clone(&data),
@@ -210,8 +276,8 @@ async fn broadcast_reads(
                     if ack.load(Ordering::Acquire) {
                         break 'deliver; // delivered: safe to advance
                     }
-                    if tx.receiver_count() == 0 {
-                        break; // subscribers vanished before delivery; re-send
+                    if !active_clients.any_active(&recipients) {
+                        break; // original recipients vanished before delivery; re-send
                     }
                 }
             }
@@ -267,14 +333,17 @@ pub async fn run_with_control(
         .unwrap_or_default();
 
     let (read_tx, _) = broadcast::channel::<ReadFrame>(1000);
+    let read_broadcast = ReadBroadcast {
+        tx: read_tx.clone(),
+        active_clients: ActiveClients::default(),
+    };
     let shared_state = Arc::new(Mutex::new(state));
 
     // Spawn the read-generation task.
-    let read_tx_clone = read_tx.clone();
     let _read_gen_handle = tokio::spawn(broadcast_reads(
         config.delay,
         file_reads,
-        read_tx_clone,
+        read_broadcast.clone(),
         config.read_type,
         config.verbatim,
         config.once,
@@ -307,9 +376,10 @@ pub async fn run_with_control(
 
         let state = Arc::clone(&shared_state);
         let read_rx = read_tx.subscribe();
+        let active_client = read_broadcast.active_clients.register();
 
         tokio::spawn(async move {
-            handle_client(stream, state, read_rx).await;
+            handle_client(stream, state, read_rx, active_client).await;
         });
     }
 }
@@ -319,6 +389,7 @@ async fn handle_client(
     stream: tokio::net::TcpStream,
     state: Arc<Mutex<EmulatedReaderState>>,
     read_rx: broadcast::Receiver<ReadFrame>,
+    _active_client: ActiveClient,
 ) {
     let (read_half, write_half) = stream.into_split();
 
@@ -508,7 +579,10 @@ mod tests {
         let gen_task = tokio::spawn(broadcast_reads(
             1,
             frames.clone(),
-            tx.clone(),
+            ReadBroadcast {
+                tx: tx.clone(),
+                active_clients: ActiveClients::default(),
+            },
             ReadType::RAW,
             true,
             true,
@@ -547,11 +621,16 @@ mod tests {
         ];
         let delay_ms = 50;
         let (tx, _) = broadcast::channel::<ReadFrame>(16);
+        let active_clients = ActiveClients::default();
         let mut rx1 = tx.subscribe();
+        let client1 = active_clients.register();
         let gen_task = tokio::spawn(broadcast_reads(
             delay_ms,
             frames.clone(),
-            tx.clone(),
+            ReadBroadcast {
+                tx: tx.clone(),
+                active_clients: active_clients.clone(),
+            },
             ReadType::RAW,
             true,
             true,
@@ -576,6 +655,7 @@ mod tests {
         // Consumer "dies": drop the only subscriber. The generator must pause
         // before emitting the next read rather than racing ahead.
         drop(rx1);
+        drop(client1);
 
         // Wait several read intervals; if the generator were not pausing it
         // would emit (and drop) frames 2..4 and the `once` generator would even
@@ -585,6 +665,7 @@ mod tests {
         // Consumer "restarts": a fresh subscriber must receive the exact read
         // the stream paused on (frame 2), then the remainder in order.
         let mut rx2 = tx.subscribe();
+        let _client2 = active_clients.register();
         let got2 = recv_ack(&mut rx2).await;
         assert_eq!(got2, format!("{}\r\n", frames[1]));
         let got3 = recv_ack(&mut rx2).await;
@@ -597,6 +678,55 @@ mod tests {
             .await
             .expect("broadcast_reads should stop in once mode after resume")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn broadcast_reads_pause_retries_to_later_client_after_original_drops() {
+        // Client A receives the in-flight frame but never acks it. Client B
+        // subscribes after that send, then A disappears. B could not ack the
+        // original send, so pause mode must retry frame 0 to B instead of
+        // waiting forever or advancing to frame 1.
+        let frames = vec![
+            "aa400000000000010a2a01123018455900e8".to_owned(),
+            "aa400000000000020a2a01123018455900e9".to_owned(),
+        ];
+        let delay_ms = 50;
+        let (tx, _) = broadcast::channel::<ReadFrame>(16);
+        let active_clients = ActiveClients::default();
+        let mut rx_a = tx.subscribe();
+        let client_a = active_clients.register();
+        let gen_task = tokio::spawn(broadcast_reads(
+            delay_ms,
+            frames.clone(),
+            ReadBroadcast {
+                tx: tx.clone(),
+                active_clients: active_clients.clone(),
+            },
+            ReadType::RAW,
+            true,
+            true,
+            true,
+        ));
+
+        let sent_to_a = timeout(Duration::from_secs(1), rx_a.recv())
+            .await
+            .expect("client A should receive the first send")
+            .unwrap();
+        assert_eq!(sent_to_a.data.as_ref(), format!("{}\r\n", frames[0]));
+
+        let mut rx_b = tx.subscribe();
+        let _client_b = active_clients.register();
+        drop(rx_a);
+        drop(client_a);
+
+        let retried_to_b = timeout(Duration::from_millis(500), rx_b.recv())
+            .await
+            .expect("client B should receive retried frame after A drops")
+            .unwrap();
+        assert_eq!(retried_to_b.data.as_ref(), format!("{}\r\n", frames[0]));
+
+        gen_task.abort();
+        let _ = gen_task.await;
     }
 
     #[tokio::test]
@@ -613,12 +743,17 @@ mod tests {
         ];
         let delay_ms = 50;
         let (tx, _) = broadcast::channel::<ReadFrame>(16);
+        let active_clients = ActiveClients::default();
         // Subscribe a consumer that never reads/acks the frame (it "dies").
         let rx1 = tx.subscribe();
+        let client1 = active_clients.register();
         let gen_task = tokio::spawn(broadcast_reads(
             delay_ms,
             frames.clone(),
-            tx.clone(),
+            ReadBroadcast {
+                tx: tx.clone(),
+                active_clients: active_clients.clone(),
+            },
             ReadType::RAW,
             true,
             true,
@@ -629,12 +764,14 @@ mod tests {
         // dies before delivering it (it never reads or acks the frame).
         sleep(Duration::from_millis(delay_ms / 2)).await;
         drop(rx1);
+        drop(client1);
         // Give the generator time to observe that no subscribers remain.
         sleep(Duration::from_millis(delay_ms)).await;
 
         // A fresh consumer reconnects: it must receive the SAME first frame
         // (frame 0), not the second one, because the first was never delivered.
         let mut rx2 = tx.subscribe();
+        let _client2 = active_clients.register();
         let got = timeout(Duration::from_secs(1), rx2.recv())
             .await
             .expect("reconnected subscriber should receive the retried frame")
