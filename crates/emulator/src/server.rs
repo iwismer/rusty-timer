@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use timer_core::models::Message;
 use timer_core::workers::{ClientConnector, ClientPool};
@@ -14,6 +15,20 @@ use crate::read_gen::{generate_read, restamp_read};
 // Re-exports for the CLI binary
 pub use ipico_core::read::ReadType;
 pub use timer_core::util::{is_delay, is_file, is_port};
+
+/// A chip-read frame broadcast to the connected TCP clients.
+///
+/// The `ack` flag is a per-send delivery marker: a `client_write_task` sets it
+/// to `true` only after it has successfully `write_all`'d **and** `flush`'d the
+/// frame to its socket. The generator uses this in `pause_when_unsubscribed`
+/// mode to confirm at least one client actually delivered a read before
+/// advancing, so a consumer that dies mid-write never silently consumes a read.
+/// In normal (non-paused) mode the marker is ignored.
+#[derive(Clone)]
+struct ReadFrame {
+    data: Arc<str>,
+    ack: Arc<AtomicBool>,
+}
 
 pub struct EmulatorConfig {
     pub bind_port: u16,
@@ -136,7 +151,7 @@ pub async fn run(config: EmulatorConfig) {
 async fn broadcast_reads(
     delay: u64,
     file_reads: Vec<String>,
-    tx: broadcast::Sender<String>,
+    tx: broadcast::Sender<ReadFrame>,
     read_type: ReadType,
     verbatim: bool,
     once: bool,
@@ -146,8 +161,8 @@ async fn broadcast_reads(
     // dropped by the broadcast channel and lost. Wait for the first consumer so
     // the exact, finite read set is delivered deterministically. The infinite
     // (looping) mode does not need this: a dropped early read is re-sent on the
-    // next loop. When `pause_when_unsubscribed` is set, the per-iteration guard
-    // below already covers the initial wait, so the start-only wait is skipped.
+    // next loop. When `pause_when_unsubscribed` is set, the delivery loop below
+    // already covers the initial wait, so the start-only wait is skipped.
     if once && !pause_when_unsubscribed {
         while tx.receiver_count() == 0 {
             sleep(Duration::from_millis(10)).await;
@@ -155,17 +170,11 @@ async fn broadcast_reads(
     }
     let mut index = 0;
     loop {
-        // Pause before emitting the next read whenever no client is connected so
-        // a downed consumer (e.g. a SIGKILLed forwarder) never misses reads.
-        // The pending read index is preserved across the pause, so a restarted
-        // consumer resumes losslessly from exactly where the stream paused.
-        if pause_when_unsubscribed {
-            while tx.receiver_count() == 0 {
-                sleep(Duration::from_millis(10)).await;
-            }
-        }
-        let (mut chip_read, last) = if file_reads.is_empty() {
-            (generate_read(read_type), true)
+        // Compute the current read *without* advancing the index yet. The index
+        // only moves once the read has actually been delivered (in pause mode),
+        // so a consumer that dies mid-flight does not skip a read.
+        let (read_body, last, next_index) = if file_reads.is_empty() {
+            (generate_read(read_type), true, 0)
         } else {
             let read = if verbatim {
                 file_reads[index].clone()
@@ -173,13 +182,50 @@ async fn broadcast_reads(
                 restamp_read(&file_reads[index])
             };
             let last = index + 1 == file_reads.len();
-            index = (index + 1) % file_reads.len();
-            (read, last)
+            (read, last, (index + 1) % file_reads.len())
         };
-        chip_read.push_str("\r\n");
-        // broadcast::send fails when no receivers are subscribed; safe to ignore
-        // because reads are only relevant while a client is connected.
-        let _ = tx.send(chip_read);
+        let mut data = read_body;
+        data.push_str("\r\n");
+        let data: Arc<str> = Arc::from(data);
+
+        if pause_when_unsubscribed {
+            // Deterministic, fail-safe delivery: do not advance until at least
+            // one connected client has actually written+flushed this frame. If
+            // every subscriber disappears before delivery (e.g. a SIGKILLed
+            // forwarder), re-send the same frame to the next subscriber so no
+            // read is consumed by a dying write task and lost. A client that
+            // already flushed marks the ack before its receiver drops, so a
+            // clean disconnect after delivery still advances.
+            'deliver: loop {
+                while tx.receiver_count() == 0 {
+                    sleep(Duration::from_millis(10)).await;
+                }
+                let ack = Arc::new(AtomicBool::new(false));
+                let _ = tx.send(ReadFrame {
+                    data: Arc::clone(&data),
+                    ack: Arc::clone(&ack),
+                });
+                loop {
+                    sleep(Duration::from_millis(10)).await;
+                    if ack.load(Ordering::Acquire) {
+                        break 'deliver; // delivered: safe to advance
+                    }
+                    if tx.receiver_count() == 0 {
+                        break; // subscribers vanished before delivery; re-send
+                    }
+                }
+            }
+        } else {
+            // Normal mode: fire-and-forget. broadcast::send fails when no
+            // receivers are subscribed; safe to ignore because reads are only
+            // relevant while a client is connected. The ack marker is unused.
+            let _ = tx.send(ReadFrame {
+                data: Arc::clone(&data),
+                ack: Arc::new(AtomicBool::new(false)),
+            });
+        }
+
+        index = next_index;
         if once && last {
             return;
         }
@@ -220,7 +266,7 @@ pub async fn run_with_control(
         })
         .unwrap_or_default();
 
-    let (read_tx, _) = broadcast::channel::<String>(1000);
+    let (read_tx, _) = broadcast::channel::<ReadFrame>(1000);
     let shared_state = Arc::new(Mutex::new(state));
 
     // Spawn the read-generation task.
@@ -272,7 +318,7 @@ pub async fn run_with_control(
 async fn handle_client(
     stream: tokio::net::TcpStream,
     state: Arc<Mutex<EmulatedReaderState>>,
-    read_rx: broadcast::Receiver<String>,
+    read_rx: broadcast::Receiver<ReadFrame>,
 ) {
     let (read_half, write_half) = stream.into_split();
 
@@ -355,7 +401,7 @@ async fn client_read_loop(
 async fn client_write_task(
     write_half: tokio::net::tcp::OwnedWriteHalf,
     mut client_rx: tokio::sync::mpsc::Receiver<String>,
-    mut read_rx: broadcast::Receiver<String>,
+    mut read_rx: broadcast::Receiver<ReadFrame>,
 ) {
     let mut writer = BufWriter::new(write_half);
 
@@ -378,8 +424,8 @@ async fn client_write_task(
             }
             result = read_rx.recv() => {
                 match result {
-                    Ok(data) => {
-                        if let Err(e) = writer.write_all(data.as_bytes()).await {
+                    Ok(frame) => {
+                        if let Err(e) = writer.write_all(frame.data.as_bytes()).await {
                             eprintln!("[emulator] client write error: {e}");
                             break;
                         }
@@ -387,6 +433,10 @@ async fn client_write_task(
                             eprintln!("[emulator] client flush error: {e}");
                             break;
                         }
+                        // Mark the frame delivered only after a successful
+                        // write+flush so the generator can safely advance in
+                        // pause mode (deterministic, lossless delivery).
+                        frame.ack.store(true, Ordering::Release);
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         eprintln!("[emulator] client lagged, skipped {n} reads");
@@ -454,7 +504,7 @@ mod tests {
             "aa400000000000010a2a01123018455900e8".to_owned(),
             "aa400000000000020a2a01123018455900e9".to_owned(),
         ];
-        let (tx, mut rx) = broadcast::channel::<String>(8);
+        let (tx, mut rx) = broadcast::channel::<ReadFrame>(8);
         let gen_task = tokio::spawn(broadcast_reads(
             1,
             frames.clone(),
@@ -473,8 +523,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(first, format!("{}\r\n", frames[0]));
-        assert_eq!(second, format!("{}\r\n", frames[1]));
+        assert_eq!(first.data.as_ref(), format!("{}\r\n", frames[0]));
+        assert_eq!(second.data.as_ref(), format!("{}\r\n", frames[1]));
 
         // The generator must complete (no infinite loop) after the last read.
         timeout(Duration::from_secs(1), gen_task)
@@ -496,7 +546,7 @@ mod tests {
             "aa400000000000040a2a01123018455900eb".to_owned(),
         ];
         let delay_ms = 50;
-        let (tx, _) = broadcast::channel::<String>(16);
+        let (tx, _) = broadcast::channel::<ReadFrame>(16);
         let mut rx1 = tx.subscribe();
         let gen_task = tokio::spawn(broadcast_reads(
             delay_ms,
@@ -508,11 +558,19 @@ mod tests {
             true,
         ));
 
-        // First read is delivered to the initial subscriber.
-        let got1 = timeout(Duration::from_secs(1), rx1.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        // Helper: receive a frame and acknowledge delivery (simulating a
+        // client's successful write+flush) so the generator may advance.
+        async fn recv_ack(rx: &mut broadcast::Receiver<ReadFrame>) -> String {
+            let frame = timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            frame.ack.store(true, Ordering::Release);
+            frame.data.to_string()
+        }
+
+        // First read is delivered to (and acked by) the initial subscriber.
+        let got1 = recv_ack(&mut rx1).await;
         assert_eq!(got1, format!("{}\r\n", frames[0]));
 
         // Consumer "dies": drop the only subscriber. The generator must pause
@@ -527,20 +585,11 @@ mod tests {
         // Consumer "restarts": a fresh subscriber must receive the exact read
         // the stream paused on (frame 2), then the remainder in order.
         let mut rx2 = tx.subscribe();
-        let got2 = timeout(Duration::from_secs(1), rx2.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let got2 = recv_ack(&mut rx2).await;
         assert_eq!(got2, format!("{}\r\n", frames[1]));
-        let got3 = timeout(Duration::from_secs(1), rx2.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let got3 = recv_ack(&mut rx2).await;
         assert_eq!(got3, format!("{}\r\n", frames[2]));
-        let got4 = timeout(Duration::from_secs(1), rx2.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let got4 = recv_ack(&mut rx2).await;
         assert_eq!(got4, format!("{}\r\n", frames[3]));
 
         // The generator must complete after the last read in `once` mode.
@@ -548,6 +597,52 @@ mod tests {
             .await
             .expect("broadcast_reads should stop in once mode after resume")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn broadcast_reads_pause_retries_undelivered_frame_for_next_subscriber() {
+        // A consumer connects (subscribes) but dies before ever delivering
+        // (writing+flushing) the first read. In pause mode the generator must
+        // NOT advance past that read: the next subscriber that reconnects must
+        // receive the exact same first frame, never the second. Otherwise a
+        // forwarder SIGKILLed after the receiver-count guard but before the
+        // write would silently lose the in-flight read.
+        let frames = vec![
+            "aa400000000000010a2a01123018455900e8".to_owned(),
+            "aa400000000000020a2a01123018455900e9".to_owned(),
+        ];
+        let delay_ms = 50;
+        let (tx, _) = broadcast::channel::<ReadFrame>(16);
+        // Subscribe a consumer that never reads/acks the frame (it "dies").
+        let rx1 = tx.subscribe();
+        let gen_task = tokio::spawn(broadcast_reads(
+            delay_ms,
+            frames.clone(),
+            tx.clone(),
+            ReadType::RAW,
+            true,
+            true,
+            true,
+        ));
+
+        // Let the generator emit the first frame toward rx1, then the consumer
+        // dies before delivering it (it never reads or acks the frame).
+        sleep(Duration::from_millis(delay_ms / 2)).await;
+        drop(rx1);
+        // Give the generator time to observe that no subscribers remain.
+        sleep(Duration::from_millis(delay_ms)).await;
+
+        // A fresh consumer reconnects: it must receive the SAME first frame
+        // (frame 0), not the second one, because the first was never delivered.
+        let mut rx2 = tx.subscribe();
+        let got = timeout(Duration::from_secs(1), rx2.recv())
+            .await
+            .expect("reconnected subscriber should receive the retried frame")
+            .unwrap();
+        assert_eq!(got.data.as_ref(), format!("{}\r\n", frames[0]));
+
+        gen_task.abort();
+        let _ = gen_task.await;
     }
 
     #[tokio::test]
