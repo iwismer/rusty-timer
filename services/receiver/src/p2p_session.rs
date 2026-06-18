@@ -848,6 +848,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconnect_storm_resumes_without_duplicates() {
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            let stream_id = stream_id();
+            let mut script = base_script();
+            script.batches = vec![batch(&[1, 2, 3])];
+            script.caught_up_through = Some(3);
+
+            let forwarder = MockForwarderPeer::start([42; 32], script).await.unwrap();
+            let endpoint = test_endpoint(43).await;
+            let db = test_db();
+            let (shutdown_tx, shutdown_rx) = watch::channel(false);
+            let params = SessionParams {
+                stream_id: stream_id.to_owned(),
+                client_hello: test_hello(0),
+                mode: SubscribeMode::Replay,
+                backoff: BackoffConfig {
+                    initial: Duration::from_millis(1),
+                    max: Duration::from_millis(1),
+                },
+                durable_hint_tx: None,
+            };
+
+            let session_task = tokio::spawn({
+                let endpoint = endpoint.clone();
+                let db = Arc::clone(&db);
+                let forwarder_addr = forwarder.node_addr();
+                async move {
+                    run_session_with_reconnect(&endpoint, forwarder_addr, &db, &params, shutdown_rx)
+                        .await
+                }
+            });
+
+            poll_until(
+                || async { forwarder.subscribes().len() >= 4 },
+                Duration::from_secs(5),
+            )
+            .await;
+            shutdown_tx.send(true).unwrap();
+            session_task.await.unwrap().unwrap();
+
+            let guard = db.lock().await;
+            let events = guard.load_received_events(stream_id).unwrap();
+            assert_eq!(events.len(), 3, "reconnect storm must not duplicate rows");
+            assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 3);
+            drop(guard);
+
+            let subscribes = forwarder.subscribes();
+            assert!(subscribes.len() >= 4);
+            assert_eq!(subscribes[0].after_seq, 0);
+            assert!(
+                subscribes
+                    .iter()
+                    .skip(1)
+                    .all(|subscribe| subscribe.after_seq == 3),
+                "all reconnects after the first must resume from the durable cursor: {subscribes:?}"
+            );
+
+            forwarder.shutdown().await;
+        })
+        .await
+        .expect("reconnect_storm_resumes_without_duplicates timed out");
+    }
+
+    #[tokio::test]
     async fn duplicate_seq_deduped() {
         tokio::time::timeout(TEST_TIMEOUT, async {
             let stream_id = stream_id();

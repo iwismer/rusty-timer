@@ -58,3 +58,28 @@ jobs:
           name: bridge-agent-${{ matrix.os }}
           path: ${{ env.AGENT_ARTIFACTS_DIR }}
           if-no-files-found: warn
+
+  connectivity-chaos:
+    name: Connectivity chaos (non-PR)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: p2p-chaos-${{ runner.os }}
+
+      - name: Local iroh relay smoke and loss fallback
+        run: cargo test -p rt-iroh relay -- --ignored --nocapture
+
+      - name: Partition fault shim
+        run: cargo test -p rt-test-utils --test p2p_harness p2p_harness_partition_suppresses_inbound_acks -- --nocapture
+
+      - name: Receiver reconnect storm
+        run: cargo test -p receiver --lib reconnect_storm_resumes_without_duplicates -- --nocapture

@@ -190,6 +190,13 @@ impl EndpointBuilder {
         self
     }
 
+    #[cfg(test)]
+    #[must_use]
+    pub fn insecure_skip_relay_cert_verify(mut self, skip_verify: bool) -> Self {
+        self.inner = self.inner.insecure_skip_relay_cert_verify(skip_verify);
+        self
+    }
+
     #[must_use]
     pub fn known_nodes(mut self, node_addrs: impl IntoIterator<Item = NodeAddr>) -> Self {
         self.inner = self.inner.known_nodes(node_addrs.into_iter().collect());
@@ -243,6 +250,101 @@ mod tests {
         let accepted = accepted.unwrap().unwrap();
 
         assert_eq!(connected.remote_node_id().unwrap(), endpoint_b_addr.node_id);
+        assert_eq!(accepted.remote_node_id().unwrap(), endpoint_a.node_id());
+
+        endpoint_a.close().await;
+        endpoint_b.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "T6.2 non-PR connectivity chaos lane: starts a local iroh relay"]
+    async fn local_relay_ping_non_pr_lane() {
+        let (relay_map, relay_url, _relay_guard) =
+            iroh::test_utils::run_relay_server().await.unwrap();
+
+        let endpoint_a = EndpointBuilder::default()
+            .secret_key(SecretKey::from_bytes(&[3; 32]))
+            .relay_mode(RelayMode::Custom(relay_map.clone()))
+            .insecure_skip_relay_cert_verify(true)
+            .clear_discovery()
+            .bind_addr_v4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .max_concurrent_bidi_streams(256)
+            .bind()
+            .await
+            .unwrap();
+        let endpoint_b = EndpointBuilder::default()
+            .secret_key(SecretKey::from_bytes(&[4; 32]))
+            .relay_mode(RelayMode::Custom(relay_map))
+            .insecure_skip_relay_cert_verify(true)
+            .clear_discovery()
+            .bind_addr_v4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .max_concurrent_bidi_streams(256)
+            .bind()
+            .await
+            .unwrap();
+
+        endpoint_b.node_addr().await;
+        let relay_only_addr = NodeAddr::new(endpoint_b.node_id()).with_relay_url(relay_url);
+
+        let (connected, accepted) =
+            tokio::join!(endpoint_a.connect(relay_only_addr), endpoint_b.accept(),);
+
+        let connected = connected.unwrap();
+        let accepted = accepted.unwrap().unwrap();
+        assert_eq!(connected.remote_node_id().unwrap(), endpoint_b.node_id());
+        assert_eq!(accepted.remote_node_id().unwrap(), endpoint_a.node_id());
+
+        endpoint_a.close().await;
+        endpoint_b.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "T6.2 non-PR connectivity chaos lane: starts a local iroh relay"]
+    async fn relay_loss_uses_last_known_direct_addr() {
+        let (relay_map, _relay_url, relay_guard) =
+            iroh::test_utils::run_relay_server().await.unwrap();
+
+        let endpoint_a = EndpointBuilder::default()
+            .secret_key(SecretKey::from_bytes(&[5; 32]))
+            .relay_mode(RelayMode::Custom(relay_map.clone()))
+            .insecure_skip_relay_cert_verify(true)
+            .clear_discovery()
+            .bind_addr_v4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .max_concurrent_bidi_streams(256)
+            .bind()
+            .await
+            .unwrap();
+        let endpoint_b = EndpointBuilder::default()
+            .secret_key(SecretKey::from_bytes(&[6; 32]))
+            .relay_mode(RelayMode::Custom(relay_map))
+            .insecure_skip_relay_cert_verify(true)
+            .clear_discovery()
+            .bind_addr_v4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .max_concurrent_bidi_streams(256)
+            .bind()
+            .await
+            .unwrap();
+
+        let last_known_addr = endpoint_b.node_addr().await;
+        assert!(
+            !last_known_addr.direct_addresses.is_empty(),
+            "last-known address must include a direct loopback fallback: {last_known_addr:?}"
+        );
+        let direct_fallback_addr = NodeAddr::from_parts(
+            endpoint_b.node_id(),
+            None,
+            last_known_addr.direct_addresses.iter().copied(),
+        );
+        drop(relay_guard);
+
+        let (connected, accepted) = tokio::join!(
+            endpoint_a.connect(direct_fallback_addr),
+            endpoint_b.accept(),
+        );
+
+        let connected = connected.unwrap();
+        let accepted = accepted.unwrap().unwrap();
+        assert_eq!(connected.remote_node_id().unwrap(), endpoint_b.node_id());
         assert_eq!(accepted.remote_node_id().unwrap(), endpoint_a.node_id());
 
         endpoint_a.close().await;

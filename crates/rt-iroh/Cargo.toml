@@ -14,5 +14,6 @@ rand = "0.8"
 thiserror = "2"
 
 [dev-dependencies]
+iroh = { version = "=0.92.0", features = ["test-utils"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
