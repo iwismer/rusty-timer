@@ -35,6 +35,23 @@ agent artifacts under its run directory. The backend assertions are the hard
 gate: received event counts, DBF rows, TCP proxy replay, receiver cursors, and
 thin-node announcer/status state.
 
+## Manual Dev Stack
+
+`scripts/dev_stack.py` boots the whole loopback stack and leaves it running for
+manual exploration (no assertions, no failure-injection lanes). It starts the
+emulator, forwarder, and thin-node, preseeds the receiver with a subscription to
+the emulated stream, and launches the receiver:
+
+```bash
+uv run scripts/dev_stack.py                    # build + launch the desktop app
+uv run scripts/dev_stack.py --receiver headless
+uv run scripts/dev_stack.py --receiver none
+uv run scripts/dev_stack.py --no-build
+```
+
+The desktop app reads its P2P config from the `RT_P2P_*` / `RT_RECEIVER_*`
+environment variables the script sets. Press Ctrl-C to tear the stack down.
+
 ## Agent UI Harness
 
 `scripts/e2e/agent_ui/run_bridge_goal.py` drives the receiver-headless

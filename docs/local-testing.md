@@ -49,6 +49,34 @@ The orchestrator starts:
 The hard assertions check received event counts, receiver cursors, DBF rows,
 TCP proxy replay, and thin-node state. UI-agent artifacts are diagnostic only.
 
+## Manual Dev Stack
+
+To bring the whole stack up and interact with it by hand (instead of running
+assertions), use:
+
+```bash
+uv run scripts/dev_stack.py
+```
+
+This starts the emulator, forwarder, and thin-node on loopback, preseeds the
+receiver with one subscription to the emulated stream, and launches the desktop
+receiver app via `cargo tauri dev` wired to the local forwarder over iroh. Press
+Ctrl-C to tear the whole stack down.
+
+Receiver options:
+
+```bash
+uv run scripts/dev_stack.py --receiver headless   # no GUI; control API + data plane
+uv run scripts/dev_stack.py --receiver none       # set up only; launch a receiver yourself
+uv run scripts/dev_stack.py --read-delay-ms 500   # faster emulated reads
+uv run scripts/dev_stack.py --data-dir /tmp/rt-dev  # reuse a receiver data dir
+```
+
+The desktop app reads its P2P config from the `RT_P2P_*` / `RT_RECEIVER_*`
+environment variables the script sets. Unlike `scripts/e2e/run_stack.py`, this
+runner makes no assertions and runs no failure-injection lanes; it is purely for
+manual exploration.
+
 ## Power-loss and Chaos Lanes
 
 The default run kills both real receiver and forwarder OS processes in separate
