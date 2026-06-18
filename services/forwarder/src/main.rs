@@ -255,6 +255,7 @@ async fn main() {
             .iter()
             .map(|(addr, _)| addr.clone())
             .collect::<Vec<_>>(),
+        cfg.display_name.clone(),
     )
     .await
     {

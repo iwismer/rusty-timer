@@ -20,6 +20,7 @@ mod data;
 mod endpoint;
 
 use std::net::SocketAddrV4;
+use std::num::TryFromIntError;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -33,9 +34,9 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 
 pub use allowlist::{
-    AllowList, AllowListRefreshError, DEFAULT_ALLOWLIST_POLL_INTERVAL, ReceiverAllowListUpdate,
-    ThinNodeAllowListClient, apply_receiver_update, fetch_and_apply_once,
-    run_allowlist_distribution,
+    AllowList, AllowListRefreshError, CatalogPushError, DEFAULT_ALLOWLIST_POLL_INTERVAL,
+    ForwarderCatalog, ForwarderCatalogStream, ReceiverAllowListUpdate, ThinNodeAllowListClient,
+    ThinNodeCatalogClient, apply_receiver_update, fetch_and_apply_once, run_allowlist_distribution,
 };
 pub use control::{
     CatalogProvider, ControlEvent, ControlEventReceiver, ControlEventSender, HeartbeatConfig,
@@ -46,6 +47,7 @@ pub use data::{DataConfig, serve_data_streams};
 pub use endpoint::P2pEndpoint;
 
 const DEFAULT_P2P_SECRET_KEY_PATH: &str = "/var/lib/rusty-timer/p2p-secret.key";
+const DEFAULT_FORWARDER_CATALOG_PUSH_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Running forwarder P2P server tasks.
 #[derive(Debug)]
@@ -89,6 +91,7 @@ pub async fn start_forwarder_p2p(
     config: &P2pConfig,
     journal: Arc<Mutex<Journal>>,
     reader_streams: &[String],
+    display_name: Option<String>,
 ) -> Result<Option<P2pRuntime>, P2pStartError> {
     if !config.enabled {
         return Ok(None);
@@ -113,7 +116,7 @@ pub async fn start_forwarder_p2p(
         endpoint_builder(config)?,
         allow_list.clone(),
         catalog,
-        journal,
+        Arc::clone(&journal),
         DataConfig::default(),
     )
     .await?;
@@ -121,7 +124,7 @@ pub async fn start_forwarder_p2p(
     let run_endpoint = endpoint.clone();
     let mut tasks = vec![tokio::spawn(async move { run_endpoint.run().await })];
 
-    if let Some(client) = thin_node_client(config)? {
+    if let Some((base_url, bearer_token)) = thin_node_credentials(config)? {
         // Allow-list freshness is polling-only for now: the thin node has no
         // server-push channel wired yet, so we hand `run_allowlist_distribution`
         // a receiver whose sender is dropped immediately. The distribution loop
@@ -130,12 +133,26 @@ pub async fn start_forwarder_p2p(
         // dropped sender with the real one.
         let (push_tx, push_rx) = mpsc::channel(16);
         drop(push_tx);
+        let request_timeout = Duration::from_secs(config.allowlist_request_timeout_secs);
         let poll_interval = Duration::from_secs(config.allowlist_poll_interval_secs);
         tasks.push(tokio::spawn(run_allowlist_distribution(
             allow_list,
-            client,
+            ThinNodeAllowListClient::with_timeout(
+                base_url.clone(),
+                bearer_token.clone(),
+                request_timeout,
+            ),
             push_rx,
             poll_interval,
+        )));
+
+        tasks.push(tokio::spawn(run_forwarder_catalog_distribution(
+            ThinNodeCatalogClient::with_timeout(base_url, bearer_token, request_timeout),
+            endpoint.clone(),
+            display_name,
+            Arc::clone(&journal),
+            reader_streams.to_vec(),
+            DEFAULT_FORWARDER_CATALOG_PUSH_INTERVAL,
         )));
     }
 
@@ -163,6 +180,8 @@ pub enum P2pStartError {
     Iroh(#[from] rt_iroh::Error),
     #[error("failed to initialize p2p stream state")]
     Journal(#[from] crate::storage::journal::JournalError),
+    #[error("p2p stream catalog value out of range")]
+    CatalogValueOutOfRange(#[from] TryFromIntError),
 }
 
 #[derive(Debug)]
@@ -245,19 +264,119 @@ fn build_allow_list(config: &P2pConfig) -> Result<AllowList, P2pStartError> {
     Ok(allow_list)
 }
 
-fn thin_node_client(config: &P2pConfig) -> Result<Option<ThinNodeAllowListClient>, P2pStartError> {
+fn thin_node_credentials(config: &P2pConfig) -> Result<Option<(String, String)>, P2pStartError> {
     match (&config.thin_node_url, &config.thin_node_token_file) {
         (Some(url), Some(token_file)) => {
             let token = std::fs::read_to_string(Path::new(token_file))?;
-            Ok(Some(ThinNodeAllowListClient::with_timeout(
-                url.clone(),
-                token.trim().to_owned(),
-                Duration::from_secs(config.allowlist_request_timeout_secs),
-            )))
+            Ok(Some((url.clone(), token.trim().to_owned())))
         }
         (None, None) => Ok(None),
         _ => Err(P2pStartError::IncompleteThinNodeConfig),
     }
+}
+
+async fn run_forwarder_catalog_distribution(
+    client: ThinNodeCatalogClient,
+    endpoint: P2pEndpoint,
+    display_name: Option<String>,
+    journal: Arc<Mutex<Journal>>,
+    reader_streams: Vec<String>,
+    push_interval: Duration,
+) {
+    push_forwarder_catalog_once(
+        &client,
+        &endpoint,
+        display_name.as_deref(),
+        Arc::clone(&journal),
+        &reader_streams,
+    )
+    .await;
+
+    let push_interval = if push_interval.is_zero() {
+        DEFAULT_FORWARDER_CATALOG_PUSH_INTERVAL
+    } else {
+        push_interval
+    };
+    let mut ticker = tokio::time::interval(push_interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await;
+
+    loop {
+        ticker.tick().await;
+        push_forwarder_catalog_once(
+            &client,
+            &endpoint,
+            display_name.as_deref(),
+            Arc::clone(&journal),
+            &reader_streams,
+        )
+        .await;
+    }
+}
+
+async fn push_forwarder_catalog_once(
+    client: &ThinNodeCatalogClient,
+    endpoint: &P2pEndpoint,
+    display_name: Option<&str>,
+    journal: Arc<Mutex<Journal>>,
+    reader_streams: &[String],
+) {
+    let endpoint_id = endpoint.node_id().to_string();
+    if let Err(error) = client.register_forwarder(&endpoint_id).await {
+        tracing::warn!(%endpoint_id, %error, "forwarder thin-node registration failed");
+    }
+
+    let node_addr = endpoint.node_addr().await;
+    let direct_addrs = node_addr
+        .direct_addresses
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let catalog = match build_forwarder_catalog(
+        &endpoint_id,
+        display_name,
+        &direct_addrs,
+        journal,
+        reader_streams,
+    )
+    .await
+    {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            tracing::warn!(%endpoint_id, %error, "failed to build forwarder catalog push");
+            return;
+        }
+    };
+
+    if let Err(error) = client.push_catalog(&catalog).await {
+        tracing::warn!(%endpoint_id, %error, "forwarder catalog push failed");
+    }
+}
+
+async fn build_forwarder_catalog(
+    endpoint_id: &str,
+    display_name: Option<&str>,
+    direct_addrs: &[String],
+    journal: Arc<Mutex<Journal>>,
+    reader_streams: &[String],
+) -> Result<ForwarderCatalog, P2pStartError> {
+    let mut journal = journal.lock().await;
+    let mut streams = Vec::with_capacity(reader_streams.len());
+    for stream_id in reader_streams {
+        let (epoch, next_seq) = journal.current_epoch_and_next_seq(stream_id)?;
+        streams.push(ForwarderCatalogStream {
+            stream_id: stream_id.clone(),
+            epoch: u64::try_from(epoch)?,
+            next_seq: u64::try_from(next_seq)?,
+        });
+    }
+
+    Ok(ForwarderCatalog {
+        endpoint_id: endpoint_id.to_owned(),
+        display_name: display_name.map(ToOwned::to_owned),
+        direct_addrs: direct_addrs.to_vec(),
+        streams,
+    })
 }
 
 fn parse_node_ids(values: &[String]) -> Result<Vec<NodeId>, P2pStartError> {
@@ -337,6 +456,7 @@ mod tests {
             &p2p_config(receiver.node_id().to_string()),
             Arc::clone(&journal),
             &[stream_key.to_owned()],
+            None,
         )
         .await?
         .expect("p2p enabled");
@@ -433,6 +553,7 @@ mod tests {
             &p2p_config(receiver.node_id().to_string()),
             Arc::clone(&journal),
             &[stream_key.to_owned()],
+            None,
         )
         .await?
         .expect("p2p enabled");

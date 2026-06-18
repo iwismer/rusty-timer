@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use rt_iroh::{Connection, NodeId};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 /// QUIC application error code used when force-closing a revoked peer's
@@ -278,6 +278,114 @@ impl ThinNodeAllowListClient {
     }
 }
 
+/// HTTP client for registering the forwarder and pushing its stream catalog.
+#[derive(Clone)]
+pub struct ThinNodeCatalogClient {
+    http: reqwest::Client,
+    base_url: String,
+    bearer_token: Arc<str>,
+}
+
+impl std::fmt::Debug for ThinNodeCatalogClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThinNodeCatalogClient")
+            .field("base_url", &self.base_url)
+            .field("bearer_token", &"<redacted>")
+            .finish()
+    }
+}
+
+impl ThinNodeCatalogClient {
+    /// Builds a client with the default thin-node request timeout.
+    #[must_use]
+    pub fn new(base_url: impl Into<String>, bearer_token: impl Into<String>) -> Self {
+        Self::with_timeout(base_url, bearer_token, DEFAULT_ALLOWLIST_REQUEST_TIMEOUT)
+    }
+
+    /// Builds a client that bounds every registration/catalog request.
+    #[must_use]
+    pub fn with_timeout(
+        base_url: impl Into<String>,
+        bearer_token: impl Into<String>,
+        request_timeout: Duration,
+    ) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(request_timeout)
+            .build()
+            .expect(
+                "reqwest client builder with request timeout must initialise; \
+                 a failure here indicates the platform TLS/transport backend is unavailable",
+            );
+        Self {
+            http,
+            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            bearer_token: Arc::from(bearer_token.into()),
+        }
+    }
+
+    /// Self-registers this forwarder as a pending/known device on the thin node.
+    pub async fn register_forwarder(&self, endpoint_id: &str) -> Result<(), CatalogPushError> {
+        let url = format!("{}/register", self.base_url);
+        self.http
+            .post(url)
+            .bearer_auth(self.bearer_token.as_ref())
+            .json(&RegisterForwarderRequest {
+                endpoint_id,
+                device_kind: "forwarder",
+                device_token: self.bearer_token.as_ref(),
+            })
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// Pushes this forwarder's latest identity and stream catalog.
+    pub async fn push_catalog(&self, catalog: &ForwarderCatalog) -> Result<(), CatalogPushError> {
+        let url = format!("{}/forwarder/catalog", self.base_url);
+        self.http
+            .post(url)
+            .bearer_auth(self.bearer_token.as_ref())
+            .json(catalog)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct RegisterForwarderRequest<'a> {
+    endpoint_id: &'a str,
+    device_kind: &'static str,
+    device_token: &'a str,
+}
+
+/// Wire-format forwarder catalog pushed to the thin node.
+#[derive(Debug, Clone, Serialize)]
+pub struct ForwarderCatalog {
+    pub endpoint_id: String,
+    pub display_name: Option<String>,
+    pub direct_addrs: Vec<String>,
+    pub streams: Vec<ForwarderCatalogStream>,
+}
+
+/// Wire-format stream entry in a forwarder catalog push.
+#[derive(Debug, Clone, Serialize)]
+pub struct ForwarderCatalogStream {
+    pub stream_id: String,
+    pub epoch: u64,
+    pub next_seq: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CatalogPushError {
+    // `reqwest::Error`'s `Display` covers URL/status/transport but never
+    // request headers, so the bearer token cannot leak here.
+    #[error("thin-node catalog request failed: {0}")]
+    Http(#[from] reqwest::Error),
+}
+
 /// Wire-format receiver allow-list snapshot distributed by the thin node.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReceiverAllowListUpdate {
@@ -509,7 +617,7 @@ mod tests {
         extract::State,
         http::{HeaderMap, StatusCode, header::AUTHORIZATION},
         response::{IntoResponse, Response},
-        routing::get,
+        routing::{get, post},
     };
     use rt_iroh::{Endpoint, EndpointBuilder, NodeAddr};
     use tokio::sync::{Mutex as TokioMutex, mpsc, watch};
@@ -739,6 +847,98 @@ mod tests {
         server.abort();
         receiver.close().await;
         forwarder.close().await;
+        Ok(())
+    }
+
+    #[derive(Clone)]
+    struct TestCatalogServerState {
+        bearer_token: &'static str,
+        received: Arc<TokioMutex<Option<(HeaderMap, serde_json::Value)>>>,
+    }
+
+    async fn test_catalog_handler(
+        State(state): State<TestCatalogServerState>,
+        headers: HeaderMap,
+        Json(body): Json<serde_json::Value>,
+    ) -> Response {
+        let authorized = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == format!("Bearer {}", state.bearer_token));
+        if !authorized {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        *state.received.lock().await = Some((headers.clone(), body));
+        StatusCode::OK.into_response()
+    }
+
+    #[tokio::test]
+    async fn catalog_client_posts_registration_and_catalog_with_bearer() -> TestResult {
+        let received = Arc::new(TokioMutex::new(None));
+        let app = Router::new()
+            .route("/register", post(test_catalog_handler))
+            .route("/forwarder/catalog", post(test_catalog_handler))
+            .with_state(TestCatalogServerState {
+                bearer_token: "thin-secret",
+                received: received.clone(),
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let base_url = format!("http://{}", listener.local_addr()?);
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = ThinNodeCatalogClient::new(base_url, "thin-secret");
+        client
+            .register_forwarder("fwd-node-1")
+            .await
+            .expect("registration request succeeds");
+        let (headers, register_body) = received
+            .lock()
+            .await
+            .take()
+            .expect("server captured registration request");
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
+            "Bearer thin-secret"
+        );
+        assert_eq!(register_body["endpoint_id"], "fwd-node-1");
+        assert_eq!(register_body["device_kind"], "forwarder");
+        assert_eq!(register_body["device_token"], "thin-secret");
+
+        client
+            .push_catalog(&ForwarderCatalog {
+                endpoint_id: "fwd-node-1".to_owned(),
+                display_name: Some("Start Line".to_owned()),
+                direct_addrs: vec!["127.0.0.1:12345".to_owned()],
+                streams: vec![ForwarderCatalogStream {
+                    stream_id: "reader-a".to_owned(),
+                    epoch: 3,
+                    next_seq: 42,
+                }],
+            })
+            .await
+            .expect("catalog request succeeds");
+        let (headers, catalog_body) = received
+            .lock()
+            .await
+            .take()
+            .expect("server captured catalog request");
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
+            "Bearer thin-secret"
+        );
+        assert_eq!(catalog_body["endpoint_id"], "fwd-node-1");
+        assert_eq!(catalog_body["display_name"], "Start Line");
+        assert_eq!(
+            catalog_body["direct_addrs"],
+            serde_json::json!(["127.0.0.1:12345"])
+        );
+        assert_eq!(catalog_body["streams"][0]["stream_id"], "reader-a");
+        assert_eq!(catalog_body["streams"][0]["epoch"], 3);
+        assert_eq!(catalog_body["streams"][0]["next_seq"], 42);
+
+        server.abort();
         Ok(())
     }
 
