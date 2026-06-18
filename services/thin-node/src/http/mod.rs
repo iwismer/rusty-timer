@@ -59,5 +59,6 @@ pub fn router(state: AppState) -> Router {
         .route("/announcer/rows", post(announcer::push_row))
         .route("/announcer/takeover", post(announcer::takeover))
         .route("/allowlist/receivers", get(allowlist::receiver_allowlist))
+        .fallback(crate::ui_server::serve_ui)
         .with_state(state)
 }

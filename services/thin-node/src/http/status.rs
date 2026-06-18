@@ -172,6 +172,11 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    async fn response_text(resp: axum::response::Response) -> String {
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
     fn approve_request(admin_header: Option<&str>, body: &serde_json::Value) -> Request<Body> {
         let mut builder = Request::builder()
             .method("POST")
@@ -223,6 +228,30 @@ mod tests {
         assert_eq!(devices[0]["endpoint_id"], "ep-1");
         assert_eq!(devices[0]["device_kind"], "forwarder");
         assert_eq!(devices[0]["approval_state"], "pending");
+    }
+
+    #[tokio::test]
+    async fn ui_fallback_serves_non_embedded_placeholder() {
+        let state = test_state();
+        let app = router(state);
+
+        for path in ["/", "/admin", "/announcer"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "path {path}");
+
+            let body = response_text(resp).await;
+            assert!(body.contains("Thin Node UI not embedded"));
+        }
     }
 
     #[tokio::test]

@@ -2,6 +2,7 @@ pub mod announcer;
 pub mod db;
 pub mod http;
 pub mod registry;
+pub mod ui_server;
 
 #[cfg(test)]
 mod tests {
