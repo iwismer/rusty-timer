@@ -1,0 +1,60 @@
+name: P2P E2E
+
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  full-stack:
+    name: Full-stack + bridge agent (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      AGENT_ARTIFACTS_DIR: ${{ runner.temp }}/rt-bridge-agent-artifacts
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: p2p-e2e-${{ matrix.os }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Run deterministic backend E2E
+        run: uv run scripts/e2e/run_stack.py
+
+      - name: Run bridge-agent E2E and emit artifacts
+        run: |
+          mkdir -p "${AGENT_ARTIFACTS_DIR}"
+          uv run scripts/e2e/agent_ui/run_bridge_goal.py --artifacts-dir "${AGENT_ARTIFACTS_DIR}"
+
+      - name: Upload bridge-agent artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-agent-${{ matrix.os }}
+          path: ${{ env.AGENT_ARTIFACTS_DIR }}
+          if-no-files-found: warn
