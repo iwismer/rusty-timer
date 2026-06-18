@@ -1,6 +1,7 @@
 import argparse
 import subprocess
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import scripts.release as release
@@ -151,6 +152,19 @@ class PushTests(unittest.TestCase):
         )
         self.assertIn(["git", "push", "origin", "master"], calls)
         self.assertIn(["git", "push", "origin", "forwarder-v0.1.1"], calls)
+
+
+class ServiceConfigTests(unittest.TestCase):
+    def test_valid_services_include_thin_node(self) -> None:
+        self.assertIn("thin-node", release.VALID_SERVICES)
+
+    def test_release_workflow_routes_thin_node_and_drops_armv7(self) -> None:
+        workflow = Path(".github/workflows/release.yml").read_text()
+
+        self.assertIn('"thin-node-v*"', workflow)
+        self.assertIn("forwarder|streamer|emulator|server|thin-node", workflow)
+        self.assertNotIn("armv7", workflow)
+        self.assertNotIn("armv7-unknown-linux-gnueabihf", workflow)
 
 
 class ReleaseWorkflowParityTests(unittest.TestCase):
@@ -333,6 +347,67 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
             ],
             calls,
         )
+
+    @patch("scripts.release.write_version")
+    @patch("scripts.release.compute_new_version")
+    @patch("scripts.release.read_version")
+    @patch("scripts.release.git_current_branch", return_value="master")
+    @patch("scripts.release.git_is_dirty", return_value=False)
+    def test_thin_node_runs_release_build_without_ui_checks(
+        self,
+        _dirty_mock,
+        _branch_mock,
+        read_version_mock,
+        compute_new_version_mock,
+        _write_version_mock,
+    ) -> None:
+        args = argparse.Namespace(
+            services=["thin-node"],
+            major=False,
+            minor=False,
+            patch=True,
+            version=None,
+            dry_run=False,
+            yes=True,
+            server_docker_image="iwismer/rt-server",
+            server_local_docker_build=False,
+        )
+
+        read_version_mock.return_value = "0.1.0"
+        compute_new_version_mock.return_value = "0.1.1"
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs):  # noqa: ANN003
+            calls.append(cmd)
+            if cmd == ["git", "rev-parse", "HEAD"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="abc123\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with patch("scripts.release.parse_args", return_value=args), patch(
+            "scripts.release.run", side_effect=fake_run
+        ):
+            release.main()
+
+        self.assertNotIn(["npm", "ci"], calls)
+        self.assertIn(
+            [
+                "cargo",
+                "build",
+                "--release",
+                "--package",
+                "thin-node",
+                "--bin",
+                "thin-node",
+            ],
+            calls,
+        )
+        self.assertIn(
+            ["git", "add", "services/thin-node/Cargo.toml", "Cargo.lock"],
+            calls,
+        )
+        self.assertIn(["git", "tag", "thin-node-v0.1.1"], calls)
+        self.assertIn(["git", "push", "origin", "thin-node-v0.1.1"], calls)
 
     @patch("scripts.release.write_version")
     @patch("scripts.release.compute_new_version")

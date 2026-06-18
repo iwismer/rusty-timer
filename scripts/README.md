@@ -174,6 +174,7 @@ It supports these services:
 - `streamer`
 - `emulator`
 - `server`
+- `thin-node`
 
 ## Prerequisites
 
@@ -211,6 +212,9 @@ uv run scripts/release.py server --patch
 
 # Server release with optional local Docker build check
 uv run scripts/release.py server --version 2.0.0 --server-local-docker-build
+
+# Thin-node release (arm64 Linux artifact)
+uv run scripts/release.py thin-node --patch
 ```
 
 ## Flags
@@ -238,7 +242,7 @@ For each requested service, the script:
    - `server`: `npm ci`, UI `lint`, UI `check`, UI tests for `apps/server-ui`, then:
      - default: `cargo build --release --package server --bin server`
      - optional: `docker build -t <image>:v<version> -t <image>:latest -f services/server/Dockerfile .` (with `--server-local-docker-build`)
-   - `forwarder`/`receiver`/`streamer`/`emulator`: `cargo build --release --package <service> --bin <service>` (`--features embed-ui` for `forwarder`/`receiver`)
+   - `forwarder`/`streamer`/`emulator`/`thin-node`: `cargo build --release --package <service> --bin <service>` (`--features embed-ui,eink` for `forwarder`)
 6. Stages `services/<service>/Cargo.toml` and `Cargo.lock` (and for `receiver`,
    `apps/receiver-ui/src-tauri/tauri.conf.json`).
 7. Creates commit: `chore(<service>): bump version to <new_version>`.
@@ -260,6 +264,10 @@ Actions run (see comments in `scripts/release.py`).
 For `server` releases, Docker image build/push is handled by GitHub Actions on
 `server-v<version>` tags.
 That workflow requires repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.
+
+The GitHub release workflow no longer builds armv7 artifacts. Linux SBC release
+artifacts are arm64 (`aarch64-unknown-linux-gnu`); `thin-node` releases publish
+only that arm64 Linux artifact.
 
 ## Safety and Failure Behavior
 

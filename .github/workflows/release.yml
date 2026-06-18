@@ -14,6 +14,7 @@ on:
       - "streamer-v*"
       - "emulator-v*"
       - "server-v*"
+      - "thin-node-v*"
 
 permissions:
   contents: write
@@ -66,7 +67,7 @@ jobs:
             echo "::error::Tag input is empty."
             exit 1
           fi
-          if ! [[ "$INPUT_TAG" =~ ^(forwarder|streamer|emulator|server)-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if ! [[ "$INPUT_TAG" =~ ^(forwarder|streamer|emulator|server|thin-node)-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Invalid tag format: '$INPUT_TAG'. Expected: <service>-v<X.Y.Z>"
             exit 1
           fi
@@ -85,12 +86,12 @@ jobs:
           else
             TAG="${GITHUB_REF#refs/tags/}"
           fi
-          if [[ "$TAG" =~ ^(forwarder|streamer|emulator|server)-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+          if [[ "$TAG" =~ ^(forwarder|streamer|emulator|server|thin-node)-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
             SERVICE="${BASH_REMATCH[1]}"
             VERSION="${BASH_REMATCH[2]}"
           else
             echo "::error::Invalid tag format: ${TAG}"
-            echo "::error::Expected: <service>-v<semver> where service is one of forwarder|streamer|emulator|server (receiver app: tag receiver-v<semver>)"
+            echo "::error::Expected: <service>-v<semver> where service is one of forwarder|streamer|emulator|server|thin-node (receiver app: tag receiver-v<semver>)"
             exit 1
           fi
           echo "service=${SERVICE}" >> "$GITHUB_OUTPUT"
@@ -134,10 +135,9 @@ jobs:
               MATRIX=$(jq -c . <<'JSON'
           {
             "include": [
-              { "os": "linux",   "arch": "x86_64", "runner": "ubuntu-latest",    "target": "x86_64-unknown-linux-gnu",      "use_cross": "false" },
-              { "os": "linux",   "arch": "arm64",  "runner": "ubuntu-24.04-arm", "target": "aarch64-unknown-linux-gnu",     "use_cross": "false" },
-              { "os": "linux",   "arch": "armv7",  "runner": "ubuntu-latest",    "target": "armv7-unknown-linux-gnueabihf", "use_cross": "true"  },
-              { "os": "windows", "arch": "x86_64", "runner": "windows-latest",   "target": "x86_64-pc-windows-msvc",       "use_cross": "false" }
+              { "os": "linux",   "arch": "x86_64", "runner": "ubuntu-latest",    "target": "x86_64-unknown-linux-gnu",  "use_cross": "false" },
+              { "os": "linux",   "arch": "arm64",  "runner": "ubuntu-24.04-arm", "target": "aarch64-unknown-linux-gnu", "use_cross": "false" },
+              { "os": "windows", "arch": "x86_64", "runner": "windows-latest",   "target": "x86_64-pc-windows-msvc",   "use_cross": "false" }
             ]
           }
           JSON
@@ -153,6 +153,16 @@ jobs:
           }
           JSON
               ) || { echo "::error::jq failed to parse streamer build matrix"; exit 1; }
+              ;;
+            thin-node)
+              MATRIX=$(jq -c . <<'JSON'
+          {
+            "include": [
+              { "os": "linux", "arch": "arm64", "runner": "ubuntu-24.04-arm", "target": "aarch64-unknown-linux-gnu", "use_cross": "false" }
+            ]
+          }
+          JSON
+              ) || { echo "::error::jq failed to parse thin-node build matrix"; exit 1; }
               ;;
             server)
               # Keep a valid matrix output, but skip binary build/package jobs.

@@ -169,7 +169,7 @@ fi
 echo ""
 echo "=== docker-compose.prod.yml ==="
 
-COMPOSE_FILE="deploy/docker-compose.prod.yml"
+COMPOSE_FILE="deploy/server/docker-compose.prod.yml"
 
 check_file_exists "${COMPOSE_FILE}" "Production docker-compose.prod.yml exists"
 
@@ -236,12 +236,26 @@ check_runbook() {
 check_runbook "docs/runbooks/forwarder-operations.md" "Forwarder"
 check_runbook "docs/runbooks/server-operations.md" "Server"
 check_runbook "docs/runbooks/receiver-operations.md" "Receiver"
+check_runbook "docs/runbooks/thin-node-operations.md" "Thin-node"
 
 # Forwarder runbook must cover epoch reset.
 FWRD_RUNBOOK="docs/runbooks/forwarder-operations.md"
 if [[ -f "${REPO_ROOT}/${FWRD_RUNBOOK}" ]]; then
     check_file_contains "${FWRD_RUNBOOK}" 'epoch' \
         "Forwarder runbook: covers epoch reset"
+fi
+
+# Thin-node runbook must cover provisioning, allow-list distribution, announcer push, and auth posture.
+THIN_RUNBOOK="docs/runbooks/thin-node-operations.md"
+if [[ -f "${REPO_ROOT}/${THIN_RUNBOOK}" ]]; then
+    check_file_contains "${THIN_RUNBOOK}" '(THIN_NODE_PROVISIONING_TOKEN|provisioning token)' \
+        "Thin-node runbook: covers provisioning token"
+    check_file_contains "${THIN_RUNBOOK}" '(allow-list|allowlist|allow list)' \
+        "Thin-node runbook: covers allow-list distribution"
+    check_file_contains "${THIN_RUNBOOK}" '(announcer|generation|lease)' \
+        "Thin-node runbook: covers announcer push"
+    check_file_contains "${THIN_RUNBOOK}" '(Authelia|M2M|Bearer|public read)' \
+        "Thin-node runbook: covers auth posture"
 fi
 
 # Server runbook must cover exports and manual retention-delete.

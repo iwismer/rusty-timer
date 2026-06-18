@@ -14,6 +14,7 @@ routes the proxy must protect. The in-code source of truth is the module doc on
 | `/register`                  | POST   | M2M / device bearer | in-process provisioning bearer token |
 | `/announcer/rows`            | POST   | M2M / device bearer | in-process provisioning bearer token |
 | `/announcer/takeover`        | POST   | M2M / device bearer | in-process provisioning bearer token |
+| `/allowlist/receivers`       | GET    | M2M / device bearer | in-process provisioning bearer token |
 
 ## Caddy / Authelia requirements
 
@@ -26,9 +27,6 @@ routes the proxy must protect. The in-code source of truth is the module doc on
   cannot be spoofed.
 - **Public routes** (`/status`, `/healthz`) may be allow-listed without
   authentication.
-- **M2M/device routes** (`/register`, `/announcer/*`) authenticate in-process
-  using the provisioning bearer token and do not depend on the proxy; the proxy
-  should forward the `Authorization` header unchanged.
-
-> Allow-list distribution to devices is intentionally **not** implemented at
-> this stage; this document only covers the status/admin/M2M route auth matrix.
+- **M2M/device routes** (`/register`, `/allowlist/receivers`, `/announcer/*`)
+  authenticate in-process using the provisioning bearer token and do not depend
+  on the proxy; the proxy should forward the `Authorization` header unchanged.

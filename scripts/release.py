@@ -33,7 +33,7 @@ import traceback
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-VALID_SERVICES = ("forwarder", "receiver", "streamer", "emulator", "server")
+VALID_SERVICES = ("forwarder", "receiver", "streamer", "emulator", "server", "thin-node")
 EMBED_UI_SERVICES = ("forwarder",)
 UI_WORKSPACES = {
     "forwarder": "apps/forwarder-ui",
