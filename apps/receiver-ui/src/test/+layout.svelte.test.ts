@@ -41,8 +41,6 @@ const apiMocks = vi.hoisted(() => ({
   }),
   putMode: vi.fn().mockResolvedValue(undefined),
   putProfile: vi.fn().mockResolvedValue(undefined),
-  connect: vi.fn().mockResolvedValue(undefined),
-  disconnect: vi.fn().mockResolvedValue(undefined),
   putEarliestEpoch: vi.fn().mockResolvedValue(undefined),
   getDbfConfig: vi.fn().mockResolvedValue({ enabled: false, path: "" }),
   putDbfConfig: vi.fn().mockResolvedValue(undefined),

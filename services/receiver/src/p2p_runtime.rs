@@ -37,6 +37,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use rt_iroh::{Endpoint, EndpointBuilder, NodeAddr, NodeId, SecretKey};
@@ -49,9 +50,12 @@ use crate::announcer_push::{
     self, AnnouncerPushClient, ParticipantResolver, ResolvedParticipant, ThinNodeAnnouncerClient,
 };
 use crate::control_api::AppState;
+use crate::control_api::ConnectionState;
 use crate::db::{Db, StreamSubscription};
 use crate::local_proxy::LocalProxy;
-use crate::p2p_session::{BackoffConfig, SessionParams, run_session_with_reconnect};
+use crate::p2p_session::{
+    BackoffConfig, SessionParams, SessionStatusReporter, run_session_with_reconnect,
+};
 use crate::ports::default_port;
 
 /// Capacity of each per-stream durable-hint broadcast channel.
@@ -181,12 +185,28 @@ pub async fn start_receiver_p2p(
     let forwarder_addr =
         NodeAddr::new(forwarder_node_id).with_direct_addresses([config.forwarder.direct_addr]);
 
+    // P2P is configured and the runtime is attempting to reach the forwarder:
+    // surface that as Connecting until a session actually connects. A shared
+    // live-session counter, threaded into every stream worker via a
+    // `SessionStatusReporter`, then drives the aggregate state to Connected
+    // while at least one session is up and back to Connecting when the last one
+    // drops. Shutdown (below) restores Disconnected.
+    state
+        .set_connection_state(ConnectionState::Connecting)
+        .await;
+    let live_sessions = Arc::new(AtomicUsize::new(0));
+    let reporter = Arc::new(SessionStatusReporter::new(
+        Arc::clone(&state),
+        live_sessions,
+    ));
+
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let task = tokio::spawn(run_reconcile_loop(
         state,
         config,
         endpoint,
         forwarder_addr,
+        reporter,
         shutdown_rx,
     ));
 
@@ -249,6 +269,7 @@ async fn run_reconcile_loop(
     config: P2pReceiverConfig,
     endpoint: Endpoint,
     forwarder_addr: NodeAddr,
+    reporter: Arc<SessionStatusReporter>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let endpoint = Arc::new(endpoint);
@@ -290,6 +311,7 @@ async fn run_reconcile_loop(
             &config,
             &endpoint,
             &forwarder_addr,
+            &reporter,
             announcer_generation,
             &mut workers,
         )
@@ -308,6 +330,12 @@ async fn run_reconcile_loop(
         worker.stop().await;
     }
     endpoint.close().await;
+    // The runtime is shutting down: no sessions remain and none will be
+    // reattempted, so report a clean Disconnected. `P2pReceiverRuntime::shutdown`
+    // awaits this task, so the state is settled before shutdown returns.
+    state
+        .set_connection_state(ConnectionState::Disconnected)
+        .await;
 }
 
 async fn thin_node_startup(thin: ThinNodeClientConfig, endpoint_id: String) -> Result<i64, String> {
@@ -326,6 +354,7 @@ async fn reconcile_once(
     config: &P2pReceiverConfig,
     endpoint: &Arc<Endpoint>,
     forwarder_addr: &NodeAddr,
+    reporter: &Arc<SessionStatusReporter>,
     announcer_generation: Option<i64>,
     workers: &mut HashMap<String, StreamWorker>,
 ) {
@@ -391,6 +420,7 @@ async fn reconcile_once(
             config,
             endpoint,
             forwarder_addr,
+            reporter,
             announcer_generation,
             &sub,
         )
@@ -404,6 +434,7 @@ async fn start_stream_worker(
     config: &P2pReceiverConfig,
     endpoint: &Arc<Endpoint>,
     forwarder_addr: &NodeAddr,
+    reporter: &Arc<SessionStatusReporter>,
     announcer_generation: Option<i64>,
     sub: &StreamSubscription,
 ) -> StreamWorker {
@@ -426,6 +457,7 @@ async fn start_stream_worker(
             mode: SubscribeMode::Replay,
             backoff: BackoffConfig::default(),
             durable_hint_tx: Some(hint_tx.clone()),
+            reporter: Some(Arc::clone(reporter)),
         };
         let session_shutdown = shutdown_rx.clone();
         let session_stream_id = stream_id.clone();

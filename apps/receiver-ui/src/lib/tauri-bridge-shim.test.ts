@@ -92,10 +92,10 @@ describe("tauri-bridge-shim invoke", () => {
       .mockResolvedValue(new Response("null", { status: 200 }));
     globalThis.fetch = fetchMock as typeof fetch;
 
-    await invoke("connect");
+    await invoke("get_status");
 
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe("/bridge/invoke/connect");
+    expect(url).toBe("/bridge/invoke/get_status");
     expect(JSON.parse(init.body)).toEqual({});
   });
 
@@ -118,7 +118,7 @@ describe("tauri-bridge-shim invoke", () => {
       .mockResolvedValue(new Response(null, { status: 204 }));
     globalThis.fetch = fetchMock as typeof fetch;
 
-    const result = await invoke("disconnect");
+    const result = await invoke("admin_clear_data");
     expect(result).toBeUndefined();
   });
 

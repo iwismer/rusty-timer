@@ -246,14 +246,6 @@ export async function getReplayTargetEpochs(
   });
 }
 
-export async function connect(): Promise<void> {
-  await invoke("connect");
-}
-
-export async function disconnect(): Promise<void> {
-  await invoke("disconnect");
-}
-
 export async function resetStreamCursor(stream: {
   stream_id: string;
 }): Promise<void> {

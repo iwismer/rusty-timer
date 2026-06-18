@@ -318,18 +318,6 @@ async fn get_logs(state: State<'_, Arc<AppState>>) -> CmdResult<control_api::Log
 }
 
 #[tauri::command]
-async fn connect(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
-    control_api::connect(&state).await;
-    Ok(())
-}
-
-#[tauri::command]
-async fn disconnect(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
-    control_api::disconnect(&state).await;
-    Ok(())
-}
-
-#[tauri::command]
 async fn admin_reset_cursor(
     state: State<'_, Arc<AppState>>,
     body: control_api::CursorResetRequest,

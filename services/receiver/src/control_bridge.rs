@@ -281,14 +281,6 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
         "get_status" => ok(control_api::get_status(state).await),
         "get_version" => ok(control_api::get_version()),
         "get_logs" => ok(control_api::get_logs(state).await),
-        "connect" => {
-            control_api::connect(state).await;
-            Ok(Value::Null)
-        }
-        "disconnect" => {
-            control_api::disconnect(state).await;
-            Ok(Value::Null)
-        }
         "admin_reset_cursor" => {
             ok(control_api::admin_reset_cursor(state, arg(args, "body")?).await?)
         }

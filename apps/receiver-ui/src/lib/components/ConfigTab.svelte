@@ -4,8 +4,7 @@
     store,
     getConfigDirty,
     getConnectionState,
-    handleConnect,
-    handleDisconnect,
+    getConnectionBadgeState,
     saveProfile,
     saveDbfConfig,
     clearDbfFile,
@@ -13,12 +12,13 @@
     setEditToken,
     setEditReceiverId,
   } from "$lib/store.svelte";
-  import {
-    inputClass,
-    btnPrimary,
-    btnSecondary,
-    btnDisconnect,
-  } from "$lib/ui-classes";
+  import { inputClass, btnPrimary, btnSecondary } from "$lib/ui-classes";
+
+  const dotClass: Record<"ok" | "warn" | "err", string> = {
+    ok: "bg-status-ok",
+    warn: "bg-status-warn",
+    err: "bg-status-err",
+  };
 
   function getDbfDirty(): boolean {
     return (
@@ -102,43 +102,19 @@
     <div class="flex items-center justify-between gap-4">
       <div>
         <p class="text-xs font-medium text-text-muted">Connection</p>
-        <p
-          data-testid="config-connection-state"
-          class="mt-1 text-sm text-text-primary"
-        >
-          {connectionLabel(getConnectionState())}
+        <p class="mt-1 text-xs text-text-muted">
+          Connects automatically to the forwarder over the peer-to-peer link.
         </p>
       </div>
 
-      {#if getConnectionState() === "connected"}
-        <button
-          data-testid="config-connect-toggle-btn"
-          class={btnDisconnect}
-          onclick={() => handleDisconnect()}
-          disabled={store.connectBusy}
-        >
-          Disconnect
-        </button>
-      {:else if getConnectionState() === "disconnected"}
-        <button
-          data-testid="config-connect-toggle-btn"
-          class={btnPrimary}
-          onclick={() => handleConnect()}
-          disabled={store.connectBusy || !store.savedThinNodeUrl}
-        >
-          Connect
-        </button>
-      {:else}
-        <button
-          data-testid="config-connect-toggle-btn"
-          class={btnPrimary}
-          disabled
-        >
-          {getConnectionState() === "disconnecting"
-            ? "Disconnecting..."
-            : "Connecting..."}
-        </button>
-      {/if}
+      <span
+        data-testid="config-connection-state"
+        class="flex shrink-0 items-center gap-2 text-sm text-text-primary"
+      >
+        <span class="h-2 w-2 rounded-full {dotClass[getConnectionBadgeState()]}"
+        ></span>
+        {connectionLabel(getConnectionState())}
+      </span>
     </div>
   </section>
 

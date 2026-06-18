@@ -75,20 +75,6 @@ describe("api client", () => {
     expect(s.receiver_id).toBe("recv-status");
   });
 
-  it("connect invokes command", async () => {
-    const { connect } = await import("./api");
-    mockInvoke.mockResolvedValue(undefined);
-    await expect(connect()).resolves.toBeUndefined();
-    expect(mockInvoke).toHaveBeenCalledWith("connect");
-  });
-
-  it("disconnect invokes command", async () => {
-    const { disconnect } = await import("./api");
-    mockInvoke.mockResolvedValue(undefined);
-    await expect(disconnect()).resolves.toBeUndefined();
-    expect(mockInvoke).toHaveBeenCalledWith("disconnect");
-  });
-
   it("putSubscriptions sends body with subscriptions", async () => {
     const { putSubscriptions } = await import("./api");
     mockInvoke.mockResolvedValue(undefined);

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/svelte";
+import { render, screen } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import ConfigTab from "./components/ConfigTab.svelte";
@@ -12,14 +12,12 @@ const mockState = vi.hoisted(() => ({
     savedThinNodeUrl: "https://thin-node.example.com",
     savedToken: "secret",
     saving: false,
-    connectBusy: false,
     status: { connection_state: "disconnected" },
   },
   getConfigDirty: vi.fn(() => false),
   getConnectionState: vi.fn(() => "disconnected"),
+  getConnectionBadgeState: vi.fn(() => "err"),
   saveProfile: vi.fn(),
-  handleConnect: vi.fn(),
-  handleDisconnect: vi.fn(),
   setEditReceiverId: vi.fn(),
   setEditThinNodeUrl: vi.fn(),
   setEditToken: vi.fn(),
@@ -29,9 +27,8 @@ vi.mock("$lib/store.svelte", () => ({
   store: mockState.store,
   getConfigDirty: mockState.getConfigDirty,
   getConnectionState: mockState.getConnectionState,
+  getConnectionBadgeState: mockState.getConnectionBadgeState,
   saveProfile: mockState.saveProfile,
-  handleConnect: mockState.handleConnect,
-  handleDisconnect: mockState.handleDisconnect,
   setEditReceiverId: mockState.setEditReceiverId,
   setEditThinNodeUrl: mockState.setEditThinNodeUrl,
   setEditToken: mockState.setEditToken,
@@ -51,10 +48,10 @@ describe("ConfigTab", () => {
     mockState.store.savedThinNodeUrl = "https://thin-node.example.com";
     mockState.store.savedToken = "secret";
     mockState.store.saving = false;
-    mockState.store.connectBusy = false;
     mockState.store.status = { connection_state: "disconnected" };
     mockState.getConfigDirty.mockReturnValue(false);
     mockState.getConnectionState.mockReturnValue("disconnected");
+    mockState.getConnectionBadgeState.mockReturnValue("err");
   });
 
   it("renders config inputs and the current connection state", () => {
@@ -69,50 +66,43 @@ describe("ConfigTab", () => {
     expect(screen.getByTestId("config-connection-state")).toHaveTextContent(
       "Disconnected",
     );
-    expect(screen.getByRole("button", { name: "Connect" })).toBeInTheDocument();
   });
 
-  it("calls handleConnect when the config tab connect button is pressed", async () => {
+  it("shows a read-only connection indicator with no manual controls", () => {
     render(ConfigTab);
 
-    await fireEvent.click(screen.getByRole("button", { name: "Connect" }));
-
-    expect(mockState.handleConnect).toHaveBeenCalledTimes(1);
+    // The connection state is read-only: there are no Connect/Disconnect
+    // buttons (the P2P session drives the state automatically).
+    expect(
+      screen.queryByRole("button", { name: "Connect" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Disconnect" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("config-connect-toggle-btn"),
+    ).not.toBeInTheDocument();
   });
 
-  it("shows disconnect when currently connected", async () => {
+  it("reflects the connected state driven by the backend", () => {
     mockState.store.status = { connection_state: "connected" };
     mockState.getConnectionState.mockReturnValue("connected");
+    mockState.getConnectionBadgeState.mockReturnValue("ok");
 
     render(ConfigTab);
-
-    const button = screen.getByRole("button", { name: "Disconnect" });
-    await fireEvent.click(button);
 
     expect(screen.getByTestId("config-connection-state")).toHaveTextContent(
       "Connected",
     );
-    expect(mockState.handleDisconnect).toHaveBeenCalledTimes(1);
   });
 
-  it("disables connect when there is no saved thin-node URL", () => {
-    mockState.store.editThinNodeUrl = "https://draft-only.example";
-    mockState.store.savedThinNodeUrl = "";
-
-    render(ConfigTab);
-
-    expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
-  });
-
-  it("renders connecting as a disabled transitional state", () => {
+  it("reflects the connecting transitional state", () => {
     mockState.store.status = { connection_state: "connecting" };
     mockState.getConnectionState.mockReturnValue("connecting");
+    mockState.getConnectionBadgeState.mockReturnValue("warn");
 
     render(ConfigTab);
 
-    expect(
-      screen.getByRole("button", { name: "Connecting..." }),
-    ).toBeDisabled();
     expect(screen.getByTestId("config-connection-state")).toHaveTextContent(
       "Connecting...",
     );

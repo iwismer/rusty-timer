@@ -44,7 +44,6 @@ export const store = $state({
   // Connection / status
   status: null as StatusResponse | null,
   error: null as string | null,
-  connectBusy: false,
 
   // Streams
   streams: null as StreamsResponse | null,
@@ -1016,28 +1015,6 @@ export async function handleCheckUpdate(): Promise<void> {
     }
   } finally {
     store.checkingUpdate = false;
-  }
-}
-
-export async function handleConnect(): Promise<void> {
-  store.connectBusy = true;
-  try {
-    await api.connect();
-  } catch (e) {
-    store.error = String(e);
-  } finally {
-    store.connectBusy = false;
-  }
-}
-
-export async function handleDisconnect(): Promise<void> {
-  store.connectBusy = true;
-  try {
-    await api.disconnect();
-  } catch (e) {
-    store.error = String(e);
-  } finally {
-    store.connectBusy = false;
   }
 }
 

@@ -23,6 +23,7 @@
 //! is owned by later tasks; this module provides the testable session core.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use prost::Message;
@@ -34,7 +35,62 @@ use rt_p2p_protocol::{
 };
 use tokio::sync::{Mutex, broadcast, watch};
 
+use crate::control_api::{AppState, ConnectionState};
 use crate::db::{Db, GapMarkerInsert, ReceivedEventInsert};
+
+/// Aggregates live-session connectivity across stream workers and reflects it
+/// into the shared [`AppState`] connection state.
+///
+/// Each reconnecting session calls [`on_connected`](Self::on_connected) right
+/// after its control-plane handshake succeeds and
+/// [`on_disconnected`](Self::on_disconnected) once that session ends. A shared
+/// atomic counter tracks how many sessions are currently live so the aggregate
+/// state is `Connected` while at least one session is up and falls back to
+/// `Connecting` when the last one drops (the runtime keeps retrying). Runtime
+/// start (`Connecting`) and shutdown (`Disconnected`) are driven separately by
+/// [`crate::p2p_runtime`].
+pub struct SessionStatusReporter {
+    state: Arc<AppState>,
+    live_sessions: Arc<AtomicUsize>,
+}
+
+impl std::fmt::Debug for SessionStatusReporter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionStatusReporter")
+            .field("live_sessions", &self.live_sessions.load(Ordering::SeqCst))
+            .finish()
+    }
+}
+
+impl SessionStatusReporter {
+    /// Build a reporter sharing `live_sessions` across every stream worker.
+    pub fn new(state: Arc<AppState>, live_sessions: Arc<AtomicUsize>) -> Self {
+        Self {
+            state,
+            live_sessions,
+        }
+    }
+
+    /// Record that a session's control-plane handshake just succeeded.
+    async fn on_connected(&self) {
+        self.live_sessions.fetch_add(1, Ordering::SeqCst);
+        self.state
+            .set_connection_state(ConnectionState::Connected)
+            .await;
+    }
+
+    /// Record that a previously-connected session has ended. When no sessions
+    /// remain live the aggregate state falls back to `Connecting` (the runtime
+    /// keeps reconnecting with backoff).
+    async fn on_disconnected(&self) {
+        let previous = self.live_sessions.fetch_sub(1, Ordering::SeqCst);
+        if previous <= 1 {
+            self.state
+                .set_connection_state(ConnectionState::Connecting)
+                .await;
+        }
+    }
+}
 
 /// Errors raised by the receiver P2P data session.
 #[derive(Debug, thiserror::Error)]
@@ -175,6 +231,10 @@ pub struct SessionParams {
     /// persisted rows. The hint is sent *after* the durable write, preserving
     /// the insert-before-ack contract.
     pub durable_hint_tx: Option<broadcast::Sender<i64>>,
+    /// Optional reporter that reflects this session's connect/disconnect
+    /// lifecycle into the shared [`AppState`] connection state. `None` for
+    /// session-core tests that do not exercise the aggregate connection state.
+    pub reporter: Option<Arc<SessionStatusReporter>>,
 }
 
 /// An established control-plane session with a forwarder peer.
@@ -531,14 +591,25 @@ async fn run_once(
     params: &SessionParams,
 ) -> Result<SessionOutcome, P2pSessionError> {
     let session = connect_and_hello(endpoint, forwarder_addr, params.client_hello.clone()).await?;
-    run_data_subscription_with_hint(
+    // The handshake succeeded: this session is live. Record connected before the
+    // data subscription runs, and record disconnected once it ends for any
+    // reason (clean EOF or error) so the aggregate connection state tracks the
+    // real session lifecycle.
+    if let Some(reporter) = &params.reporter {
+        reporter.on_connected().await;
+    }
+    let outcome = run_data_subscription_with_hint(
         &session.connection,
         db,
         &params.stream_id,
         params.mode,
         params.durable_hint_tx.as_ref(),
     )
-    .await
+    .await;
+    if let Some(reporter) = &params.reporter {
+        reporter.on_disconnected().await;
+    }
+    outcome
 }
 
 /// Run a reconnecting single-stream session: dial + hello + data subscription,
@@ -866,6 +937,7 @@ mod tests {
                     max: Duration::from_millis(1),
                 },
                 durable_hint_tx: None,
+                reporter: None,
             };
 
             let session_task = tokio::spawn({
@@ -1030,6 +1102,7 @@ mod tests {
             mode: SubscribeMode::Replay,
             backoff: BackoffConfig::default(),
             durable_hint_tx: None,
+            reporter: None,
         };
 
         let result =
@@ -1396,6 +1469,7 @@ mod tests {
                 max: Duration::from_millis(10),
             },
             durable_hint_tx: None,
+            reporter: None,
         };
 
         let result = tokio::time::timeout(
@@ -1469,6 +1543,7 @@ mod tests {
                     max: Duration::from_millis(50),
                 },
                 durable_hint_tx: None,
+                reporter: None,
             };
 
             let result = run_session_with_reconnect(

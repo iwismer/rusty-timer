@@ -12,10 +12,12 @@ use std::time::Duration;
 use axum::Json;
 use axum::extract::State;
 use axum::routing::post;
+use receiver::control_api::ConnectionState;
 use receiver::db::{DbfConfig, EventType, StreamSubscription};
 use receiver::p2p_runtime::{
     ForwarderPeerConfig, P2pReceiverConfig, ThinNodeClientConfig, start_receiver_p2p,
 };
+use receiver::ui_events::ReceiverUiEvent;
 use rt_p2p_protocol::{
     EventBatch, Hello, MAX_FRAME_BYTES, ReadRecord, StreamCatalog, StreamEntry, SubscribeOk,
 };
@@ -808,6 +810,70 @@ async fn start_receiver_p2p_rejects_tiny_reconcile_interval() {
     );
 
     forwarder.shutdown().await;
+}
+
+/// The receiver's `connection_state` must reflect the real P2P session
+/// lifecycle: once a session connects on loopback it reaches `Connected`, and
+/// once the runtime is shut down it returns to `Disconnected`.
+#[tokio::test]
+async fn connection_state_reflects_p2p_session_lifecycle() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let forwarder = MockForwarderPeer::start([90; 32], script_two(b"frame"))
+            .await
+            .unwrap();
+        let (node_id, direct) = forwarder_config(&forwarder);
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_state(dir.path()).await;
+        let (config, sub) = base_config(node_id, direct, 91, None);
+        state
+            .db
+            .lock()
+            .await
+            .replace_stream_subscriptions(&[sub])
+            .unwrap();
+
+        // Subscribe to status events before starting so the (non-coalesced)
+        // broadcast stream reliably surfaces the Connected transition even
+        // though the scripted mock closes each connection right after its ack
+        // (which makes the live state briefly flap Connected -> Connecting).
+        let mut ui_rx = state.ui_tx.subscribe();
+        let runtime = start_receiver_p2p(Arc::clone(&state), config)
+            .await
+            .unwrap();
+
+        // The live P2P session drives the connection state to Connected.
+        let reached_connected = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match ui_rx.recv().await {
+                    Ok(ReceiverUiEvent::StatusChanged {
+                        connection_state: ConnectionState::Connected,
+                        ..
+                    }) => break,
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        })
+        .await;
+        assert!(
+            reached_connected.is_ok(),
+            "a live P2P session must drive the connection state to Connected"
+        );
+
+        // Shutting down the runtime returns the connection state to Disconnected.
+        runtime.shutdown().await;
+        assert_eq!(
+            *state.conn_rx().borrow(),
+            ConnectionState::Disconnected,
+            "runtime shutdown must report Disconnected"
+        );
+
+        forwarder.shutdown().await;
+    })
+    .await
+    .expect("connection_state_reflects_p2p_session_lifecycle timed out");
 }
 
 #[tokio::test]

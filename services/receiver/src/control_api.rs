@@ -709,22 +709,6 @@ pub fn get_version() -> String {
     env!("CARGO_PKG_VERSION").to_owned()
 }
 
-pub async fn connect(state: &AppState) {
-    state.request_connect().await;
-}
-
-pub async fn disconnect(state: &AppState) {
-    let current = state.connection_state.borrow().clone();
-    if current == ConnectionState::Disconnected {
-        return;
-    }
-    state.clear_stream_metrics_cache().await;
-    state
-        .set_connection_state(ConnectionState::Disconnecting)
-        .await;
-    state.request_disconnect_shutdown();
-}
-
 pub async fn get_dbf_config(state: &AppState) -> Result<crate::db::DbfConfig, ReceiverError> {
     let db = state.db.lock().await;
     match db.load_dbf_config() {
@@ -1046,8 +1030,6 @@ macro_rules! receiver_command_list {
             get_status() -> "StatusResponse",
             get_version() -> "String",
             get_logs() -> "LogsResponse",
-            connect() -> "()",
-            disconnect() -> "()",
             admin_reset_cursor(body: "CursorResetRequest") -> "()",
             admin_reset_all_cursors() -> "serde_json::Value",
             admin_reset_earliest_epoch(body: "CursorResetRequest") -> "()",
@@ -1438,38 +1420,6 @@ mod tests {
         state.request_process_shutdown();
         shutdown_rx.changed().await.unwrap();
         assert_eq!(*shutdown_rx.borrow(), ShutdownSignal::Terminate);
-    }
-
-    #[tokio::test]
-    async fn disconnect_clears_cached_stream_metrics() {
-        let db = Db::open_in_memory().unwrap();
-        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
-        state.set_connection_state(ConnectionState::Connected).await;
-
-        state
-            .cache_stream_metrics(&crate::ui_events::StreamMetricsPayload {
-                forwarder_id: "fwd-1".to_owned(),
-                reader_ip: "10.0.0.1:10000".to_owned(),
-                raw_count: 10,
-                dedup_count: 9,
-                retransmit_count: 1,
-                lag_ms: Some(250),
-                epoch_raw_count: 4,
-                epoch_dedup_count: 3,
-                epoch_retransmit_count: 1,
-                unique_chips: 2,
-                epoch_last_received_at: Some("2026-03-22T12:00:00Z".to_owned()),
-                epoch_lag_ms: Some(125),
-            })
-            .await;
-
-        disconnect(&state).await;
-
-        assert!(state.get_stream_metrics_snapshot().await.is_empty());
-        assert_eq!(
-            *state.connection_state.borrow(),
-            ConnectionState::Disconnecting
-        );
     }
 
     #[tokio::test]
