@@ -27,6 +27,7 @@
 //! `src/generated/rusty_timer.p2p.v1.rs`. The build script never performs this
 //! step.
 
+pub mod capabilities;
 pub mod codec;
 pub mod error;
 pub mod negotiate;
@@ -43,6 +44,7 @@ pub mod proto {
     pub use crate::generated::*;
 }
 
+pub use capabilities::{CAP_CONTROL_EVENTS, CAP_REMOTE_CONFIG, has_capability};
 pub use codec::{Frame, MAX_FRAME_BYTES, decode_frame, decode_message_frame, encode_frame};
 pub use error::{ProtocolError, ProtocolErrorCode};
 pub use generated::{
