@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS profile (
     receiver_mode_json TEXT,
     receiver_id TEXT,
     dbf_enabled INTEGER NOT NULL DEFAULT 0,
-    dbf_path    TEXT NOT NULL DEFAULT 'C:\winrace\Files\IPICO.DBF'
+    dbf_path    TEXT NOT NULL DEFAULT 'C:\winrace\Files\IPICO.DBF',
+    -- Global announcer publish on/off (opt-in; default off).
+    announcer_enabled INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -113,3 +115,11 @@ CREATE TABLE IF NOT EXISTS bib_chips (
 );
 
 CREATE INDEX IF NOT EXISTS idx_bib_chips_bib ON bib_chips (bib);
+
+-- Per-stream announcer publish opt-in. Presence of a stream_id means that
+-- stream publishes to the announcer (when the global toggle is on). Kept in a
+-- separate table so replacing the subscription set does not clobber the
+-- per-stream publish choice. Opt-in: absent = does not publish.
+CREATE TABLE IF NOT EXISTS announcer_publish_streams (
+    stream_id TEXT PRIMARY KEY
+);

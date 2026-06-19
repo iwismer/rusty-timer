@@ -257,6 +257,24 @@ async fn import_chips(
 }
 
 #[tauri::command]
+async fn set_announcer_enabled(state: State<'_, Arc<AppState>>, enabled: bool) -> CmdResult<()> {
+    control_api::set_announcer_enabled(&state, enabled)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_stream_announcer_publish(
+    state: State<'_, Arc<AppState>>,
+    stream_id: String,
+    publish: bool,
+) -> CmdResult<()> {
+    control_api::set_stream_announcer_publish(&state, &stream_id, publish)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_mode(state: State<'_, Arc<AppState>>) -> CmdResult<rt_domain::ReceiverMode> {
     control_api::get_mode(&state)
         .await

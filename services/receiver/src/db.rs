@@ -232,11 +232,14 @@ impl Db {
     ) -> DbResult<()> {
         let receiver_mode_json = self.load_receiver_mode_json_raw()?;
         let dbf_config = self.load_dbf_config()?;
+        // Preserve config flags that live on the profile row across the
+        // delete+insert (mirrors dbf handling).
+        let announcer_enabled = self.load_announcer_enabled()?;
         let tx = self.conn.transaction()?;
         tx.execute_batch("DELETE FROM profile")?;
         tx.execute(
-            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, dbf_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, &dbf_config.path],
+            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, dbf_path, announcer_enabled) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, &dbf_config.path, i64::from(announcer_enabled)],
         )?;
         tx.commit()?;
         Ok(())
@@ -989,6 +992,11 @@ impl Db {
         )?;
         apply_add_column_migration(
             &self.conn,
+            "ALTER TABLE profile ADD COLUMN announcer_enabled INTEGER NOT NULL DEFAULT 0;",
+            "announcer_enabled",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
             "ALTER TABLE subscriptions ADD COLUMN event_type TEXT NOT NULL DEFAULT 'finish';",
             "event_type",
         )?;
@@ -1173,8 +1181,9 @@ impl Db {
         tx.execute_batch("DELETE FROM gap_markers")?;
         tx.execute_batch("DELETE FROM earliest_epochs")?;
         tx.execute_batch("DELETE FROM subscriptions")?;
+        tx.execute_batch("DELETE FROM announcer_publish_streams")?;
         tx.execute(
-            "UPDATE profile SET update_mode = ?1, receiver_mode_json = NULL, dbf_enabled = 0, dbf_path = 'C:\\winrace\\Files\\IPICO.DBF'",
+            "UPDATE profile SET update_mode = ?1, receiver_mode_json = NULL, dbf_enabled = 0, dbf_path = 'C:\\winrace\\Files\\IPICO.DBF', announcer_enabled = 0",
             rusqlite::params![DEFAULT_UPDATE_MODE],
         )?;
         tx.commit()?;
@@ -1235,6 +1244,60 @@ impl Db {
             return Err(DbError::ProfileMissing);
         }
         Ok(())
+    }
+
+    /// Whether the global announcer publish toggle is on. Defaults to `false`
+    /// (opt-in) when no profile row exists.
+    pub fn load_announcer_enabled(&self) -> DbResult<bool> {
+        let enabled: Option<i64> = self
+            .conn
+            .query_row("SELECT announcer_enabled FROM profile LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(enabled.unwrap_or(0) != 0)
+    }
+
+    /// Set the global announcer publish toggle. Requires a profile row
+    /// (created at receiver startup).
+    pub fn set_announcer_enabled(&self, enabled: bool) -> DbResult<()> {
+        let changed = self.conn.execute(
+            "UPDATE profile SET announcer_enabled = ?1",
+            rusqlite::params![i64::from(enabled)],
+        )?;
+        if changed == 0 {
+            return Err(DbError::ProfileMissing);
+        }
+        Ok(())
+    }
+
+    /// Enable or disable announcer publishing for a single stream (opt-in).
+    pub fn set_stream_announcer_publish(&self, stream_id: &str, publish: bool) -> DbResult<()> {
+        if publish {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO announcer_publish_streams (stream_id) VALUES (?1)",
+                rusqlite::params![stream_id],
+            )?;
+        } else {
+            self.conn.execute(
+                "DELETE FROM announcer_publish_streams WHERE stream_id = ?1",
+                rusqlite::params![stream_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The set of stream ids opted in to announcer publishing.
+    pub fn load_announcer_publish_streams(&self) -> DbResult<std::collections::HashSet<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT stream_id FROM announcer_publish_streams")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut set = std::collections::HashSet::new();
+        for row in rows {
+            set.insert(row?);
+        }
+        Ok(set)
     }
 
     pub fn update_subscription_event_type(
@@ -1552,6 +1615,38 @@ fn is_duplicate_column_error(message: &str, column_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn announcer_flags_persist() {
+        let mut db = Db::open_in_memory().unwrap();
+        // A profile row is required for the global toggle (created at startup).
+        db.save_profile("http://x", "t", DEFAULT_UPDATE_MODE, None)
+            .unwrap();
+        assert!(!db.load_announcer_enabled().unwrap(), "defaults to off");
+        db.set_announcer_enabled(true).unwrap();
+        assert!(db.load_announcer_enabled().unwrap());
+
+        // Saving the profile again must preserve the announcer toggle.
+        db.save_profile("http://y", "t2", DEFAULT_UPDATE_MODE, None)
+            .unwrap();
+        assert!(
+            db.load_announcer_enabled().unwrap(),
+            "announcer_enabled must survive a profile save"
+        );
+
+        // Per-stream publish is opt-in and tracked independently.
+        assert!(db.load_announcer_publish_streams().unwrap().is_empty());
+        db.set_stream_announcer_publish("127.0.0.1:1", true)
+            .unwrap();
+        assert!(
+            db.load_announcer_publish_streams()
+                .unwrap()
+                .contains("127.0.0.1:1")
+        );
+        db.set_stream_announcer_publish("127.0.0.1:1", false)
+            .unwrap();
+        assert!(db.load_announcer_publish_streams().unwrap().is_empty());
+    }
 
     #[test]
     fn replace_and_load_participants_and_chips() {

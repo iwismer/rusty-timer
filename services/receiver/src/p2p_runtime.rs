@@ -791,7 +791,7 @@ async fn reconcile_once(
     workers: &mut HashMap<String, ForwarderConnection>,
     stream_workers: &mut HashMap<String, StreamWorker>,
 ) {
-    let (subs, intents) = {
+    let (subs, intents, announcer_enabled, announcer_publish_streams) = {
         let db = state.db.lock().await;
         let subs = match db.load_stream_subscriptions() {
             Ok(subs) => subs,
@@ -807,7 +807,11 @@ async fn reconcile_once(
                 HashMap::new()
             }
         };
-        (subs, intents)
+        // Announcer gating inputs (global toggle + per-stream opt-in). Failures
+        // are treated as "disabled" so a transient DB error never publishes.
+        let enabled = db.load_announcer_enabled().unwrap_or(false);
+        let publish = db.load_announcer_publish_streams().unwrap_or_default();
+        (subs, intents, enabled, publish)
     };
 
     let discovered = state.discovered_forwarders.read().await.clone();
@@ -867,24 +871,34 @@ async fn reconcile_once(
         }
     }
 
-    let announcer_desired = config.server.is_some() && announcer_generation.is_some();
+    // Whether announcer push may run at all this pass: a server is configured,
+    // a fenced generation was acquired, and the global toggle is on. Per-stream
+    // opt-in is applied below via `announcer_publish_streams`.
+    let announcer_available =
+        config.server.is_some() && announcer_generation.is_some() && announcer_enabled;
+    let should_announce =
+        |stream_id: &str| announcer_available && announcer_publish_streams.contains(stream_id);
     for (stream_id, sub) in desired_streams {
+        let want_announce = should_announce(&stream_id);
         if let Some(existing) = stream_workers.get(&stream_id) {
             let config_changed = existing.sub != sub;
-            let announcer_missing = announcer_desired && !existing.announcer_active;
-            if !config_changed && !announcer_missing {
+            // Rebuild if the announcer state for this stream needs to change
+            // (turned on or off).
+            let announcer_mismatch = existing.announcer_active != want_announce;
+            if !config_changed && !announcer_mismatch {
                 continue;
             }
             if let Some(worker) = stream_workers.remove(&stream_id) {
                 if config_changed {
                     info!(%stream_id, "rebuilding p2p stream worker (subscription config changed)");
                 } else {
-                    info!(%stream_id, "rebuilding p2p stream worker (announcer now available)");
+                    info!(%stream_id, announce = want_announce, "rebuilding p2p stream worker (announcer state changed)");
                 }
                 worker.stop().await;
             }
         }
-        let worker = start_stream_worker(state, config, announcer_generation, &sub).await;
+        let worker =
+            start_stream_worker(state, config, announcer_generation, want_announce, &sub).await;
         stream_workers.insert(stream_id, worker);
     }
 
@@ -912,6 +926,7 @@ async fn start_stream_worker(
     state: &Arc<AppState>,
     config: &P2pReceiverConfig,
     announcer_generation: Option<i64>,
+    announce: bool,
     sub: &StreamSubscription,
 ) -> StreamWorker {
     let stream_id = sub.stream_id.clone();
@@ -984,9 +999,12 @@ async fn start_stream_worker(
         )));
     }
 
-    // Announcer push.
+    // Announcer push. Gated by the per-stream + global opt-in resolved by the
+    // reconcile loop (`announce`).
     let mut announcer_active = false;
-    if let (Some(thin), Some(generation)) = (config.server.clone(), announcer_generation) {
+    if let (true, Some(thin), Some(generation)) =
+        (announce, config.server.clone(), announcer_generation)
+    {
         match ServerAnnouncerClient::new(&thin.url, thin.token.clone()) {
             Ok(client) => {
                 let client: Arc<dyn AnnouncerPushClient + Send + Sync> = Arc::new(client);

@@ -337,6 +337,16 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
             ok(control_api::import_participants(state, arg(args, "contents")?).await?)
         }
         "import_chips" => ok(control_api::import_chips(state, arg(args, "contents")?).await?),
+        "set_announcer_enabled" => {
+            ok(control_api::set_announcer_enabled(state, arg(args, "enabled")?).await?)
+        }
+        "set_stream_announcer_publish" => {
+            let stream_id: String = arg(args, "stream_id")?;
+            ok(
+                control_api::set_stream_announcer_publish(state, &stream_id, arg(args, "publish")?)
+                    .await?,
+            )
+        }
         other => Err(BridgeError::Unknown(other.to_owned())),
     }
 }

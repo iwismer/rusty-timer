@@ -544,12 +544,14 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
-        state
-            .db
-            .lock()
-            .await
-            .replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
-            .unwrap();
+        {
+            let mut db = state.db.lock().await;
+            db.replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
+                .unwrap();
+            // Opt this stream in to announcer publishing (global + per-stream).
+            db.set_announcer_enabled(true).unwrap();
+            db.set_stream_announcer_publish(STREAM_ID, true).unwrap();
+        }
 
         let (mut config, _sub) = base_config(node_id, direct, 77, None);
         config.server = Some(ServerClientConfig {
@@ -594,6 +596,71 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
     })
     .await
     .expect("announcer_push_pushes_rows_with_generation_and_no_duplicates timed out");
+}
+
+/// Phase 6 / Task 6.2: with the stream NOT opted in to announcer publishing,
+/// the receiver still registers + takes over (generation acquired) but pushes
+/// NO rows. Verifies per-stream gating.
+#[tokio::test]
+async fn announcer_does_not_push_when_stream_not_opted_in() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let forwarder = MockForwarderPeer::start([88; 32], script_two(VALID_FRAME))
+            .await
+            .unwrap();
+        let (node_id, direct) = forwarder_config(&forwarder);
+        let (thin_url, thin_state) = start_mock_server().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_state(dir.path()).await;
+        {
+            let mut db = state.db.lock().await;
+            db.replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
+                .unwrap();
+            // Global toggle on, but the stream is NOT opted in.
+            db.set_announcer_enabled(true).unwrap();
+        }
+
+        let (mut config, _sub) = base_config(node_id, direct, 89, None);
+        config.server = Some(ServerClientConfig {
+            url: thin_url,
+            token: "secret-token".to_owned(),
+        });
+        let runtime = start_receiver_p2p(Arc::clone(&state), config)
+            .await
+            .unwrap();
+
+        // Wait until events are durable and the generation has been taken over,
+        // proving the server path ran end-to-end.
+        poll_until(
+            || {
+                let state = Arc::clone(&state);
+                let thin_state = thin_state.clone();
+                async move {
+                    let durable = {
+                        let db = state.db.lock().await;
+                        db.load_received_events(STREAM_ID)
+                            .map(|e| e.len() >= 2)
+                            .unwrap_or(false)
+                    };
+                    durable && *thin_state.generation.lock().unwrap() >= 1
+                }
+            },
+            Duration::from_secs(10),
+        )
+        .await;
+
+        // Give any (erroneous) push a chance to land, then assert none did.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            thin_state.rows.lock().unwrap().is_empty(),
+            "no rows must be pushed for a stream that is not opted in"
+        );
+
+        runtime.shutdown().await;
+        forwarder.shutdown().await;
+    })
+    .await
+    .expect("announcer_does_not_push_when_stream_not_opted_in timed out");
 }
 
 /// A record carrying an explicit `stream_id` (used to script a stream-id
@@ -800,12 +867,13 @@ async fn announcer_push_recovers_when_server_starts_late() {
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
-        state
-            .db
-            .lock()
-            .await
-            .replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
-            .unwrap();
+        {
+            let mut db = state.db.lock().await;
+            db.replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
+                .unwrap();
+            db.set_announcer_enabled(true).unwrap();
+            db.set_stream_announcer_publish(STREAM_ID, true).unwrap();
+        }
 
         let (mut config, _sub) = base_config(node_id, direct, 85, None);
         config.server = Some(ServerClientConfig {

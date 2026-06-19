@@ -1306,6 +1306,25 @@ pub async fn import_chips(
     })
 }
 
+/// Enable or disable the global announcer publish toggle. The P2P reconcile
+/// loop picks up the change on its next pass (within one reconcile interval).
+pub async fn set_announcer_enabled(state: &AppState, enabled: bool) -> Result<(), ReceiverError> {
+    let db = state.db.lock().await;
+    db.set_announcer_enabled(enabled)
+        .map_err(|e| ReceiverError::Internal(e.to_string()))
+}
+
+/// Opt a single stream in/out of announcer publishing (opt-in default off).
+pub async fn set_stream_announcer_publish(
+    state: &AppState,
+    stream_id: &str,
+    publish: bool,
+) -> Result<(), ReceiverError> {
+    let db = state.db.lock().await;
+    db.set_stream_announcer_publish(stream_id, publish)
+        .map_err(|e| ReceiverError::Internal(e.to_string()))
+}
+
 /// Rebuild the in-memory chip->participant lookup from the durable
 /// participant/chip tables. Called at startup and after each import. Returns
 /// the number of resolvable chips. The lookup uses a single outer key
@@ -2248,6 +2267,11 @@ macro_rules! receiver_command_list {
             ) -> "()",
             import_participants(contents: "String") -> "ImportSummary",
             import_chips(contents: "String") -> "ImportSummary",
+            set_announcer_enabled(enabled: "bool") -> "()",
+            set_stream_announcer_publish(
+                stream_id: "String",
+                publish: "bool"
+            ) -> "()",
         }
     };
 }
