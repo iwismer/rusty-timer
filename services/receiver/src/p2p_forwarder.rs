@@ -8,7 +8,7 @@ use rt_iroh::{Endpoint, NodeAddr, RecvStream, SendStream};
 use rt_p2p_protocol::{
     ControlC2F, ControlF2C, Hello, Pong, SubscribeMode, control_c2f, control_f2c,
 };
-use tokio::sync::{Mutex, broadcast, watch};
+use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
@@ -165,7 +165,7 @@ fn next_backoff(current: Duration, max: Duration) -> Duration {
 
 async fn run_connected_forwarder(
     endpoint_id: &str,
-    mut session: crate::p2p_session::ControlSession,
+    session: crate::p2p_session::ControlSession,
     db: &Arc<Mutex<Db>>,
     reporter: &Arc<SessionStatusReporter>,
     desired_rx: &mut watch::Receiver<HashMap<String, ForwarderDataStream>>,
@@ -173,10 +173,18 @@ async fn run_connected_forwarder(
 ) {
     let _control_guard = reporter.on_control_connected(endpoint_id).await;
     let mut data_tasks = HashMap::new();
+
+    let crate::p2p_session::ControlSession {
+        connection,
+        mut control_send,
+        control_recv,
+        ..
+    } = session;
+
     let desired = desired_rx.borrow().clone();
     sync_data_tasks(
         endpoint_id,
-        &session.connection,
+        &connection,
         db,
         reporter,
         &desired,
@@ -184,71 +192,120 @@ async fn run_connected_forwarder(
     )
     .await;
 
+    // BUG 1 fix: cancel-safe control reads. A dedicated task exclusively owns
+    // the control `RecvStream` and loops `read_frame` (which uses `read_exact`
+    // and is therefore cancel-UNSAFE), forwarding each parsed frame over an
+    // mpsc. The main `select!` only ever consumes already-parsed frames from
+    // that channel, so a `desired_rx.changed()` wake (every reconcile pass) can
+    // never cancel a partial wire read and desync the length-prefixed frame
+    // stream — which would otherwise break Ping/Pong and get us dropped.
+    let (frame_tx, mut frame_rx) = mpsc::channel::<ControlF2C>(64);
+    let reader_task = tokio::spawn(control_reader_loop(
+        endpoint_id.to_owned(),
+        control_recv,
+        frame_tx,
+    ));
+
+    // BUG 2 fix: keep the aggregate recompute (which awaits DB + discovered
+    // locks) off the frame-handling path. Status frames only do a quick
+    // in-memory store and signal this coalescing task, so a queued heartbeat
+    // `Ping` is never delayed behind a lock-bound recompute. Each notify
+    // guarantees at least one subsequent recompute that observes the store.
+    let recompute_notify = Arc::new(Notify::new());
+    let recompute_task = tokio::spawn({
+        let reporter = Arc::clone(reporter);
+        let recompute_notify = Arc::clone(&recompute_notify);
+        async move {
+            loop {
+                recompute_notify.notified().await;
+                reporter
+                    .app_state()
+                    .recompute_aggregate_connection_state()
+                    .await;
+            }
+        }
+    });
+
     loop {
         tokio::select! {
             biased;
             changed = shutdown_rx.changed() => {
                 if changed.is_err() || *shutdown_rx.borrow() {
-                    reporter.app_state().clear_forwarder_live_status(endpoint_id).await;
-                    stop_data_tasks(data_tasks).await;
-                    return;
+                    break;
                 }
             }
             changed = desired_rx.changed() => {
                 if changed.is_err() {
-                    reporter.app_state().clear_forwarder_live_status(endpoint_id).await;
-                    stop_data_tasks(data_tasks).await;
-                    return;
+                    break;
                 }
                 let desired = desired_rx.borrow().clone();
                 sync_data_tasks(
                     endpoint_id,
-                    &session.connection,
+                    &connection,
                     db,
                     reporter,
                     &desired,
                     &mut data_tasks,
                 ).await;
             }
-            result = read_next_control_frame(&mut session.control_recv) => {
-                match result {
-                    Ok(Some(frame)) => {
+            frame = frame_rx.recv() => {
+                match frame {
+                    Some(frame) => {
                         if let Err(error) = handle_control_frame(
                             endpoint_id,
                             frame,
-                            &mut session.control_send,
+                            &mut control_send,
                             reporter,
+                            &recompute_notify,
                         ).await {
                             warn!(%endpoint_id, %error, "failed to handle forwarder control frame");
-                            reporter.app_state().clear_forwarder_live_status(endpoint_id).await;
-                            stop_data_tasks(data_tasks).await;
-                            return;
+                            break;
                         }
                     }
-                    Ok(None) => {
-                        reporter.app_state().clear_forwarder_live_status(endpoint_id).await;
-                        stop_data_tasks(data_tasks).await;
-                        return;
-                    }
-                    Err(error) => {
-                        warn!(%endpoint_id, %error, "forwarder control stream ended with error");
-                        reporter.app_state().clear_forwarder_live_status(endpoint_id).await;
-                        stop_data_tasks(data_tasks).await;
-                        return;
-                    }
+                    // The reader task ended: clean disconnect/EOF or a decode/
+                    // protocol error (already logged by the reader task).
+                    None => break,
                 }
             }
         }
     }
+
+    // Tear down the owned tasks first so no further frames are parsed and no
+    // offloaded recompute can re-add status after we clear it below. Clearing
+    // live status on disconnect must still happen, so it runs after the abort
+    // (and does its own synchronous recompute), with no task left racing it.
+    reader_task.abort();
+    recompute_task.abort();
+    reporter
+        .app_state()
+        .clear_forwarder_live_status(endpoint_id)
+        .await;
+    stop_data_tasks(data_tasks).await;
 }
 
-async fn read_next_control_frame(
-    recv: &mut RecvStream,
-) -> Result<Option<ControlF2C>, P2pSessionError> {
-    match read_frame::<ControlF2C>(recv).await {
-        Ok(frame) => Ok(Some(frame)),
-        Err(P2pSessionError::Read(_)) => Ok(None),
-        Err(error) => Err(error),
+/// Cancel-safe owner of the control `RecvStream`: loops `read_frame` and
+/// forwards each parsed frame to the main loop over `frame_tx`. Returns (which
+/// drops the sender, signalling the main loop) on disconnect/EOF, on a decode/
+/// protocol error, or once the main loop has gone away.
+async fn control_reader_loop(
+    endpoint_id: String,
+    mut recv: RecvStream,
+    frame_tx: mpsc::Sender<ControlF2C>,
+) {
+    loop {
+        match read_frame::<ControlF2C>(&mut recv).await {
+            Ok(frame) => {
+                if frame_tx.send(frame).await.is_err() {
+                    return;
+                }
+            }
+            // A read error is the expected clean disconnect/EOF signal.
+            Err(P2pSessionError::Read(_)) => return,
+            Err(error) => {
+                warn!(%endpoint_id, %error, "forwarder control stream ended with error");
+                return;
+            }
+        }
     }
 }
 
@@ -257,25 +314,26 @@ async fn handle_control_frame(
     frame: ControlF2C,
     send: &mut SendStream,
     reporter: &Arc<SessionStatusReporter>,
+    recompute_notify: &Notify,
 ) -> Result<(), P2pSessionError> {
     match frame.msg {
         Some(control_f2c::Msg::ReaderStatus(status)) => {
             reporter
                 .app_state()
-                .record_forwarder_reader_status(endpoint_id, status)
-                .await;
+                .store_forwarder_reader_status_sync(endpoint_id, status);
+            recompute_notify.notify_one();
         }
         Some(control_f2c::Msg::ReaderInfo(info)) => {
             reporter
                 .app_state()
-                .record_forwarder_reader_info(endpoint_id, info)
-                .await;
+                .store_forwarder_reader_info_sync(endpoint_id, info);
+            recompute_notify.notify_one();
         }
         Some(control_f2c::Msg::UpsStatus(status)) => {
             reporter
                 .app_state()
-                .record_forwarder_ups_status(endpoint_id, status)
-                .await;
+                .store_forwarder_ups_status_sync(endpoint_id, status);
+            recompute_notify.notify_one();
         }
         Some(control_f2c::Msg::Ping(ping)) => {
             write_frame(

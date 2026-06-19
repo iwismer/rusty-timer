@@ -409,7 +409,21 @@ impl AppState {
         derive_forwarder_state(runtime, intent)
     }
 
+    #[cfg(test)]
     pub(crate) async fn record_forwarder_reader_status(
+        &self,
+        endpoint_id: &str,
+        status: ReaderStatus,
+    ) {
+        self.store_forwarder_reader_status_sync(endpoint_id, status);
+        self.recompute_aggregate_connection_state().await;
+    }
+
+    /// Quick, lock-only store of a reader's live status with NO aggregate
+    /// recompute. Used on the control read path so a status frame never blocks
+    /// the reader (and any queued heartbeat `Ping`) on the DB/discovered locks
+    /// the recompute takes. Callers must trigger the recompute off-path.
+    pub(crate) fn store_forwarder_reader_status_sync(
         &self,
         endpoint_id: &str,
         status: ReaderStatus,
@@ -424,64 +438,71 @@ impl AppState {
             firmware_version: None,
             model: None,
         };
-        {
-            let mut live_statuses = self.forwarder_live_status.lock().unwrap();
-            let live_status = live_statuses.entry(endpoint_id.to_owned()).or_default();
-            live_status
-                .readers
-                .entry(stream_id)
-                .and_modify(|existing| {
-                    let hardware_reader_id = existing.hardware_reader_id.clone();
-                    let firmware_version = existing.firmware_version.clone();
-                    let model = existing.model.clone();
-                    *existing = ReaderLiveStatus {
-                        hardware_reader_id,
-                        firmware_version,
-                        model,
-                        ..reader.clone()
-                    };
-                })
-                .or_insert(reader);
-        }
-        self.recompute_aggregate_connection_state().await;
+        let mut live_statuses = self.forwarder_live_status.lock().unwrap();
+        let live_status = live_statuses.entry(endpoint_id.to_owned()).or_default();
+        live_status
+            .readers
+            .entry(stream_id)
+            .and_modify(|existing| {
+                let hardware_reader_id = existing.hardware_reader_id.clone();
+                let firmware_version = existing.firmware_version.clone();
+                let model = existing.model.clone();
+                *existing = ReaderLiveStatus {
+                    hardware_reader_id,
+                    firmware_version,
+                    model,
+                    ..reader.clone()
+                };
+            })
+            .or_insert(reader);
     }
 
+    #[cfg(test)]
     pub(crate) async fn record_forwarder_reader_info(&self, endpoint_id: &str, info: ReaderInfo) {
-        let stream_id = decode_stream_id(info.stream_id);
-        {
-            let mut live_statuses = self.forwarder_live_status.lock().unwrap();
-            let live_status = live_statuses.entry(endpoint_id.to_owned()).or_default();
-            live_status
-                .readers
-                .entry(stream_id.clone())
-                .and_modify(|reader| {
-                    reader.hardware_reader_id = optional_non_empty(info.hardware_reader_id.clone());
-                    reader.firmware_version = optional_non_empty(info.firmware_version.clone());
-                    reader.model = optional_non_empty(info.model.clone());
-                })
-                .or_insert_with(|| ReaderLiveStatus {
-                    stream_id,
-                    connected: false,
-                    state: "unknown".to_owned(),
-                    last_read_unix_ms: None,
-                    hardware_reader_id: optional_non_empty(info.hardware_reader_id),
-                    firmware_version: optional_non_empty(info.firmware_version),
-                    model: optional_non_empty(info.model),
-                });
-        }
+        self.store_forwarder_reader_info_sync(endpoint_id, info);
         self.recompute_aggregate_connection_state().await;
     }
 
-    pub(crate) async fn record_forwarder_ups_status(&self, endpoint_id: &str, status: UpsStatus) {
-        {
-            let mut live_statuses = self.forwarder_live_status.lock().unwrap();
-            live_statuses.entry(endpoint_id.to_owned()).or_default().ups = Some(UpsStatusPayload {
-                on_battery: status.on_battery,
-                battery_percent: status.battery_percent,
-                runtime_seconds: status.runtime_seconds,
+    /// Quick, lock-only store of a reader's static info with NO aggregate
+    /// recompute (see [`Self::store_forwarder_reader_status_sync`]).
+    pub(crate) fn store_forwarder_reader_info_sync(&self, endpoint_id: &str, info: ReaderInfo) {
+        let stream_id = decode_stream_id(info.stream_id);
+        let mut live_statuses = self.forwarder_live_status.lock().unwrap();
+        let live_status = live_statuses.entry(endpoint_id.to_owned()).or_default();
+        live_status
+            .readers
+            .entry(stream_id.clone())
+            .and_modify(|reader| {
+                reader.hardware_reader_id = optional_non_empty(info.hardware_reader_id.clone());
+                reader.firmware_version = optional_non_empty(info.firmware_version.clone());
+                reader.model = optional_non_empty(info.model.clone());
+            })
+            .or_insert_with(|| ReaderLiveStatus {
+                stream_id,
+                connected: false,
+                state: "unknown".to_owned(),
+                last_read_unix_ms: None,
+                hardware_reader_id: optional_non_empty(info.hardware_reader_id),
+                firmware_version: optional_non_empty(info.firmware_version),
+                model: optional_non_empty(info.model),
             });
-        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn record_forwarder_ups_status(&self, endpoint_id: &str, status: UpsStatus) {
+        self.store_forwarder_ups_status_sync(endpoint_id, status);
         self.recompute_aggregate_connection_state().await;
+    }
+
+    /// Quick, lock-only store of a forwarder's UPS status with NO aggregate
+    /// recompute (see [`Self::store_forwarder_reader_status_sync`]).
+    pub(crate) fn store_forwarder_ups_status_sync(&self, endpoint_id: &str, status: UpsStatus) {
+        let mut live_statuses = self.forwarder_live_status.lock().unwrap();
+        live_statuses.entry(endpoint_id.to_owned()).or_default().ups = Some(UpsStatusPayload {
+            on_battery: status.on_battery,
+            battery_percent: status.battery_percent,
+            runtime_seconds: status.runtime_seconds,
+        });
     }
 
     pub(crate) async fn clear_forwarder_live_status(&self, endpoint_id: &str) {
