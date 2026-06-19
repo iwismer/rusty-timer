@@ -3,6 +3,7 @@
   import type { TabId } from "$lib/store.svelte";
 
   const tabs: { id: TabId; label: string }[] = [
+    { id: "connections", label: "Connections" },
     { id: "streams", label: "Streams" },
     { id: "mode", label: "Mode" },
     { id: "config", label: "Config" },

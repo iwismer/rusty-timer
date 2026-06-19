@@ -93,6 +93,46 @@ describe("api client", () => {
     expect(mockInvoke).toHaveBeenCalledWith("reconnect_server");
   });
 
+  it("getConnections calls connections command", async () => {
+    const { getConnections } = await import("./api");
+    mockInvoke.mockResolvedValue({
+      server: {
+        configured: true,
+        endpoint_id: "server-node-1",
+        reachable: true,
+        approval_state: "active",
+        waiting_for_approval: false,
+        message: null,
+      },
+      forwarders: [],
+    });
+
+    const response = await getConnections();
+
+    expect(mockInvoke).toHaveBeenCalledWith("get_connections");
+    expect(response.forwarders).toEqual([]);
+  });
+
+  it("sends camelCase endpoint id for forwarder connection commands", async () => {
+    const { connectForwarder, disconnectForwarder, reconnectForwarder } =
+      await import("./api");
+    mockInvoke.mockResolvedValue(undefined);
+
+    await connectForwarder("endpoint-1");
+    await disconnectForwarder("endpoint-1");
+    await reconnectForwarder("endpoint-1");
+
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "connect_forwarder", {
+      endpointId: "endpoint-1",
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "disconnect_forwarder", {
+      endpointId: "endpoint-1",
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(3, "reconnect_forwarder", {
+      endpointId: "endpoint-1",
+    });
+  });
+
   it("putSubscriptions sends body with subscriptions", async () => {
     const { putSubscriptions } = await import("./api");
     mockInvoke.mockResolvedValue(undefined);
@@ -244,6 +284,7 @@ describe("sse client", () => {
       onStreamsSnapshot: vi.fn(),
       onLogEntry: vi.fn(),
       onResync: vi.fn(),
+      onConnectionsChanged: vi.fn(),
       onConnectionChange: vi.fn(),
       onStreamCountsUpdated: vi.fn(),
       onForwarderMetricsUpdated: vi.fn(),
@@ -265,6 +306,7 @@ describe("sse client", () => {
     expect(registeredEvents).toContain("streams_snapshot");
     expect(registeredEvents).toContain("log_entry");
     expect(registeredEvents).toContain("resync");
+    expect(registeredEvents).toContain("connections_changed");
     expect(registeredEvents).toContain("stream_counts_updated");
     expect(registeredEvents).toContain("forwarder_metrics_updated");
     expect(registeredEvents).toContain("mode_changed");
@@ -303,6 +345,7 @@ describe("sse client", () => {
       onStreamsSnapshot: vi.fn(),
       onLogEntry: vi.fn(),
       onResync: vi.fn(),
+      onConnectionsChanged: vi.fn(),
       onConnectionChange: vi.fn(),
       onStreamCountsUpdated: vi.fn(),
       onForwarderMetricsUpdated: vi.fn(),
@@ -353,6 +396,7 @@ describe("sse client", () => {
       onStreamsSnapshot: vi.fn(),
       onLogEntry: vi.fn(),
       onResync: vi.fn(),
+      onConnectionsChanged: vi.fn(),
       onConnectionChange: vi.fn(),
       onStreamCountsUpdated: vi.fn(),
       onForwarderMetricsUpdated: vi.fn(),
@@ -396,6 +440,7 @@ describe("sse client", () => {
       onStreamsSnapshot: vi.fn(),
       onLogEntry: vi.fn(),
       onResync: vi.fn(),
+      onConnectionsChanged: vi.fn(),
       onConnectionChange: vi.fn(),
       onStreamCountsUpdated: vi.fn(),
       onForwarderMetricsUpdated: vi.fn(),

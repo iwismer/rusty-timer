@@ -9,6 +9,7 @@
   import StatusBar from "$lib/components/StatusBar.svelte";
   import HelpModal from "$lib/components/HelpModal.svelte";
   import UpdateModal from "$lib/components/UpdateModal.svelte";
+  import ConnectionsTab from "$lib/components/ConnectionsTab.svelte";
   import StreamsTab from "$lib/components/StreamsTab.svelte";
   import ConfigTab from "$lib/components/ConfigTab.svelte";
   import ModeTab from "$lib/components/ModeTab.svelte";
@@ -55,6 +56,8 @@
   <div class="flex-1 overflow-y-auto">
     {#if hasNestedRoute && children}
       {@render children()}
+    {:else if store.activeTab === "connections"}
+      <ConnectionsTab />
     {:else if store.activeTab === "streams"}
       <StreamsTab />
     {:else if store.activeTab === "config"}

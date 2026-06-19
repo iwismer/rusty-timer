@@ -20,6 +20,17 @@ const apiMocks = vi.hoisted(() => ({
     degraded: false,
     upstream_error: null,
   }),
+  getConnections: vi.fn().mockResolvedValue({
+    server: {
+      configured: false,
+      endpoint_id: null,
+      reachable: null,
+      approval_state: null,
+      waiting_for_approval: false,
+      message: null,
+    },
+    forwarders: [],
+  }),
   getLogs: vi.fn().mockResolvedValue({ entries: [] }),
   getProfile: vi.fn().mockResolvedValue(null),
   getUpdateStatus: vi.fn().mockResolvedValue(null),

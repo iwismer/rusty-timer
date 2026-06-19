@@ -3,6 +3,7 @@
 
 import * as api from "./api";
 import type {
+  ConnectionsResponse,
   LastRead,
   ReceiverMode,
   StatusResponse,
@@ -21,7 +22,13 @@ import {
 
 // --------------- Tab enum ---------------
 
-export type TabId = "streams" | "mode" | "config" | "logs" | "admin";
+export type TabId =
+  | "connections"
+  | "streams"
+  | "mode"
+  | "config"
+  | "logs"
+  | "admin";
 
 export type UpdateState = {
   status: "available" | "downloaded";
@@ -43,6 +50,7 @@ export const store = $state({
 
   // Connection / status
   status: null as StatusResponse | null,
+  connections: null as ConnectionsResponse | null,
   error: null as string | null,
 
   // Streams
@@ -664,6 +672,14 @@ function applyStreamCountUpdates(updates: StreamCountUpdate[]): boolean {
   return hasUnknown;
 }
 
+export async function loadConnections(): Promise<void> {
+  try {
+    store.connections = await api.getConnections();
+  } catch (e) {
+    store.error = String(e);
+  }
+}
+
 export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
   if (loadAllInFlight) {
     loadAllQueued = true;
@@ -675,24 +691,32 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
     const modeEditVersionAtStart = modeEditVersion;
     const modeMutationVersionAtStart = modeMutationVersion;
     const streamRefreshVersionAtStart = streamRefreshVersion;
-    const [nextStatus, nextStreams, nextLogs, nextMode, nextMetrics] =
-      await Promise.all([
-        api.getStatus(),
-        api.getStreams(),
-        api.getLogs(),
-        api.getMode().catch(() => null),
-        api.getStreamMetrics().catch((e: unknown) => {
-          console.warn(
-            "getStreamMetrics failed, will rely on real-time updates:",
-            e,
-          );
-          return [] as api.StreamMetrics[];
-        }),
-      ]);
+    const [
+      nextStatus,
+      nextConnections,
+      nextStreams,
+      nextLogs,
+      nextMode,
+      nextMetrics,
+    ] = await Promise.all([
+      api.getStatus(),
+      api.getConnections(),
+      api.getStreams(),
+      api.getLogs(),
+      api.getMode().catch(() => null),
+      api.getStreamMetrics().catch((e: unknown) => {
+        console.warn(
+          "getStreamMetrics failed, will rely on real-time updates:",
+          e,
+        );
+        return [] as api.StreamMetrics[];
+      }),
+    ]);
 
     await loadDbfConfig();
 
     store.status = nextStatus;
+    store.connections = nextConnections;
     if (streamRefreshVersion === streamRefreshVersionAtStart) {
       store.streams = nextStreams;
       lastConcreteEpochByKey = nextConcreteEpochs(
@@ -1205,6 +1229,9 @@ export function initStore(): void {
     },
     onResync: () => {
       void loadAll();
+    },
+    onConnectionsChanged: () => {
+      void loadConnections();
     },
     onConnectionChange: () => {},
     onStreamCountsUpdated: (updates) => {

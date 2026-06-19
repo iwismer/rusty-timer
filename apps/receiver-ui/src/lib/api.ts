@@ -107,6 +107,29 @@ export interface ServerDeviceStatus {
   message: string | null;
 }
 
+export type ForwarderConnState =
+  | "subscribed"
+  | "connected"
+  | "unavailable"
+  | "disconnected";
+
+export interface ForwarderConnectionStatus {
+  endpoint_id: string;
+  display_name: string | null;
+  state: ForwarderConnState;
+  pending: boolean;
+  subscribed_count: number;
+  available_count: number;
+  readers: unknown[];
+  ups: ForwarderUpsState | null;
+  restart_needed: boolean | null;
+}
+
+export interface ConnectionsResponse {
+  server: ServerDeviceStatus;
+  forwarders: ForwarderConnectionStatus[];
+}
+
 export interface StatusResponse {
   connection_state: ConnectionState;
   local_ok: boolean;
@@ -231,6 +254,22 @@ export async function getStatus(): Promise<StatusResponse> {
 
 export async function reconnectServer(): Promise<void> {
   await invoke("reconnect_server");
+}
+
+export async function getConnections(): Promise<ConnectionsResponse> {
+  return invoke<ConnectionsResponse>("get_connections");
+}
+
+export async function connectForwarder(endpointId: string): Promise<void> {
+  await invoke("connect_forwarder", { endpointId });
+}
+
+export async function disconnectForwarder(endpointId: string): Promise<void> {
+  await invoke("disconnect_forwarder", { endpointId });
+}
+
+export async function reconnectForwarder(endpointId: string): Promise<void> {
+  await invoke("reconnect_forwarder", { endpointId });
 }
 
 export async function getLogs(): Promise<LogsResponse> {
