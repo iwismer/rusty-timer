@@ -448,7 +448,7 @@ async fn set_current_epoch_name_returns_400_when_name_field_missing() {
         config_file,
         r#"schema_version = 1
 [p2p]
-thin_node_url = "http://127.0.0.1:1"
+server_url = "http://127.0.0.1:1"
 [auth]
 token_file = "{}"
 [[readers]]
@@ -500,7 +500,7 @@ async fn set_current_epoch_name_returns_400_when_name_is_wrong_type() {
         config_file,
         r#"schema_version = 1
 [p2p]
-thin_node_url = "http://127.0.0.1:1"
+server_url = "http://127.0.0.1:1"
 [auth]
 token_file = "{}"
 [[readers]]

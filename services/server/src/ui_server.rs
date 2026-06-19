@@ -3,10 +3,10 @@ use axum::response::{IntoResponse, Response};
 
 #[cfg(feature = "embed-ui")]
 #[derive(rust_embed::Embed)]
-#[folder = "../../apps/thin-node-ui/build"]
+#[folder = "../../apps/server-ui/build"]
 struct UiAssets;
 
-/// Axum fallback handler that serves the embedded thin-node UI assets.
+/// Axum fallback handler that serves the embedded server UI assets.
 ///
 /// When `embed-ui` is enabled, serves files from the embedded `SvelteKit` build.
 /// Unknown paths fall back to `index.html` for client-side routing.
@@ -19,6 +19,7 @@ pub async fn serve_ui(method: Method, uri: Uri) -> Response {
         &[
             "/status",
             "/admin/devices/approve",
+            "/admin/devices/rename",
             "/register",
             "/announcer/rows",
             "/announcer/takeover",
@@ -37,6 +38,6 @@ pub async fn serve_ui(method: Method, uri: Uri) -> Response {
     #[cfg(not(feature = "embed-ui"))]
     {
         let _ = raw_path;
-        rt_ui_http::non_embedded_placeholder("Thin Node")
+        rt_ui_http::non_embedded_placeholder("Server")
     }
 }

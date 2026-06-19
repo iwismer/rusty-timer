@@ -154,7 +154,7 @@ check_runbook() {
 
 check_runbook "docs/runbooks/forwarder-operations.md" "Forwarder"
 check_runbook "docs/runbooks/receiver-operations.md" "Receiver"
-check_runbook "docs/runbooks/thin-node-operations.md" "Thin-node"
+check_runbook "docs/runbooks/server-operations.md" "Server"
 
 FWRD_RUNBOOK="docs/runbooks/forwarder-operations.md"
 if [[ -f "${REPO_ROOT}/${FWRD_RUNBOOK}" ]]; then
@@ -162,16 +162,16 @@ if [[ -f "${REPO_ROOT}/${FWRD_RUNBOOK}" ]]; then
         "Forwarder runbook: covers epoch operations"
 fi
 
-THIN_RUNBOOK="docs/runbooks/thin-node-operations.md"
+THIN_RUNBOOK="docs/runbooks/server-operations.md"
 if [[ -f "${REPO_ROOT}/${THIN_RUNBOOK}" ]]; then
-    check_file_contains "${THIN_RUNBOOK}" '(THIN_NODE_PROVISIONING_TOKEN|provisioning token)' \
-        "Thin-node runbook: covers provisioning token"
+    check_file_contains "${THIN_RUNBOOK}" '(SERVER_PROVISIONING_TOKEN|provisioning token)' \
+        "Server runbook: covers provisioning token"
     check_file_contains "${THIN_RUNBOOK}" '(allow-list|allowlist|allow list)' \
-        "Thin-node runbook: covers allow-list distribution"
+        "Server runbook: covers allow-list distribution"
     check_file_contains "${THIN_RUNBOOK}" '(announcer|generation|lease)' \
-        "Thin-node runbook: covers announcer push"
+        "Server runbook: covers announcer push"
     check_file_contains "${THIN_RUNBOOK}" '(Authelia|M2M|Bearer|public read)' \
-        "Thin-node runbook: covers auth posture"
+        "Server runbook: covers auth posture"
 fi
 
 echo ""
@@ -180,8 +180,8 @@ echo "=== Release workflow ==="
 RELEASE_WF=".github/workflows/release.yml"
 check_file_exists "${RELEASE_WF}" "Release workflow exists"
 if [[ -f "${REPO_ROOT}/${RELEASE_WF}" ]]; then
-    check_file_contains "${RELEASE_WF}" 'thin-node-v\*' \
-        "Release workflow publishes thin-node tags"
+    check_file_contains "${RELEASE_WF}" 'server-v\*' \
+        "Release workflow publishes server tags"
     check_file_contains "${RELEASE_WF}" 'aarch64-unknown-linux-gnu' \
         "Release workflow includes Linux arm64 target"
     check_file_not_contains "${RELEASE_WF}" '(server-v\*|SERVER_DOCKER_IMAGE|rt-server|services/server|apps/server-ui|armv7)' \

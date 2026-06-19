@@ -7,7 +7,7 @@ facts (not just process startup):
 
     emulator  --(TCP, verbatim/once)-->  forwarder  --(iroh P2P)-->  receiver-headless
                                                                           |
-                                          thin-node  <--(announcer push)--+
+                                          server  <--(announcer push)--+
 
 The stack is configured for determinism:
 
@@ -23,7 +23,7 @@ Assertions (all must be green):
 2. Receiver DBF has the exact record count and no duplicates after resume.
 3. Receiver durable TCP local proxy replays the exact raw frames to a fresh
    client.
-4. Thin-node ``/status`` reports the expected announcer generation and finisher
+4. Server ``/status`` reports the expected announcer generation and finisher
    count.
 5. Power-loss lanes (T6.1): both the receiver *and* the forwarder are, in
    separate full-stack runs, SIGKILLed mid-stream (after ``0 < count_at_kill <
@@ -244,18 +244,18 @@ class Stack:
 # ---------------------------------------------------------------------------
 def cargo_build(*, agent_ui: bool = False):
     if not agent_ui:
-        print("[build] cargo build -p emulator -p forwarder -p receiver -p thin-node ...")
+        print("[build] cargo build -p emulator -p forwarder -p receiver -p server ...")
         subprocess.run(
             ["cargo", "build", "-p", "emulator", "-p", "forwarder", "-p", "receiver",
-             "-p", "thin-node"],
+             "-p", "server"],
             cwd=str(REPO_ROOT),
             check=True,
         )
         return
 
-    print("[build] cargo build -p emulator -p forwarder -p thin-node ...")
+    print("[build] cargo build -p emulator -p forwarder -p server ...")
     subprocess.run(
-        ["cargo", "build", "-p", "emulator", "-p", "forwarder", "-p", "thin-node"],
+        ["cargo", "build", "-p", "emulator", "-p", "forwarder", "-p", "server"],
         cwd=str(REPO_ROOT),
         check=True,
     )
@@ -294,7 +294,7 @@ def derive_node_id(seed_hex: str) -> str:
 # ---------------------------------------------------------------------------
 PRESEED_SQL = """
 CREATE TABLE IF NOT EXISTS profile (
-    thin_node_url  TEXT NOT NULL,
+    server_url  TEXT NOT NULL,
     token       TEXT NOT NULL,
     update_mode TEXT NOT NULL DEFAULT 'check-and-download',
     receiver_mode_json TEXT,
@@ -321,7 +321,7 @@ def preseed_receiver_db(db_path: Path, forwarder_node_id: str, stream_id: str,
         conn.executescript(PRESEED_SQL)
         conn.execute(
             "INSERT INTO profile "
-            "(thin_node_url, token, update_mode, receiver_mode_json, receiver_id, "
+            "(server_url, token, update_mode, receiver_mode_json, receiver_id, "
             " dbf_enabled, dbf_path) VALUES (?,?,?,?,?,?,?)",
             ("p2p://loopback", "e2e-token", "check-and-download", None,
              "rx-e2e", 1, str(dbf_path)),
@@ -449,14 +449,14 @@ def read_proxy_replay(port: int, expected_bytes: int, timeout: float = 10.0) -> 
 
 
 # ---------------------------------------------------------------------------
-# Thin-node HTTP
+# Server HTTP
 # ---------------------------------------------------------------------------
-def thin_node_status(base_url: str) -> dict:
+def server_status(base_url: str) -> dict:
     with urllib.request.urlopen(f"{base_url}/status", timeout=5) as resp:
         return json.loads(resp.read().decode())
 
 
-def thin_node_healthy(base_url: str) -> bool:
+def server_healthy(base_url: str) -> bool:
     try:
         with urllib.request.urlopen(f"{base_url}/healthz", timeout=2) as resp:
             return resp.status == 200
@@ -559,8 +559,8 @@ def dbf_ready(dbf_path: Path) -> bool:
     return dbf_record_count(dbf_path) == NUM_READS
 
 
-def thin_node_announcer_ready(base_url: str):
-    status = thin_node_status(base_url)
+def server_announcer_ready(base_url: str):
+    status = server_status(base_url)
     pushed_chips = {row.get("chip_id") for row in status.get("announcer_rows", [])}
     if (status.get("announcer_source_generation", 0) >= 1
             and status.get("finisher_count") == NUM_READS
@@ -587,11 +587,11 @@ def run(
     forwarder_status_port = free_tcp_port()
     forwarder_fanout_port = free_tcp_port()
     forwarder_p2p_port = free_udp_port()
-    thin_node_port = free_tcp_port()
+    server_port = free_tcp_port()
     proxy_port = free_tcp_port()
 
     stream_id = f"127.0.0.1:{emulator_port}"
-    thin_node_url = f"http://127.0.0.1:{thin_node_port}"
+    server_url = f"http://127.0.0.1:{server_port}"
 
     # --- Deterministic node ids (shared seed->id derivation) ---
     forwarder_node_id = derive_node_id(FORWARDER_SEED_HEX)
@@ -606,7 +606,7 @@ def run(
     token_file.write_text("e2e-forwarder-token\n")
 
     journal_path = tmp / "forwarder.sqlite3"
-    thin_db_path = tmp / "thin-node.sqlite3"
+    thin_db_path = tmp / "server.sqlite3"
     receiver_data_dir = tmp / "receiver-data"
     receiver_data_dir.mkdir(parents=True, exist_ok=True)
     receiver_db_path = receiver_data_dir / "receiver.sqlite3"
@@ -644,22 +644,22 @@ static_allowed_receivers = ["{receiver_node_id}"]
     # --- Preseed receiver DB (canonical subscription + DBF profile) ---
     preseed_receiver_db(receiver_db_path, forwarder_node_id, stream_id, proxy_port, dbf_path)
 
-    # --- 1. thin-node ---
+    # --- 1. server ---
     thin = stack.add(Managed(
-        name="thin-node",
-        argv=[str(bin_path("thin-node"))],
-        log_path=tmp / "thin-node.log",
+        name="server",
+        argv=[str(bin_path("server"))],
+        log_path=tmp / "server.log",
         env={
-            "THIN_NODE_DB_PATH": str(thin_db_path),
-            "BIND_ADDR": f"127.0.0.1:{thin_node_port}",
-            "THIN_NODE_PROVISIONING_TOKEN": PROVISIONING_TOKEN,
+            "SERVER_DB_PATH": str(thin_db_path),
+            "BIND_ADDR": f"127.0.0.1:{server_port}",
+            "SERVER_PROVISIONING_TOKEN": PROVISIONING_TOKEN,
             "LOG_LEVEL": "info",
         },
     ))
     thin.start()
-    wait_until(lambda: thin_node_healthy(thin_node_url), timeout=20,
-               what="thin-node /healthz")
-    print("[up] thin-node healthy")
+    wait_until(lambda: server_healthy(server_url), timeout=20,
+               what="server /healthz")
+    print("[up] server healthy")
 
     # --- 2. emulator (deterministic, verbatim, once) ---
     emulator_argv = [str(bin_path("emulator")),
@@ -702,7 +702,7 @@ static_allowed_receivers = ["{receiver_node_id}"]
     forwarder.assert_alive()
     print("[up] forwarder p2p serving")
 
-    # --- 4. receiver-headless (P2P + thin-node announcer) ---
+    # --- 4. receiver-headless (P2P + server announcer) ---
     receiver_argv = [
         str(bin_path("receiver-headless")),
         "--data-dir", str(receiver_data_dir),
@@ -711,8 +711,8 @@ static_allowed_receivers = ["{receiver_node_id}"]
         "--p2p-forwarder-node-id", forwarder_node_id,
         "--p2p-forwarder-direct-addr", f"127.0.0.1:{forwarder_p2p_port}",
         "--p2p-secret-key-seed-hex", RECEIVER_SEED_HEX,
-        "--p2p-thin-node-url", thin_node_url,
-        "--p2p-thin-node-token", PROVISIONING_TOKEN,
+        "--p2p-server-url", server_url,
+        "--p2p-server-token", PROVISIONING_TOKEN,
         "--p2p-reconcile-ms", str(RECONCILE_MS),
     ]
 
@@ -770,8 +770,8 @@ static_allowed_receivers = ["{receiver_node_id}"]
                what=f"receiver to persist all {NUM_READS} events")
     wait_until(lambda: dbf_ready(dbf_path), timeout=20,
                what=f"DBF to contain all {NUM_READS} rows")
-    status = wait_until(lambda: thin_node_announcer_ready(thin_node_url), timeout=20,
-                        what="thin-node announcer to receive all rows")
+    status = wait_until(lambda: server_announcer_ready(server_url), timeout=20,
+                        what="server announcer to receive all rows")
 
     print("\n=== Assertions ===")
 
@@ -798,14 +798,14 @@ static_allowed_receivers = ["{receiver_node_id}"]
     results.expect_eq("TCP proxy replays exact deterministic frames",
                       replay, expected_replay)
 
-    # 4. Thin-node announcer state.
-    results.check("thin-node announcer generation >= 1",
+    # 4. Server announcer state.
+    results.check("server announcer generation >= 1",
                   status.get("announcer_source_generation", 0) >= 1,
                   f"generation={status.get('announcer_source_generation')}")
-    results.expect_eq(f"thin-node finisher_count == {NUM_READS} (distinct chips)",
+    results.expect_eq(f"server finisher_count == {NUM_READS} (distinct chips)",
                       status.get("finisher_count"), NUM_READS)
     pushed_chips = {row.get("chip_id") for row in status.get("announcer_rows", [])}
-    results.check("thin-node announcer rows cover all expected chips",
+    results.check("server announcer rows cover all expected chips",
                   set(EXPECTED_TAGS).issubset(pushed_chips),
                   f"missing={set(EXPECTED_TAGS) - pushed_chips}")
 

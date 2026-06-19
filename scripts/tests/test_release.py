@@ -151,14 +151,14 @@ class PushTests(unittest.TestCase):
 
 
 class ServiceConfigTests(unittest.TestCase):
-    def test_valid_services_include_thin_node(self) -> None:
-        self.assertIn("thin-node", release.VALID_SERVICES)
+    def test_valid_services_include_server(self) -> None:
+        self.assertIn("server", release.VALID_SERVICES)
 
-    def test_release_workflow_routes_thin_node_and_drops_armv7(self) -> None:
+    def test_release_workflow_routes_server_and_drops_armv7(self) -> None:
         workflow = Path(".github/workflows/release.yml").read_text()
 
-        self.assertIn('"thin-node-v*"', workflow)
-        self.assertIn("forwarder|streamer|emulator|thin-node", workflow)
+        self.assertIn('"server-v*"', workflow)
+        self.assertIn("forwarder|streamer|emulator|server", workflow)
         self.assertNotIn("armv7", workflow)
         self.assertNotIn("armv7-unknown-linux-gnueabihf", workflow)
 
@@ -343,7 +343,7 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
     @patch("scripts.release.read_version")
     @patch("scripts.release.git_current_branch", return_value="master")
     @patch("scripts.release.git_is_dirty", return_value=False)
-    def test_thin_node_runs_release_build_without_ui_checks(
+    def test_server_runs_release_build_without_ui_checks(
         self,
         _dirty_mock,
         _branch_mock,
@@ -352,7 +352,7 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
         _write_version_mock,
     ) -> None:
         args = argparse.Namespace(
-            services=["thin-node"],
+            services=["server"],
             major=False,
             minor=False,
             patch=True,
@@ -384,18 +384,18 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
                 "build",
                 "--release",
                 "--package",
-                "thin-node",
+                "server",
                 "--bin",
-                "thin-node",
+                "server",
             ],
             calls,
         )
         self.assertIn(
-            ["git", "add", "services/thin-node/Cargo.toml", "Cargo.lock"],
+            ["git", "add", "services/server/Cargo.toml", "Cargo.lock"],
             calls,
         )
-        self.assertIn(["git", "tag", "thin-node-v0.1.1"], calls)
-        self.assertIn(["git", "push", "origin", "thin-node-v0.1.1"], calls)
+        self.assertIn(["git", "tag", "server-v0.1.1"], calls)
+        self.assertIn(["git", "push", "origin", "server-v0.1.1"], calls)
 
 
 class DryRunBehaviorTests(unittest.TestCase):

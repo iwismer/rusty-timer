@@ -3,8 +3,8 @@ import { fieldMatchesQuery } from "./field-match";
 import type { FieldHelp } from "./help-types";
 
 const field: FieldHelp = {
-  label: "Thin-node URL",
-  summary: "Thin-node coordinator address.",
+  label: "Server URL",
+  summary: "Server coordinator address.",
   detailHtml: "The full URL including protocol.",
   default: "https://localhost:8080",
   range: "Valid URL",
@@ -13,7 +13,7 @@ const field: FieldHelp = {
 
 describe("fieldMatchesQuery", () => {
   it("matches on label", () => {
-    expect(fieldMatchesQuery(field, "thin-node url")).toBe(true);
+    expect(fieldMatchesQuery(field, "server url")).toBe(true);
   });
   it("matches on summary", () => {
     expect(fieldMatchesQuery(field, "coordinator")).toBe(true);
@@ -31,7 +31,7 @@ describe("fieldMatchesQuery", () => {
     expect(fieldMatchesQuery(field, "https")).toBe(true);
   });
   it("is case-insensitive", () => {
-    expect(fieldMatchesQuery(field, "THIN-NODE URL")).toBe(true);
+    expect(fieldMatchesQuery(field, "SERVER URL")).toBe(true);
   });
   it("returns false for non-match", () => {
     expect(fieldMatchesQuery(field, "zzz-no-match")).toBe(false);

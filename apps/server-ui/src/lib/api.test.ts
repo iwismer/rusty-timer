@@ -16,8 +16,8 @@ function makeResponse(status: number, body: unknown) {
   };
 }
 
-describe("thin-node api client", () => {
-  it("getStatus fetches the public thin-node status", async () => {
+describe("server api client", () => {
+  it("getStatus fetches the public server status", async () => {
     const { getStatus } = await import("./api");
     mockFetch.mockResolvedValue(
       makeResponse(200, {
@@ -99,6 +99,45 @@ describe("thin-node api client", () => {
     const { approveDevice } = await import("./api");
 
     await expect(approveDevice("receiver-1", "   ")).rejects.toThrow(
+      "Display name is required",
+    );
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("renameDevice posts JSON to the rename endpoint with the admin header", async () => {
+    const { renameDevice } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, {
+        endpoint_id: "receiver-1",
+        device_kind: "receiver",
+        display_name: "Finish Line",
+        approval_state: "active",
+      }),
+    );
+
+    const device = await renameDevice("receiver-1", "Finish Line", "alice");
+
+    expect(device.display_name).toBe("Finish Line");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/admin/devices/rename",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          "Content-Type": "application/json",
+          "Remote-User": "alice",
+        }),
+        body: JSON.stringify({
+          endpoint_id: "receiver-1",
+          display_name: "Finish Line",
+        }),
+      }),
+    );
+  });
+
+  it("renameDevice rejects blank display names before posting", async () => {
+    const { renameDevice } = await import("./api");
+
+    await expect(renameDevice("receiver-1", "   ")).rejects.toThrow(
       "Display name is required",
     );
     expect(mockFetch).not.toHaveBeenCalled();

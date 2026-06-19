@@ -53,7 +53,7 @@ class SbcCloudInitConfig:
     wifi_password: str | None = None
     wifi_country: str | None = None
     auto_first_boot: bool = False
-    thin_node_url: str | None = None
+    server_url: str | None = None
     auth_token: str | None = None
     reader_targets: tuple[str, ...] = ()
     status_bind: str = DEFAULT_STATUS_BIND
@@ -139,9 +139,9 @@ def parse_dns_servers(value: str) -> tuple[str, ...]:
 def validate_base_url(value: str) -> str:
     url = value.strip()
     if not url:
-        raise ValueError("thin-node URL is required")
+        raise ValueError("server URL is required")
     if not (url.startswith("http://") or url.startswith("https://")):
-        raise ValueError("thin-node URL must start with http:// or https://")
+        raise ValueError("server URL must start with http:// or https://")
     return url
 
 
@@ -277,10 +277,10 @@ def collect_config(auto_first_boot: bool) -> SbcCloudInitConfig:
 
     print("")
     print("Automatic first-boot forwarder setup")
-    thin_node_url = prompt_until_valid(
-        lambda: ask_required("Thin-node URL"),
+    server_url = prompt_until_valid(
+        lambda: ask_required("Server URL"),
         validate_base_url,
-        "thin-node URL",
+        "server URL",
     )
     auth_token = prompt_until_valid(
         lambda: ask_required("Forwarder auth token"),
@@ -309,7 +309,7 @@ def collect_config(auto_first_boot: bool) -> SbcCloudInitConfig:
         wifi_password=wifi_password,
         wifi_country=wifi_country,
         auto_first_boot=True,
-        thin_node_url=thin_node_url,
+        server_url=server_url,
         auth_token=auth_token,
         reader_targets=reader_targets,
         status_bind=status_bind,
@@ -319,7 +319,7 @@ def collect_config(auto_first_boot: bool) -> SbcCloudInitConfig:
 def render_setup_env_content(config: SbcCloudInitConfig) -> str:
     if not config.auto_first_boot:
         return ""
-    if not config.thin_node_url or not config.auth_token or not config.reader_targets:
+    if not config.server_url or not config.auth_token or not config.reader_targets:
         raise ValueError("auto-first-boot config is missing setup values")
 
     reader_targets_csv = ",".join(config.reader_targets)
@@ -329,7 +329,7 @@ def render_setup_env_content(config: SbcCloudInitConfig) -> str:
         "RT_SETUP_OVERWRITE_CONFIG=0",
         "RT_SETUP_RESTART_IF_RUNNING=1",
         f"RT_SETUP_DISPLAY_NAME={shell_quote(config.hostname)}",
-        f"RT_SETUP_THIN_NODE_URL={shell_quote(config.thin_node_url)}",
+        f"RT_SETUP_SERVER_URL={shell_quote(config.server_url)}",
         f"RT_SETUP_AUTH_TOKEN={shell_quote(config.auth_token)}",
         f"RT_SETUP_READER_TARGETS={shell_quote(reader_targets_csv)}",
         f"RT_SETUP_STATUS_BIND={shell_quote(config.status_bind)}",

@@ -1212,19 +1212,19 @@ pub async fn apply_section_update(
         }
         "p2p" => {
             let enabled = optional_bool_field(payload, "enabled")?;
-            let thin_node_url = optional_string_field(payload, "thin_node_url")?.and_then(|url| {
+            let server_url = optional_string_field(payload, "server_url")?.and_then(|url| {
                 let trimmed = url.trim();
                 (!trimmed.is_empty()).then(|| trimmed.to_owned())
             });
-            let thin_node_token_file = optional_string_field(payload, "thin_node_token_file")?
-                .and_then(|path| {
+            let server_token_file =
+                optional_string_field(payload, "server_token_file")?.and_then(|path| {
                     let trimmed = path.trim();
                     (!trimmed.is_empty()).then(|| trimmed.to_owned())
                 });
-            if let Some(ref url) = thin_node_url {
-                validate_thin_node_url(url).map_err(bad_request_error)?;
+            if let Some(ref url) = server_url {
+                validate_server_url(url).map_err(bad_request_error)?;
             }
-            if let Some(ref token_file) = thin_node_token_file {
+            if let Some(ref token_file) = server_token_file {
                 validate_token_file(token_file).map_err(bad_request_error)?;
             }
             update_config_file(config_state, subsystem, ui_tx, |raw| {
@@ -1249,8 +1249,8 @@ pub async fn apply_section_update(
                     allowlist_cache_path: previous
                         .as_ref()
                         .and_then(|cfg| cfg.allowlist_cache_path.clone()),
-                    thin_node_url,
-                    thin_node_token_file,
+                    server_url,
+                    server_token_file,
                     allowlist_poll_interval_secs: previous
                         .as_ref()
                         .and_then(|cfg| cfg.allowlist_poll_interval_secs),
@@ -1554,11 +1554,11 @@ fn validate_status_bind(bind: &str) -> Result<(), String> {
         .map_err(|_| "bind must be a valid IPv4 address with port (e.g. 127.0.0.1:8080)".to_owned())
 }
 
-fn validate_thin_node_url(url: &str) -> Result<(), String> {
+fn validate_server_url(url: &str) -> Result<(), String> {
     if url.starts_with("http://") || url.starts_with("https://") {
         Ok(())
     } else {
-        Err("thin_node_url must start with http:// or https://".to_owned())
+        Err("server_url must start with http:// or https://".to_owned())
     }
 }
 
@@ -1986,7 +1986,7 @@ fn get_config_state<J: JournalAccess + Send + 'static>(
 }
 
 #[derive(serde::Serialize)]
-struct ThinNodeDeviceStatusJson {
+struct ServerDeviceStatusJson {
     configured: bool,
     endpoint_id: Option<String>,
     reachable: Option<bool>,
@@ -1995,7 +1995,7 @@ struct ThinNodeDeviceStatusJson {
     message: Option<String>,
 }
 
-impl ThinNodeDeviceStatusJson {
+impl ServerDeviceStatusJson {
     fn not_configured() -> Self {
         Self {
             configured: false,
@@ -2017,7 +2017,7 @@ struct StatusJsonResponse {
     p2p_connected: bool,
     restart_needed: bool,
     ups_status: Option<UpsStatusState>,
-    thin_node: ThinNodeDeviceStatusJson,
+    server: ServerDeviceStatusJson,
     readers: Vec<ReaderStatusJson>,
 }
 
@@ -2034,33 +2034,33 @@ struct ReaderStatusJson {
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct ThinNodeStatusBoardJson {
+struct ServerStatusBoardJson {
     #[serde(default)]
-    devices: Vec<ThinNodeStatusDeviceJson>,
+    devices: Vec<ServerStatusDeviceJson>,
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct ThinNodeStatusDeviceJson {
+struct ServerStatusDeviceJson {
     endpoint_id: String,
     approval_state: String,
 }
 
-async fn forwarder_thin_node_status<J: JournalAccess + Send + 'static>(
+async fn forwarder_server_status<J: JournalAccess + Send + 'static>(
     state: &AppState<J>,
-) -> ThinNodeDeviceStatusJson {
+) -> ServerDeviceStatusJson {
     let endpoint_id = state.subsystem.lock().await.p2p_endpoint_id.clone();
     let Some(endpoint_id) = endpoint_id else {
-        return ThinNodeDeviceStatusJson::not_configured();
+        return ServerDeviceStatusJson::not_configured();
     };
     let Some(config_state) = get_config_state(state) else {
-        return ThinNodeDeviceStatusJson::not_configured();
+        return ServerDeviceStatusJson::not_configured();
     };
-    let thin_node_url = {
+    let server_url = {
         let _guard = config_state.write_lock.lock().await;
         match crate::config::load_config_from_path(&config_state.path) {
-            Ok(config) => config.p2p.thin_node_url,
+            Ok(config) => config.p2p.server_url,
             Err(error) => {
-                return ThinNodeDeviceStatusJson {
+                return ServerDeviceStatusJson {
                     configured: true,
                     endpoint_id: Some(endpoint_id),
                     reachable: None,
@@ -2071,8 +2071,8 @@ async fn forwarder_thin_node_status<J: JournalAccess + Send + 'static>(
             }
         }
     };
-    let Some(thin_node_url) = thin_node_url else {
-        return ThinNodeDeviceStatusJson::not_configured();
+    let Some(server_url) = server_url else {
+        return ServerDeviceStatusJson::not_configured();
     };
 
     let client = match reqwest::Client::builder()
@@ -2081,52 +2081,52 @@ async fn forwarder_thin_node_status<J: JournalAccess + Send + 'static>(
     {
         Ok(client) => client,
         Err(error) => {
-            return ThinNodeDeviceStatusJson {
+            return ServerDeviceStatusJson {
                 configured: true,
                 endpoint_id: Some(endpoint_id),
                 reachable: Some(false),
                 approval_state: None,
                 waiting_for_approval: false,
-                message: Some(format!("Thin node status client unavailable: {error}")),
+                message: Some(format!("Server status client unavailable: {error}")),
             };
         }
     };
-    let status_url = format!("{}/status", thin_node_url.trim_end_matches('/'));
+    let status_url = format!("{}/status", server_url.trim_end_matches('/'));
     let response = match client.get(status_url).send().await {
         Ok(response) => response,
         Err(error) => {
-            return ThinNodeDeviceStatusJson {
+            return ServerDeviceStatusJson {
                 configured: true,
                 endpoint_id: Some(endpoint_id),
                 reachable: Some(false),
                 approval_state: None,
                 waiting_for_approval: false,
-                message: Some(format!("Thin node status unavailable: {error}")),
+                message: Some(format!("Server status unavailable: {error}")),
             };
         }
     };
     let board = match response.error_for_status() {
-        Ok(response) => match response.json::<ThinNodeStatusBoardJson>().await {
+        Ok(response) => match response.json::<ServerStatusBoardJson>().await {
             Ok(board) => board,
             Err(error) => {
-                return ThinNodeDeviceStatusJson {
+                return ServerDeviceStatusJson {
                     configured: true,
                     endpoint_id: Some(endpoint_id),
                     reachable: Some(false),
                     approval_state: None,
                     waiting_for_approval: false,
-                    message: Some(format!("Thin node status response was invalid: {error}")),
+                    message: Some(format!("Server status response was invalid: {error}")),
                 };
             }
         },
         Err(error) => {
-            return ThinNodeDeviceStatusJson {
+            return ServerDeviceStatusJson {
                 configured: true,
                 endpoint_id: Some(endpoint_id),
                 reachable: Some(false),
                 approval_state: None,
                 waiting_for_approval: false,
-                message: Some(format!("Thin node status returned an error: {error}")),
+                message: Some(format!("Server status returned an error: {error}")),
             };
         }
     };
@@ -2138,23 +2138,23 @@ async fn forwarder_thin_node_status<J: JournalAccess + Send + 'static>(
     {
         Some(device) => {
             let waiting_for_approval = device.approval_state == "pending";
-            ThinNodeDeviceStatusJson {
+            ServerDeviceStatusJson {
                 configured: true,
                 endpoint_id: Some(endpoint_id),
                 reachable: Some(true),
                 approval_state: Some(device.approval_state),
                 waiting_for_approval,
                 message: waiting_for_approval
-                    .then(|| "Waiting for thin-node admin approval".to_owned()),
+                    .then(|| "Waiting for server admin approval".to_owned()),
             }
         }
-        None => ThinNodeDeviceStatusJson {
+        None => ServerDeviceStatusJson {
             configured: true,
             endpoint_id: Some(endpoint_id),
             reachable: Some(true),
             approval_state: None,
             waiting_for_approval: true,
-            message: Some("Waiting for this forwarder to register with the thin node".to_owned()),
+            message: Some("Waiting for this forwarder to register with the server".to_owned()),
         },
     }
 }
@@ -2162,7 +2162,7 @@ async fn forwarder_thin_node_status<J: JournalAccess + Send + 'static>(
 async fn status_json_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> Response {
-    let thin_node = forwarder_thin_node_status(&state).await;
+    let server = forwarder_server_status(&state).await;
     let ss = state.subsystem.lock().await;
     let mut readers: Vec<_> = ss
         .readers
@@ -2195,7 +2195,7 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
         p2p_connected: ss.p2p_connected(),
         restart_needed: ss.restart_needed(),
         ups_status: ss.ups_status().cloned(),
-        thin_node,
+        server,
         readers,
     };
 
@@ -5236,7 +5236,7 @@ mod tests {
             r#"schema_version = 1
 display_name = "Start Line"
 [p2p]
-thin_node_url = "https://timing.example.com"
+server_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -5295,7 +5295,7 @@ target = "192.168.1.100:10000"
             config_file,
             r#"schema_version = 1
 [p2p]
-thin_node_url = "https://timing.example.com"
+server_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -5355,7 +5355,7 @@ target = "192.168.1.100:10000"
             config_file,
             r#"schema_version = 1
 [p2p]
-thin_node_url = "https://timing.example.com"
+server_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -6700,7 +6700,7 @@ target = "192.168.1.100:10000"
             config_file,
             r#"schema_version = 1
 [p2p]
-thin_node_url = "https://timing.example.com"
+server_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -6747,7 +6747,7 @@ target = "192.168.1.100:10000"
             config_file,
             r#"schema_version = 1
 [p2p]
-thin_node_url = "https://timing.example.com"
+server_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -6791,7 +6791,7 @@ target = "192.168.1.100:10000"
             config_file,
             r#"schema_version = 1
 [p2p]
-thin_node_url = "https://timing.example.com"
+server_url = "https://timing.example.com"
 [auth]
 token_file = "/tmp/fake-token"
 [[readers]]
@@ -6839,7 +6839,7 @@ target = "192.168.1.100:10000"
             config_file,
             r#"schema_version = 1
 [p2p]
-thin_node_url = "https://timing.example.com"
+server_url = "https://timing.example.com"
 [auth]
 token_file = "{token_path}"
 [[readers]]

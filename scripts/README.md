@@ -3,7 +3,7 @@
 ## Deterministic P2P E2E Stack
 
 Use `scripts/e2e/run_stack.py` for local data-plane verification. It starts
-real OS processes for the emulator, forwarder, receiver-headless, and thin-node
+real OS processes for the emulator, forwarder, receiver-headless, and server
 with iroh configured for deterministic loopback operation: relays disabled,
 discovery disabled, seeded keys, and injected local addresses.
 
@@ -33,14 +33,14 @@ uv run scripts/e2e/run_stack.py \
 The stack writes temporary configs, SQLite databases, DBF output, logs, and UI
 agent artifacts under its run directory. The backend assertions are the hard
 gate: received event counts, DBF rows, TCP proxy replay, receiver cursors, and
-thin-node announcer/status state.
+server announcer/status state.
 
 ## Manual Dev Stack
 
 `scripts/dev_stack.py` boots the whole loopback stack and leaves it running for
 manual exploration (no assertions, no failure-injection lanes), the prod-like
-way. It starts the emulator, forwarder, and thin-node (both the forwarder and
-thin-node serve their embedded web UIs) and launches the receiver:
+way. It starts the emulator, forwarder, and server (both the forwarder and
+server serve their embedded web UIs) and launches the receiver:
 
 ```bash
 uv run scripts/dev_stack.py                    # build + launch the desktop app
@@ -50,10 +50,10 @@ uv run scripts/dev_stack.py --no-build
 ```
 
 There is no static allow-list or preseeded subscription: the forwarder and
-receiver self-register with the thin-node, you approve both in the thin-node
+receiver self-register with the server, you approve both in the server
 admin UI (`/admin`), the receiver discovers the approved forwarder, and you
 subscribe to the discovered stream in the receiver UI. The startup banner prints
-all the URLs. The desktop app reads its thin-node config from the `RT_P2P_*` /
+all the URLs. The desktop app reads its server config from the `RT_P2P_*` /
 `RT_RECEIVER_*` environment variables the script sets. Press Ctrl-C to tear the
 stack down.
 
@@ -76,7 +76,7 @@ It supports these services:
 - `receiver`
 - `streamer`
 - `emulator`
-- `thin-node`
+- `server`
 
 ### Prerequisites
 
@@ -100,7 +100,7 @@ Examples:
 uv run scripts/release.py forwarder --patch
 uv run scripts/release.py forwarder emulator --minor
 uv run scripts/release.py receiver --version 2.0.0
-uv run scripts/release.py thin-node --patch
+uv run scripts/release.py server --patch
 uv run scripts/release.py forwarder --patch --dry-run
 ```
 
@@ -116,7 +116,7 @@ For each requested service, the script:
    - `forwarder`: `npm ci`, forwarder UI lint/check/test, then release build
      with `embed-ui,eink`.
    - `receiver`: `npm ci`, receiver UI lint/check/test, then release build.
-   - `streamer`, `emulator`, `thin-node`: release build for the service
+   - `streamer`, `emulator`, `server`: release build for the service
      binary.
 5. Stages changed version files.
 6. Creates commit `chore(<service>): bump version to <new_version>`.
@@ -124,7 +124,7 @@ For each requested service, the script:
 8. Pushes the branch and each tag separately.
 
 The GitHub release workflow publishes arm64 Linux artifacts for Linux SBCs.
-`thin-node` releases are arm64-only.
+`server` releases are arm64-only.
 
 ## Packaging Validation
 

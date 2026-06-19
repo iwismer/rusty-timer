@@ -56,7 +56,7 @@ pub fn resolve_receiver_id(cli_id: Option<String>, db: &Db) -> Result<String, St
 
 pub fn profile_has_connect_credentials(profile: Option<&crate::db::Profile>) -> bool {
     profile.is_some_and(|profile| {
-        !profile.thin_node_url.trim().is_empty() && !profile.token.trim().is_empty()
+        !profile.server_url.trim().is_empty() && !profile.token.trim().is_empty()
     })
 }
 
@@ -97,7 +97,7 @@ pub async fn init_with_data_dir(
 /// Run local receiver housekeeping until shutdown.
 ///
 /// The central relay session was removed at P2P cutover. Durable
-/// event delivery, local TCP proxy replay, DBF writes, and thin-node announcer
+/// event delivery, local TCP proxy replay, DBF writes, and server announcer
 /// pushes are driven by `p2p_runtime` when a P2P config is present.
 pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<ShutdownSignal>) {
     loop {

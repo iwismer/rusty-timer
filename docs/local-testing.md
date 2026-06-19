@@ -43,11 +43,11 @@ The orchestrator starts:
    endpoint.
 3. `services/receiver` via `receiver-headless`, with durable received events,
    cursors, DBF output, and local TCP replay.
-4. `services/thin-node` for registry, allow-list distribution, announcer/status
+4. `services/server` for registry, allow-list distribution, announcer/status
    state, and auth matrix coverage.
 
 The hard assertions check received event counts, receiver cursors, DBF rows,
-TCP proxy replay, and thin-node state. UI-agent artifacts are diagnostic only.
+TCP proxy replay, and server state. UI-agent artifacts are diagnostic only.
 
 ## Manual Dev Stack
 
@@ -58,19 +58,19 @@ assertions), use:
 uv run scripts/dev_stack.py
 ```
 
-This starts the emulator, forwarder, and thin-node on loopback (the forwarder
-and thin-node serve their embedded web UIs) and launches the desktop receiver
+This starts the emulator, forwarder, and server on loopback (the forwarder
+and server serve their embedded web UIs) and launches the desktop receiver
 app via `cargo tauri dev`. It follows the **prod-like flow** — no static
 allow-list, no preseeded subscription, no hand-fed node ids:
 
-1. The forwarder and receiver self-register with the thin-node (TOFU).
-2. Open the thin-node admin UI and **approve both** the forwarder and receiver.
+1. The forwarder and receiver self-register with the server (TOFU).
+2. Open the server admin UI and **approve both** the forwarder and receiver.
 3. The forwarder fetches the receiver allow-list; the receiver discovers the
    approved forwarder.
 4. In the receiver app's Streams tab, the discovered stream appears as
    **Available** — click Subscribe and reads start flowing.
 
-The startup banner prints the thin-node UI, admin, and announcer URLs, the
+The startup banner prints the server UI, admin, and announcer URLs, the
 forwarder UI URL, and the expected stream id. Press Ctrl-C (or close the
 receiver app) to tear the whole stack down.
 
@@ -83,7 +83,7 @@ uv run scripts/dev_stack.py --read-delay-ms 500   # faster emulated reads
 uv run scripts/dev_stack.py --data-dir /tmp/rt-dev  # reuse a receiver data dir (keeps approvals)
 ```
 
-The desktop app reads its thin-node config from the `RT_P2P_*` / `RT_RECEIVER_*`
+The desktop app reads its server config from the `RT_P2P_*` / `RT_RECEIVER_*`
 environment variables the script sets. Unlike `scripts/e2e/run_stack.py`, this
 runner makes no assertions and runs no failure-injection lanes; it is purely for
 manual exploration.

@@ -20,15 +20,15 @@ IPICO Reader ─TCP─► Forwarder (Pi)         │
                     └─────────────────────┘
 
                     ┌── Coordination ─────┐
-                    │  Thin node          │
+                    │  Server          │
                     │  registry/status    │
                     │  allow-list distro  │
                     └─────────────────────┘
 ```
 
-The thin node coordinates endpoint registration, allow-list distribution, and
+The server coordinates endpoint registration, allow-list distribution, and
 status/announcer state. Chip-read events flow directly between forwarders and
-receivers over iroh; they are not relayed through the thin node.
+receivers over iroh; they are not relayed through the server.
 
 ## Ports
 
@@ -37,13 +37,13 @@ receivers over iroh; they are not relayed through the thin node.
 | IPICO Reader | 10000 | TCP | Reader → Forwarder | Standard IPICO reader port |
 | Forwarder status | 8080 default | HTTP | Trusted LAN or localhost | Health check + embedded UI |
 | Forwarder P2P endpoint | OS-assigned/QUIC | iroh | Receiver ↔ Forwarder | Uses endpoint IDs and allow-list enforcement |
-| Thin node | 8080 default | HTTPS/HTTP behind proxy | Forwarders, receivers, operators | Registry, allow-list, status board |
+| Server | 8080 default | HTTPS/HTTP behind proxy | Forwarders, receivers, operators | Registry, allow-list, status board |
 | Receiver TCP out | 10000+ | TCP | Localhost only | One port per subscribed stream |
 | Receiver test bridge | loopback only | HTTP | Local test harness | Compiled only with `test-bridge` |
 
 ## Firewall Rules
 
-### Thin-node host
+### Server host
 
 - Allow inbound operator/admin traffic only through the configured reverse proxy.
 - Allow M2M bearer-token traffic from provisioned forwarders and receivers.
@@ -52,14 +52,14 @@ receivers over iroh; they are not relayed through the thin node.
 
 ### Forwarder field site
 
-- Allow outbound traffic needed for thin-node registration/allow-list polling and
+- Allow outbound traffic needed for server registration/allow-list polling and
 iroh connectivity.
 - Allow inbound TCP from the local IPICO reader.
 - Restrict status UI access to the trusted local network.
 
 ### Receiver timing tent
 
-- Allow outbound traffic needed for thin-node lookup and iroh connectivity.
+- Allow outbound traffic needed for server lookup and iroh connectivity.
 - Bind replay TCP ports to localhost for timing software on the same machine.
 - Keep the `test-bridge` disabled in release builds.
 

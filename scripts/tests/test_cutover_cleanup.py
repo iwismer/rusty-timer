@@ -43,12 +43,12 @@ class CutoverCleanupTests(unittest.TestCase):
         package = tomllib.loads((ROOT / "pyproject.toml").read_text()) if (ROOT / "pyproject.toml").exists() else None
         self.assertIsNone(package, "pyproject is not expected in this Node workspace")
 
-    def test_docs_are_cutover_to_p2p_thin_node_architecture(self) -> None:
+    def test_docs_are_cutover_to_p2p_server_architecture(self) -> None:
         docs_readme = (ROOT / "docs/README.md").read_text()
         agent_notes = (ROOT / "AGENTS.md").read_text()
 
         for text, label in [(docs_readme, "docs/README.md"), (agent_notes, "AGENTS.md")]:
-            self.assertIn("thin-node", text, label)
+            self.assertIn("server", text, label)
             self.assertIn("P2P", text, label)
             self.assertNotIn("services/server", text, label)
             self.assertNotIn("Postgres", text, label)

@@ -1,4 +1,4 @@
-//! HTTP surface for the thin node.
+//! HTTP surface for the server.
 
 pub mod allowlist;
 pub mod announcer;
@@ -49,13 +49,13 @@ impl AppState {
     }
 }
 
-/// Build the thin-node HTTP router.
+/// Build the server HTTP router.
 ///
 /// Routes are grouped by the auth posture documented in [`status`]:
 ///
 /// - Public (unauthenticated): `GET /status`.
 /// - Admin (upstream [`status::ADMIN_HEADER`] required): `POST
-///   /admin/devices/approve`.
+///   /admin/devices/approve`, `POST /admin/devices/rename`.
 /// - M2M/device (in-process provisioning bearer auth): `POST /register`, `POST
 ///   /forwarder/catalog`, `POST /announcer/rows`, `POST /announcer/takeover`.
 pub fn router(state: AppState) -> Router {
@@ -64,6 +64,7 @@ pub fn router(state: AppState) -> Router {
         .route("/status", get(status::status))
         // Admin endpoints — must be protected by Caddy/Authelia.
         .route("/admin/devices/approve", post(status::approve_device))
+        .route("/admin/devices/rename", post(status::rename_device))
         // M2M/device endpoints — in-process provisioning bearer auth.
         .route("/register", post(register::register))
         .route("/forwarder/catalog", post(catalog::push_catalog))

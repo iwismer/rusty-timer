@@ -14,7 +14,7 @@ fn profile_save_and_load() {
     db.save_profile("https://e.com", "t", "check-and-download", None)
         .unwrap();
     let p = db.load_profile().unwrap().unwrap();
-    assert_eq!(p.thin_node_url, "https://e.com");
+    assert_eq!(p.server_url, "https://e.com");
     assert_eq!(p.token, "t");
 }
 #[test]
@@ -25,7 +25,7 @@ fn profile_update_replaces_existing() {
     db.save_profile("https://new", "new", "check-and-download", None)
         .unwrap();
     assert_eq!(
-        db.load_profile().unwrap().unwrap().thin_node_url,
+        db.load_profile().unwrap().unwrap().server_url,
         "https://new"
     );
 }
@@ -175,7 +175,7 @@ fn db_profile_persists_to_file() {
     {
         let db = Db::open(&p).unwrap();
         let pr = db.load_profile().unwrap().unwrap();
-        assert_eq!(pr.thin_node_url, "https://p.com");
+        assert_eq!(pr.server_url, "https://p.com");
         assert_eq!(db.load_cursors().unwrap()[0].last_seq, 200);
     }
 }

@@ -11,18 +11,18 @@ It starts, on loopback only:
 
     emulator  --(TCP)-->  forwarder  --(iroh P2P)-->  receiver (desktop app)
                                                            |
-                              thin-node  <--(register / catalog / announcer)--+
+                              server  <--(register / catalog / announcer)--+
 
 The flow mirrors production (no static allow-list, no preseeded subscription,
 no hand-fed node ids):
 
-1. The forwarder and receiver each **self-register** with the thin-node (TOFU)
+1. The forwarder and receiver each **self-register** with the server (TOFU)
    using a deterministic seeded identity, and the forwarder pushes its stream
    catalog + direct addresses.
-2. You open the **thin-node UI** and approve BOTH the forwarder and the receiver
+2. You open the **server UI** and approve BOTH the forwarder and the receiver
    (TOFU approve + name).
 3. The forwarder fetches the receiver allow-list; the receiver discovers the
-   approved forwarder (node id + direct addresses) from the thin-node.
+   approved forwarder (node id + direct addresses) from the server.
 4. You open the **receiver UI**, see the discovered (available) stream, and
    subscribe to it. Reads then flow forwarder -> receiver, the receiver
    re-exposes the stream on a local TCP port, and DBF/announcer follow.
@@ -73,12 +73,12 @@ RECEIVER_UI_DIR = REPO_ROOT / "apps" / "receiver-ui"
 
 # Deterministic 32-byte secret-key seeds (hex). Distinct so the two endpoints
 # get distinct node ids. Loopback-only; never used outside development. Keeping
-# them stable means a re-run (with a preserved thin-node DB / --data-dir) keeps
+# them stable means a re-run (with a preserved server DB / --data-dir) keeps
 # the same identities, so prior approvals still apply.
 FORWARDER_SEED_HEX = "cd" * 32
 RECEIVER_SEED_HEX = "ab" * 32
 
-# Single dev provisioning token: the thin-node accepts it for M2M device
+# Single dev provisioning token: the server accepts it for M2M device
 # endpoints (/register, /forwarder/catalog, /allowlist/receivers, /forwarders,
 # /announcer/*), and the forwarder + receiver present it as their device token.
 # Production uses per-device tokens; one shared token is fine for local dev.
@@ -91,7 +91,7 @@ NUM_FRAMES = 25
 # runs. Overridable via CLI flags; each falls back to an OS-assigned free port
 # if the preferred one is already in use.
 DEFAULT_FORWARDER_STATUS_PORT = 8787
-DEFAULT_THIN_NODE_PORT = 8675
+DEFAULT_SERVER_PORT = 8675
 
 
 # ---------------------------------------------------------------------------
@@ -237,11 +237,11 @@ def wait_tcp(port: int, timeout: float, what: str) -> None:
 # Build
 # ---------------------------------------------------------------------------
 def cargo_build() -> None:
-    # Build both web UIs so the forwarder and thin-node can embed them (each
+    # Build both web UIs so the forwarder and server can embed them (each
     # serves its UI only when built with `--features embed-ui`, which embeds the
     # SvelteKit `build/` output at compile time).
-    print("[build] web UIs (npm run build: forwarder-ui, thin-node-ui) ...")
-    for app in ("apps/forwarder-ui", "apps/thin-node-ui"):
+    print("[build] web UIs (npm run build: forwarder-ui, server-ui) ...")
+    for app in ("apps/forwarder-ui", "apps/server-ui"):
         subprocess.run(
             ["npm", "run", "build", "--workspace", app],
             cwd=str(REPO_ROOT),
@@ -253,21 +253,21 @@ def cargo_build() -> None:
         cwd=str(REPO_ROOT),
         check=True,
     )
-    print("[build] cargo build -p forwarder -p thin-node --features embed-ui ...")
+    print("[build] cargo build -p forwarder -p server --features embed-ui ...")
     subprocess.run(
         ["cargo", "build", "-p", "forwarder", "--features", "embed-ui"],
         cwd=str(REPO_ROOT),
         check=True,
     )
     subprocess.run(
-        ["cargo", "build", "-p", "thin-node", "--features", "embed-ui"],
+        ["cargo", "build", "-p", "server", "--features", "embed-ui"],
         cwd=str(REPO_ROOT),
         check=True,
     )
 
 
 # ---------------------------------------------------------------------------
-# Forwarder config (prod-like: thin-node registration + allow-list fetch; NO
+# Forwarder config (prod-like: server registration + allow-list fetch; NO
 # static allow-list).
 # ---------------------------------------------------------------------------
 def write_forwarder_config(
@@ -279,8 +279,8 @@ def write_forwarder_config(
     emulator_port: int,
     fanout_port: int,
     p2p_port: int,
-    thin_node_url: str,
-    thin_node_token_file: Path,
+    server_url: str,
+    server_token_file: Path,
 ) -> None:
     path.write_text(
         f"""schema_version = 1
@@ -307,8 +307,8 @@ bind_addr_v4 = "127.0.0.1:{p2p_port}"
 relay_disabled = true
 discovery_disabled = true
 max_concurrent_bidi_streams = 256
-thin_node_url = "{thin_node_url}"
-thin_node_token_file = "{thin_node_token_file}"
+server_url = "{server_url}"
+server_token_file = "{server_token_file}"
 """
     )
 
@@ -354,12 +354,12 @@ def main() -> int:
         ),
     )
     parser.add_argument(
-        "--thin-node-port",
+        "--server-port",
         type=int,
-        default=DEFAULT_THIN_NODE_PORT,
+        default=DEFAULT_SERVER_PORT,
         help=(
-            "preferred port for the thin-node HTTP/UI "
-            f"(default: {DEFAULT_THIN_NODE_PORT}; "
+            "preferred port for the server HTTP/UI "
+            f"(default: {DEFAULT_SERVER_PORT}; "
             "falls back to a free port if taken)"
         ),
     )
@@ -383,9 +383,9 @@ def main() -> int:
     )
     forwarder_fanout_port = free_tcp_port()
     forwarder_p2p_port = free_udp_port()
-    thin_node_port = fixed_or_free_tcp_port(args.thin_node_port, what="thin-node UI")
+    server_port = fixed_or_free_tcp_port(args.server_port, what="server UI")
 
-    thin_node_url = f"http://127.0.0.1:{thin_node_port}"
+    server_url = f"http://127.0.0.1:{server_port}"
     receiver_id = "dev-receiver"
     # The forwarder journals each reader stream under its network address; the
     # catalog stream id the receiver will discover is therefore this:
@@ -398,10 +398,10 @@ def main() -> int:
     )
     auth_token_file = work_dir / "forwarder-auth-token"
     auth_token_file.write_text("dev-forwarder-auth-token\n")
-    thin_node_token_file = work_dir / "thin-node-token"
-    thin_node_token_file.write_text(PROVISIONING_TOKEN + "\n")
+    server_token_file = work_dir / "server-token"
+    server_token_file.write_text(PROVISIONING_TOKEN + "\n")
     journal_path = work_dir / "forwarder.sqlite3"
-    thin_db_path = work_dir / "thin-node.sqlite3"
+    thin_db_path = work_dir / "server.sqlite3"
     forwarder_config = work_dir / "forwarder.toml"
 
     write_forwarder_config(
@@ -412,39 +412,39 @@ def main() -> int:
         emulator_port=emulator_port,
         fanout_port=forwarder_fanout_port,
         p2p_port=forwarder_p2p_port,
-        thin_node_url=thin_node_url,
-        thin_node_token_file=thin_node_token_file,
+        server_url=server_url,
+        server_token_file=server_token_file,
     )
 
     # The RT_* env the desktop app / receiver-headless read to start P2P. No
     # forwarder node id/addr: the receiver discovers approved forwarders from
-    # the thin-node.
+    # the server.
     receiver_env = {
         "RT_RECEIVER_DATA_DIR": str(receiver_data_dir),
         "RT_RECEIVER_ID": receiver_id,
         "RT_P2P_SECRET_KEY_SEED_HEX": RECEIVER_SEED_HEX,
-        "RT_P2P_THIN_NODE_URL": thin_node_url,
-        "RT_P2P_THIN_NODE_TOKEN": PROVISIONING_TOKEN,
+        "RT_P2P_SERVER_URL": server_url,
+        "RT_P2P_SERVER_TOKEN": PROVISIONING_TOKEN,
         "RT_P2P_RECONCILE_MS": "1000",
         "RUST_LOG": os.environ.get("RUST_LOG", "info,receiver=debug"),
     }
 
     stack = Stack()
     try:
-        # --- thin-node (open in dev; serves the embedded UI at /) ---
+        # --- server (open in dev; serves the embedded UI at /) ---
         thin = stack.add(Managed(
-            name="thin-node",
-            argv=[str(bin_path("thin-node"))],
-            log_path=work_dir / "thin-node.log",
+            name="server",
+            argv=[str(bin_path("server"))],
+            log_path=work_dir / "server.log",
             env={
-                "THIN_NODE_DB_PATH": str(thin_db_path),
-                "BIND_ADDR": f"127.0.0.1:{thin_node_port}",
-                "THIN_NODE_PROVISIONING_TOKEN": PROVISIONING_TOKEN,
+                "SERVER_DB_PATH": str(thin_db_path),
+                "BIND_ADDR": f"127.0.0.1:{server_port}",
+                "SERVER_PROVISIONING_TOKEN": PROVISIONING_TOKEN,
                 "LOG_LEVEL": "info",
             },
         ))
         thin.start()
-        wait_tcp(thin_node_port, timeout=20, what="thin-node")
+        wait_tcp(server_port, timeout=20, what="server")
         thin.assert_alive()
 
         # --- emulator (loops the reads file forever) ---
@@ -466,7 +466,7 @@ def main() -> int:
         emulator.assert_alive()
 
         # --- forwarder (P2P, seeded; self-registers + pushes catalog + fetches
-        #     the receiver allow-list from the thin-node) ---
+        #     the receiver allow-list from the server) ---
         forwarder = stack.add(Managed(
             name="forwarder",
             argv=[str(bin_path("forwarder")), "--config", str(forwarder_config)],
@@ -481,8 +481,8 @@ def main() -> int:
         print_summary(
             work_dir=work_dir,
             receiver_data_dir=receiver_data_dir,
-            thin_node_url=thin_node_url,
-            thin_node_port=thin_node_port,
+            server_url=server_url,
+            server_port=server_port,
             forwarder_status_port=forwarder_status_port,
             emulator_port=emulator_port,
             expected_stream_id=expected_stream_id,
@@ -518,8 +518,8 @@ def run_receiver(mode: str, stack: Stack, work_dir: Path, receiver_env: dict) ->
             "--bind-addr", "127.0.0.1:0",
             "--receiver-id", receiver_env["RT_RECEIVER_ID"],
             "--p2p-secret-key-seed-hex", receiver_env["RT_P2P_SECRET_KEY_SEED_HEX"],
-            "--p2p-thin-node-url", receiver_env["RT_P2P_THIN_NODE_URL"],
-            "--p2p-thin-node-token", receiver_env["RT_P2P_THIN_NODE_TOKEN"],
+            "--p2p-server-url", receiver_env["RT_P2P_SERVER_URL"],
+            "--p2p-server-token", receiver_env["RT_P2P_SERVER_TOKEN"],
             "--p2p-reconcile-ms", receiver_env["RT_P2P_RECONCILE_MS"],
         ]
         print("\n[receiver] launching receiver-headless in the foreground "
@@ -551,13 +551,13 @@ def run_receiver(mode: str, stack: Stack, work_dir: Path, receiver_env: dict) ->
 
 def print_summary(**kw) -> None:
     env = kw["receiver_env"]
-    thin = kw["thin_node_url"]
+    thin = kw["server_url"]
     print("\n" + "=" * 72)
     print("  Rusty Timer — local P2P dev stack is UP (prod-like flow)")
     print("=" * 72)
-    print(f"  Thin-node UI:       {thin}/         (status dashboard)")
-    print(f"  Thin-node admin:    {thin}/admin    (APPROVE devices here)")
-    print(f"  Thin-node announcer:{thin}/announcer")
+    print(f"  Server UI:       {thin}/         (status dashboard)")
+    print(f"  Server admin:    {thin}/admin    (APPROVE devices here)")
+    print(f"  Server announcer:{thin}/announcer")
     print(f"  Forwarder UI:       http://127.0.0.1:{kw['forwarder_status_port']}/   (status API at /api/v1/status)")
     print(f"  Emulator (reads):   127.0.0.1:{kw['emulator_port']}   (log: {kw['work_dir']}/emulator.log)")
     print(f"  Expected stream id: {kw['expected_stream_id']}   (appears once the forwarder is approved)")
@@ -576,13 +576,13 @@ def print_summary(**kw) -> None:
     print("  Receiver env (read by the desktop app / receiver-headless):")
     for key in (
         "RT_RECEIVER_DATA_DIR", "RT_RECEIVER_ID", "RT_P2P_SECRET_KEY_SEED_HEX",
-        "RT_P2P_THIN_NODE_URL", "RT_P2P_THIN_NODE_TOKEN", "RT_P2P_RECONCILE_MS",
+        "RT_P2P_SERVER_URL", "RT_P2P_SERVER_TOKEN", "RT_P2P_RECONCILE_MS",
     ):
         print(f"    {key}={env[key]}")
     if kw["mode"] == "none":
         cmd = " ".join(f'{k}="{env[k]}"' for k in (
             "RT_RECEIVER_DATA_DIR", "RT_RECEIVER_ID", "RT_P2P_SECRET_KEY_SEED_HEX",
-            "RT_P2P_THIN_NODE_URL", "RT_P2P_THIN_NODE_TOKEN", "RT_P2P_RECONCILE_MS",
+            "RT_P2P_SERVER_URL", "RT_P2P_SERVER_TOKEN", "RT_P2P_RECONCILE_MS",
         ))
         print("-" * 72)
         print("  Launch the desktop app yourself with:")

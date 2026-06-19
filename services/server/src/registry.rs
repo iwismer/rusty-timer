@@ -1,4 +1,4 @@
-//! SQLite-backed device registry for the thin node.
+//! SQLite-backed device registry for the server.
 //!
 //! Tracks forwarder/receiver endpoints, their approval state, hashed
 //! per-device bearer tokens, and a backup of the forwarder stream catalog.
@@ -352,6 +352,30 @@ pub fn approve_device(
     let changed = conn.execute(
         "UPDATE devices
          SET approval_state = 'active', display_name = ?2, updated_unix_ms = ?3
+         WHERE endpoint_id = ?1",
+        params![endpoint_id, display_name, now],
+    )?;
+
+    if changed == 0 {
+        return Ok(None);
+    }
+
+    get_device(conn, endpoint_id)
+}
+
+/// Rename a registered device by setting its admin-assigned display name.
+///
+/// Works for devices in any approval state and leaves the approval state
+/// unchanged. Returns `None` if no device with the given endpoint id exists.
+pub fn rename_device(
+    conn: &Connection,
+    endpoint_id: &str,
+    display_name: &str,
+) -> rusqlite::Result<Option<DeviceRecord>> {
+    let now = Utc::now().timestamp_millis();
+    let changed = conn.execute(
+        "UPDATE devices
+         SET display_name = ?2, updated_unix_ms = ?3
          WHERE endpoint_id = ?1",
         params![endpoint_id, display_name, now],
     )?;
@@ -772,6 +796,37 @@ mod tests {
     fn approve_missing_device_returns_none() {
         let conn = test_conn();
         assert!(approve_device(&conn, "missing", "name").unwrap().is_none());
+    }
+
+    #[test]
+    fn rename_active_device_updates_name_and_preserves_state() {
+        let conn = test_conn();
+        register_device(&conn, "ep-1", DeviceKind::Forwarder, "tok").unwrap();
+        approve_device(&conn, "ep-1", "Start Line").unwrap();
+
+        let renamed = rename_device(&conn, "ep-1", "Finish Line")
+            .unwrap()
+            .expect("device exists");
+        assert_eq!(renamed.display_name.as_deref(), Some("Finish Line"));
+        assert_eq!(renamed.approval_state, ApprovalState::Active);
+    }
+
+    #[test]
+    fn rename_pending_device_keeps_pending_state() {
+        let conn = test_conn();
+        register_device(&conn, "ep-2", DeviceKind::Receiver, "tok").unwrap();
+
+        let renamed = rename_device(&conn, "ep-2", "Tablet")
+            .unwrap()
+            .expect("device exists");
+        assert_eq!(renamed.display_name.as_deref(), Some("Tablet"));
+        assert_eq!(renamed.approval_state, ApprovalState::Pending);
+    }
+
+    #[test]
+    fn rename_missing_device_returns_none() {
+        let conn = test_conn();
+        assert!(rename_device(&conn, "missing", "name").unwrap().is_none());
     }
 
     #[test]

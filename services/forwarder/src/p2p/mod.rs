@@ -10,7 +10,7 @@
 //!
 //! Scope: production startup currently wires the endpoint, accept loop, and
 //! allow-listed control-plane handshake. The data-stream subscriber handler and
-//! the thin-node allow-list distribution components ([`ThinNodeAllowListClient`]
+//! the server allow-list distribution components ([`ServerAllowListClient`]
 //! and [`run_allowlist_distribution`]) are available for P2P wiring, while the
 //! reader control/status mapping remains a later task.
 
@@ -35,8 +35,8 @@ use tokio::task::JoinHandle;
 
 pub use allowlist::{
     AllowList, AllowListRefreshError, CatalogPushError, DEFAULT_ALLOWLIST_POLL_INTERVAL,
-    ForwarderCatalog, ForwarderCatalogStream, ReceiverAllowListUpdate, ThinNodeAllowListClient,
-    ThinNodeCatalogClient, apply_receiver_update, fetch_and_apply_once, run_allowlist_distribution,
+    ForwarderCatalog, ForwarderCatalogStream, ReceiverAllowListUpdate, ServerAllowListClient,
+    ServerCatalogClient, apply_receiver_update, fetch_and_apply_once, run_allowlist_distribution,
 };
 pub use control::{
     CatalogProvider, ControlEvent, ControlEventReceiver, ControlEventSender, HeartbeatConfig,
@@ -124,8 +124,8 @@ pub async fn start_forwarder_p2p(
     let run_endpoint = endpoint.clone();
     let mut tasks = vec![tokio::spawn(async move { run_endpoint.run().await })];
 
-    if let Some((base_url, bearer_token)) = thin_node_credentials(config)? {
-        // Allow-list freshness is polling-only for now: the thin node has no
+    if let Some((base_url, bearer_token)) = server_credentials(config)? {
+        // Allow-list freshness is polling-only for now: the server has no
         // server-push channel wired yet, so we hand `run_allowlist_distribution`
         // a receiver whose sender is dropped immediately. The distribution loop
         // treats the closed push channel as "no pushes" and relies on its
@@ -137,7 +137,7 @@ pub async fn start_forwarder_p2p(
         let poll_interval = Duration::from_secs(config.allowlist_poll_interval_secs);
         tasks.push(tokio::spawn(run_allowlist_distribution(
             allow_list,
-            ThinNodeAllowListClient::with_timeout(
+            ServerAllowListClient::with_timeout(
                 base_url.clone(),
                 bearer_token.clone(),
                 request_timeout,
@@ -147,7 +147,7 @@ pub async fn start_forwarder_p2p(
         )));
 
         tasks.push(tokio::spawn(run_forwarder_catalog_distribution(
-            ThinNodeCatalogClient::with_timeout(base_url, bearer_token, request_timeout),
+            ServerCatalogClient::with_timeout(base_url, bearer_token, request_timeout),
             endpoint.clone(),
             display_name,
             Arc::clone(&journal),
@@ -163,8 +163,8 @@ pub async fn start_forwarder_p2p(
 pub enum P2pStartError {
     #[error("p2p is enabled but no allow-list source is configured")]
     MissingAllowList,
-    #[error("p2p thin-node URL and token file must be configured together")]
-    IncompleteThinNodeConfig,
+    #[error("p2p server URL and token file must be configured together")]
+    IncompleteServerConfig,
     #[error("invalid p2p receiver node id '{value}': {source}")]
     InvalidReceiverNodeId {
         value: String,
@@ -244,7 +244,7 @@ fn endpoint_builder(config: &P2pConfig) -> Result<EndpointBuilder, P2pStartError
 fn build_allow_list(config: &P2pConfig) -> Result<AllowList, P2pStartError> {
     if config.static_allowed_receivers.is_empty()
         && config.allowlist_cache_path.is_none()
-        && config.thin_node_url.is_none()
+        && config.server_url.is_none()
     {
         return Err(P2pStartError::MissingAllowList);
     }
@@ -264,19 +264,19 @@ fn build_allow_list(config: &P2pConfig) -> Result<AllowList, P2pStartError> {
     Ok(allow_list)
 }
 
-fn thin_node_credentials(config: &P2pConfig) -> Result<Option<(String, String)>, P2pStartError> {
-    match (&config.thin_node_url, &config.thin_node_token_file) {
+fn server_credentials(config: &P2pConfig) -> Result<Option<(String, String)>, P2pStartError> {
+    match (&config.server_url, &config.server_token_file) {
         (Some(url), Some(token_file)) => {
             let token = std::fs::read_to_string(Path::new(token_file))?;
             Ok(Some((url.clone(), token.trim().to_owned())))
         }
         (None, None) => Ok(None),
-        _ => Err(P2pStartError::IncompleteThinNodeConfig),
+        _ => Err(P2pStartError::IncompleteServerConfig),
     }
 }
 
 async fn run_forwarder_catalog_distribution(
-    client: ThinNodeCatalogClient,
+    client: ServerCatalogClient,
     endpoint: P2pEndpoint,
     display_name: Option<String>,
     journal: Arc<Mutex<Journal>>,
@@ -315,7 +315,7 @@ async fn run_forwarder_catalog_distribution(
 }
 
 async fn push_forwarder_catalog_once(
-    client: &ThinNodeCatalogClient,
+    client: &ServerCatalogClient,
     endpoint: &P2pEndpoint,
     display_name: Option<&str>,
     journal: Arc<Mutex<Journal>>,
@@ -323,7 +323,7 @@ async fn push_forwarder_catalog_once(
 ) {
     let endpoint_id = endpoint.node_id().to_string();
     if let Err(error) = client.register_forwarder(&endpoint_id).await {
-        tracing::warn!(%endpoint_id, %error, "forwarder thin-node registration failed");
+        tracing::warn!(%endpoint_id, %error, "forwarder server registration failed");
     }
 
     let node_addr = endpoint.node_addr().await;
@@ -434,8 +434,8 @@ mod tests {
             max_concurrent_bidi_streams: Some(64),
             static_allowed_receivers: vec![receiver_id],
             allowlist_cache_path: None,
-            thin_node_url: None,
-            thin_node_token_file: None,
+            server_url: None,
+            server_token_file: None,
             allowlist_poll_interval_secs: 60,
             allowlist_request_timeout_secs: 10,
         }

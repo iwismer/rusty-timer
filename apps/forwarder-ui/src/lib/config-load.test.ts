@@ -5,7 +5,7 @@ import { loadConfigPageState } from "./config-load";
 function makeConfig(): ForwarderConfig {
   return {
     display_name: "Start Line",
-    p2p: { enabled: true, thin_node_url: "https://thin.example.com" },
+    p2p: { enabled: true, server_url: "https://thin.example.com" },
     readers: [{ target: "192.168.1.10:10000", enabled: true }],
   };
 }
@@ -18,7 +18,7 @@ function makeStatus(restart_needed: boolean): ForwarderStatus {
     ready_reason: null,
     p2p_connected: true,
     restart_needed,
-    thin_node: {
+    server: {
       configured: false,
       endpoint_id: null,
       reachable: null,

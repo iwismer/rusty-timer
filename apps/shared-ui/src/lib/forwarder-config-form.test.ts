@@ -42,8 +42,8 @@ function makeForm(overrides: Partial<ForwarderConfigFormState> = {}): ForwarderC
   return {
     generalDisplayName: "",
     p2pEnabled: true,
-    p2pThinNodeUrl: "http://localhost:8080",
-    p2pThinNodeTokenFile: "/tmp/token.txt",
+    p2pServerUrl: "http://localhost:8080",
+    p2pServerTokenFile: "/tmp/token.txt",
     authTokenFile: "/tmp/token.txt",
     journalSqlitePath: "",
     journalPruneWatermarkPct: "",
@@ -218,23 +218,23 @@ describe("fromConfig", () => {
   it("normalizes missing sections to empty form defaults", () => {
     const form = fromConfig({});
     expect(form.p2pEnabled).toBe(false);
-    expect(form.p2pThinNodeUrl).toBe("");
-    expect(form.p2pThinNodeTokenFile).toBe("");
+    expect(form.p2pServerUrl).toBe("");
+    expect(form.p2pServerTokenFile).toBe("");
     expect(form.controlAllowPowerActions).toBe(false);
     expect(form.readers).toEqual([]);
   });
 
-  it("loads p2p thin-node settings when present", () => {
+  it("loads p2p server settings when present", () => {
     const form = fromConfig({
       p2p: {
         enabled: true,
-        thin_node_url: "https://thin.example.com",
-        thin_node_token_file: "/etc/rusty-timer/forwarder.token",
+        server_url: "https://thin.example.com",
+        server_token_file: "/etc/rusty-timer/forwarder.token",
       },
     });
     expect(form.p2pEnabled).toBe(true);
-    expect(form.p2pThinNodeUrl).toBe("https://thin.example.com");
-    expect(form.p2pThinNodeTokenFile).toBe("/etc/rusty-timer/forwarder.token");
+    expect(form.p2pServerUrl).toBe("https://thin.example.com");
+    expect(form.p2pServerTokenFile).toBe("/etc/rusty-timer/forwarder.token");
   });
 
   it("loads control.allow_power_actions when present", () => {
@@ -431,17 +431,17 @@ describe("payload builders", () => {
     expect(payload.readers[0].target).toBeNull();
   });
 
-  it("serializes p2p thin-node settings", () => {
+  it("serializes p2p server settings", () => {
     expect(
       toP2pPayload({
         p2pEnabled: true,
-        p2pThinNodeUrl: " https://thin.example.com/ ",
-        p2pThinNodeTokenFile: " /etc/rusty-timer/forwarder.token ",
+        p2pServerUrl: " https://thin.example.com/ ",
+        p2pServerTokenFile: " /etc/rusty-timer/forwarder.token ",
       } as ForwarderConfigFormState),
     ).toEqual({
       enabled: true,
-      thin_node_url: "https://thin.example.com/",
-      thin_node_token_file: "/etc/rusty-timer/forwarder.token",
+      server_url: "https://thin.example.com/",
+      server_token_file: "/etc/rusty-timer/forwarder.token",
     });
   });
 
@@ -449,13 +449,13 @@ describe("payload builders", () => {
     expect(
       toP2pPayload({
         p2pEnabled: false,
-        p2pThinNodeUrl: "",
-        p2pThinNodeTokenFile: "",
+        p2pServerUrl: "",
+        p2pServerTokenFile: "",
       } as ForwarderConfigFormState),
     ).toEqual({
       enabled: false,
-      thin_node_url: null,
-      thin_node_token_file: null,
+      server_url: null,
+      server_token_file: null,
     });
   });
 
@@ -529,28 +529,28 @@ describe("validateGeneral", () => {
 });
 
 describe("validateP2p", () => {
-  it("accepts blank thin-node URL for local-only tests", () => {
-    expect(validateP2p(makeForm({ p2pThinNodeUrl: "" }))).toBeNull();
+  it("accepts blank server URL for local-only tests", () => {
+    expect(validateP2p(makeForm({ p2pServerUrl: "" }))).toBeNull();
   });
 
   it("passes for valid http URL", () => {
-    expect(validateP2p(makeForm({ p2pThinNodeUrl: "http://example.com" }))).toBeNull();
+    expect(validateP2p(makeForm({ p2pServerUrl: "http://example.com" }))).toBeNull();
   });
 
   it("passes for valid https URL", () => {
-    expect(validateP2p(makeForm({ p2pThinNodeUrl: "https://example.com:8443" }))).toBeNull();
+    expect(validateP2p(makeForm({ p2pServerUrl: "https://example.com:8443" }))).toBeNull();
   });
 
   it("rejects unsupported URL schemes", () => {
-    expect(validateP2p(makeForm({ p2pThinNodeUrl: "ftp://example.com" }))).toBeTruthy();
+    expect(validateP2p(makeForm({ p2pServerUrl: "ftp://example.com" }))).toBeTruthy();
   });
 
   it("rejects URL without scheme", () => {
-    expect(validateP2p(makeForm({ p2pThinNodeUrl: "example.com" }))).toBeTruthy();
+    expect(validateP2p(makeForm({ p2pServerUrl: "example.com" }))).toBeTruthy();
   });
 
-  it("rejects multiline thin-node token file", () => {
-    expect(validateP2p(makeForm({ p2pThinNodeTokenFile: "/tmp/\ntoken.txt" }))).toBeTruthy();
+  it("rejects multiline server token file", () => {
+    expect(validateP2p(makeForm({ p2pServerTokenFile: "/tmp/\ntoken.txt" }))).toBeTruthy();
   });
 });
 

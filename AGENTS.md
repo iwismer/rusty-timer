@@ -16,7 +16,7 @@ This is the **Rusty Timer P2P Remote Forwarding Suite**, a multi-service Rust wo
 - `services/emulator/` — Simulates IPICO reads for development/testing.
 - `services/forwarder/` — Reads from IPICO hardware, journals to SQLite, exposes status/control HTTP, and serves receiver peers over P2P iroh.
 - `services/receiver/` — Windows/headless receiver: dials forwarders over P2P, stores durable received events, proxies streams to local TCP ports, and writes DBF rows.
-- `services/thin-node/` — SQLite registry, receiver allow-list distribution, announcer push/status board, and HTTP auth boundary.
+- `services/server/` — SQLite registry, receiver allow-list distribution, announcer push/status board, and HTTP auth boundary.
 - `apps/receiver-ui/` — Tauri v2 + SvelteKit frontend for the receiver.
 - `apps/forwarder-ui/` — SvelteKit frontend for forwarder status/control.
 - `apps/shared-ui/` — Shared frontend components and help metadata.
@@ -31,7 +31,7 @@ This is the **Rusty Timer P2P Remote Forwarding Suite**, a multi-service Rust wo
 - Rust MSRV: 1.85.0; pinned toolchain: 1.93.1 (see `rust-toolchain.toml`).
 - Node 24.x / npm 11.x (see root `package.json` + `.nvmrc`).
 - Forwarder config: TOML only (no env var overrides).
-- Thin-node config: env vars for process deployment; SQLite for persistence.
+- Server config: env vars for process deployment; SQLite for persistence.
 - Event delivery: at-least-once; receiver deduplicates durable events by `(stream_id, seq)`.
 - Deterministic CI P2P tests use loopback-only iroh with relays disabled, discovery off, seeded keys, and injected addresses.
 
@@ -89,7 +89,7 @@ cd apps/receiver-ui && npm run format
 
 - `scripts/parse_pcap.py` — Parses `.pcapng` capture files and decodes IPICO protocol frames from reassembled TCP streams. Use this with captures in `docs/ipico-protocol/captures/`.
 - `tshark` — Use alongside `scripts/parse_pcap.py` for raw packet payloads, TCP stream details, timing, or capture validation.
-- `scripts/e2e/run_stack.py` — Boots the loopback emulator → forwarder → receiver-headless → thin-node stack and runs deterministic assertions.
+- `scripts/e2e/run_stack.py` — Boots the loopback emulator → forwarder → receiver-headless → server stack and runs deterministic assertions.
 
 ## Important Notes
 

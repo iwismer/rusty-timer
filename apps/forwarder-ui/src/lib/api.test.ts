@@ -27,13 +27,13 @@ describe("forwarder api client", () => {
         ready_reason: null,
         p2p_connected: true,
         restart_needed: false,
-        thin_node: {
+        server: {
           configured: true,
           endpoint_id: "node-1",
           reachable: true,
           approval_state: "pending",
           waiting_for_approval: true,
-          message: "Waiting for thin-node admin approval",
+          message: "Waiting for server admin approval",
         },
         readers: [],
       }),
@@ -60,7 +60,7 @@ describe("forwarder api client", () => {
     const { saveConfigSection } = await import("./api");
     mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
     await saveConfigSection("p2p", {
-      thin_node_url: "https://thin.example.com",
+      server_url: "https://thin.example.com",
     });
     expect(mockFetch).toHaveBeenCalledWith(
       "/api/v1/config/p2p",

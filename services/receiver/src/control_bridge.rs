@@ -279,7 +279,7 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
         "get_subscriptions" => ok(control_api::get_subscriptions(state).await?),
         "put_subscriptions" => ok(control_api::put_subscriptions(state, arg(args, "body")?).await?),
         "get_status" => ok(control_api::get_status(state).await),
-        "reconnect_thin_node" => ok(control_api::reconnect_thin_node(state).await?),
+        "reconnect_server" => ok(control_api::reconnect_server(state).await?),
         "get_version" => ok(control_api::get_version()),
         "get_logs" => ok(control_api::get_logs(state).await),
         "admin_reset_cursor" => {
@@ -361,7 +361,7 @@ mod tests {
     /// for required arguments or `Handler` errors for unmet preconditions).
     ///
     /// The seeded DB keeps the dispatch side-effect-free: an unparseable
-    /// `thin_node_url` makes network-backed commands fail fast with no I/O, and a
+    /// `server_url` makes network-backed commands fail fast with no I/O, and a
     /// temp DBF path keeps `clear_dbf` writes inside a tempdir.
     #[tokio::test]
     async fn dispatch_table_covers_registry() {

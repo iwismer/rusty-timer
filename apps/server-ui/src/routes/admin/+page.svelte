@@ -17,6 +17,11 @@
       [],
   );
 
+  let activeDevices = $derived(
+    status?.devices.filter((device) => device.approval_state === "active") ??
+      [],
+  );
+
   function displayKind(device: DeviceRecord) {
     return device.device_kind === "forwarder" ? "Forwarder" : "Receiver";
   }
@@ -70,6 +75,31 @@
     }
   }
 
+  async function rename(device: DeviceRecord) {
+    busyEndpoint = device.endpoint_id;
+    error = null;
+    success = null;
+    try {
+      const renamed = await api.renameDevice(
+        device.endpoint_id,
+        nameDrafts[device.endpoint_id] ?? "",
+      );
+      success = `Renamed to ${renamed.display_name ?? renamed.endpoint_id}.`;
+      await loadStatus();
+    } catch (err) {
+      error = String(err);
+    } finally {
+      busyEndpoint = null;
+    }
+  }
+
+  function isUnchanged(device: DeviceRecord) {
+    return (
+      (nameDrafts[device.endpoint_id] ?? "").trim() ===
+      (device.display_name ?? "")
+    );
+  }
+
   onMount(() => {
     void loadStatus();
     poll = setInterval(() => void loadStatus(), 2_000);
@@ -85,7 +115,8 @@
     <div>
       <h1 class="text-2xl font-bold text-text-primary m-0">Device approval</h1>
       <p class="text-sm text-text-muted mt-1 mb-0">
-        Name and approve pending forwarders and receivers.
+        Name and approve pending forwarders and receivers, and rename approved
+        devices.
       </p>
     </div>
     {#if loading}
@@ -154,6 +185,55 @@
               disabled={busyEndpoint === device.endpoint_id}
             >
               {busyEndpoint === device.endpoint_id ? "Approving…" : "Approve"}
+            </button>
+          </form>
+        {/each}
+      </div>
+    {/if}
+  </Card>
+
+  <Card title="Registered devices">
+    {#if !status}
+      <p class="text-sm text-text-muted m-0">Loading devices…</p>
+    {:else if activeDevices.length === 0}
+      <p class="text-sm text-text-muted m-0">No approved devices yet.</p>
+    {:else}
+      <div class="space-y-4">
+        {#each activeDevices as device (device.endpoint_id)}
+          <form
+            class="grid gap-3 rounded-md border border-border bg-surface-2 p-4 md:grid-cols-[1fr_220px_auto] md:items-end"
+            onsubmit={(event) => {
+              event.preventDefault();
+              void rename(device);
+            }}
+          >
+            <div>
+              <p class="text-sm font-semibold text-text-primary m-0">
+                {displayKind(device)}
+              </p>
+              <p class="text-xs text-text-muted font-mono mt-1 mb-0">
+                {device.endpoint_id}
+              </p>
+            </div>
+            <label class="block">
+              <span class="block text-xs font-medium text-text-muted mb-1">
+                Display name
+              </span>
+              <input
+                class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
+                value={nameDrafts[device.endpoint_id] ?? ""}
+                oninput={(event) => handleNameInput(device.endpoint_id, event)}
+                placeholder="Finish Line"
+                disabled={busyEndpoint === device.endpoint_id}
+              />
+            </label>
+            <button
+              type="submit"
+              class="rounded-md border-none bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={busyEndpoint === device.endpoint_id ||
+                isUnchanged(device)}
+            >
+              {busyEndpoint === device.endpoint_id ? "Saving…" : "Rename"}
             </button>
           </form>
         {/each}

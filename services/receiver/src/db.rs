@@ -62,7 +62,7 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {
-    pub thin_node_url: String,
+    pub server_url: String,
     pub token: String,
     pub update_mode: String,
     pub receiver_id: Option<String>,
@@ -210,12 +210,12 @@ impl Db {
         Ok(())
     }
     pub fn load_profile(&self) -> DbResult<Option<Profile>> {
-        let mut s = self.conn.prepare(
-            "SELECT thin_node_url, token, update_mode, receiver_id FROM profile LIMIT 1",
-        )?;
+        let mut s = self
+            .conn
+            .prepare("SELECT server_url, token, update_mode, receiver_id FROM profile LIMIT 1")?;
         let mut rows = s.query_map([], |r| {
             Ok(Profile {
-                thin_node_url: r.get(0)?,
+                server_url: r.get(0)?,
                 token: r.get(1)?,
                 update_mode: r.get(2)?,
                 receiver_id: r.get(3)?,
@@ -235,7 +235,7 @@ impl Db {
         let tx = self.conn.transaction()?;
         tx.execute_batch("DELETE FROM profile")?;
         tx.execute(
-            "INSERT INTO profile (thin_node_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, dbf_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, dbf_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, &dbf_config.path],
         )?;
         tx.commit()?;
@@ -262,7 +262,7 @@ impl Db {
     }
 
     /// Persists the receiver ID. If no profile row exists yet, a minimal
-    /// placeholder row is created (empty thin_node_url/token). Code that checks
+    /// placeholder row is created (empty server_url/token). Code that checks
     /// for a configured profile must use `profile_has_connect_credentials`
     /// rather than just testing for `Some(profile)`.
     pub fn save_receiver_id(&self, receiver_id: &str) -> DbResult<()> {
@@ -272,7 +272,7 @@ impl Db {
         )?;
         if updated == 0 {
             self.conn.execute(
-                "INSERT INTO profile (thin_node_url, token, update_mode, receiver_id)
+                "INSERT INTO profile (server_url, token, update_mode, receiver_id)
                  SELECT '', '', ?1, ?2
                  WHERE NOT EXISTS (SELECT 1 FROM profile)",
                 rusqlite::params![DEFAULT_UPDATE_MODE, receiver_id],
@@ -898,6 +898,8 @@ impl Db {
     }
     fn apply_schema(&self) -> DbResult<()> {
         self.conn.execute_batch(SCHEMA_SQL)?;
+        // Migration: rename the legacy profile.thin_node_url column to server_url.
+        migrate_profile_server_url_column(&self.conn)?;
         // Migration: add update_mode column to existing profile tables.
         apply_add_column_migration(
             &self.conn,
@@ -1059,7 +1061,7 @@ impl Db {
     pub fn reset_profile(&self) -> DbResult<()> {
         self.conn.execute_batch("DELETE FROM profile")?;
         self.conn.execute(
-            "INSERT INTO profile (thin_node_url, token, update_mode) VALUES ('', '', ?1)",
+            "INSERT INTO profile (server_url, token, update_mode) VALUES ('', '', ?1)",
             rusqlite::params![DEFAULT_UPDATE_MODE],
         )?;
         Ok(())
@@ -1091,7 +1093,7 @@ impl Db {
         tx.execute_batch("DELETE FROM subscriptions")?;
         tx.execute_batch("DELETE FROM profile")?;
         tx.execute(
-            "INSERT INTO profile (thin_node_url, token, update_mode) VALUES ('', '', ?1)",
+            "INSERT INTO profile (server_url, token, update_mode) VALUES ('', '', ?1)",
             rusqlite::params![DEFAULT_UPDATE_MODE],
         )?;
         tx.commit()?;
@@ -1384,6 +1386,21 @@ struct TableColumn {
     pk: i64,
 }
 
+/// Rename the legacy `profile.thin_node_url` column to `server_url`.
+///
+/// Idempotent: only renames when the legacy column exists and the new column
+/// does not, so it is a no-op on fresh databases (created with `server_url`)
+/// and on databases already migrated.
+fn migrate_profile_server_url_column(conn: &Connection) -> DbResult<()> {
+    let columns = load_table_columns(conn, "profile")?;
+    let has_legacy = columns.iter().any(|column| column.name == "thin_node_url");
+    let has_new = columns.iter().any(|column| column.name == "server_url");
+    if has_legacy && !has_new {
+        conn.execute_batch("ALTER TABLE profile RENAME COLUMN thin_node_url TO server_url;")?;
+    }
+    Ok(())
+}
+
 fn load_table_columns(conn: &Connection, table: &str) -> DbResult<Vec<TableColumn>> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let rows = stmt.query_map([], |row| {
@@ -1426,6 +1443,34 @@ fn is_duplicate_column_error(message: &str, column_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrates_legacy_thin_node_url_column_to_server_url() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Pre-rename profile schema, created with the legacy column name.
+        conn.execute_batch(
+            "CREATE TABLE profile (
+                 thin_node_url TEXT NOT NULL,
+                 token TEXT NOT NULL,
+                 update_mode TEXT NOT NULL DEFAULT 'check-and-download'
+             );
+             INSERT INTO profile (thin_node_url, token)
+             VALUES ('https://legacy.example', 'legacy-token');",
+        )
+        .unwrap();
+
+        let db = Db { conn };
+        db.apply_pragmas().unwrap();
+        db.apply_schema().unwrap();
+
+        let columns = load_table_columns(&db.conn, "profile").unwrap();
+        assert!(columns.iter().any(|column| column.name == "server_url"));
+        assert!(!columns.iter().any(|column| column.name == "thin_node_url"));
+
+        let profile = db.load_profile().unwrap().expect("profile row preserved");
+        assert_eq!(profile.server_url, "https://legacy.example");
+        assert_eq!(profile.token, "legacy-token");
+    }
 
     #[test]
     fn profile_round_trip_with_update_mode() {
@@ -1642,7 +1687,7 @@ mod tests {
         db.save_receiver_id("recv-test1234").unwrap();
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.receiver_id, Some("recv-test1234".to_owned()));
-        assert_eq!(p.thin_node_url, "");
+        assert_eq!(p.server_url, "");
         assert_eq!(p.token, "");
         assert_eq!(p.update_mode, "check-and-download");
     }
@@ -1655,7 +1700,7 @@ mod tests {
         db.save_receiver_id("recv-new").unwrap();
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.receiver_id, Some("recv-new".to_owned()));
-        assert_eq!(p.thin_node_url, "https://example.com");
+        assert_eq!(p.server_url, "https://example.com");
         assert_eq!(p.token, "tok");
         assert_eq!(p.update_mode, "check-only");
     }
@@ -1740,7 +1785,7 @@ mod tests {
         .unwrap();
         db.reset_profile().unwrap();
         let p = db.load_profile().unwrap().unwrap();
-        assert_eq!(p.thin_node_url, "");
+        assert_eq!(p.server_url, "");
         assert_eq!(p.token, "");
         assert_eq!(p.update_mode, "check-and-download");
         assert_eq!(p.receiver_id, None);
@@ -1751,7 +1796,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         db.reset_profile().unwrap();
         let p = db.load_profile().unwrap().unwrap();
-        assert_eq!(p.thin_node_url, "");
+        assert_eq!(p.server_url, "");
         assert_eq!(p.token, "");
     }
 
@@ -1765,7 +1810,7 @@ mod tests {
         db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
         db.factory_reset().unwrap();
         let p = db.load_profile().unwrap().unwrap();
-        assert_eq!(p.thin_node_url, "");
+        assert_eq!(p.server_url, "");
         assert_eq!(p.token, "");
         assert_eq!(p.receiver_id, None);
         assert!(db.load_subscriptions().unwrap().is_empty());
@@ -1788,7 +1833,7 @@ mod tests {
         db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
         db.clear_data().unwrap();
         let p = db.load_profile().unwrap().unwrap();
-        assert_eq!(p.thin_node_url, "https://example.com");
+        assert_eq!(p.server_url, "https://example.com");
         assert_eq!(p.token, "tok");
         assert_eq!(p.receiver_id, Some("recv-1".to_owned()));
         // Non-profile fields should be reset

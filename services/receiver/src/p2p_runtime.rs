@@ -16,7 +16,7 @@
 //!   hints (when a local port can be resolved);
 //! * a DBF feed (when DBF config is enabled) that rebuilds the DBF file from
 //!   `received_events` after each durable hint and on startup/retry;
-//! * a thin-node announcer push worker (when a thin-node client is configured)
+//! * a server announcer push worker (when a server client is configured)
 //!   that pushes not-yet-pushed rows under a fenced generation after each
 //!   durable hint and on startup/retry.
 //!
@@ -47,7 +47,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::announcer_push::{
-    self, AnnouncerPushClient, ParticipantResolver, ResolvedParticipant, ThinNodeAnnouncerClient,
+    self, AnnouncerPushClient, ParticipantResolver, ResolvedParticipant, ServerAnnouncerClient,
 };
 use crate::control_api::AppState;
 use crate::control_api::ConnectionState;
@@ -78,22 +78,22 @@ pub struct ForwarderPeerConfig {
     pub direct_addr: SocketAddr,
 }
 
-/// Configuration for the optional thin-node client (register / takeover /
+/// Configuration for the optional server client (register / takeover /
 /// announcer rows).
 ///
 /// `Debug` is implemented by hand (not derived) so the bearer token is never
 /// leaked through debug logs; it is rendered as `<redacted>`.
 #[derive(Clone)]
-pub struct ThinNodeClientConfig {
+pub struct ServerClientConfig {
     /// Base URL, e.g. `http://127.0.0.1:8080`.
     pub url: String,
     /// Per-device bearer token. Never logged.
     pub token: String,
 }
 
-impl std::fmt::Debug for ThinNodeClientConfig {
+impl std::fmt::Debug for ServerClientConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ThinNodeClientConfig")
+        f.debug_struct("ServerClientConfig")
             .field("url", &self.url)
             .field("token", &"<redacted>")
             .finish()
@@ -109,11 +109,11 @@ pub struct P2pReceiverConfig {
     pub secret_key_seed: [u8; 32],
     /// An optional explicit forwarder peer to dial. When present it is seeded
     /// into the discovered-forwarders map at startup so the loopback/dev path
-    /// works without a thin node. When absent, forwarders are learned entirely
-    /// from the thin-node discovery feed.
+    /// works without a server. When absent, forwarders are learned entirely
+    /// from the server discovery feed.
     pub forwarder: Option<ForwarderPeerConfig>,
-    /// Optional thin-node client for announcer push and forwarder discovery.
-    pub thin_node: Option<ThinNodeClientConfig>,
+    /// Optional server client for announcer push and forwarder discovery.
+    pub server: Option<ServerClientConfig>,
     /// How often to reconcile canonical subscriptions. Must be at least
     /// [`MIN_RECONCILE_INTERVAL`]; also used as the delivery retry cadence.
     pub reconcile_interval: Duration,
@@ -185,9 +185,9 @@ pub async fn start_receiver_p2p(
     );
 
     // Seed the discovered-forwarders map from the optional explicit forwarder
-    // so the loopback/dev path (and tests) dial it without a thin node. The
-    // discovery task (when a thin node is configured) refreshes the map but
-    // preserves this seed if the thin node hasn't advertised the same endpoint.
+    // so the loopback/dev path (and tests) dial it without a server. The
+    // discovery task (when a server is configured) refreshes the map but
+    // preserves this seed if the server hasn't advertised the same endpoint.
     // An already-present entry (e.g. injected by a test) is left untouched.
     if let Some(forwarder) = &config.forwarder {
         forwarder
@@ -247,7 +247,7 @@ struct StreamWorker {
     /// DBF + announcer task handles.
     tasks: Vec<JoinHandle<()>>,
     /// Whether an announcer push worker was spawned for this worker. When the
-    /// thin-node was unavailable at worker-build time (no fenced generation
+    /// server was unavailable at worker-build time (no fenced generation
     /// yet) this is `false`, and reconciliation rebuilds the worker once a
     /// generation becomes available so announcer push can start.
     announcer_active: bool,
@@ -294,10 +294,10 @@ async fn run_reconcile_loop(
     let mut connect_attempt_rx = state.connect_attempt_rx();
     let mut force_reconnect = false;
 
-    // When a thin node is configured, periodically refresh the discovered
+    // When a server is configured, periodically refresh the discovered
     // forwarders map from its `GET /forwarders` feed. The task observes the
     // same shutdown signal and is awaited/aborted below.
-    let discovery_task = config.thin_node.clone().map(|thin| {
+    let discovery_task = config.server.clone().map(|thin| {
         tokio::spawn(run_discovery_loop(
             Arc::clone(&state),
             thin,
@@ -308,8 +308,8 @@ async fn run_reconcile_loop(
         ))
     });
 
-    // Thin-node announcer generation, acquired by registering this endpoint and
-    // taking over the announcer generation. When the thin-node is unavailable
+    // Server announcer generation, acquired by registering this endpoint and
+    // taking over the announcer generation. When the server is unavailable
     // at startup the takeover is retried every reconcile pass (bounded by the
     // reconcile interval, racing the shutdown signal) until it succeeds rather
     // than permanently disabling announcer push. Workers are rebuilt once a
@@ -329,7 +329,7 @@ async fn run_reconcile_loop(
         }
 
         if announcer_generation.is_none()
-            && let Some(thin) = config.thin_node.clone()
+            && let Some(thin) = config.server.clone()
         {
             let endpoint_id = endpoint.node_id().to_string();
             tokio::select! {
@@ -337,13 +337,13 @@ async fn run_reconcile_loop(
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() { break; }
                 }
-                result = thin_node_startup(thin, endpoint_id) => match result {
+                result = server_startup(thin, endpoint_id) => match result {
                     Ok(generation) => {
-                        info!(generation, "thin-node announcer startup succeeded");
+                        info!(generation, "server announcer startup succeeded");
                         announcer_generation = Some(generation);
                     }
                     Err(e) => {
-                        warn!(error = %e, "thin-node announcer startup failed; will retry");
+                        warn!(error = %e, "server announcer startup failed; will retry");
                     }
                 }
             }
@@ -389,25 +389,25 @@ async fn run_reconcile_loop(
         .await;
 }
 
-async fn thin_node_startup(thin: ThinNodeClientConfig, endpoint_id: String) -> Result<i64, String> {
+async fn server_startup(thin: ServerClientConfig, endpoint_id: String) -> Result<i64, String> {
     tokio::task::spawn_blocking(move || {
-        announcer_push::register_receiver_with_thin_node(&thin.url, &thin.token, &endpoint_id)
+        announcer_push::register_receiver_with_server(&thin.url, &thin.token, &endpoint_id)
             .map_err(|e| e.to_string())?;
         announcer_push::takeover_announcer_generation(&thin.url, &thin.token)
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("thin-node startup task failed: {e}"))?
+    .map_err(|e| format!("server startup task failed: {e}"))?
 }
 
-/// Periodically refresh [`AppState::discovered_forwarders`] from the thin-node
+/// Periodically refresh [`AppState::discovered_forwarders`] from the server
 /// `GET /forwarders` feed. Failures are logged and retried on the next interval;
 /// the task never crashes. The optional explicit `seed` forwarder is preserved
-/// in the refreshed map when the thin node has not advertised that endpoint, so
+/// in the refreshed map when the server has not advertised that endpoint, so
 /// the loopback/dev path keeps working alongside discovery.
 async fn run_discovery_loop(
     state: Arc<AppState>,
-    thin: ThinNodeClientConfig,
+    thin: ServerClientConfig,
     seed: Option<ForwarderPeerConfig>,
     interval: Duration,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -439,7 +439,7 @@ async fn run_discovery_loop(
     }
 }
 
-/// Build the discovered-forwarders snapshot from a thin-node discovery feed.
+/// Build the discovered-forwarders snapshot from a server discovery feed.
 ///
 /// Each entry's endpoint id is validated as a dialable node id exactly once
 /// here, at discovery cadence, so a malformed id is dropped (with a single
@@ -497,7 +497,7 @@ fn build_discovered_forwarders(
 }
 
 async fn fetch_forwarders(
-    thin: &ThinNodeClientConfig,
+    thin: &ServerClientConfig,
 ) -> Result<Vec<announcer_push::ForwarderDiscoveryEntry>, String> {
     let url = thin.url.clone();
     let token = thin.token.clone();
@@ -564,9 +564,9 @@ async fn reconcile_once(
         }
     }
 
-    // Whether announcer push should be running: a thin-node is configured and a
+    // Whether announcer push should be running: a server is configured and a
     // fenced generation has been acquired.
-    let announcer_desired = config.thin_node.is_some() && announcer_generation.is_some();
+    let announcer_desired = config.server.is_some() && announcer_generation.is_some();
 
     // Snapshot discovered forwarders for per-subscription address resolution.
     let discovered = state.discovered_forwarders.read().await.clone();
@@ -712,8 +712,8 @@ async fn start_stream_worker(
 
     // Announcer push.
     let mut announcer_active = false;
-    if let (Some(thin), Some(generation)) = (config.thin_node.clone(), announcer_generation) {
-        match ThinNodeAnnouncerClient::new(&thin.url, thin.token.clone()) {
+    if let (Some(thin), Some(generation)) = (config.server.clone(), announcer_generation) {
+        match ServerAnnouncerClient::new(&thin.url, thin.token.clone()) {
             Ok(client) => {
                 let client: Arc<dyn AnnouncerPushClient + Send + Sync> = Arc::new(client);
                 let db = Arc::clone(&state.db);
@@ -994,7 +994,7 @@ pub fn node_id_for_seed(seed: [u8; 32]) -> String {
 // Shared by the desktop (Tauri) receiver app to start the same P2P lane as
 // `receiver-headless` without CLI flags. This is an explicit local-config
 // affordance for development and the manual dev stack; production forwarder
-// discovery via the thin node is a separate concern. P2P stays disabled unless
+// discovery via the server is a separate concern. P2P stays disabled unless
 // at least one of these keys is present.
 // ---------------------------------------------------------------------------
 
@@ -1004,10 +1004,10 @@ pub const ENV_P2P_FORWARDER_NODE_ID: &str = "RT_P2P_FORWARDER_NODE_ID";
 pub const ENV_P2P_FORWARDER_DIRECT_ADDR: &str = "RT_P2P_FORWARDER_DIRECT_ADDR";
 /// Env var holding the receiver's 64-hex-character secret-key seed.
 pub const ENV_P2P_SECRET_KEY_SEED_HEX: &str = "RT_P2P_SECRET_KEY_SEED_HEX";
-/// Env var for the optional thin-node base URL (set with the token).
-pub const ENV_P2P_THIN_NODE_URL: &str = "RT_P2P_THIN_NODE_URL";
-/// Env var for the optional thin-node bearer token (set with the URL).
-pub const ENV_P2P_THIN_NODE_TOKEN: &str = "RT_P2P_THIN_NODE_TOKEN";
+/// Env var for the optional server base URL (set with the token).
+pub const ENV_P2P_SERVER_URL: &str = "RT_P2P_SERVER_URL";
+/// Env var for the optional server bearer token (set with the URL).
+pub const ENV_P2P_SERVER_TOKEN: &str = "RT_P2P_SERVER_TOKEN";
 /// Env var overriding the subscription reconcile interval, in milliseconds.
 pub const ENV_P2P_RECONCILE_MS: &str = "RT_P2P_RECONCILE_MS";
 
@@ -1016,8 +1016,8 @@ pub const ENV_P2P_RECONCILE_MS: &str = "RT_P2P_RECONCILE_MS";
 /// Mirrors the `receiver-headless` CLI validation: P2P is enabled only when at
 /// least one key is present; the secret-key seed is then required; the forwarder
 /// node id and direct address must be supplied together (both or neither); the
-/// thin-node URL and token must be supplied together; at least one of an
-/// explicit forwarder or a thin node must be configured; and the reconcile
+/// server URL and token must be supplied together; at least one of an
+/// explicit forwarder or a server must be configured; and the reconcile
 /// interval defaults to 1000ms and must be at least [`MIN_RECONCILE_INTERVAL`].
 /// Empty/whitespace-only values are treated as absent.
 pub fn p2p_config_from_lookup(
@@ -1032,15 +1032,15 @@ pub fn p2p_config_from_lookup(
     let forwarder_node_id = trimmed(ENV_P2P_FORWARDER_NODE_ID);
     let forwarder_direct_addr = trimmed(ENV_P2P_FORWARDER_DIRECT_ADDR);
     let secret_key_seed_hex = trimmed(ENV_P2P_SECRET_KEY_SEED_HEX);
-    let thin_node_url = trimmed(ENV_P2P_THIN_NODE_URL);
-    let thin_node_token = trimmed(ENV_P2P_THIN_NODE_TOKEN);
+    let server_url = trimmed(ENV_P2P_SERVER_URL);
+    let server_token = trimmed(ENV_P2P_SERVER_TOKEN);
     let reconcile_ms_raw = trimmed(ENV_P2P_RECONCILE_MS);
 
     let any_present = forwarder_node_id.is_some()
         || forwarder_direct_addr.is_some()
         || secret_key_seed_hex.is_some()
-        || thin_node_url.is_some()
-        || thin_node_token.is_some()
+        || server_url.is_some()
+        || server_token.is_some()
         || reconcile_ms_raw.is_some();
     if !any_present {
         return Ok(None);
@@ -1069,21 +1069,21 @@ pub fn p2p_config_from_lookup(
         }
     };
 
-    let thin_node = match (thin_node_url, thin_node_token) {
-        (Some(url), Some(token)) => Some(ThinNodeClientConfig { url, token }),
+    let server = match (server_url, server_token) {
+        (Some(url), Some(token)) => Some(ServerClientConfig { url, token }),
         (None, None) => None,
         _ => {
             return Err(format!(
-                "{ENV_P2P_THIN_NODE_URL} and {ENV_P2P_THIN_NODE_TOKEN} must be set together"
+                "{ENV_P2P_SERVER_URL} and {ENV_P2P_SERVER_TOKEN} must be set together"
             ));
         }
     };
 
-    if forwarder.is_none() && thin_node.is_none() {
+    if forwarder.is_none() && server.is_none() {
         return Err(format!(
             "P2P requires either an explicit forwarder ({ENV_P2P_FORWARDER_NODE_ID} + \
-             {ENV_P2P_FORWARDER_DIRECT_ADDR}) or a thin node ({ENV_P2P_THIN_NODE_URL} + \
-             {ENV_P2P_THIN_NODE_TOKEN})"
+             {ENV_P2P_FORWARDER_DIRECT_ADDR}) or a server ({ENV_P2P_SERVER_URL} + \
+             {ENV_P2P_SERVER_TOKEN})"
         ));
     }
 
@@ -1109,7 +1109,7 @@ pub fn p2p_config_from_lookup(
     Ok(Some(P2pReceiverConfig {
         secret_key_seed,
         forwarder,
-        thin_node,
+        server,
         reconcile_interval,
     }))
 }
@@ -1162,28 +1162,28 @@ mod tests {
         assert_eq!(fwd.node_id, "endpoint-x");
         assert_eq!(fwd.direct_addr, "127.0.0.1:5000".parse().unwrap());
         assert_eq!(cfg.secret_key_seed, [0xab; 32]);
-        assert!(cfg.thin_node.is_none());
+        assert!(cfg.server.is_none());
         assert_eq!(cfg.reconcile_interval, Duration::from_millis(1000));
     }
 
     #[test]
-    fn p2p_config_from_lookup_accepts_thin_node_only_without_forwarder() {
+    fn p2p_config_from_lookup_accepts_server_only_without_forwarder() {
         let cfg = p2p_config_from_lookup(lookup(&[
             (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
-            (ENV_P2P_THIN_NODE_URL, "http://127.0.0.1:8080"),
-            (ENV_P2P_THIN_NODE_TOKEN, "tok"),
+            (ENV_P2P_SERVER_URL, "http://127.0.0.1:8080"),
+            (ENV_P2P_SERVER_TOKEN, "tok"),
         ]))
         .unwrap()
         .expect("config present");
         assert!(
             cfg.forwarder.is_none(),
-            "thin-node-only config must not require an explicit forwarder"
+            "server-only config must not require an explicit forwarder"
         );
-        assert!(cfg.thin_node.is_some());
+        assert!(cfg.server.is_some());
     }
 
     #[test]
-    fn p2p_config_from_lookup_requires_forwarder_or_thin_node() {
+    fn p2p_config_from_lookup_requires_forwarder_or_server() {
         let err = p2p_config_from_lookup(lookup(&[(ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX)]))
             .unwrap_err();
         assert!(err.contains("either an explicit forwarder"), "got: {err}");
@@ -1197,30 +1197,30 @@ mod tests {
     }
 
     #[test]
-    fn p2p_config_from_lookup_thin_node_requires_both() {
+    fn p2p_config_from_lookup_server_requires_both() {
         let err = p2p_config_from_lookup(lookup(&[
             (ENV_P2P_FORWARDER_NODE_ID, "endpoint-x"),
             (ENV_P2P_FORWARDER_DIRECT_ADDR, "127.0.0.1:5000"),
             (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
-            (ENV_P2P_THIN_NODE_URL, "http://127.0.0.1:8080"),
+            (ENV_P2P_SERVER_URL, "http://127.0.0.1:8080"),
         ]))
         .unwrap_err();
-        assert!(err.contains(ENV_P2P_THIN_NODE_TOKEN), "got: {err}");
+        assert!(err.contains(ENV_P2P_SERVER_TOKEN), "got: {err}");
     }
 
     #[test]
-    fn p2p_config_from_lookup_accepts_thin_node_pair_and_reconcile_override() {
+    fn p2p_config_from_lookup_accepts_server_pair_and_reconcile_override() {
         let cfg = p2p_config_from_lookup(lookup(&[
             (ENV_P2P_FORWARDER_NODE_ID, "endpoint-x"),
             (ENV_P2P_FORWARDER_DIRECT_ADDR, "127.0.0.1:5000"),
             (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
-            (ENV_P2P_THIN_NODE_URL, "http://127.0.0.1:8080"),
-            (ENV_P2P_THIN_NODE_TOKEN, "tok"),
+            (ENV_P2P_SERVER_URL, "http://127.0.0.1:8080"),
+            (ENV_P2P_SERVER_TOKEN, "tok"),
             (ENV_P2P_RECONCILE_MS, "200"),
         ]))
         .unwrap()
         .expect("config present");
-        let thin = cfg.thin_node.expect("thin node configured");
+        let thin = cfg.server.expect("server configured");
         assert_eq!(thin.url, "http://127.0.0.1:8080");
         assert_eq!(thin.token, "tok");
         assert_eq!(cfg.reconcile_interval, Duration::from_millis(200));
@@ -1353,8 +1353,8 @@ mod tests {
     }
 
     #[test]
-    fn thin_node_client_config_debug_redacts_token() {
-        let cfg = ThinNodeClientConfig {
+    fn server_client_config_debug_redacts_token() {
+        let cfg = ServerClientConfig {
             url: "http://127.0.0.1:8080".to_owned(),
             token: "super-secret-token".to_owned(),
         };
@@ -1379,7 +1379,7 @@ mod tests {
                 node_id: "node".to_owned(),
                 direct_addr: "127.0.0.1:1".parse().unwrap(),
             }),
-            thin_node: Some(cfg),
+            server: Some(cfg),
             reconcile_interval: Duration::from_millis(50),
         };
         let outer_rendered = format!("{outer:?}");

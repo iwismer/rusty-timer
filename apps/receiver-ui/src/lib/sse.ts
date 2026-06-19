@@ -18,7 +18,7 @@ type StatusChangedPayload = {
   streams_count: number;
   receiver_id?: string;
 };
-type StatusChangedUpdate = Omit<StatusResponse, "thin_node">;
+type StatusChangedUpdate = Omit<StatusResponse, "server">;
 type StreamsSnapshotPayload = {
   streams: StreamsResponse["streams"];
   degraded: boolean;

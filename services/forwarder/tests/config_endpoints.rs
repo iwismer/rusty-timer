@@ -847,14 +847,14 @@ target = "192.168.1.100:10000"
 }
 
 #[tokio::test]
-async fn post_config_p2p_updates_thin_node_settings() {
+async fn post_config_p2p_updates_server_settings() {
     let (server, config_file) = start_config_server().await;
     let addr = server.local_addr();
 
     let (status, response) = http_post(
         addr,
         "/api/v1/config/p2p",
-        r#"{"enabled":true,"thin_node_url":"https://thin.example.com","thin_node_token_file":"/etc/rusty-timer/forwarder.token"}"#,
+        r#"{"enabled":true,"server_url":"https://thin.example.com","server_token_file":"/etc/rusty-timer/forwarder.token"}"#,
     )
     .await;
     assert_eq!(status, 200, "p2p config update must return 200: {response}");
@@ -872,27 +872,27 @@ async fn post_config_p2p_updates_thin_node_settings() {
         "enabled persisted: {toml_str}"
     );
     assert!(
-        toml_str.contains("thin_node_url = \"https://thin.example.com\""),
-        "thin-node URL persisted: {toml_str}"
+        toml_str.contains("server_url = \"https://thin.example.com\""),
+        "server URL persisted: {toml_str}"
     );
     assert!(
-        toml_str.contains("thin_node_token_file = \"/etc/rusty-timer/forwarder.token\""),
-        "thin-node token file persisted: {toml_str}"
+        toml_str.contains("server_token_file = \"/etc/rusty-timer/forwarder.token\""),
+        "server token file persisted: {toml_str}"
     );
 }
 
 #[tokio::test]
-async fn post_config_p2p_rejects_unsupported_thin_node_url_scheme() {
+async fn post_config_p2p_rejects_unsupported_server_url_scheme() {
     let (server, _config_file) = start_config_server().await;
     let addr = server.local_addr();
 
     let (status, _response) = http_post(
         addr,
         "/api/v1/config/p2p",
-        r#"{"thin_node_url":"ftp://thin.example.com"}"#,
+        r#"{"server_url":"ftp://thin.example.com"}"#,
     )
     .await;
-    assert_eq!(status, 400, "invalid thin-node URL scheme must return 400");
+    assert_eq!(status, 400, "invalid server URL scheme must return 400");
 }
 
 #[tokio::test]

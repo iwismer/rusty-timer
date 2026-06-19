@@ -8,7 +8,7 @@
 //!    admits and tracks a connection under one lock, before any control or data
 //!    stream work happens.
 //! 2. **Last-known persistence.** The allowed set is cached on disk so a
-//!    refresh failure (e.g. an offline thin node) falls back to the previously
+//!    refresh failure (e.g. an offline server) falls back to the previously
 //!    persisted list rather than failing open or failing closed-empty. Updates
 //!    persist *before* the in-memory swap, so a write failure leaves the
 //!    last-known set in force ([`AllowList::apply_update`]).
@@ -16,7 +16,7 @@
 //!    node id ([`AllowList::try_register_connection`]); when an update removes a
 //!    peer, its open connections are force-closed immediately.
 //!
-//! Updates are sourced from the thin node: [`ThinNodeAllowListClient`] fetches
+//! Updates are sourced from the server: [`ServerAllowListClient`] fetches
 //! the active receiver set over bearer-authenticated HTTP, and
 //! [`run_allowlist_distribution`] keeps the list fresh from a startup fetch,
 //! pushed snapshots, and periodic polling. The reader control/status mapping
@@ -38,11 +38,11 @@ use tokio::sync::mpsc;
 /// connection after it is removed from the allow-list.
 const REVOKED_ERROR_CODE: u32 = 3;
 
-/// Production poll cadence for refreshing receiver authorization from the thin node.
+/// Production poll cadence for refreshing receiver authorization from the server.
 pub const DEFAULT_ALLOWLIST_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Conservative bound on a single thin-node allow-list HTTP request. Without a
-/// timeout a hung thin node would stall the distribution loop's initial refresh
+/// Conservative bound on a single server allow-list HTTP request. Without a
+/// timeout a hung server would stall the distribution loop's initial refresh
 /// and polling indefinitely; this caps how long any one fetch can block.
 pub const DEFAULT_ALLOWLIST_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -119,7 +119,7 @@ impl AllowList {
     /// Unlike [`AllowList::apply_update`], this neither persists to the cache
     /// nor revokes anything: it is additive. It exists so statically configured
     /// receivers can be allowed *on top of* the cached/last-known (or
-    /// thin-node-fetched) set at startup, rather than replacing it.
+    /// server-fetched) set at startup, rather than replacing it.
     pub fn add_allowed(&self, additional: impl IntoIterator<Item = NodeId>) {
         let mut state = self.lock();
         state.allowed.extend(additional);
@@ -211,9 +211,9 @@ impl AllowList {
     }
 }
 
-/// HTTP client for fetching receiver allow-list snapshots from the thin node.
+/// HTTP client for fetching receiver allow-list snapshots from the server.
 #[derive(Clone)]
-pub struct ThinNodeAllowListClient {
+pub struct ServerAllowListClient {
     http: reqwest::Client,
     base_url: String,
     bearer_token: Arc<str>,
@@ -221,16 +221,16 @@ pub struct ThinNodeAllowListClient {
 
 // Manual `Debug` so the bearer token can never leak through formatting (e.g.
 // when a struct holding the client is logged or asserted on).
-impl std::fmt::Debug for ThinNodeAllowListClient {
+impl std::fmt::Debug for ServerAllowListClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ThinNodeAllowListClient")
+        f.debug_struct("ServerAllowListClient")
             .field("base_url", &self.base_url)
             .field("bearer_token", &"<redacted>")
             .finish()
     }
 }
 
-impl ThinNodeAllowListClient {
+impl ServerAllowListClient {
     /// Builds a client with the [`DEFAULT_ALLOWLIST_REQUEST_TIMEOUT`] applied to
     /// every allow-list request.
     #[must_use]
@@ -251,7 +251,7 @@ impl ThinNodeAllowListClient {
             // A builder failure here only means the platform TLS/transport
             // backend could not initialise. Never fall back to an untimed
             // client: that would silently drop the request timeout and let a
-            // hung thin node stall the distribution loop indefinitely. Such a
+            // hung server stall the distribution loop indefinitely. Such a
             // failure is a fatal environment problem, so surface it loudly.
             .expect(
                 "reqwest client builder with request timeout must initialise; \
@@ -280,23 +280,23 @@ impl ThinNodeAllowListClient {
 
 /// HTTP client for registering the forwarder and pushing its stream catalog.
 #[derive(Clone)]
-pub struct ThinNodeCatalogClient {
+pub struct ServerCatalogClient {
     http: reqwest::Client,
     base_url: String,
     bearer_token: Arc<str>,
 }
 
-impl std::fmt::Debug for ThinNodeCatalogClient {
+impl std::fmt::Debug for ServerCatalogClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ThinNodeCatalogClient")
+        f.debug_struct("ServerCatalogClient")
             .field("base_url", &self.base_url)
             .field("bearer_token", &"<redacted>")
             .finish()
     }
 }
 
-impl ThinNodeCatalogClient {
-    /// Builds a client with the default thin-node request timeout.
+impl ServerCatalogClient {
+    /// Builds a client with the default server request timeout.
     #[must_use]
     pub fn new(base_url: impl Into<String>, bearer_token: impl Into<String>) -> Self {
         Self::with_timeout(base_url, bearer_token, DEFAULT_ALLOWLIST_REQUEST_TIMEOUT)
@@ -323,7 +323,7 @@ impl ThinNodeCatalogClient {
         }
     }
 
-    /// Self-registers this forwarder as a pending/known device on the thin node.
+    /// Self-registers this forwarder as a pending/known device on the server.
     pub async fn register_forwarder(&self, endpoint_id: &str) -> Result<(), CatalogPushError> {
         let url = format!("{}/register", self.base_url);
         self.http
@@ -361,7 +361,7 @@ struct RegisterForwarderRequest<'a> {
     device_token: &'a str,
 }
 
-/// Wire-format forwarder catalog pushed to the thin node.
+/// Wire-format forwarder catalog pushed to the server.
 #[derive(Debug, Clone, Serialize)]
 pub struct ForwarderCatalog {
     pub endpoint_id: String,
@@ -382,11 +382,11 @@ pub struct ForwarderCatalogStream {
 pub enum CatalogPushError {
     // `reqwest::Error`'s `Display` covers URL/status/transport but never
     // request headers, so the bearer token cannot leak here.
-    #[error("thin-node catalog request failed: {0}")]
+    #[error("server catalog request failed: {0}")]
     Http(#[from] reqwest::Error),
 }
 
-/// Wire-format receiver allow-list snapshot distributed by the thin node.
+/// Wire-format receiver allow-list snapshot distributed by the server.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReceiverAllowListUpdate {
     pub receiver_endpoint_ids: Vec<String>,
@@ -405,15 +405,15 @@ impl ReceiverAllowListUpdate {
 pub enum AllowListRefreshError {
     // `reqwest::Error`'s `Display` covers the failing URL and transport cause
     // but never request headers, so the bearer token cannot leak here.
-    #[error("thin-node allow-list request failed: {0}")]
+    #[error("server allow-list request failed: {0}")]
     Http(#[from] reqwest::Error),
     #[error("failed to apply receiver allow-list update: {0}")]
     Apply(#[from] io::Error),
 }
 
-/// Fetches the current thin-node allow-list and applies it to `allow_list`.
+/// Fetches the current server allow-list and applies it to `allow_list`.
 pub async fn fetch_and_apply_once(
-    client: &ThinNodeAllowListClient,
+    client: &ServerAllowListClient,
     allow_list: &AllowList,
 ) -> Result<Vec<NodeId>, AllowListRefreshError> {
     let update = client.fetch().await?;
@@ -446,7 +446,7 @@ type PollFetch = std::pin::Pin<
 /// Keeps `allow_list` fresh from startup fetches, pushed snapshots, and polling.
 pub async fn run_allowlist_distribution(
     allow_list: AllowList,
-    client: ThinNodeAllowListClient,
+    client: ServerAllowListClient,
     mut pushed_updates: mpsc::Receiver<ReceiverAllowListUpdate>,
     poll_interval: Duration,
 ) {
@@ -816,17 +816,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn offline_thinnode_uses_cached_list() -> TestResult {
+    async fn offline_server_uses_cached_list() -> TestResult {
         let dir = tempfile::tempdir()?;
         let cache_path = dir.path().join("allowlist");
 
         let receiver = EndpointBuilder::test([44; 32]).bind().await?;
 
-        // First run with the thin node online: persist the allowed set.
+        // First run with the server online: persist the allowed set.
         let online = AllowList::load(&cache_path)?;
         online.apply_update([receiver.node_id()])?;
 
-        // Restart with the thin node offline: load only uses the cache, no
+        // Restart with the server offline: load only uses the cache, no
         // refresh. The cached peer must still be authorized.
         let cached = AllowList::load(&cache_path)?;
         assert!(
@@ -888,7 +888,7 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
 
-        let client = ThinNodeCatalogClient::new(base_url, "thin-secret");
+        let client = ServerCatalogClient::new(base_url, "thin-secret");
         client
             .register_forwarder("fwd-node-1")
             .await
@@ -948,7 +948,7 @@ mod tests {
         let receiver_endpoint_ids = Arc::new(TokioMutex::new(vec![receiver.node_id().to_string()]));
         let (base_url, _fetches, server) =
             spawn_test_allowlist_server(receiver_endpoint_ids).await?;
-        let client = ThinNodeAllowListClient::new(base_url, "thin-secret");
+        let client = ServerAllowListClient::new(base_url, "thin-secret");
         let allow = AllowList::default();
 
         fetch_and_apply_once(&client, &allow).await?;
@@ -966,7 +966,7 @@ mod tests {
         let receiver_endpoint_ids = Arc::new(TokioMutex::new(vec![receiver.node_id().to_string()]));
         let (base_url, _fetches, server) =
             spawn_test_allowlist_server(receiver_endpoint_ids).await?;
-        let client = ThinNodeAllowListClient::new(base_url, "thin-secret");
+        let client = ServerAllowListClient::new(base_url, "thin-secret");
         let (tx, rx) = mpsc::channel(1);
         let sync = tokio::spawn(run_allowlist_distribution(
             allow.clone(),
@@ -997,7 +997,7 @@ mod tests {
         let receiver_endpoint_ids = Arc::new(TokioMutex::new(Vec::new()));
         let (base_url, mut fetches, server) =
             spawn_test_allowlist_server(receiver_endpoint_ids.clone()).await?;
-        let client = ThinNodeAllowListClient::new(base_url, "thin-secret");
+        let client = ServerAllowListClient::new(base_url, "thin-secret");
         let allow = AllowList::default();
         let (_tx, rx) = mpsc::channel(1);
         // Short poll interval with real time: the backstop must re-fetch on its
@@ -1084,7 +1084,7 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
 
-        let client = ThinNodeAllowListClient::new(base_url, "thin-secret");
+        let client = ServerAllowListClient::new(base_url, "thin-secret");
         let (tx, rx) = mpsc::channel(1);
         // Short poll interval so a poll fetch starts promptly after the initial
         // fetch admits the receiver.
@@ -1147,7 +1147,7 @@ mod tests {
 
     #[tokio::test]
     async fn debug_redacts_bearer_token() {
-        let client = ThinNodeAllowListClient::new("http://thin.example", "super-secret-token");
+        let client = ServerAllowListClient::new("http://thin.example", "super-secret-token");
         let rendered = format!("{client:?}");
         assert!(
             !rendered.contains("super-secret-token"),
@@ -1157,7 +1157,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hung_thinnode_request_times_out() -> TestResult {
+    async fn hung_server_request_times_out() -> TestResult {
         // A handler that never responds: only the client request timeout can
         // unblock the fetch.
         async fn hang() -> Response {
@@ -1171,7 +1171,7 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
 
-        let client = ThinNodeAllowListClient::with_timeout(
+        let client = ServerAllowListClient::with_timeout(
             base_url,
             "thin-secret",
             Duration::from_millis(200),
@@ -1200,7 +1200,7 @@ mod tests {
         let revoked = EndpointBuilder::test([54; 32]).bind().await?;
         let allow = AllowList::new([retained.node_id(), revoked.node_id()]);
 
-        // The thin node can contain arbitrary endpoint_id text from receiver
+        // The server can contain arbitrary endpoint_id text from receiver
         // registration. An invalid active id must be ignored, while the valid
         // omission of `revoked` still removes its authorization.
         let receiver_endpoint_ids = Arc::new(TokioMutex::new(vec![
@@ -1209,7 +1209,7 @@ mod tests {
         ]));
         let (base_url, _fetches, server) =
             spawn_test_allowlist_server(receiver_endpoint_ids).await?;
-        let client = ThinNodeAllowListClient::new(base_url, "thin-secret");
+        let client = ServerAllowListClient::new(base_url, "thin-secret");
 
         let result = fetch_and_apply_once(&client, &allow).await?;
         assert_eq!(result, vec![revoked.node_id()]);

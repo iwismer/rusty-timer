@@ -21,13 +21,13 @@ describe("api client", () => {
   it("getProfile calls correct command", async () => {
     const { getProfile } = await import("./api");
     mockInvoke.mockResolvedValue({
-      thin_node_url: "https://thin.test",
+      server_url: "https://thin.test",
       token: "tok",
       receiver_id: "recv-test",
     });
     const p = await getProfile();
     expect(mockInvoke).toHaveBeenCalledWith("get_profile");
-    expect(p.thin_node_url).toBe("https://thin.test");
+    expect(p.server_url).toBe("https://thin.test");
     expect(p.receiver_id).toBe("recv-test");
   });
 
@@ -35,13 +35,13 @@ describe("api client", () => {
     const { putProfile } = await import("./api");
     mockInvoke.mockResolvedValue(undefined);
     await putProfile({
-      thin_node_url: "https://thin.test",
+      server_url: "https://thin.test",
       token: "t",
       receiver_id: "recv-test",
     });
     expect(mockInvoke).toHaveBeenCalledWith("put_profile", {
       body: {
-        thin_node_url: "https://thin.test",
+        server_url: "https://thin.test",
         token: "t",
         receiver_id: "recv-test",
       },
@@ -68,29 +68,29 @@ describe("api client", () => {
       local_ok: true,
       streams_count: 0,
       receiver_id: "recv-status",
-      thin_node: {
+      server: {
         configured: true,
         endpoint_id: "node-1",
         reachable: true,
         approval_state: "pending",
         waiting_for_approval: true,
-        message: "Waiting for thin-node admin approval",
+        message: "Waiting for server admin approval",
       },
     });
     const s = await getStatus();
     expect(mockInvoke).toHaveBeenCalledWith("get_status");
     expect(s.connection_state).toBe("disconnected");
     expect(s.receiver_id).toBe("recv-status");
-    expect(s.thin_node.waiting_for_approval).toBe(true);
+    expect(s.server.waiting_for_approval).toBe(true);
   });
 
-  it("reconnectThinNode calls reconnect command", async () => {
-    const { reconnectThinNode } = await import("./api");
+  it("reconnectServer calls reconnect command", async () => {
+    const { reconnectServer } = await import("./api");
     mockInvoke.mockResolvedValue(undefined);
 
-    await reconnectThinNode();
+    await reconnectServer();
 
-    expect(mockInvoke).toHaveBeenCalledWith("reconnect_thin_node");
+    expect(mockInvoke).toHaveBeenCalledWith("reconnect_server");
   });
 
   it("putSubscriptions sends body with subscriptions", async () => {

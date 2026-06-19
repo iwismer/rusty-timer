@@ -7,19 +7,19 @@ service and `receiver-headless` binary.
 
 The receiver:
 
-- Discovers allowed forwarders through the thin node.
+- Discovers allowed forwarders through the server.
 - Connects directly to forwarders over iroh.
 - Writes received events and cursors to local SQLite before acknowledging.
 - Marks gaps when a forwarder reports that the requested cursor was pruned.
 - Replays received events to local TCP ports for timing software.
 - Writes idempotent DBF rows keyed by `(stream_id, seq)`.
-- Optionally pushes sanitized announcer rows to the thin node with generation
+- Optionally pushes sanitized announcer rows to the server with generation
   fencing and idempotency keys.
 
 ## Startup
 
 1. Confirm the receiver data directory is writable.
-2. Configure the thin-node URL, receiver ID, and token in the receiver UI or
+2. Configure the server URL, receiver ID, and token in the receiver UI or
    control API.
 3. Select streams by `forwarder_endpoint_id` and `stream_id`.
 4. Start the desktop app or headless binary:
@@ -29,7 +29,7 @@ The receiver:
    ```
 
 5. Confirm local TCP ports are listening on loopback.
-6. Confirm the thin-node status board shows the receiver online.
+6. Confirm the server status board shows the receiver online.
 
 ## Recovery
 
@@ -64,8 +64,8 @@ path is unavailable, fix filesystem permissions and restart the receiver.
 
 ## Announcer Push
 
-Announcer push is optional. The receiver publishes sanitized rows to the thin
-node using a fenced generation. If an older receiver process is still running,
+Announcer push is optional. The receiver publishes sanitized rows to the server
+using a fenced generation. If an older receiver process is still running,
 its writes are rejected by generation checks.
 
 ## Shutdown
