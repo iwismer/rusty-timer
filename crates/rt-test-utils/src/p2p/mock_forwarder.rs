@@ -31,6 +31,14 @@ pub struct ForwarderScript {
     pub caught_up_through: Option<u64>,
     /// Fault injected into outbound data-plane frames after a subscription.
     pub data_fault: ConnectivityFault,
+    /// When `true`, every outbound data-plane frame's `stream_id` (the
+    /// `SubscribeOk` and each `EventBatch` record, plus any `GapNotice`) is
+    /// rewritten to the `stream_id` carried by the inbound `DataSubscribe`, so a
+    /// single script can serve *any* subscribed stream. This lets one connection
+    /// multiplex several distinct streams (each gets records tagged with its own
+    /// id) without a per-stream script. Defaults to `false`, which serves the
+    /// script's verbatim `stream_id`s (so stream-id-mismatch tests still work).
+    pub echo_subscribed_stream_id: bool,
 }
 
 /// A scripted forwarder peer bound to a loopback iroh endpoint.
@@ -45,6 +53,7 @@ pub struct MockForwarderPeer {
     accept_task: JoinHandle<()>,
     acks: Arc<Mutex<Vec<Ack>>>,
     subscribes: Arc<Mutex<Vec<DataSubscribe>>>,
+    connections: Arc<Mutex<usize>>,
 }
 
 impl MockForwarderPeer {
@@ -55,13 +64,22 @@ impl MockForwarderPeer {
 
         let acks = Arc::new(Mutex::new(Vec::new()));
         let subscribes = Arc::new(Mutex::new(Vec::new()));
+        let connections = Arc::new(Mutex::new(0usize));
         let script = Arc::new(script);
 
         let accept_endpoint = endpoint.clone();
         let accept_acks = Arc::clone(&acks);
         let accept_subscribes = Arc::clone(&subscribes);
+        let accept_connections = Arc::clone(&connections);
         let accept_task = tokio::spawn(async move {
-            accept_loop(accept_endpoint, script, accept_acks, accept_subscribes).await;
+            accept_loop(
+                accept_endpoint,
+                script,
+                accept_acks,
+                accept_subscribes,
+                accept_connections,
+            )
+            .await;
         });
 
         Ok(Self {
@@ -70,6 +88,7 @@ impl MockForwarderPeer {
             accept_task,
             acks,
             subscribes,
+            connections,
         })
     }
 
@@ -93,6 +112,13 @@ impl MockForwarderPeer {
             .clone()
     }
 
+    /// The number of inbound QUIC connections accepted so far. A receiver that
+    /// multiplexes several data streams over one control session opens exactly
+    /// one connection, so this stays `1` while many streams are subscribed.
+    pub fn connection_count(&self) -> usize {
+        *self.connections.lock().expect("connections mutex poisoned")
+    }
+
     /// Stops the accept loop and closes the endpoint.
     pub async fn shutdown(self) {
         self.accept_task.abort();
@@ -105,8 +131,10 @@ async fn accept_loop(
     script: Arc<ForwarderScript>,
     acks: Arc<Mutex<Vec<Ack>>>,
     subscribes: Arc<Mutex<Vec<DataSubscribe>>>,
+    connections: Arc<Mutex<usize>>,
 ) {
     while let Ok(Some(connection)) = endpoint.accept().await {
+        *connections.lock().expect("connections mutex poisoned") += 1;
         let script = Arc::clone(&script);
         let acks = Arc::clone(&acks);
         let subscribes = Arc::clone(&subscribes);
@@ -125,8 +153,33 @@ async fn handle_connection(
     subscribes: Arc<Mutex<Vec<DataSubscribe>>>,
 ) -> HarnessResult {
     let _control_streams = serve_control(&connection, &script).await?;
-    serve_data(&connection, &script, &acks, &subscribes).await?;
+    serve_data_loop(&connection, &script, &acks, &subscribes).await;
     Ok(())
+}
+
+/// Accept data bi-streams on a single connection for as long as it stays open,
+/// serving each accepted stream concurrently in its own task. This is what lets
+/// one control session multiplex several data subscriptions over the same
+/// connection. The loop ends when the connection closes (`accept_bi` errors).
+async fn serve_data_loop(
+    connection: &Connection,
+    script: &Arc<ForwarderScript>,
+    acks: &Arc<Mutex<Vec<Ack>>>,
+    subscribes: &Arc<Mutex<Vec<DataSubscribe>>>,
+) {
+    loop {
+        let (send, recv) = match connection.accept_bi().await {
+            Ok(pair) => pair,
+            // Connection closed (receiver disconnected / shutdown): stop.
+            Err(_) => return,
+        };
+        let script = Arc::clone(script);
+        let acks = Arc::clone(acks);
+        let subscribes = Arc::clone(subscribes);
+        tokio::spawn(async move {
+            let _ = serve_one_data_stream(send, recv, &script, &acks, &subscribes).await;
+        });
+    }
 }
 
 async fn serve_control(
@@ -160,14 +213,13 @@ async fn serve_control(
     Ok((send, recv))
 }
 
-async fn serve_data(
-    connection: &Connection,
+async fn serve_one_data_stream(
+    mut send: SendStream,
+    mut recv: RecvStream,
     script: &ForwarderScript,
     acks: &Arc<Mutex<Vec<Ack>>>,
     subscribes: &Arc<Mutex<Vec<DataSubscribe>>>,
 ) -> HarnessResult {
-    let (mut send, mut recv) = connection.accept_bi().await?;
-
     let data = read_frame::<DataC2F>(&mut recv).await?;
     let subscribe = match data.msg {
         Some(data_c2f::Msg::DataSubscribe(subscribe)) => subscribe,
@@ -178,32 +230,53 @@ async fn serve_data(
         .expect("subscribes mutex poisoned")
         .push(subscribe.clone());
 
+    // When echoing, every outbound frame is tagged with the subscribed
+    // stream_id so one script can serve any stream. Otherwise the script's
+    // verbatim stream_ids are used.
+    let stream_id_for = |script_default: &[u8]| -> Vec<u8> {
+        if script.echo_subscribed_stream_id {
+            subscribe.stream_id.clone()
+        } else {
+            script_default.to_vec()
+        }
+    };
+
+    let mut subscribe_ok = script.subscribe_ok.clone();
+    subscribe_ok.stream_id = stream_id_for(&script.subscribe_ok.stream_id);
     write_faulted_data_frame(
         &mut send,
         &script.data_fault,
         &DataF2C {
-            msg: Some(data_f2c::Msg::SubscribeOk(script.subscribe_ok.clone())),
+            msg: Some(data_f2c::Msg::SubscribeOk(subscribe_ok)),
         },
     )
     .await?;
 
     if let Some(gap_notice) = &script.gap_notice {
+        let mut gap_notice = gap_notice.clone();
+        gap_notice.stream_id = stream_id_for(&gap_notice.stream_id);
         write_faulted_data_frame(
             &mut send,
             &script.data_fault,
             &DataF2C {
-                msg: Some(data_f2c::Msg::GapNotice(gap_notice.clone())),
+                msg: Some(data_f2c::Msg::GapNotice(gap_notice)),
             },
         )
         .await?;
     }
 
     for batch in &script.batches {
+        let mut batch = batch.clone();
+        if script.echo_subscribed_stream_id {
+            for record in &mut batch.records {
+                record.stream_id = subscribe.stream_id.clone();
+            }
+        }
         write_faulted_data_frame(
             &mut send,
             &script.data_fault,
             &DataF2C {
-                msg: Some(data_f2c::Msg::EventBatch(batch.clone())),
+                msg: Some(data_f2c::Msg::EventBatch(batch)),
             },
         )
         .await?;

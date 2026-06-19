@@ -68,6 +68,7 @@ async fn run_harness_self_test() {
         caught_up_through: Some(1),
         gap_notice: None,
         data_fault: ConnectivityFault::healthy(),
+        echo_subscribed_stream_id: false,
     };
 
     let forwarder = MockForwarderPeer::start([1; 32], script)
@@ -190,6 +191,7 @@ async fn p2p_harness_data_fault_drop_outbound_suppresses_subscribe_response() {
         caught_up_through: Some(1),
         gap_notice: None,
         data_fault: ConnectivityFault::dropping(),
+        echo_subscribed_stream_id: false,
     };
 
     let forwarder = MockForwarderPeer::start([3; 32], script)
@@ -265,6 +267,7 @@ async fn run_partition_ack_test() {
         caught_up_through: None,
         gap_notice: None,
         data_fault: ConnectivityFault::partitioned(),
+        echo_subscribed_stream_id: false,
     };
 
     let forwarder = MockForwarderPeer::start([5; 32], script)

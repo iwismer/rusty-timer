@@ -326,6 +326,7 @@ mod tests {
             batches: Vec::new(),
             caught_up_through: None,
             data_fault: ConnectivityFault::delayed(Duration::from_secs(2)),
+            echo_subscribed_stream_id: false,
         }
     }
 

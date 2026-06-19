@@ -825,6 +825,7 @@ mod tests {
             batches: Vec::new(),
             caught_up_through: None,
             data_fault: ConnectivityFault::healthy(),
+            echo_subscribed_stream_id: false,
         }
     }
 
