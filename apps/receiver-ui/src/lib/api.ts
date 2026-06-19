@@ -8,6 +8,9 @@ export interface Profile {
   server_url: string;
   token: string;
   receiver_id: string;
+  // Where the effective server config comes from: "env" (environment override
+  // active), "profile" (stored profile), or "none". Optional for compatibility.
+  server_source?: "env" | "profile" | "none";
 }
 
 export interface StreamEntry {

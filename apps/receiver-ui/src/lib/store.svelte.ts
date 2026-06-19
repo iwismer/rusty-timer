@@ -73,6 +73,10 @@ export const store = $state({
   savedServerUrl: "",
   savedToken: "",
   savedReceiverId: "",
+  // Where the effective server config comes from: "env" | "profile" | "none".
+  // When "env", the server URL/token are overridden by environment variables
+  // and the Config tab shows them read-only.
+  serverSource: "none" as "env" | "profile" | "none",
   saving: false,
   checkingUpdate: false,
   checkMessage: null as string | null,
@@ -796,6 +800,7 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
       store.savedServerUrl = p.server_url;
       store.savedToken = p.token;
       store.savedReceiverId = p.receiver_id;
+      store.serverSource = p.server_source ?? "none";
       // Only overwrite edit fields if the user hasn't made unsaved changes.
       if (!configWasDirty) {
         store.editServerUrl = p.server_url;

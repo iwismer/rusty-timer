@@ -44,6 +44,7 @@
         value={store.editServerUrl}
         oninput={(e) => setEditServerUrl(e.currentTarget.value)}
         placeholder="https://server.example.com"
+        disabled={store.serverSource === "env"}
       />
     </label>
 
@@ -57,8 +58,19 @@
         value={store.editToken}
         oninput={(e) => setEditToken(e.currentTarget.value)}
         placeholder="auth token"
+        disabled={store.serverSource === "env"}
       />
     </label>
+
+    {#if store.serverSource === "env"}
+      <p data-testid="server-env-override-note" class="text-xs text-text-muted">
+        Server URL and token are set by environment variables (<code
+          >RT_P2P_SERVER_URL</code
+        >
+        / <code>RT_P2P_SERVER_TOKEN</code>) and override the stored profile.
+        Unset them to edit here.
+      </p>
+    {/if}
   </div>
 
   <div class="mt-4">

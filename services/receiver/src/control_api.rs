@@ -1046,9 +1046,15 @@ fn is_uuid_format(value: &str) -> bool {
 
 #[derive(Debug, Serialize)]
 pub struct ProfileResponse {
+    /// Effective server URL (resolved: env override > profile).
     pub server_url: String,
+    /// Effective server token (resolved: env override > profile).
     pub token: String,
     pub receiver_id: String,
+    /// Where the effective server config comes from: `"env"` (RT_P2P_SERVER_*
+    /// override active), `"profile"` (stored profile), or `"none"`. The UI
+    /// renders the URL/token read-only when this is `"env"`.
+    pub server_source: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1251,16 +1257,35 @@ pub struct EventTypeRequest {
 
 pub async fn get_profile(state: &AppState) -> Result<ProfileResponse, ReceiverError> {
     let receiver_id = state.receiver_id.read().await.clone();
-    let db = state.db.lock().await;
-    match db.load_profile() {
-        Ok(Some(p)) => Ok(ProfileResponse {
-            server_url: p.server_url,
-            token: p.token,
-            receiver_id,
-        }),
-        Ok(None) => Err(ReceiverError::NotFound("no profile".to_owned())),
-        Err(e) => Err(ReceiverError::Internal(e.to_string())),
+    let profile = {
+        let db = state.db.lock().await;
+        db.load_profile()
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?
+    };
+
+    // Report the effective server config and its source so the UI can show the
+    // real values (and lock the fields) when an environment override is active.
+    let env_url = std::env::var(crate::p2p_runtime::ENV_P2P_SERVER_URL).ok();
+    let env_token = std::env::var(crate::p2p_runtime::ENV_P2P_SERVER_TOKEN).ok();
+    let non_empty = |s: &Option<String>| s.as_deref().map(str::trim).is_some_and(|v| !v.is_empty());
+    let env_active = non_empty(&env_url) && non_empty(&env_token);
+    let resolved = crate::runtime::resolve_server_config(profile.as_ref(), (env_url, env_token));
+    let server_source = if env_active {
+        "env"
+    } else if resolved.is_some() {
+        "profile"
+    } else {
+        "none"
     }
+    .to_owned();
+    let (server_url, token) =
+        resolved.map_or_else(|| (String::new(), String::new()), |s| (s.url, s.token));
+    Ok(ProfileResponse {
+        server_url,
+        token,
+        receiver_id,
+        server_source,
+    })
 }
 
 pub async fn get_mode(state: &AppState) -> Result<ReceiverMode, ReceiverError> {
