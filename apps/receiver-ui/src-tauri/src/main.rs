@@ -740,44 +740,45 @@ fn main() {
             // Start event bridge
             spawn_event_bridge(handle, &state);
 
-            // Optional local/dev P2P lane: when the RT_P2P_* env vars are
-            // present, start the same P2P receiver runtime as
-            // `receiver-headless` so the desktop app connects to a forwarder
-            // over iroh. Inert (no P2P) when the env vars are absent.
+            // P2P lane: always start a runtime so a fresh install has a live
+            // endpoint that a later profile save can reconfigure. The RT_P2P_*
+            // env vars (dev/loopback overrides) take precedence; otherwise a
+            // bare production config is used. The stored profile is the source
+            // of truth for the server URL+token, with the env vars as override.
             let p2p_handle = app.handle().clone();
             let p2p_key_path = data_dir.join("p2p_secret.key");
-            match receiver::p2p_runtime::p2p_config_from_env(p2p_key_path) {
-                Ok(Some(mut p2p_config)) => {
-                    // The stored profile is the source of truth for the server
-                    // URL+token; the RT_P2P_SERVER_* env vars override it.
-                    let profile = tauri::async_runtime::block_on(async {
-                        state.db.lock().await.load_profile().ok().flatten()
-                    });
-                    p2p_config.server = receiver::runtime::resolve_server_config(
-                        profile.as_ref(),
-                        (
-                            std::env::var(receiver::p2p_runtime::ENV_P2P_SERVER_URL).ok(),
-                            std::env::var(receiver::p2p_runtime::ENV_P2P_SERVER_TOKEN).ok(),
-                        ),
-                    );
-                    let p2p_state = state.clone();
-                    let p2p_runtime = tauri::async_runtime::block_on(async {
-                        receiver::p2p_runtime::start_receiver_p2p(p2p_state, p2p_config).await
-                    })
-                    .map_err(|e| -> Box<dyn std::error::Error> {
-                        let msg = format!("Fatal: failed to start P2P receiver runtime: {e}");
+            let mut p2p_config =
+                match receiver::p2p_runtime::p2p_config_from_env(p2p_key_path.clone()) {
+                    Ok(Some(cfg)) => cfg,
+                    Ok(None) => {
+                        receiver::p2p_runtime::P2pReceiverConfig::production_default(p2p_key_path)
+                    }
+                    Err(e) => {
+                        let msg = format!("Fatal: invalid P2P env configuration: {e}");
                         record_app_failure(&p2p_handle, &msg);
-                        Box::new(std::io::Error::other(msg))
-                    })?;
-                    app.manage(Mutex::new(Some(p2p_runtime)));
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    let msg = format!("Fatal: invalid P2P env configuration: {e}");
-                    record_app_failure(&p2p_handle, &msg);
-                    return Err(Box::new(std::io::Error::other(msg)));
-                }
-            }
+                        return Err(Box::new(std::io::Error::other(msg)));
+                    }
+                };
+            let profile = tauri::async_runtime::block_on(async {
+                state.db.lock().await.load_profile().ok().flatten()
+            });
+            p2p_config.server = receiver::runtime::resolve_server_config(
+                profile.as_ref(),
+                (
+                    std::env::var(receiver::p2p_runtime::ENV_P2P_SERVER_URL).ok(),
+                    std::env::var(receiver::p2p_runtime::ENV_P2P_SERVER_TOKEN).ok(),
+                ),
+            );
+            let p2p_state = state.clone();
+            let p2p_runtime = tauri::async_runtime::block_on(async {
+                receiver::p2p_runtime::start_receiver_p2p(p2p_state, p2p_config).await
+            })
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                let msg = format!("Fatal: failed to start P2P receiver runtime: {e}");
+                record_app_failure(&p2p_handle, &msg);
+                Box::new(std::io::Error::other(msg))
+            })?;
+            app.manage(Mutex::new(Some(p2p_runtime)));
 
             // Spawn receiver runtime, keeping the handle so we can await
             // graceful shutdown (cancel session, stop proxies) before exit.

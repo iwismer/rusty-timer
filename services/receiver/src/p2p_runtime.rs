@@ -142,6 +142,25 @@ pub struct P2pReceiverConfig {
     pub reconcile_interval: Duration,
 }
 
+impl P2pReceiverConfig {
+    /// A bare production config: persistent key-path identity, relays and
+    /// discovery enabled, no explicit forwarder, and no server. The caller
+    /// sets `server` from the profile. Used for cold start so a fresh install
+    /// always has a live endpoint that a later profile save can reconfigure.
+    #[must_use]
+    pub fn production_default(key_path: std::path::PathBuf) -> Self {
+        Self {
+            identity: ReceiverIdentity::KeyPath(key_path),
+            relay_disabled: false,
+            discovery_disabled: false,
+            bind_addr_v4: None,
+            forwarder: None,
+            server: None,
+            reconcile_interval: Duration::from_millis(1000),
+        }
+    }
+}
+
 #[cfg(test)]
 impl P2pReceiverConfig {
     /// Loopback/dev config from a seed, replicating `EndpointBuilder::test`
@@ -1565,6 +1584,33 @@ mod tests {
         let id1 = bind_node_id(ReceiverIdentity::KeyPath(key.clone())).await;
         let id2 = bind_node_id(ReceiverIdentity::KeyPath(key)).await;
         assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn production_default_has_keypath_identity_and_production_transport() {
+        let p = std::path::PathBuf::from("/tmp/k.key");
+        let cfg = P2pReceiverConfig::production_default(p.clone());
+        assert!(matches!(cfg.identity, ReceiverIdentity::KeyPath(ref x) if *x == p));
+        assert!(!cfg.relay_disabled);
+        assert!(!cfg.discovery_disabled);
+        assert!(cfg.bind_addr_v4.is_none());
+        assert!(cfg.forwarder.is_none());
+        assert!(cfg.server.is_none());
+    }
+
+    #[tokio::test]
+    async fn bare_runtime_binds_and_idles_without_server_or_forwarder() {
+        use crate::control_api::AppState;
+        use crate::db::Db;
+        // server=None, forwarder=None, loopback transport: the runtime must
+        // bind and run its reconcile loop without panicking (no discovery task,
+        // no announcer workers, generation stays None).
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let cfg = P2pReceiverConfig::for_test_seed([5u8; 32], true);
+        let rt = start_receiver_p2p(Arc::clone(&state), cfg)
+            .await
+            .expect("bare runtime starts");
+        rt.shutdown().await;
     }
 
     /// Bind a minimal loopback runtime with the given identity, capture the
