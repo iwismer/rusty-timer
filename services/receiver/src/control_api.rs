@@ -95,6 +95,24 @@ pub(crate) struct ForwarderRuntimeStatus {
     pub pending_started_at: Option<Instant>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConnectionsFingerprint {
+    aggregate_state: ConnectionState,
+    forwarders: Vec<ForwarderConnectionsFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ForwarderConnectionsFingerprint {
+    endpoint_id: String,
+    state: ForwarderConnState,
+    pending: bool,
+    intent: bool,
+    discovered: bool,
+    display_name: Option<String>,
+    subscribed_count: usize,
+    available_count: usize,
+}
+
 const FORWARDER_PENDING_GRACE: Duration = Duration::from_secs(5);
 
 fn derive_forwarder_state(runtime: ForwarderRuntimeStatus, intent: bool) -> ForwarderStateSnapshot {
@@ -155,6 +173,7 @@ pub struct AppState {
     pub discovered_forwarders: Arc<tokio::sync::RwLock<DiscoveredForwarders>>,
     pub p2p_endpoint_id: Arc<RwLock<Option<String>>>,
     forwarder_runtime: Arc<StdMutex<HashMap<String, ForwarderRuntimeStatus>>>,
+    last_connections_fingerprint: StdMutex<Option<ConnectionsFingerprint>>,
     connect_attempt: AtomicU64,
     connect_attempt_version: watch::Sender<ConnectAttempt>,
     /// Keepalive receiver to prevent the connect-attempt watch channel from being dropped
@@ -214,6 +233,7 @@ impl AppState {
             discovered_forwarders: Arc::new(tokio::sync::RwLock::new(DiscoveredForwarders::new())),
             p2p_endpoint_id: Arc::new(RwLock::new(None)),
             forwarder_runtime: Arc::new(StdMutex::new(HashMap::new())),
+            last_connections_fingerprint: StdMutex::new(None),
             connect_attempt: AtomicU64::new(0),
             connect_attempt_version,
             _connect_attempt_keepalive,
@@ -390,12 +410,18 @@ impl AppState {
 
     pub(crate) async fn recompute_aggregate_connection_state(&self) {
         let statuses = self.forwarder_runtime.lock().unwrap().clone();
-        let intents = self
-            .db
-            .lock()
-            .await
-            .load_forwarder_intents()
-            .unwrap_or_default();
+        let (intents, subscriptions) = {
+            let db = self.db.lock().await;
+            let intents = db.load_forwarder_intents().unwrap_or_default();
+            let subscriptions = match db.load_stream_subscriptions() {
+                Ok(subscriptions) => subscriptions,
+                Err(error) => {
+                    warn!(error = %error, "failed to load subscriptions for connections fingerprint");
+                    Vec::new()
+                }
+            };
+            (intents, subscriptions)
+        };
         let any_connected = statuses
             .values()
             .any(|status| status.control_up || status.data_sessions > 0);
@@ -411,8 +437,74 @@ impl AppState {
         } else {
             ConnectionState::Disconnected
         };
-        let _ = self.ui_tx.send(ReceiverUiEvent::ConnectionsChanged);
+        let discovered = self.discovered_forwarders.read().await.clone();
+        let fingerprint = Self::connections_fingerprint(
+            next.clone(),
+            &statuses,
+            &intents,
+            &discovered,
+            &subscriptions,
+        );
+        let connections_changed = {
+            let mut last = self.last_connections_fingerprint.lock().unwrap();
+            if last.as_ref() == Some(&fingerprint) {
+                false
+            } else {
+                *last = Some(fingerprint);
+                true
+            }
+        };
+        if connections_changed {
+            let _ = self.ui_tx.send(ReceiverUiEvent::ConnectionsChanged);
+        }
         self.set_connection_state_if_changed(next).await;
+    }
+
+    fn connections_fingerprint(
+        aggregate_state: ConnectionState,
+        statuses: &HashMap<String, ForwarderRuntimeStatus>,
+        intents: &HashMap<String, bool>,
+        discovered: &DiscoveredForwarders,
+        subscriptions: &[StreamSubscription],
+    ) -> ConnectionsFingerprint {
+        let mut endpoints: BTreeSet<String> = statuses.keys().cloned().collect();
+        endpoints.extend(intents.keys().cloned());
+        endpoints.extend(discovered.keys().cloned());
+
+        let mut subscribed_counts: HashMap<String, usize> = HashMap::new();
+        for subscription in subscriptions {
+            endpoints.insert(subscription.forwarder_endpoint_id.clone());
+            *subscribed_counts
+                .entry(subscription.forwarder_endpoint_id.clone())
+                .or_default() += 1;
+        }
+
+        let forwarders = endpoints
+            .into_iter()
+            .map(|endpoint_id| {
+                let runtime = statuses.get(&endpoint_id).copied().unwrap_or_default();
+                let intent = *intents.get(&endpoint_id).unwrap_or(&true);
+                let snapshot = derive_forwarder_state(runtime, intent);
+                let discovered_forwarder = discovered.get(&endpoint_id);
+                ForwarderConnectionsFingerprint {
+                    endpoint_id: endpoint_id.clone(),
+                    state: snapshot.state,
+                    pending: snapshot.pending,
+                    intent,
+                    discovered: discovered_forwarder.is_some(),
+                    display_name: discovered_forwarder
+                        .and_then(|forwarder| forwarder.display_name.clone()),
+                    subscribed_count: subscribed_counts.get(&endpoint_id).copied().unwrap_or(0),
+                    available_count: discovered_forwarder
+                        .map_or(0, |forwarder| forwarder.streams.len()),
+                }
+            })
+            .collect();
+
+        ConnectionsFingerprint {
+            aggregate_state,
+            forwarders,
+        }
     }
 
     async fn set_connection_state_if_changed(&self, new_state: ConnectionState) {
@@ -1714,6 +1806,20 @@ mod tests {
     use super::*;
     use crate::db::Db;
 
+    async fn count_connections_changed_events(
+        ui_rx: &mut tokio::sync::broadcast::Receiver<ReceiverUiEvent>,
+    ) -> usize {
+        let mut count = 0;
+        while let Ok(Ok(event)) =
+            tokio::time::timeout(std::time::Duration::from_millis(25), ui_rx.recv()).await
+        {
+            if matches!(event, ReceiverUiEvent::ConnectionsChanged) {
+                count += 1;
+            }
+        }
+        count
+    }
+
     #[test]
     fn derive_forwarder_state_pending_grace_expires_to_unavailable() {
         // Intent to connect, control not up, and the pending clock was started
@@ -1972,6 +2078,61 @@ mod tests {
         assert!(
             saw_connections_changed,
             "forwarder state change should emit ConnectionsChanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn recompute_emits_connections_changed_at_most_once_when_view_is_unchanged() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        state.discovered_forwarders.write().await.insert(
+            "endpoint-a".to_owned(),
+            DiscoveredForwarder {
+                display_name: Some("Finish Line".to_owned()),
+                direct_addrs: Vec::new(),
+                streams: vec![DiscoveredStream {
+                    stream_id: "stream-a".to_owned(),
+                    epoch: 1,
+                    next_seq: 10,
+                }],
+            },
+        );
+        let mut ui_rx = state.ui_tx.subscribe();
+
+        state.recompute_aggregate_connection_state().await;
+        state.recompute_aggregate_connection_state().await;
+
+        let connections_changed_count = count_connections_changed_events(&mut ui_rx).await;
+        assert!(
+            connections_changed_count <= 1,
+            "unchanged connections view should emit at most one ConnectionsChanged event, got {connections_changed_count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recompute_emits_connections_changed_again_when_view_changes() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        state.discovered_forwarders.write().await.insert(
+            "endpoint-a".to_owned(),
+            DiscoveredForwarder {
+                display_name: Some("Finish Line".to_owned()),
+                direct_addrs: Vec::new(),
+                streams: Vec::new(),
+            },
+        );
+        let mut ui_rx = state.ui_tx.subscribe();
+
+        state.recompute_aggregate_connection_state().await;
+        let _ = count_connections_changed_events(&mut ui_rx).await;
+
+        state.update_forwarder_runtime_sync("endpoint-a", |status| status.control_up = true);
+        state.recompute_aggregate_connection_state().await;
+
+        let connections_changed_count = count_connections_changed_events(&mut ui_rx).await;
+        assert_eq!(
+            connections_changed_count, 1,
+            "changed connections view should emit another ConnectionsChanged event"
         );
     }
 
