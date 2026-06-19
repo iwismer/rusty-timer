@@ -83,6 +83,56 @@ describe("getOverallHealth", () => {
     expect(getOverallHealth()).toBe("ok");
   });
 
+  it("returns warn for a pending unavailable forwarder during the connect grace", async () => {
+    const { getOverallHealth, store } = await import("./store.svelte");
+
+    store.connections = {
+      server: server(),
+      forwarders: [forwarder({ state: "unavailable", pending: true })],
+    };
+
+    expect(getOverallHealth()).toBe("warn");
+  });
+
+  it("returns ok when the approved server has no forwarders", async () => {
+    const { getOverallHealth, store } = await import("./store.svelte");
+
+    store.connections = {
+      server: server(),
+      forwarders: [],
+    };
+
+    expect(getOverallHealth()).toBe("ok");
+  });
+
+  it("returns ok when all forwarders are manually disconnected", async () => {
+    const { getOverallHealth, store } = await import("./store.svelte");
+
+    store.connections = {
+      server: server(),
+      forwarders: [
+        forwarder({ endpoint_id: "fwd-1", state: "disconnected" }),
+        forwarder({ endpoint_id: "fwd-2", state: "disconnected" }),
+      ],
+    };
+
+    expect(getOverallHealth()).toBe("ok");
+  });
+
+  it("returns err when server approval is inactive and not pending", async () => {
+    const { getOverallHealth, store } = await import("./store.svelte");
+
+    store.connections = {
+      server: server({
+        approval_state: "revoked",
+        waiting_for_approval: false,
+      }),
+      forwarders: [forwarder()],
+    };
+
+    expect(getOverallHealth()).toBe("err");
+  });
+
   it("returns err when the configured server is unreachable", async () => {
     const { getOverallHealth, store } = await import("./store.svelte");
 

@@ -163,7 +163,13 @@ export function getOverallHealth(): OverallHealth {
   const intendedForwarders = forwarders.filter(
     (forwarder) => forwarder.pending || forwarder.state !== "disconnected",
   );
-  const unavailableForwarders = intendedForwarders.filter(
+  const pendingForwarders = intendedForwarders.filter(
+    (forwarder) => forwarder.pending,
+  );
+  const nonPendingIntendedForwarders = intendedForwarders.filter(
+    (forwarder) => !forwarder.pending,
+  );
+  const unavailableForwarders = nonPendingIntendedForwarders.filter(
     (forwarder) => forwarder.state === "unavailable",
   );
 
@@ -173,19 +179,20 @@ export function getOverallHealth(): OverallHealth {
   if (server.approval_state !== "active" && !server.waiting_for_approval) {
     return "err";
   }
+
+  // Pending forwarders are still connecting, so they contribute warn/amber but
+  // do not count as unavailable for the all-down/red health decision.
   if (
-    intendedForwarders.length > 0 &&
-    unavailableForwarders.length === intendedForwarders.length
+    nonPendingIntendedForwarders.length > 0 &&
+    unavailableForwarders.length === nonPendingIntendedForwarders.length
   ) {
     return "err";
   }
 
   if (server.waiting_for_approval) return "warn";
   if (server.reachable !== true) return "warn";
+  if (pendingForwarders.length > 0) return "warn";
   if (unavailableForwarders.length > 0) return "warn";
-  if (intendedForwarders.some((forwarder) => forwarder.pending)) {
-    return "warn";
-  }
 
   return "ok";
 }
