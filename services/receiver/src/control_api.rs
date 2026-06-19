@@ -1059,6 +1059,14 @@ pub(crate) async fn server_device_status(state: &AppState) -> ServerDeviceStatus
             _ => return ServerDeviceStatus::not_configured(),
         }
     };
+
+    server_device_status_for_url(state, &server_url).await
+}
+
+pub(crate) async fn server_device_status_for_url(
+    state: &AppState,
+    server_url: &str,
+) -> ServerDeviceStatus {
     let endpoint_id = state.p2p_endpoint_id.read().await.clone();
 
     let Some(endpoint_id) = endpoint_id else {

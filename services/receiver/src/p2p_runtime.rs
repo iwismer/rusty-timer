@@ -51,7 +51,8 @@ use crate::announcer_push::{
 use crate::cache::StreamKey;
 use crate::control_api::ConnectionState;
 use crate::control_api::{
-    AppState, DiscoveredForwarder, DiscoveredForwarders, DiscoveredStream, server_device_status,
+    AppState, DiscoveredForwarder, DiscoveredForwarders, DiscoveredStream,
+    server_device_status_for_url,
 };
 use crate::db::{Db, ReceivedEvent, StreamSubscription};
 use crate::local_proxy::LocalProxy;
@@ -301,9 +302,10 @@ async fn run_reconcile_loop(
             state.connect_attempt_rx(),
         ))
     });
-    let approval_watch_task = config.server.as_ref().map(|_| {
+    let approval_watch_task = config.server.as_ref().map(|thin| {
         tokio::spawn(run_approval_watch_loop(
             Arc::clone(&state),
+            thin.url.clone(),
             config.reconcile_interval,
             shutdown_rx.clone(),
         ))
@@ -482,12 +484,13 @@ async fn run_discovery_loop(
 
 async fn run_approval_watch_loop(
     state: Arc<AppState>,
+    server_url: String,
     interval: Duration,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let mut previous_approval: Option<String> = None;
     loop {
-        let status = server_device_status(&state).await;
+        let status = server_device_status_for_url(&state, &server_url).await;
         if approval_became_active(
             previous_approval.as_deref(),
             status.approval_state.as_deref(),
@@ -496,6 +499,8 @@ async fn run_approval_watch_loop(
                 endpoint_id = status.endpoint_id.as_deref().unwrap_or("<unknown>"),
                 "server approval became active; reconnecting receiver"
             );
+            // A transient active→unknown→active flap intentionally re-requests
+            // a connect so server recovery resets backoff and re-dials.
             state.request_connect().await;
             state.emit_resync();
         }
@@ -1419,6 +1424,53 @@ mod tests {
         assert!(!approval_became_active(Some("active"), Some("active")));
         assert!(!approval_became_active(Some("active"), Some("pending")));
         assert!(!approval_became_active(Some("pending"), Some("pending")));
+    }
+
+    #[tokio::test]
+    async fn approval_watch_uses_configured_server_url_without_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _shutdown_rx) = crate::runtime::init_with_data_dir(None, dir.path())
+            .await
+            .expect("init receiver state");
+        state.set_p2p_endpoint_id("receiver-ep".to_owned()).await;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/status",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "devices": [{
+                        "endpoint_id": "receiver-ep",
+                        "approval_state": "active"
+                    }]
+                }))
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let mut connect_rx = state.connect_attempt_rx();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(run_approval_watch_loop(
+            Arc::clone(&state),
+            format!("http://{addr}"),
+            Duration::from_millis(50),
+            shutdown_rx,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(2), connect_rx.changed())
+            .await
+            .expect("approval watch should request reconnect from configured server url")
+            .expect("connect attempt sender should remain open");
+        assert_eq!(state.current_connect_attempt(), 1);
+
+        let _ = shutdown_tx.send(true);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("approval watch should stop")
+            .expect("approval watch task should not panic");
     }
 
     #[test]
