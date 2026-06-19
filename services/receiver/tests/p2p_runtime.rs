@@ -142,6 +142,70 @@ fn base_config(
 }
 
 #[tokio::test]
+async fn runtime_projects_canonical_stream_address_events_to_ui_state() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let forwarder = MockForwarderPeer::start([68; 32], script_two(VALID_FRAME))
+            .await
+            .unwrap();
+        let (node_id, direct) = forwarder_config(&forwarder);
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_state(dir.path()).await;
+        let (config, mut sub) = base_config(node_id.clone(), direct, 69, None);
+        sub.reader_ip = None;
+        sub.forwarder_id = None;
+        state
+            .db
+            .lock()
+            .await
+            .replace_stream_subscriptions(&[sub])
+            .unwrap();
+
+        let runtime = start_receiver_p2p(Arc::clone(&state), config)
+            .await
+            .unwrap();
+
+        poll_until(
+            || {
+                let state = Arc::clone(&state);
+                let node_id = node_id.clone();
+                async move {
+                    state.get_stream_metrics_snapshot().await.iter().any(|m| {
+                        m.forwarder_id == node_id
+                            && m.reader_ip == STREAM_ID
+                            && m.raw_count == 2
+                            && m.dedup_count == 2
+                            && m.epoch_raw_count == 2
+                            && m.unique_chips == 1
+                    })
+                }
+            },
+            Duration::from_secs(10),
+        )
+        .await;
+
+        let streams = state.build_streams_response().await.streams;
+        let stream = streams
+            .iter()
+            .find(|stream| stream.stream_id == STREAM_ID)
+            .expect("subscribed stream present");
+        assert_eq!(stream.forwarder_id.as_deref(), Some(node_id.as_str()));
+        assert_eq!(stream.reader_ip.as_deref(), Some(STREAM_ID));
+        assert_eq!(stream.reads_total, Some(2));
+        assert_eq!(
+            stream.local_port,
+            receiver::ports::default_port(STREAM_ID),
+            "canonical stream address should still get a default local proxy port"
+        );
+
+        runtime.shutdown().await;
+        forwarder.shutdown().await;
+    })
+    .await
+    .expect("runtime_projects_canonical_stream_address_events_to_ui_state timed out");
+}
+
+#[tokio::test]
 async fn runtime_persists_events_and_advances_cursor() {
     tokio::time::timeout(TEST_TIMEOUT, async {
         let forwarder = MockForwarderPeer::start([70; 32], script_two(b"frame"))

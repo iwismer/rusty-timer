@@ -320,15 +320,23 @@ impl AppState {
         let mut streams: Vec<StreamEntry> = Vec::new();
 
         for sub in &subs {
+            let display_reader_ip = sub.reader_ip.clone().or_else(|| {
+                crate::ports::reader_addr_if_port_mappable(&sub.stream_id)
+                    .map(std::borrow::ToOwned::to_owned)
+            });
+            let display_forwarder_id = sub.forwarder_id.clone().or_else(|| {
+                display_reader_ip
+                    .as_ref()
+                    .map(|_| sub.forwarder_endpoint_id.clone())
+            });
             let port = sub.local_port_override.or_else(|| {
-                sub.reader_ip
+                display_reader_ip
                     .as_deref()
                     .and_then(crate::ports::default_port)
             });
-            let counts = sub
-                .forwarder_id
+            let counts = display_forwarder_id
                 .as_deref()
-                .zip(sub.reader_ip.as_deref())
+                .zip(display_reader_ip.as_deref())
                 .and_then(|(forwarder_id, reader_ip)| {
                     let sk = crate::cache::StreamKey::new(forwarder_id, reader_ip);
                     counts_snapshot.get(&sk)
@@ -339,8 +347,8 @@ impl AppState {
             streams.push(StreamEntry {
                 forwarder_endpoint_id: sub.forwarder_endpoint_id.clone(),
                 stream_id: sub.stream_id.clone(),
-                forwarder_id: sub.forwarder_id.clone(),
-                reader_ip: sub.reader_ip.clone(),
+                forwarder_id: display_forwarder_id,
+                reader_ip: display_reader_ip,
                 subscribed: true,
                 local_port: port,
                 event_type: Some(sub.event_type),

@@ -34,7 +34,7 @@
 //! * Announcer pushes run on a blocking task and resolve participants from a
 //!   snapshot of the in-memory chip lookup, searching across all forwarders.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -49,15 +49,17 @@ use tracing::{info, warn};
 use crate::announcer_push::{
     self, AnnouncerPushClient, ParticipantResolver, ResolvedParticipant, ServerAnnouncerClient,
 };
+use crate::cache::StreamKey;
 use crate::control_api::AppState;
 use crate::control_api::ConnectionState;
 use crate::control_api::{DiscoveredForwarder, DiscoveredForwarders, DiscoveredStream};
-use crate::db::{Db, StreamSubscription};
+use crate::db::{Db, ReceivedEvent, StreamSubscription};
 use crate::local_proxy::LocalProxy;
 use crate::p2p_session::{
     BackoffConfig, SessionParams, SessionStatusReporter, run_session_with_reconnect,
 };
-use crate::ports::default_port;
+use crate::ports::{default_port, reader_addr_if_port_mappable};
+use crate::ui_events::ReceiverUiEvent;
 
 /// Capacity of each per-stream durable-hint broadcast channel.
 const HINT_CHANNEL_CAPACITY: usize = 1024;
@@ -710,6 +712,20 @@ async fn start_stream_worker(
         }
     };
 
+    // UI projection for P2P-delivered events. Canonical streams discovered from
+    // the server may not carry legacy `(forwarder_id, reader_ip)` metadata, but
+    // stream IDs that are reader network addresses can still drive the existing
+    // UI count/last-read/metrics model without storing fabricated metadata.
+    if let Some(ui_key) = ui_stream_key(sub) {
+        tasks.push(tokio::spawn(run_ui_projection_worker(
+            Arc::clone(state),
+            stream_id.clone(),
+            ui_key,
+            hint_tx.subscribe(),
+            shutdown_rx.clone(),
+        )));
+    }
+
     // DBF feed.
     let dbf_config = {
         let db = state.db.lock().await;
@@ -772,12 +788,164 @@ async fn start_stream_worker(
     }
 }
 
+/// Resolve the reader address to use for compatibility UI/proxy paths.
+///
+/// Prefer explicit legacy metadata. When it is absent, use the canonical stream
+/// id only if it is a reader network address that can be mapped to a local port.
+fn ui_reader_ip(sub: &StreamSubscription) -> Option<String> {
+    sub.reader_ip.clone().or_else(|| {
+        reader_addr_if_port_mappable(&sub.stream_id).map(std::borrow::ToOwned::to_owned)
+    })
+}
+
+/// Resolve the compatibility stream key used by existing UI count, last-read,
+/// and metrics events.
+fn ui_stream_key(sub: &StreamSubscription) -> Option<StreamKey> {
+    let reader_ip = ui_reader_ip(sub)?;
+    let forwarder_id = sub
+        .forwarder_id
+        .clone()
+        .unwrap_or_else(|| sub.forwarder_endpoint_id.clone());
+    Some(StreamKey::new(forwarder_id, reader_ip))
+}
+
 /// Resolve the local TCP port for a subscription: explicit override first, then
-/// the default mapping from `reader_ip`. Returns `None` if neither yields a
+/// the default mapping from reader metadata, falling back to a canonical stream
+/// id that is itself a reader network address. Returns `None` if none yields a
 /// port.
 fn resolve_local_port(sub: &StreamSubscription) -> Option<u16> {
     sub.local_port_override
-        .or_else(|| sub.reader_ip.as_deref().and_then(default_port))
+        .or_else(|| ui_reader_ip(sub).as_deref().and_then(default_port))
+}
+
+async fn run_ui_projection_worker(
+    state: Arc<AppState>,
+    stream_id: String,
+    ui_key: StreamKey,
+    mut hint_rx: broadcast::Receiver<i64>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    project_stream_ui_state(&state, &stream_id, &ui_key).await;
+    loop {
+        tokio::select! {
+            biased;
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() { break; }
+            }
+            recv = hint_rx.recv() => {
+                match recv {
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                        project_stream_ui_state(&state, &stream_id, &ui_key).await;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+}
+
+async fn project_stream_ui_state(state: &Arc<AppState>, stream_id: &str, ui_key: &StreamKey) {
+    let events = {
+        let db = state.db.lock().await;
+        match db.load_received_events(stream_id) {
+            Ok(events) => events,
+            Err(e) => {
+                warn!(error = %e, %stream_id, "failed to load P2P received events for UI projection");
+                return;
+            }
+        }
+    };
+    if events.is_empty() {
+        return;
+    }
+
+    let mut seqs_by_epoch: HashMap<i64, Vec<i64>> = HashMap::new();
+    for event in &events {
+        seqs_by_epoch
+            .entry(event.epoch)
+            .or_default()
+            .push(event.seq);
+    }
+    for (epoch, seqs) in seqs_by_epoch {
+        state.stream_counts.record_batch(ui_key, epoch, seqs);
+    }
+
+    if let Some(counts) = state.stream_counts.get(ui_key) {
+        let _ = state.ui_tx.send(ReceiverUiEvent::StreamCountsUpdated {
+            updates: vec![crate::ui_events::StreamCountUpdate {
+                forwarder_id: ui_key.forwarder_id.clone(),
+                reader_ip: ui_key.reader_ip.clone(),
+                reads_total: counts.total,
+                reads_epoch: counts.epoch,
+            }],
+        });
+    }
+
+    if let Some(last) = events.last() {
+        let _ = state
+            .ui_tx
+            .send(ReceiverUiEvent::LastRead(crate::ui_events::LastRead {
+                forwarder_id: ui_key.forwarder_id.clone(),
+                reader_ip: ui_key.reader_ip.clone(),
+                chip_id: crate::ui_events::chip_id_from_raw_frame(&last.raw_frame),
+                timestamp: unix_ms_to_rfc3339(last.received_unix_ms)
+                    .unwrap_or_else(|| last.received_unix_ms.to_string()),
+                bib: None,
+                name: None,
+            }));
+    }
+
+    let metrics = stream_metrics_from_events(ui_key, &events);
+    state.cache_stream_metrics(&metrics).await;
+    let _ = state
+        .ui_tx
+        .send(ReceiverUiEvent::StreamMetricsUpdated(metrics));
+    state.emit_streams_snapshot().await;
+}
+
+fn stream_metrics_from_events(
+    ui_key: &StreamKey,
+    events: &[ReceivedEvent],
+) -> crate::ui_events::StreamMetricsPayload {
+    let current_epoch = events.iter().map(|event| event.epoch).max();
+    let epoch_events = events
+        .iter()
+        .filter(|event| Some(event.epoch) == current_epoch)
+        .collect::<Vec<_>>();
+    let unique_chips = epoch_events
+        .iter()
+        .map(|event| crate::ui_events::chip_id_from_raw_frame(&event.raw_frame))
+        .collect::<HashSet<_>>()
+        .len();
+    let epoch_last_received_ms = epoch_events
+        .iter()
+        .map(|event| event.received_unix_ms)
+        .max();
+    let lag_ms = epoch_last_received_ms
+        .map(|last| u64::try_from(now_unix_ms().saturating_sub(last)).unwrap_or(0));
+
+    crate::ui_events::StreamMetricsPayload {
+        forwarder_id: ui_key.forwarder_id.clone(),
+        reader_ip: ui_key.reader_ip.clone(),
+        raw_count: i64::try_from(events.len()).unwrap_or(i64::MAX),
+        dedup_count: i64::try_from(events.len()).unwrap_or(i64::MAX),
+        retransmit_count: 0,
+        lag_ms,
+        epoch_raw_count: i64::try_from(epoch_events.len()).unwrap_or(i64::MAX),
+        epoch_dedup_count: i64::try_from(epoch_events.len()).unwrap_or(i64::MAX),
+        epoch_retransmit_count: 0,
+        unique_chips: i64::try_from(unique_chips).unwrap_or(i64::MAX),
+        epoch_last_received_at: epoch_last_received_ms.and_then(unix_ms_to_rfc3339),
+        epoch_lag_ms: lag_ms,
+    }
+}
+
+fn unix_ms_to_rfc3339(unix_ms: i64) -> Option<String> {
+    use chrono::TimeZone as _;
+    chrono::Utc
+        .timestamp_millis_opt(unix_ms)
+        .single()
+        .map(|dt| dt.to_rfc3339())
 }
 
 async fn run_dbf_worker(
@@ -1273,6 +1441,20 @@ mod tests {
             dbf_delivered_unix_ms: None,
         })
         .unwrap();
+    }
+
+    #[test]
+    fn resolve_local_port_falls_back_to_canonical_stream_address() {
+        let sub = StreamSubscription {
+            forwarder_endpoint_id: "endpoint".to_owned(),
+            stream_id: "127.0.0.1:50057".to_owned(),
+            local_port_override: None,
+            event_type: EventType::Finish,
+            forwarder_id: None,
+            reader_ip: None,
+        };
+
+        assert_eq!(resolve_local_port(&sub), default_port(&sub.stream_id));
     }
 
     /// Poll an async predicate until it returns `true` or `timeout` elapses.

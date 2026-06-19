@@ -71,6 +71,12 @@ pub fn default_port(ip: &str) -> Option<u16> {
     Some((DYNAMIC_MIN_PORT as u32 + offset) as u16)
 }
 
+/// Return `value` when it is a reader network address that can drive display
+/// metadata and default local-port resolution.
+pub fn reader_addr_if_port_mappable(value: &str) -> Option<&str> {
+    default_port(value).map(|_| value)
+}
+
 /// Resolve port assignments for a list of subscriptions.
 ///
 /// For each subscription:
