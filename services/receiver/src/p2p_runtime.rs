@@ -137,6 +137,12 @@ pub struct P2pReceiverConfig {
     pub forwarder: Option<ForwarderPeerConfig>,
     /// Optional server client for announcer push and forwarder discovery.
     pub server: Option<ServerClientConfig>,
+    /// The raw server override (env vars for the desktop app, CLI flags for
+    /// headless) captured at construction, as `(url, token)`. The reconcile
+    /// loop re-resolves the effective server from `(profile, server_override)`
+    /// on a config-change signal, so a headless CLI override is not silently
+    /// lost when the profile is saved. Empty when there is no override source.
+    pub server_override: (Option<String>, Option<String>),
     /// How often to reconcile canonical subscriptions. Must be at least
     /// [`MIN_RECONCILE_INTERVAL`]; also used as the delivery retry cadence.
     pub reconcile_interval: Duration,
@@ -156,6 +162,7 @@ impl P2pReceiverConfig {
             bind_addr_v4: None,
             forwarder: None,
             server: None,
+            server_override: (None, None),
             reconcile_interval: Duration::from_millis(1000),
         }
     }
@@ -177,6 +184,7 @@ impl P2pReceiverConfig {
             )),
             forwarder: None,
             server: None,
+            server_override: (None, None),
             reconcile_interval: Duration::from_millis(1000),
         }
     }
@@ -191,6 +199,7 @@ impl P2pReceiverConfig {
             bind_addr_v4: None,
             forwarder: None,
             server: None,
+            server_override: (None, None),
             reconcile_interval: Duration::from_millis(1000),
         }
     }
@@ -326,6 +335,31 @@ pub async fn start_receiver_p2p(
     ));
 
     Ok(P2pReceiverRuntime { shutdown_tx, task })
+}
+
+/// Replace the discovered-forwarders map with just the optional explicit
+/// (loopback/dev) forwarder seed. Called when the server config changes so
+/// forwarders learned from the previous server are not re-dialed; the new
+/// server's discovery loop (if any) then repopulates the map. An invalid seed
+/// node id is dropped because it cannot be dialed.
+async fn reseed_discovered_forwarders(
+    state: &Arc<AppState>,
+    forwarder: Option<&ForwarderPeerConfig>,
+) {
+    let mut discovered = state.discovered_forwarders.write().await;
+    discovered.clear();
+    if let Some(forwarder) = forwarder
+        && forwarder.node_id.parse::<NodeId>().is_ok()
+    {
+        discovered.insert(
+            forwarder.node_id.clone(),
+            DiscoveredForwarder {
+                display_name: None,
+                direct_addrs: vec![forwarder.direct_addr],
+                streams: Vec::new(),
+            },
+        );
+    }
 }
 
 /// Per-stream auxiliary worker bundle (local proxy, UI projection, DBF, announcer).
@@ -505,12 +539,13 @@ async fn run_reconcile_loop(
                     // announcer clients pick up the new server. This causes a
                     // brief session reconnect, which is acceptable and bounded.
                     let profile = state.db.lock().await.load_profile().ok().flatten();
+                    // Re-resolve using the override captured at construction
+                    // (env vars for desktop, CLI flags for headless) so a
+                    // headless CLI override survives a profile save instead of
+                    // silently falling back to the stored profile.
                     let new_server = crate::runtime::resolve_server_config(
                         profile.as_ref(),
-                        (
-                            std::env::var(ENV_P2P_SERVER_URL).ok(),
-                            std::env::var(ENV_P2P_SERVER_TOKEN).ok(),
-                        ),
+                        config.server_override.clone(),
                     );
                     if new_server != config.server {
                         info!("receiver server config changed; rebinding server-bound tasks");
@@ -533,6 +568,24 @@ async fn run_reconcile_loop(
                             .server
                             .clone()
                             .map(|thin| spawn_approval_watch(thin, shutdown_rx.clone()));
+                        // Drop forwarders learned from the old server so stale
+                        // peers are not re-dialed; re-seed only the explicit
+                        // (loopback/dev) forwarder. When the new server is
+                        // present its discovery loop repopulates the map; when
+                        // the server was cleared the map stays empty so no
+                        // old-server workers are rebuilt.
+                        reseed_discovered_forwarders(&state, config.forwarder.as_ref()).await;
+                        // Announcer generation fencing is per-stream and
+                        // monotonic; a replacement server may start at a lower
+                        // generation, which would otherwise permanently stale
+                        // every push. Reset the fences so the new server's
+                        // generation is accepted fresh.
+                        if let Err(e) = {
+                            let db = state.db.lock().await;
+                            db.reset_announcer_fences()
+                        } {
+                            warn!(error = %e, "failed to reset announcer fences on server change");
+                        }
                         // Force re-running register/takeover and rebuilding all
                         // forwarder + stream workers against the new server.
                         announcer_generation = None;
@@ -1481,10 +1534,11 @@ fn parse_env_flag(value: Option<String>, key: &str) -> Result<bool, String> {
 /// Mirrors the `receiver-headless` CLI validation: P2P is enabled only when at
 /// least one key is present; the forwarder node id and direct address must be
 /// supplied together (both or neither); the server URL and token must be
-/// supplied together; at least one of an explicit forwarder or a server must be
-/// configured; and the reconcile interval defaults to 1000ms and must be at
-/// least [`MIN_RECONCILE_INTERVAL`]. Empty/whitespace-only values are treated
-/// as absent.
+/// supplied together; and the reconcile interval defaults to 1000ms and must be
+/// at least [`MIN_RECONCILE_INTERVAL`]. Empty/whitespace-only values are treated
+/// as absent. A config with only identity/transport/reconcile knobs (no
+/// forwarder, no server) is valid and returns `server: None`; the caller then
+/// attaches the resolved profile/override server.
 ///
 /// Identity: a seed and an explicit key path are mutually exclusive. When
 /// neither is given the receiver uses a persistent key at `default_key_path`
@@ -1547,6 +1601,7 @@ pub fn p2p_config_from_lookup(
         }
     };
 
+    let server_override = (server_url.clone(), server_token.clone());
     let server = match (server_url, server_token) {
         (Some(url), Some(token)) => Some(ServerClientConfig { url, token }),
         (None, None) => None,
@@ -1556,14 +1611,6 @@ pub fn p2p_config_from_lookup(
             ));
         }
     };
-
-    if forwarder.is_none() && server.is_none() {
-        return Err(format!(
-            "P2P requires either an explicit forwarder ({ENV_P2P_FORWARDER_NODE_ID} + \
-             {ENV_P2P_FORWARDER_DIRECT_ADDR}) or a server ({ENV_P2P_SERVER_URL} + \
-             {ENV_P2P_SERVER_TOKEN})"
-        ));
-    }
 
     // Identity: seed XOR explicit key path; fall back to the persistent default
     // key path when neither is given.
@@ -1621,6 +1668,7 @@ pub fn p2p_config_from_lookup(
         bind_addr_v4,
         forwarder,
         server,
+        server_override,
         reconcile_interval,
     }))
 }
@@ -1692,6 +1740,56 @@ mod tests {
         rt.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn reseed_discovered_forwarders_clears_old_and_keeps_valid_seed() {
+        use crate::control_api::AppState;
+        use crate::db::Db;
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        // Populate with forwarders learned from a previous server.
+        {
+            let mut d = state.discovered_forwarders.write().await;
+            for id in ["old-a", "old-b"] {
+                d.insert(
+                    id.to_owned(),
+                    DiscoveredForwarder {
+                        display_name: None,
+                        direct_addrs: vec!["127.0.0.1:1".parse().unwrap()],
+                        streams: Vec::new(),
+                    },
+                );
+            }
+        }
+
+        // Clearing with no explicit seed (server cleared) empties the map, so
+        // no old-server forwarder can be re-dialed.
+        reseed_discovered_forwarders(&state, None).await;
+        assert!(state.discovered_forwarders.read().await.is_empty());
+
+        // Re-populate, then reseed with a valid explicit (loopback/dev)
+        // forwarder: only that entry survives.
+        {
+            let mut d = state.discovered_forwarders.write().await;
+            d.insert(
+                "old-a".to_owned(),
+                DiscoveredForwarder {
+                    display_name: None,
+                    direct_addrs: vec!["127.0.0.1:1".parse().unwrap()],
+                    streams: Vec::new(),
+                },
+            );
+        }
+        let seed_id = SecretKey::from_bytes(&[7u8; 32]).public().to_string();
+        let seed = ForwarderPeerConfig {
+            node_id: seed_id.clone(),
+            direct_addr: "127.0.0.1:9000".parse().unwrap(),
+        };
+        reseed_discovered_forwarders(&state, Some(&seed)).await;
+        let map = state.discovered_forwarders.read().await;
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&seed_id));
+        assert!(!map.contains_key("old-a"));
+    }
+
     /// Bind a minimal loopback runtime with the given identity, capture the
     /// resulting p2p node id, and shut it down.
     #[cfg(test)]
@@ -1709,6 +1807,7 @@ mod tests {
             )),
             forwarder: None,
             server: None,
+            server_override: (None, None),
             reconcile_interval: Duration::from_millis(1000),
         };
         let rt = start_receiver_p2p(Arc::clone(&state), cfg)
@@ -1904,9 +2003,39 @@ mod tests {
     }
 
     #[test]
-    fn p2p_config_from_lookup_requires_forwarder_or_server() {
-        let err = cfg_from(&[(ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX)]).unwrap_err();
-        assert!(err.contains("either an explicit forwarder"), "got: {err}");
+    fn p2p_config_from_lookup_allows_transport_only_without_forwarder_or_server() {
+        // Only identity/transport knobs set (no forwarder, no server). This is
+        // valid: the caller attaches the resolved profile/override server, so a
+        // dev override like RT_P2P_RELAY_DISABLED=1 with a stored-profile server
+        // must not fail at startup.
+        let cfg = cfg_from(&[
+            (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
+            (ENV_P2P_RELAY_DISABLED, "1"),
+        ])
+        .unwrap()
+        .expect("transport-only config is valid");
+        assert!(cfg.forwarder.is_none());
+        assert!(cfg.server.is_none());
+        assert_eq!(cfg.server_override, (None, None));
+        assert!(cfg.relay_disabled);
+    }
+
+    #[test]
+    fn p2p_config_from_lookup_captures_server_override() {
+        let cfg = cfg_from(&[
+            (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
+            (ENV_P2P_SERVER_URL, "http://127.0.0.1:8080"),
+            (ENV_P2P_SERVER_TOKEN, "tok"),
+        ])
+        .unwrap()
+        .expect("config present");
+        assert_eq!(
+            cfg.server_override,
+            (
+                Some("http://127.0.0.1:8080".to_owned()),
+                Some("tok".to_owned())
+            )
+        );
     }
 
     #[test]
@@ -2116,6 +2245,7 @@ mod tests {
                 direct_addr: "127.0.0.1:1".parse().unwrap(),
             }),
             server: Some(cfg),
+            server_override: (None, None),
             reconcile_interval: Duration::from_millis(50),
         };
         let outer_rendered = format!("{outer:?}");

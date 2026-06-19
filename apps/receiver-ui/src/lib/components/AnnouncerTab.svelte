@@ -7,11 +7,23 @@
   } from "$lib/store.svelte";
   import { inputClass, btnSecondary } from "$lib/ui-classes";
 
+  // Legacy Race Director `.ppl`/`.bibchip` files are frequently Windows-1252
+  // (accented names). `File.text()` assumes UTF-8 and would mangle them, so
+  // decode strict UTF-8 first and fall back to Windows-1252 on invalid bytes.
+  async function decodeFile(file: File): Promise<string> {
+    const buf = await file.arrayBuffer();
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(buf);
+    } catch {
+      return new TextDecoder("windows-1252").decode(buf);
+    }
+  }
+
   async function onParticipantsFile(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     if (!file) return;
-    const text = await file.text();
+    const text = await decodeFile(file);
     await importParticipantsText(text);
     input.value = "";
   }
@@ -20,7 +32,7 @@
     const input = e.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     if (!file) return;
-    const text = await file.text();
+    const text = await decodeFile(file);
     await importChipsText(text);
     input.value = "";
   }

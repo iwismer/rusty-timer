@@ -169,6 +169,7 @@ async fn p2p_startup_failure_does_not_leak_control_server() {
                 direct_addr: "127.0.0.1:5000".parse().expect("parse addr"),
             }),
             server: None,
+            server_override: (None, None),
             reconcile_interval: Duration::from_millis(100),
         }),
     };

@@ -800,13 +800,15 @@ fn main() {
             let profile = tauri::async_runtime::block_on(async {
                 state.db.lock().await.load_profile().ok().flatten()
             });
-            p2p_config.server = receiver::runtime::resolve_server_config(
-                profile.as_ref(),
-                (
-                    std::env::var(receiver::p2p_runtime::ENV_P2P_SERVER_URL).ok(),
-                    std::env::var(receiver::p2p_runtime::ENV_P2P_SERVER_TOKEN).ok(),
-                ),
+            let server_override = (
+                std::env::var(receiver::p2p_runtime::ENV_P2P_SERVER_URL).ok(),
+                std::env::var(receiver::p2p_runtime::ENV_P2P_SERVER_TOKEN).ok(),
             );
+            p2p_config.server =
+                receiver::runtime::resolve_server_config(profile.as_ref(), server_override.clone());
+            // Keep the env override so a live profile save re-resolves with
+            // `env > profile` rather than dropping the override.
+            p2p_config.server_override = server_override;
             let p2p_state = state.clone();
             let p2p_runtime = tauri::async_runtime::block_on(async {
                 receiver::p2p_runtime::start_receiver_p2p(p2p_state, p2p_config).await

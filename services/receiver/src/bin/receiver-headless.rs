@@ -272,15 +272,9 @@ fn build_p2p_config(
             ));
         }
     };
-
-    if forwarder.is_none() && server.is_none() {
-        return Err(format!(
-            "P2P requires either an explicit forwarder (--p2p-forwarder-node-id + \
-             --p2p-forwarder-direct-addr) or a server (--p2p-server-url + \
-             --p2p-server-token)\n{}",
-            usage()
-        ));
-    }
+    // A config with only identity/transport/reconcile flags (no forwarder, no
+    // server) is valid: the stored profile supplies the server. `start`
+    // resolves `(profile, CLI override)` and sets `server`/`server_override`.
 
     let identity = match (secret_key_seed, secret_key_path) {
         (Some(_), Some(_)) => {
@@ -316,6 +310,10 @@ fn build_p2p_config(
         bind_addr_v4,
         forwarder,
         server,
+        // Placeholder; `HeadlessHost::start` takes `server` as the CLI override
+        // and sets both `server` and `server_override` after profile
+        // resolution so a profile save cannot drop the CLI override.
+        server_override: (None, None),
         reconcile_interval,
     }))
 }
@@ -427,15 +425,21 @@ mod tests {
     }
 
     #[test]
-    fn p2p_requires_forwarder_or_server() {
-        let err = parse_args(args(&[
+    fn p2p_transport_only_parses_without_forwarder_or_server() {
+        // Identity/transport flags with no forwarder and no server are valid:
+        // `HeadlessHost::start` resolves the server from the stored profile.
+        let config = parse_args(args(&[
             "--data-dir",
             "/tmp/x",
             "--p2p-secret-key-seed-hex",
             SEED_HEX,
+            "--p2p-relay-disabled",
         ]))
-        .unwrap_err();
-        assert!(err.contains("either an explicit forwarder"), "got: {err}");
+        .unwrap();
+        let p2p = config.p2p.expect("p2p config present");
+        assert!(p2p.forwarder.is_none());
+        assert!(p2p.server.is_none());
+        assert!(p2p.relay_disabled);
     }
 
     #[test]

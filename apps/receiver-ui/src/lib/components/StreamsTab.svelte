@@ -573,6 +573,7 @@
                             data-testid="announcer-publish-toggle-{key}"
                             type="checkbox"
                             checked={stream.announcer_publish ?? false}
+                            disabled={store.streamAnnouncerBusy[key]}
                             onclick={(e) => e.stopPropagation()}
                             onchange={(e) => {
                               e.stopPropagation();

@@ -832,6 +832,19 @@ impl Db {
         })
     }
 
+    /// Clear all per-stream announcer source-generation fences.
+    ///
+    /// Fences are monotonic per stream, which is correct for a single server
+    /// but wrong across a server change: a replacement announcer backend may
+    /// start at a lower generation and would otherwise be fenced out forever.
+    /// The reconcile loop calls this when the server config changes so the new
+    /// server's generation is accepted fresh.
+    pub fn reset_announcer_fences(&self) -> DbResult<()> {
+        self.conn
+            .execute_batch("DELETE FROM announcer_source_fence")?;
+        Ok(())
+    }
+
     pub fn load_received_event(
         &self,
         stream_id: &str,
@@ -1199,6 +1212,9 @@ impl Db {
         tx.execute_batch("DELETE FROM earliest_epochs")?;
         tx.execute_batch("DELETE FROM subscriptions")?;
         tx.execute_batch("DELETE FROM forwarder_intent")?;
+        tx.execute_batch("DELETE FROM announcer_publish_streams")?;
+        tx.execute_batch("DELETE FROM participants")?;
+        tx.execute_batch("DELETE FROM bib_chips")?;
         tx.execute_batch("DELETE FROM profile")?;
         tx.execute(
             "INSERT INTO profile (server_url, token, update_mode) VALUES ('', '', ?1)",
@@ -2084,6 +2100,18 @@ mod tests {
         db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
         db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
         db.set_forwarder_intent("f1", false).unwrap();
+        db.set_announcer_enabled(true).unwrap();
+        db.set_stream_announcer_publish("10.0.0.1:10000", true)
+            .unwrap();
+        db.replace_participants(&[crate::participants::Participant {
+            bib: 1,
+            last: "Last".to_owned(),
+            first: "First".to_owned(),
+            affiliation: String::new(),
+            gender: "X".to_owned(),
+        }])
+        .unwrap();
+        db.replace_bib_chips(&[(1, "0a1b".to_owned())]).unwrap();
         db.factory_reset().unwrap();
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.server_url, "");
@@ -2095,6 +2123,30 @@ mod tests {
         // forwarder_intent is cleared, so the default-true contract is restored.
         assert!(db.load_forwarder_intents().unwrap().is_empty());
         assert!(db.forwarder_should_connect("f1").unwrap());
+        // New tables and the global toggle must also be wiped.
+        assert!(!db.load_announcer_enabled().unwrap());
+        assert!(db.load_announcer_publish_streams().unwrap().is_empty());
+        assert!(db.load_chip_to_participant().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reset_announcer_fences_allows_lower_generation_after_server_change() {
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = "11111111-1111-1111-1111-111111111111";
+        // Fence advances to 10 against the original server.
+        db.accept_announcer_generation(stream_id, 10).unwrap();
+        // A replacement server starting at a lower generation would be fenced.
+        assert!(matches!(
+            db.accept_announcer_generation(stream_id, 3).unwrap(),
+            AnnouncerGenerationAcceptance::Stale { .. }
+        ));
+        // Resetting the fence (done on a server change) accepts it fresh.
+        db.reset_announcer_fences().unwrap();
+        assert_eq!(db.load_announcer_fence(stream_id).unwrap(), None);
+        assert_eq!(
+            db.accept_announcer_generation(stream_id, 3).unwrap(),
+            AnnouncerGenerationAcceptance::Current { generation: 3 }
+        );
     }
 
     #[test]

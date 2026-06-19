@@ -153,6 +153,7 @@ fn base_config(
             direct_addr: direct,
         }),
         server: None,
+        server_override: (None, None),
         reconcile_interval: Duration::from_millis(50),
     };
     (config, sub)
@@ -1135,6 +1136,7 @@ async fn discovered_forwarder_is_dialed_and_persists_events() {
             )),
             forwarder: None,
             server: None,
+            server_override: (None, None),
             reconcile_interval: Duration::from_millis(50),
         };
         let runtime = start_receiver_p2p(Arc::clone(&state), config)
@@ -1378,6 +1380,7 @@ async fn reconfigure_on_signal_rebinds_to_profile_server() {
             bind_addr_v4: Some("127.0.0.1:0".parse().unwrap()),
             forwarder: None,
             server: None,
+            server_override: (None, None),
             reconcile_interval: Duration::from_millis(50),
         };
         let runtime = start_receiver_p2p(Arc::clone(&state), config)

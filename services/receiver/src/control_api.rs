@@ -1316,9 +1316,14 @@ pub async fn import_chips(
 /// Enable or disable the global announcer publish toggle. The P2P reconcile
 /// loop picks up the change on its next pass (within one reconcile interval).
 pub async fn set_announcer_enabled(state: &AppState, enabled: bool) -> Result<(), ReceiverError> {
-    let db = state.db.lock().await;
-    db.set_announcer_enabled(enabled)
-        .map_err(|e| ReceiverError::Internal(e.to_string()))
+    {
+        let db = state.db.lock().await;
+        db.set_announcer_enabled(enabled)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    }
+    // Other UI/bridge clients hold this in profile state; nudge them to refetch.
+    state.emit_resync();
+    Ok(())
 }
 
 /// Opt a single stream in/out of announcer publishing (opt-in default off).
@@ -1327,9 +1332,15 @@ pub async fn set_stream_announcer_publish(
     stream_id: &str,
     publish: bool,
 ) -> Result<(), ReceiverError> {
-    let db = state.db.lock().await;
-    db.set_stream_announcer_publish(stream_id, publish)
-        .map_err(|e| ReceiverError::Internal(e.to_string()))
+    {
+        let db = state.db.lock().await;
+        db.set_stream_announcer_publish(stream_id, publish)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    }
+    // The per-stream publish flag rides on the streams snapshot, so broadcast
+    // it for other clients (SSE-only; does not restart stream workers).
+    state.emit_streams_snapshot().await;
+    Ok(())
 }
 
 /// Rebuild the in-memory chip->participant lookup from the durable
@@ -1349,6 +1360,37 @@ pub async fn reload_chip_lookup(state: &AppState) -> Result<usize, ReceiverError
     Ok(count)
 }
 
+/// Choose the server URL+token to persist on a profile save.
+///
+/// When a server env override is active the UI locks the URL/token inputs and
+/// `get_profile` returns the effective (env) values, which the client echoes
+/// back on save. Persisting those would copy the env token into the profile
+/// DB, so the stored values are preserved instead. Otherwise the request body
+/// (already trimmed for the URL) is persisted.
+fn server_fields_to_persist(
+    env_active: bool,
+    body_url: String,
+    body_token: String,
+    existing: Option<&crate::db::Profile>,
+) -> (String, String) {
+    if env_active {
+        existing.map_or((String::new(), String::new()), |p| {
+            (p.server_url.clone(), p.token.clone())
+        })
+    } else {
+        (body_url, body_token)
+    }
+}
+
+/// Whether a server URL+token environment override is active (both set and
+/// non-empty). When active, the stored profile server fields are read-only in
+/// the UI and must not be overwritten by a profile save.
+fn server_env_override_active() -> bool {
+    let non_empty = |k: &str| std::env::var(k).ok().is_some_and(|v| !v.trim().is_empty());
+    non_empty(crate::p2p_runtime::ENV_P2P_SERVER_URL)
+        && non_empty(crate::p2p_runtime::ENV_P2P_SERVER_TOKEN)
+}
+
 pub async fn get_profile(state: &AppState) -> Result<ProfileResponse, ReceiverError> {
     let receiver_id = state.receiver_id.read().await.clone();
     let profile = {
@@ -1361,8 +1403,7 @@ pub async fn get_profile(state: &AppState) -> Result<ProfileResponse, ReceiverEr
     // real values (and lock the fields) when an environment override is active.
     let env_url = std::env::var(crate::p2p_runtime::ENV_P2P_SERVER_URL).ok();
     let env_token = std::env::var(crate::p2p_runtime::ENV_P2P_SERVER_TOKEN).ok();
-    let non_empty = |s: &Option<String>| s.as_deref().map(str::trim).is_some_and(|v| !v.is_empty());
-    let env_active = non_empty(&env_url) && non_empty(&env_token);
+    let env_active = server_env_override_active();
     let resolved = crate::runtime::resolve_server_config(profile.as_ref(), (env_url, env_token));
     let server_source = if env_active {
         "env"
@@ -1415,13 +1456,21 @@ pub async fn put_profile(state: &AppState, body: ProfileRequest) -> Result<(), R
     }
 
     let mut db = state.db.lock().await;
+    let existing = db.load_profile().ok().flatten();
     let persist_receiver_id = new_receiver_id
         .clone()
-        .or_else(|| db.load_profile().ok().flatten().and_then(|p| p.receiver_id));
+        .or_else(|| existing.as_ref().and_then(|p| p.receiver_id.clone()));
+
+    let (persist_url, persist_token) = server_fields_to_persist(
+        server_env_override_active(),
+        url,
+        body.token.clone(),
+        existing.as_ref(),
+    );
 
     match db.save_profile(
-        &url,
-        &body.token,
+        &persist_url,
+        &persist_token,
         DEFAULT_UPDATE_MODE,
         persist_receiver_id.as_deref(),
     ) {
@@ -1681,10 +1730,21 @@ struct ServerStatusDevice {
 
 pub(crate) async fn server_device_status(state: &AppState) -> ServerDeviceStatus {
     let server_url = {
-        let db = state.db.lock().await;
-        match db.load_profile() {
-            Ok(Some(profile)) if !profile.server_url.trim().is_empty() => profile.server_url,
-            _ => return ServerDeviceStatus::not_configured(),
+        let profile = {
+            let db = state.db.lock().await;
+            db.load_profile().ok().flatten()
+        };
+        // Mirror the P2P runtime's resolution (env/CLI override > profile) so
+        // the status card reflects the server the receiver actually targets.
+        match crate::runtime::resolve_server_config(
+            profile.as_ref(),
+            (
+                std::env::var(crate::p2p_runtime::ENV_P2P_SERVER_URL).ok(),
+                std::env::var(crate::p2p_runtime::ENV_P2P_SERVER_TOKEN).ok(),
+            ),
+        ) {
+            Some(server) => server.url,
+            None => return ServerDeviceStatus::not_configured(),
         }
     };
 
@@ -2108,6 +2168,10 @@ pub async fn admin_reset_profile(state: &AppState) -> Result<(), ReceiverError> 
         Ok(()) => {
             drop(db);
             *state.receiver_id.write().await = String::new();
+            // The server URL+token were cleared; rebind the always-on P2P
+            // runtime so it drops its old server-bound tasks immediately
+            // instead of waiting for a later profile save.
+            state.notify_server_config_changed();
             state.emit_streams_snapshot().await;
             Ok(())
         }
@@ -2149,6 +2213,13 @@ pub async fn admin_factory_reset(state: &AppState) -> Result<(), ReceiverError> 
         Ok(()) => {
             drop(db);
             *state.receiver_id.write().await = String::new();
+            // Drop the now-empty participant/chip lookup from memory so a
+            // factory reset does not leave prior identities resolvable.
+            if let Err(e) = reload_chip_lookup(state).await {
+                warn!(error = %e, "failed to reload chip lookup after factory reset");
+            }
+            // The server config was wiped; rebind the always-on P2P runtime.
+            state.notify_server_config_changed();
             state.emit_streams_snapshot().await;
             Ok(())
         }
@@ -2372,7 +2443,50 @@ pub fn event_name(event: &ReceiverUiEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Db;
+    use crate::db::{Db, Profile};
+
+    fn profile(url: &str, token: &str) -> Profile {
+        Profile {
+            server_url: url.to_owned(),
+            token: token.to_owned(),
+            update_mode: String::new(),
+            receiver_id: Some("recv-1".to_owned()),
+        }
+    }
+
+    #[test]
+    fn server_fields_to_persist_preserves_stored_when_env_active() {
+        // Env override active: the echoed env values are ignored; the stored
+        // (DB) server fields are preserved so the env token never lands in DB.
+        let stored = profile("http://stored", "stored-token");
+        let (url, token) = server_fields_to_persist(
+            true,
+            "http://env".to_owned(),
+            "env-token".to_owned(),
+            Some(&stored),
+        );
+        assert_eq!(url, "http://stored");
+        assert_eq!(token, "stored-token");
+
+        // No stored profile + env active: persist empty, never the env token.
+        let (url, token) =
+            server_fields_to_persist(true, "http://env".to_owned(), "env-token".to_owned(), None);
+        assert_eq!(url, "");
+        assert_eq!(token, "");
+    }
+
+    #[test]
+    fn server_fields_to_persist_uses_body_when_no_env_override() {
+        let stored = profile("http://stored", "stored-token");
+        let (url, token) = server_fields_to_persist(
+            false,
+            "http://body".to_owned(),
+            "body-token".to_owned(),
+            Some(&stored),
+        );
+        assert_eq!(url, "http://body");
+        assert_eq!(token, "body-token");
+    }
 
     async fn count_connections_changed_events(
         ui_rx: &mut tokio::sync::broadcast::Receiver<ReceiverUiEvent>,

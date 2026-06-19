@@ -117,6 +117,7 @@ export const store = $state({
   // Stream action state
   streamActionBusy: false,
   streamEventTypeBusy: {} as Record<string, boolean>,
+  streamAnnouncerBusy: {} as Record<string, boolean>,
 
   // UPS state (keyed by forwarder_id)
   upsState: new Map<
@@ -1069,6 +1070,11 @@ export async function setStreamAnnouncerPublish(
   stream: api.StreamEntry,
   publish: boolean,
 ): Promise<void> {
+  const key = streamIdentity(stream);
+  // Guard against rapid re-toggles: a second click while a request is in
+  // flight would race the refetch and could clobber the latest state.
+  if (store.streamAnnouncerBusy[key]) return;
+  store.streamAnnouncerBusy = { ...store.streamAnnouncerBusy, [key]: true };
   try {
     store.error = null;
     await api.setStreamAnnouncerPublish(stream.stream_id, publish);
@@ -1077,6 +1083,8 @@ export async function setStreamAnnouncerPublish(
     store.streams = latest;
   } catch (e) {
     store.error = `Failed to update stream announcer setting: ${e}`;
+  } finally {
+    store.streamAnnouncerBusy = { ...store.streamAnnouncerBusy, [key]: false };
   }
 }
 

@@ -10,6 +10,8 @@
 //!   `M`/`F` (any case) to `M`/`F`, anything else to `X`.
 //! * **`.bibchip`** — headerless CSV `bib, chipId(hex)`. Any line that does not
 //!   start with an ASCII digit is skipped (so `BIB,CHIP` headers are ignored).
+//!   The chip id must be non-empty and hexadecimal; a non-hex value rejects the
+//!   file (it can never match a real IPICO frame).
 //!
 //! Bib normalization: both formats parse the bib to an `i64`, which is the
 //! canonical key used to join chips to participants. Rendering the bib back to
@@ -97,6 +99,9 @@ pub fn parse_bibchip_line(line: &str) -> Result<Option<(i64, String)>, String> {
     let chip = parts[1].trim().to_owned();
     if chip.is_empty() {
         return Err("chip id must not be empty".to_owned());
+    }
+    if !chip.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("chip id `{chip}` must be hexadecimal"));
     }
     Ok(Some((bib, chip)))
 }
@@ -190,6 +195,18 @@ mod tests {
         assert_eq!(bib, 2);
         assert_eq!(chip, "0580");
         assert!(parse_bibchip_line("3,").is_err());
+    }
+
+    #[test]
+    fn bibchip_non_hex_chip_rejected() {
+        // Hex chip ids are accepted (incl. a-f any case)...
+        assert_eq!(
+            parse_bibchip_line("4,0AbF").unwrap().unwrap(),
+            (4, "0AbF".to_owned())
+        );
+        // ...but a non-hex chip id rejects the record.
+        let err = parse_bibchip_line("5,05G0").unwrap_err();
+        assert!(err.contains("hexadecimal"), "got: {err}");
     }
 
     #[test]
