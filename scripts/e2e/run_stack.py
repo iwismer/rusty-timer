@@ -1093,6 +1093,9 @@ static_allowed_receivers = ["{receiver_node_id}"]
         "--p2p-forwarder-node-id", forwarder_node_id,
         "--p2p-forwarder-direct-addr", f"127.0.0.1:{forwarder_p2p_port}",
         "--p2p-secret-key-seed-hex", RECEIVER_SEED_HEX,
+        # Loopback transport: explicit (a seed already implies this, but state it).
+        "--p2p-relay-disabled",
+        "--p2p-discovery-disabled",
         "--p2p-server-url", server_url,
         "--p2p-server-token", PROVISIONING_TOKEN,
         "--p2p-reconcile-ms", str(RECONCILE_MS),
