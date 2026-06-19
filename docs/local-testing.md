@@ -58,10 +58,21 @@ assertions), use:
 uv run scripts/dev_stack.py
 ```
 
-This starts the emulator, forwarder, and thin-node on loopback, preseeds the
-receiver with one subscription to the emulated stream, and launches the desktop
-receiver app via `cargo tauri dev` wired to the local forwarder over iroh. Press
-Ctrl-C to tear the whole stack down.
+This starts the emulator, forwarder, and thin-node on loopback (the forwarder
+and thin-node serve their embedded web UIs) and launches the desktop receiver
+app via `cargo tauri dev`. It follows the **prod-like flow** — no static
+allow-list, no preseeded subscription, no hand-fed node ids:
+
+1. The forwarder and receiver self-register with the thin-node (TOFU).
+2. Open the thin-node admin UI and **approve both** the forwarder and receiver.
+3. The forwarder fetches the receiver allow-list; the receiver discovers the
+   approved forwarder.
+4. In the receiver app's Streams tab, the discovered stream appears as
+   **Available** — click Subscribe and reads start flowing.
+
+The startup banner prints the thin-node UI, admin, and announcer URLs, the
+forwarder UI URL, and the expected stream id. Press Ctrl-C (or close the
+receiver app) to tear the whole stack down.
 
 Receiver options:
 
@@ -69,10 +80,10 @@ Receiver options:
 uv run scripts/dev_stack.py --receiver headless   # no GUI; control API + data plane
 uv run scripts/dev_stack.py --receiver none       # set up only; launch a receiver yourself
 uv run scripts/dev_stack.py --read-delay-ms 500   # faster emulated reads
-uv run scripts/dev_stack.py --data-dir /tmp/rt-dev  # reuse a receiver data dir
+uv run scripts/dev_stack.py --data-dir /tmp/rt-dev  # reuse a receiver data dir (keeps approvals)
 ```
 
-The desktop app reads its P2P config from the `RT_P2P_*` / `RT_RECEIVER_*`
+The desktop app reads its thin-node config from the `RT_P2P_*` / `RT_RECEIVER_*`
 environment variables the script sets. Unlike `scripts/e2e/run_stack.py`, this
 runner makes no assertions and runs no failure-injection lanes; it is purely for
 manual exploration.

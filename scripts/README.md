@@ -38,9 +38,9 @@ thin-node announcer/status state.
 ## Manual Dev Stack
 
 `scripts/dev_stack.py` boots the whole loopback stack and leaves it running for
-manual exploration (no assertions, no failure-injection lanes). It starts the
-emulator, forwarder, and thin-node, preseeds the receiver with a subscription to
-the emulated stream, and launches the receiver:
+manual exploration (no assertions, no failure-injection lanes), the prod-like
+way. It starts the emulator, forwarder, and thin-node (both the forwarder and
+thin-node serve their embedded web UIs) and launches the receiver:
 
 ```bash
 uv run scripts/dev_stack.py                    # build + launch the desktop app
@@ -49,8 +49,13 @@ uv run scripts/dev_stack.py --receiver none
 uv run scripts/dev_stack.py --no-build
 ```
 
-The desktop app reads its P2P config from the `RT_P2P_*` / `RT_RECEIVER_*`
-environment variables the script sets. Press Ctrl-C to tear the stack down.
+There is no static allow-list or preseeded subscription: the forwarder and
+receiver self-register with the thin-node, you approve both in the thin-node
+admin UI (`/admin`), the receiver discovers the approved forwarder, and you
+subscribe to the discovered stream in the receiver UI. The startup banner prints
+all the URLs. The desktop app reads its thin-node config from the `RT_P2P_*` /
+`RT_RECEIVER_*` environment variables the script sets. Press Ctrl-C to tear the
+stack down.
 
 ## Agent UI Harness
 
