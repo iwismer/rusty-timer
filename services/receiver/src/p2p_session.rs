@@ -719,6 +719,9 @@ mod tests {
             data_fault: ConnectivityFault::healthy(),
             echo_subscribed_stream_id: false,
             close_connection_after_data: false,
+            control_events: Vec::new(),
+            control_pings: 0,
+            control_ping_interval: Duration::from_millis(50),
         }
     }
 

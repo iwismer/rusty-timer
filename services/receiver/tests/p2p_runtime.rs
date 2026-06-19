@@ -91,6 +91,9 @@ fn script_two(raw: &[u8]) -> ForwarderScript {
         data_fault: ConnectivityFault::healthy(),
         echo_subscribed_stream_id: false,
         close_connection_after_data: false,
+        control_events: Vec::new(),
+        control_pings: 0,
+        control_ping_interval: std::time::Duration::from_millis(50),
     }
 }
 
@@ -621,6 +624,9 @@ fn script_stream_mismatch() -> ForwarderScript {
         data_fault: ConnectivityFault::healthy(),
         echo_subscribed_stream_id: false,
         close_connection_after_data: false,
+        control_events: Vec::new(),
+        control_pings: 0,
+        control_ping_interval: std::time::Duration::from_millis(50),
     }
 }
 

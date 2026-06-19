@@ -1,12 +1,14 @@
 //! Scripted forwarder peer for loopback P2P tests.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use prost::Message;
 use rt_iroh::{Connection, Endpoint, EndpointBuilder, NodeAddr, RecvStream, SendStream};
 use rt_p2p_protocol::{
     Ack, CaughtUp, ControlC2F, ControlF2C, DataC2F, DataF2C, DataSubscribe, EventBatch, GapNotice,
-    Hello, StreamCatalog, SubscribeOk, control_c2f, control_f2c, data_c2f, data_f2c, negotiate,
+    Hello, Ping, Pong, StreamCatalog, SubscribeOk, control_c2f, control_f2c, data_c2f, data_f2c,
+    negotiate,
 };
 use tokio::task::JoinHandle;
 
@@ -47,6 +49,19 @@ pub struct ForwarderScript {
     /// from scratch (re-sending the scripted batches), so it exercises
     /// resume-from-cursor dedup. Defaults to `false`.
     pub close_connection_after_data: bool,
+    /// Control-plane `F2C` frames sent (in order) on the control stream right
+    /// after the `HelloOk`/`StreamCatalog` handshake. Lets a test forwarder push
+    /// live status (`ReaderStatus`, `ReaderInfo`, `UpsStatus`) and exercise the
+    /// receiver's control read loop over a real stream. Defaults to empty.
+    pub control_events: Vec<ControlF2C>,
+    /// Number of heartbeat `Ping` frames the mock issues on the control stream
+    /// after `control_events`, each spaced by [`Self::control_ping_interval`].
+    /// The mock records every `Pong` it reads back (see
+    /// [`MockForwarderPeer::pongs`]) so a test can assert the receiver keeps the
+    /// heartbeat alive. Defaults to `0` (no pings).
+    pub control_pings: u32,
+    /// Delay between successive heartbeat pings (see [`Self::control_pings`]).
+    pub control_ping_interval: Duration,
 }
 
 /// A scripted forwarder peer bound to a loopback iroh endpoint.
@@ -62,6 +77,7 @@ pub struct MockForwarderPeer {
     acks: Arc<Mutex<Vec<Ack>>>,
     subscribes: Arc<Mutex<Vec<DataSubscribe>>>,
     connections: Arc<Mutex<usize>>,
+    pongs: Arc<Mutex<Vec<Pong>>>,
 }
 
 impl MockForwarderPeer {
@@ -73,12 +89,14 @@ impl MockForwarderPeer {
         let acks = Arc::new(Mutex::new(Vec::new()));
         let subscribes = Arc::new(Mutex::new(Vec::new()));
         let connections = Arc::new(Mutex::new(0usize));
+        let pongs = Arc::new(Mutex::new(Vec::new()));
         let script = Arc::new(script);
 
         let accept_endpoint = endpoint.clone();
         let accept_acks = Arc::clone(&acks);
         let accept_subscribes = Arc::clone(&subscribes);
         let accept_connections = Arc::clone(&connections);
+        let accept_pongs = Arc::clone(&pongs);
         let accept_task = tokio::spawn(async move {
             accept_loop(
                 accept_endpoint,
@@ -86,6 +104,7 @@ impl MockForwarderPeer {
                 accept_acks,
                 accept_subscribes,
                 accept_connections,
+                accept_pongs,
             )
             .await;
         });
@@ -97,6 +116,7 @@ impl MockForwarderPeer {
             acks,
             subscribes,
             connections,
+            pongs,
         })
     }
 
@@ -120,6 +140,13 @@ impl MockForwarderPeer {
             .clone()
     }
 
+    /// A snapshot of the `Pong` frames received on the control stream, in
+    /// arrival order. Used to assert the receiver answered the mock's heartbeat
+    /// `Ping`s (see [`ForwarderScript::control_pings`]).
+    pub fn pongs(&self) -> Vec<Pong> {
+        self.pongs.lock().expect("pongs mutex poisoned").clone()
+    }
+
     /// The number of inbound QUIC connections accepted so far. A receiver that
     /// multiplexes several data streams over one control session opens exactly
     /// one connection, so this stays `1` while many streams are subscribed.
@@ -140,16 +167,18 @@ async fn accept_loop(
     acks: Arc<Mutex<Vec<Ack>>>,
     subscribes: Arc<Mutex<Vec<DataSubscribe>>>,
     connections: Arc<Mutex<usize>>,
+    pongs: Arc<Mutex<Vec<Pong>>>,
 ) {
     while let Ok(Some(connection)) = endpoint.accept().await {
         *connections.lock().expect("connections mutex poisoned") += 1;
         let script = Arc::clone(&script);
         let acks = Arc::clone(&acks);
         let subscribes = Arc::clone(&subscribes);
+        let pongs = Arc::clone(&pongs);
         tokio::spawn(async move {
             // Errors here are surfaced via missing acks / failed reads on the
             // receiver side; the harness self-test asserts on those.
-            let _ = handle_connection(connection, script, acks, subscribes).await;
+            let _ = handle_connection(connection, script, acks, subscribes, pongs).await;
         });
     }
 }
@@ -159,10 +188,60 @@ async fn handle_connection(
     script: Arc<ForwarderScript>,
     acks: Arc<Mutex<Vec<Ack>>>,
     subscribes: Arc<Mutex<Vec<DataSubscribe>>>,
+    pongs: Arc<Mutex<Vec<Pong>>>,
 ) -> HarnessResult {
-    let _control_streams = serve_control(&connection, &script).await?;
+    let (control_send, control_recv) = serve_control(&connection, &script).await?;
+    // Drive live control-plane events (status pushes) and heartbeat pings on a
+    // dedicated task that exclusively owns the control streams, mirroring a real
+    // forwarder that keeps the control session active alongside data streams.
+    let control_task = tokio::spawn(serve_control_loop(
+        control_send,
+        control_recv,
+        Arc::clone(&script),
+        pongs,
+    ));
     serve_data_loop(&connection, &script, &acks, &subscribes).await;
+    control_task.abort();
     Ok(())
+}
+
+/// After the handshake, send the scripted control events, issue the scripted
+/// heartbeat pings, and record every `Pong` the receiver sends back. Runs until
+/// the control stream closes (receiver disconnect) or the task is aborted.
+async fn serve_control_loop(
+    mut send: SendStream,
+    mut recv: RecvStream,
+    script: Arc<ForwarderScript>,
+    pongs: Arc<Mutex<Vec<Pong>>>,
+) {
+    for event in &script.control_events {
+        if write_frame(&mut send, event).await.is_err() {
+            return;
+        }
+    }
+    for nonce in 0..u64::from(script.control_pings) {
+        if nonce > 0 {
+            tokio::time::sleep(script.control_ping_interval).await;
+        }
+        let ping = ControlF2C {
+            msg: Some(control_f2c::Msg::Ping(Ping { nonce })),
+        };
+        if write_frame(&mut send, &ping).await.is_err() {
+            return;
+        }
+    }
+    // Keep reading C2F frames (notably the receiver's Pong heartbeat answers)
+    // until the control stream closes, recording every Pong.
+    loop {
+        match read_frame::<ControlC2F>(&mut recv).await {
+            Ok(frame) => {
+                if let Some(control_c2f::Msg::Pong(pong)) = frame.msg {
+                    pongs.lock().expect("pongs mutex poisoned").push(pong);
+                }
+            }
+            Err(_) => return,
+        }
+    }
 }
 
 /// Accept data bi-streams on a single connection for as long as it stays open,

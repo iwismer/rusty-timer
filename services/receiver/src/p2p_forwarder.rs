@@ -440,13 +440,14 @@ mod tests {
 
     use rt_iroh::{Endpoint, EndpointBuilder};
     use rt_p2p_protocol::{
-        EventBatch, Hello, MAX_FRAME_BYTES, ReadRecord, StreamCatalog, SubscribeMode, SubscribeOk,
+        ControlF2C, DownloadProgress, EventBatch, Hello, MAX_FRAME_BYTES, ReadRecord, ReaderStatus,
+        StreamCatalog, SubscribeMode, SubscribeOk, control_f2c,
     };
     use rt_test_utils::p2p::{ConnectivityFault, ForwarderScript, MockForwarderPeer};
     use rt_test_utils::poll_until;
     use tokio::sync::{Mutex, broadcast};
 
-    use crate::control_api::{AppState, ForwarderConnState};
+    use crate::control_api::{AppState, ForwarderConnState, get_connections};
     use crate::db::Db;
     use crate::p2p_session::{BackoffConfig, SessionStatusReporter};
 
@@ -482,6 +483,9 @@ mod tests {
             data_fault: ConnectivityFault::delayed(Duration::from_secs(2)),
             echo_subscribed_stream_id: false,
             close_connection_after_data: false,
+            control_events: Vec::new(),
+            control_pings: 0,
+            control_ping_interval: Duration::from_millis(50),
         }
     }
 
@@ -704,5 +708,133 @@ mod tests {
         })
         .await
         .expect("control reconnect resume test timed out");
+    }
+
+    /// A script that, after the handshake, pushes an ignored control variant
+    /// (`DownloadProgress`) followed by a live `ReaderStatus`, then issues a
+    /// short burst of heartbeat `Ping`s. Exercises the receiver's ongoing
+    /// control read loop over a real stream.
+    fn live_status_heartbeat_script() -> ForwarderScript {
+        let mut script = base_script();
+        script.control_events = vec![
+            // An ignored F2C variant must NOT desync the frame stream or
+            // disconnect the receiver.
+            ControlF2C {
+                msg: Some(control_f2c::Msg::DownloadProgress(DownloadProgress {
+                    stream_id: STREAM_ID.as_bytes().to_vec(),
+                    downloaded_bytes: 0,
+                    total_bytes: 0,
+                })),
+            },
+            // Live reader status the receiver must reflect in get_connections.
+            ControlF2C {
+                msg: Some(control_f2c::Msg::ReaderStatus(ReaderStatus {
+                    stream_id: STREAM_ID.as_bytes().to_vec(),
+                    connected: false,
+                    state: "disconnected".to_owned(),
+                    last_read_unix_ms: 0,
+                })),
+            },
+        ];
+        script.control_pings = 3;
+        script.control_ping_interval = Duration::from_millis(50);
+        script
+    }
+
+    /// Over a REAL control stream the receiver must: consume a `ReaderStatus`
+    /// (reflected in `get_connections`), answer the forwarder's heartbeat
+    /// `Ping`s with `Pong`s (proving the cancel-safe reader keeps the frame
+    /// stream in sync even while desired-stream updates churn the reconcile
+    /// path), tolerate an ignored control variant without disconnecting, and
+    /// clear the forwarder's live status on control disconnect.
+    #[tokio::test]
+    async fn control_live_status_and_heartbeat_over_real_stream() {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let forwarder = MockForwarderPeer::start([44; 32], live_status_heartbeat_script())
+                .await
+                .unwrap();
+            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint = Arc::new(test_endpoint(45).await);
+            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+            let (state, _shutdown_rx) =
+                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
+
+            let connection = ForwarderConnection::start(
+                endpoint_id.clone(),
+                Arc::clone(&endpoint),
+                forwarder.node_addr(),
+                Arc::clone(&db),
+                test_hello(),
+                Arc::clone(&reporter),
+                BackoffConfig {
+                    initial: Duration::from_millis(50),
+                    max: Duration::from_millis(50),
+                },
+            );
+
+            // The ReaderStatus must surface in get_connections. Churn desired
+            // updates meanwhile (each one wakes the reconcile select arm, the
+            // cadence that previously cancelled an in-flight control read).
+            let mut reflected = false;
+            for _ in 0..200 {
+                connection.set_desired_streams(Vec::new());
+                let conns = get_connections(&state).await;
+                reflected = conns.forwarders.iter().any(|forwarder| {
+                    forwarder.endpoint_id == endpoint_id
+                        && forwarder.readers.iter().any(|reader| {
+                            reader.stream_id == STREAM_ID
+                                && !reader.connected
+                                && reader.state == "disconnected"
+                        })
+                });
+                if reflected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            assert!(
+                reflected,
+                "receiver must reflect the forwarder ReaderStatus in get_connections"
+            );
+
+            // Heartbeat maintained: every Ping was answered with a Pong despite
+            // the ignored variant and the desired-stream churn. If the frame
+            // stream had desynced, pongs would stall here.
+            poll_until(
+                || async { forwarder.pongs().len() >= 3 },
+                Duration::from_secs(10),
+            )
+            .await;
+
+            // The ignored control variant did not tear the session down.
+            assert_eq!(
+                state.forwarder_state(&endpoint_id).await.state,
+                ForwarderConnState::Connected,
+                "an ignored control variant must not disconnect the control session"
+            );
+
+            // Control disconnect must clear the forwarder's live status.
+            forwarder.shutdown().await;
+            poll_until(
+                || {
+                    let state = Arc::clone(&state);
+                    let endpoint_id = endpoint_id.clone();
+                    async move {
+                        let conns = get_connections(&state).await;
+                        !conns.forwarders.iter().any(|forwarder| {
+                            forwarder.endpoint_id == endpoint_id && !forwarder.readers.is_empty()
+                        })
+                    }
+                },
+                Duration::from_secs(10),
+            )
+            .await;
+
+            connection.stop().await;
+            endpoint.close().await;
+        })
+        .await
+        .expect("control live status + heartbeat test timed out");
     }
 }
