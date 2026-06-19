@@ -352,6 +352,9 @@ async fn handle_control_frame(
             | control_f2c::Msg::DownloadProgress(_)
             | control_f2c::Msg::SyncClock(_)
             | control_f2c::Msg::ReaderControlResponse(_)
+            | control_f2c::Msg::ConfigGetResponse(_)
+            | control_f2c::Msg::ConfigSetResponse(_)
+            | control_f2c::Msg::RestartResponse(_)
             | control_f2c::Msg::HelloOk(_)
             | control_f2c::Msg::StreamCatalog(_),
         )

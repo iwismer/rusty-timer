@@ -142,6 +142,38 @@ message ProtocolError {
   optional bytes stream_id = 4;
 }
 
+message ConfigGetRequest {
+  string request_id = 1;
+}
+
+message ConfigGetResponse {
+  string request_id = 1;
+  string config_json = 2;
+  bool restart_needed = 3;
+}
+
+message ConfigSetRequest {
+  string request_id = 1;
+  string config_json = 2;
+}
+
+message ConfigSetResponse {
+  string request_id = 1;
+  bool ok = 2;
+  bool restart_needed = 3;
+  string error = 4;
+}
+
+message RestartRequest {
+  string request_id = 1;
+}
+
+message RestartResponse {
+  string request_id = 1;
+  bool accepted = 2;
+  string error = 3;
+}
+
 // ---------------------------------------------------------------------------
 // Data-plane messages
 // ---------------------------------------------------------------------------
@@ -240,6 +272,9 @@ message ControlC2F {
     ReaderControlRequest reader_control_request = 2;
     Ping ping = 3;
     Pong pong = 4;
+    ConfigGetRequest config_get_request = 5;
+    ConfigSetRequest config_set_request = 6;
+    RestartRequest restart_request = 7;
   }
 }
 
@@ -257,6 +292,9 @@ message ControlF2C {
     Ping ping = 9;
     Pong pong = 10;
     ProtocolError protocol_error = 11;
+    ConfigGetResponse config_get_response = 12;
+    ConfigSetResponse config_set_response = 13;
+    RestartResponse restart_response = 14;
   }
 }
 

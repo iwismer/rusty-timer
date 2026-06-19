@@ -178,6 +178,52 @@ pub struct ProtocolError {
     #[prost(bytes = "vec", optional, tag = "4")]
     pub stream_id: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ConfigGetRequest {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ConfigGetResponse {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub config_json: ::prost::alloc::string::String,
+    #[prost(bool, tag = "3")]
+    pub restart_needed: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ConfigSetRequest {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub config_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ConfigSetResponse {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag = "2")]
+    pub ok: bool,
+    #[prost(bool, tag = "3")]
+    pub restart_needed: bool,
+    #[prost(string, tag = "4")]
+    pub error: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RestartRequest {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RestartResponse {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag = "2")]
+    pub accepted: bool,
+    #[prost(string, tag = "3")]
+    pub error: ::prost::alloc::string::String,
+}
 /// Request to subscribe to a stream's read events.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DataSubscribe {
@@ -283,7 +329,7 @@ pub struct StreamEpochStarted {
 /// Control plane, client (receiver) -> forwarder.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ControlC2F {
-    #[prost(oneof = "control_c2f::Msg", tags = "1, 2, 3, 4")]
+    #[prost(oneof = "control_c2f::Msg", tags = "1, 2, 3, 4, 5, 6, 7")]
     pub msg: ::core::option::Option<control_c2f::Msg>,
 }
 /// Nested message and enum types in `ControlC2F`.
@@ -298,12 +344,21 @@ pub mod control_c2f {
         Ping(super::Ping),
         #[prost(message, tag = "4")]
         Pong(super::Pong),
+        #[prost(message, tag = "5")]
+        ConfigGetRequest(super::ConfigGetRequest),
+        #[prost(message, tag = "6")]
+        ConfigSetRequest(super::ConfigSetRequest),
+        #[prost(message, tag = "7")]
+        RestartRequest(super::RestartRequest),
     }
 }
 /// Control plane, forwarder -> client (receiver).
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ControlF2C {
-    #[prost(oneof = "control_f2c::Msg", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11")]
+    #[prost(
+        oneof = "control_f2c::Msg",
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14"
+    )]
     pub msg: ::core::option::Option<control_f2c::Msg>,
 }
 /// Nested message and enum types in `ControlF2C`.
@@ -332,6 +387,12 @@ pub mod control_f2c {
         Pong(super::Pong),
         #[prost(message, tag = "11")]
         ProtocolError(super::ProtocolError),
+        #[prost(message, tag = "12")]
+        ConfigGetResponse(super::ConfigGetResponse),
+        #[prost(message, tag = "13")]
+        ConfigSetResponse(super::ConfigSetResponse),
+        #[prost(message, tag = "14")]
+        RestartResponse(super::RestartResponse),
     }
 }
 /// Data plane, client (receiver) -> forwarder.

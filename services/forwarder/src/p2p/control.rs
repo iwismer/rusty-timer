@@ -498,7 +498,13 @@ async fn run_control_loop(
                                 let _ = control_response_tx.send(response).await;
                             });
                         }
-                        Some(control_c2f::Msg::Hello(_)) | None => {}
+                        Some(
+                            control_c2f::Msg::ConfigGetRequest(_)
+                            | control_c2f::Msg::ConfigSetRequest(_)
+                            | control_c2f::Msg::RestartRequest(_)
+                            | control_c2f::Msg::Hello(_),
+                        )
+                        | None => {}
                     },
                     None => break Ok(()),
                 }

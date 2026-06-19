@@ -48,10 +48,11 @@ pub use capabilities::{CAP_CONTROL_EVENTS, CAP_REMOTE_CONFIG, has_capability};
 pub use codec::{Frame, MAX_FRAME_BYTES, decode_frame, decode_message_frame, encode_frame};
 pub use error::{ProtocolError, ProtocolErrorCode};
 pub use generated::{
-    Ack, CaughtUp, ControlC2F, ControlF2C, DataC2F, DataF2C, DataSubscribe, DownloadProgress,
-    EventBatch, GapNotice, Hello, HelloOk, Ping, Pong, ProtocolError as WireProtocolError,
-    ReadRecord, ReaderControlRequest, ReaderControlResponse, ReaderInfo, ReaderStatus,
-    StreamCatalog, StreamEntry, StreamEpochStarted, SubscribeMode, SubscribeOk, SyncClock,
-    UpsStatus, control_c2f, control_f2c, data_c2f, data_f2c,
+    Ack, CaughtUp, ConfigGetRequest, ConfigGetResponse, ConfigSetRequest, ConfigSetResponse,
+    ControlC2F, ControlF2C, DataC2F, DataF2C, DataSubscribe, DownloadProgress, EventBatch,
+    GapNotice, Hello, HelloOk, Ping, Pong, ProtocolError as WireProtocolError, ReadRecord,
+    ReaderControlRequest, ReaderControlResponse, ReaderInfo, ReaderStatus, RestartRequest,
+    RestartResponse, StreamCatalog, StreamEntry, StreamEpochStarted, SubscribeMode, SubscribeOk,
+    SyncClock, UpsStatus, control_c2f, control_f2c, data_c2f, data_f2c,
 };
 pub use negotiate::negotiate;
