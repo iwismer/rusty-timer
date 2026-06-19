@@ -127,6 +127,12 @@ pub async fn init_with_data_dir(
     let (state, shutdown_rx) = AppState::with_integrity(db, receiver_id, db_integrity_ok);
     state.logger.log("Receiver started");
 
+    // Populate the chip->participant lookup from any previously imported
+    // participant/chip data so the announcer can resolve bib/name immediately.
+    if let Err(e) = crate::control_api::reload_chip_lookup(&state).await {
+        warn!(error = %e, "failed to load chip lookup at startup");
+    }
+
     Ok((state, shutdown_rx))
 }
 

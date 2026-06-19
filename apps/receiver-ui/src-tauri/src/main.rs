@@ -237,6 +237,26 @@ async fn put_profile(
 }
 
 #[tauri::command]
+async fn import_participants(
+    state: State<'_, Arc<AppState>>,
+    contents: String,
+) -> CmdResult<control_api::ImportSummary> {
+    control_api::import_participants(&state, contents)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn import_chips(
+    state: State<'_, Arc<AppState>>,
+    contents: String,
+) -> CmdResult<control_api::ImportSummary> {
+    control_api::import_chips(&state, contents)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_mode(state: State<'_, Arc<AppState>>) -> CmdResult<rt_domain::ReceiverMode> {
     control_api::get_mode(&state)
         .await

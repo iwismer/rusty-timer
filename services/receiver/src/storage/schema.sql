@@ -94,3 +94,22 @@ CREATE TABLE IF NOT EXISTS forwarder_intent (
     endpoint_id TEXT PRIMARY KEY,
     connect     INTEGER NOT NULL
 );
+
+-- Participant + chip-assignment data, imported from .ppl/.bibchip files, used
+-- to resolve chip reads to bib/name locally for the announcer. Both are
+-- replaced wholesale on import ("upload replaces all"). The bib is the
+-- canonical i64 join key.
+CREATE TABLE IF NOT EXISTS participants (
+    bib         INTEGER PRIMARY KEY,
+    last        TEXT NOT NULL,
+    first       TEXT NOT NULL,
+    affiliation TEXT NOT NULL,
+    gender      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bib_chips (
+    chip_id TEXT PRIMARY KEY,
+    bib     INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_bib_chips_bib ON bib_chips (bib);

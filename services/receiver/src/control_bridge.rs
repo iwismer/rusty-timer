@@ -333,6 +333,10 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
             )
             .await?)
         }
+        "import_participants" => {
+            ok(control_api::import_participants(state, arg(args, "contents")?).await?)
+        }
+        "import_chips" => ok(control_api::import_chips(state, arg(args, "contents")?).await?),
         other => Err(BridgeError::Unknown(other.to_owned())),
     }
 }

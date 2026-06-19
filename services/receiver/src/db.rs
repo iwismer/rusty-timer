@@ -466,6 +466,67 @@ impl Db {
         tx.commit()?;
         Ok(())
     }
+
+    /// Replace all participants with `participants` (upload-replaces-all).
+    pub fn replace_participants(
+        &mut self,
+        participants: &[crate::participants::Participant],
+    ) -> DbResult<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute_batch("DELETE FROM participants")?;
+        for p in participants {
+            tx.execute(
+                "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![p.bib, &p.last, &p.first, &p.affiliation, &p.gender],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Replace all bib->chip assignments with `chips` (upload-replaces-all).
+    pub fn replace_bib_chips(&mut self, chips: &[(i64, String)]) -> DbResult<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute_batch("DELETE FROM bib_chips")?;
+        for (bib, chip_id) in chips {
+            tx.execute(
+                "INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES (?1, ?2)",
+                rusqlite::params![chip_id, bib],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Build the chip-id -> (bib, "first last") lookup by joining `bib_chips`
+    /// to `participants`. Chips with no matching participant are skipped
+    /// (inner join), matching the legacy behavior. The bib is rendered as a
+    /// canonical decimal string via its i64 value.
+    pub fn load_chip_to_participant(
+        &self,
+    ) -> DbResult<std::collections::HashMap<String, (String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.chip_id, c.bib, p.first, p.last
+             FROM bib_chips c
+             JOIN participants p ON p.bib = c.bib",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let chip_id: String = r.get(0)?;
+            let bib: i64 = r.get(1)?;
+            let first: String = r.get(2)?;
+            let last: String = r.get(3)?;
+            let name = format!("{first} {last}").trim().to_owned();
+            Ok((chip_id, (bib.to_string(), name)))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (chip_id, value) = row?;
+            map.insert(chip_id, value);
+        }
+        Ok(map)
+    }
+
     pub fn load_resume_cursors(&self) -> DbResult<Vec<ResumeCursor>> {
         Ok(self
             .load_cursors()?
@@ -1491,6 +1552,47 @@ fn is_duplicate_column_error(message: &str, column_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replace_and_load_participants_and_chips() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_participants(&[crate::participants::Participant {
+            bib: 1,
+            last: "A".to_owned(),
+            first: "B".to_owned(),
+            affiliation: String::new(),
+            gender: "M".to_owned(),
+        }])
+        .unwrap();
+        db.replace_bib_chips(&[(1i64, "0580".to_owned())]).unwrap();
+        let map = db.load_chip_to_participant().unwrap();
+        assert_eq!(map.get("0580"), Some(&("1".to_owned(), "B A".to_owned())));
+    }
+
+    #[test]
+    fn unmatched_chip_is_skipped_and_replace_clears() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_bib_chips(&[(99, "deadbeef".to_owned())])
+            .unwrap();
+        // No participant for bib 99 -> chip is not resolvable.
+        assert!(db.load_chip_to_participant().unwrap().is_empty());
+        // Re-import replaces wholesale.
+        db.replace_participants(&[crate::participants::Participant {
+            bib: 5,
+            last: "Last".to_owned(),
+            first: "First".to_owned(),
+            affiliation: "Team".to_owned(),
+            gender: "X".to_owned(),
+        }])
+        .unwrap();
+        db.replace_bib_chips(&[(5, "abc".to_owned())]).unwrap();
+        let map = db.load_chip_to_participant().unwrap();
+        assert_eq!(map.len(), 1);
+        assert_eq!(
+            map.get("abc"),
+            Some(&("5".to_owned(), "First Last".to_owned()))
+        );
+    }
 
     #[test]
     fn migrates_legacy_thin_node_url_column_to_server_url() {

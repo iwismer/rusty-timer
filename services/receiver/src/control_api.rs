@@ -1255,6 +1255,74 @@ pub struct EventTypeRequest {
 // Handler functions (plain async, no Axum)
 // ---------------------------------------------------------------------------
 
+/// Summary returned by the participant/chip import commands.
+#[derive(Debug, Serialize)]
+pub struct ImportSummary {
+    /// Rows accepted into the table (participants or chip assignments).
+    pub imported: usize,
+    /// Chips that resolve to a participant after the import (post-join).
+    pub resolvable_chips: usize,
+}
+
+/// Import participants from `.ppl` file contents. Strict: a parse error rejects
+/// the whole file and leaves the existing table untouched. On success the table
+/// is replaced wholesale and the chip lookup is rebuilt.
+pub async fn import_participants(
+    state: &AppState,
+    contents: String,
+) -> Result<ImportSummary, ReceiverError> {
+    let participants =
+        crate::participants::parse_ppl(&contents).map_err(ReceiverError::BadRequest)?;
+    let imported = participants.len();
+    {
+        let mut db = state.db.lock().await;
+        db.replace_participants(&participants)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    }
+    let resolvable_chips = reload_chip_lookup(state).await?;
+    Ok(ImportSummary {
+        imported,
+        resolvable_chips,
+    })
+}
+
+/// Import bib->chip assignments from `.bibchip` file contents. Strict, like
+/// [`import_participants`].
+pub async fn import_chips(
+    state: &AppState,
+    contents: String,
+) -> Result<ImportSummary, ReceiverError> {
+    let chips = crate::participants::parse_bibchip(&contents).map_err(ReceiverError::BadRequest)?;
+    let imported = chips.len();
+    {
+        let mut db = state.db.lock().await;
+        db.replace_bib_chips(&chips)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    }
+    let resolvable_chips = reload_chip_lookup(state).await?;
+    Ok(ImportSummary {
+        imported,
+        resolvable_chips,
+    })
+}
+
+/// Rebuild the in-memory chip->participant lookup from the durable
+/// participant/chip tables. Called at startup and after each import. Returns
+/// the number of resolvable chips. The lookup uses a single outer key
+/// (`"default"`); the announcer resolver searches across all outer maps.
+pub async fn reload_chip_lookup(state: &AppState) -> Result<usize, ReceiverError> {
+    let map = {
+        let db = state.db.lock().await;
+        db.load_chip_to_participant()
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?
+    };
+    let count = map.len();
+    let mut lookup = state.chip_lookup.write().await;
+    lookup.clear();
+    lookup.insert("default".to_owned(), map);
+    Ok(count)
+}
+
 pub async fn get_profile(state: &AppState) -> Result<ProfileResponse, ReceiverError> {
     let receiver_id = state.receiver_id.read().await.clone();
     let profile = {
@@ -2178,6 +2246,8 @@ macro_rules! receiver_command_list {
                 stream_id: "String",
                 body: "EventTypeRequest"
             ) -> "()",
+            import_participants(contents: "String") -> "ImportSummary",
+            import_chips(contents: "String") -> "ImportSummary",
         }
     };
 }
@@ -2316,6 +2386,75 @@ mod tests {
             snapshot.pending,
             "a freshly started grace clock must keep pending=true"
         );
+    }
+
+    #[tokio::test]
+    async fn import_participants_and_chips_populate_lookup() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let p = import_participants(&state, ";hdr\n1,Smith,John,,,M\n2,Doe,Jane\n".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(p.imported, 2);
+        let c = import_chips(&state, "BIB,CHIP\n1,0580\n2,0581\n".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(c.imported, 2);
+        assert_eq!(c.resolvable_chips, 2);
+        let lookup = state.chip_lookup.read().await;
+        let resolved = lookup
+            .values()
+            .find_map(|chips| chips.get("0580"))
+            .expect("chip resolves");
+        assert_eq!(resolved, &("1".to_owned(), "John Smith".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn malformed_import_is_rejected_without_mutation() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        // Seed a good participant set first.
+        import_participants(&state, "1,Smith,John\n".to_owned())
+            .await
+            .unwrap();
+        // A malformed row must reject the whole upload and not touch the table.
+        let err = import_participants(&state, "2,Good,Row\nz,bad,bib\n".to_owned())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ReceiverError::BadRequest(_)));
+        // Verify bib 2 was never written: chips for bib 1 and bib 2 should leave
+        // only bib 1 resolvable.
+        let summary = import_chips(&state, "1,aaa\n2,bbb\n".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(summary.imported, 2);
+        assert_eq!(
+            summary.resolvable_chips, 1,
+            "only bib 1 should resolve; the rejected import must not have added bib 2"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_chip_lookup_populates_resolver() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        {
+            let mut db = state.db.lock().await;
+            db.replace_participants(&[crate::participants::Participant {
+                bib: 12,
+                last: "Runner".to_owned(),
+                first: "Fast".to_owned(),
+                affiliation: String::new(),
+                gender: "X".to_owned(),
+            }])
+            .unwrap();
+            db.replace_bib_chips(&[(12, "chip-12".to_owned())]).unwrap();
+        }
+        let count = reload_chip_lookup(&state).await.unwrap();
+        assert_eq!(count, 1);
+        let lookup = state.chip_lookup.read().await;
+        let resolved = lookup
+            .values()
+            .find_map(|chips| chips.get("chip-12"))
+            .expect("chip resolves");
+        assert_eq!(resolved, &("12".to_owned(), "Fast Runner".to_owned()));
     }
 
     #[tokio::test]
