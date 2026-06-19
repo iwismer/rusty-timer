@@ -297,12 +297,12 @@ export interface ForwarderConfigResponse {
 export interface SetForwarderConfigResponse {
   ok: boolean;
   restart_needed: boolean;
-  error: string;
+  error: string | null;
 }
 
 export interface RestartForwarderResponse {
   accepted: boolean;
-  error: string;
+  error: string | null;
 }
 
 export async function getForwarderConfig(

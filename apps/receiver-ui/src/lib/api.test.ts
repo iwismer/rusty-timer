@@ -138,8 +138,8 @@ describe("api client", () => {
       await import("./api");
     mockInvoke
       .mockResolvedValueOnce({ config_json: "{}", restart_needed: false })
-      .mockResolvedValueOnce({ ok: true, restart_needed: true, error: "" })
-      .mockResolvedValueOnce({ accepted: true, error: "" });
+      .mockResolvedValueOnce({ ok: true, restart_needed: true, error: null })
+      .mockResolvedValueOnce({ accepted: true, error: null });
 
     await getForwarderConfig("endpoint-1");
     await setForwarderConfig("endpoint-1", '{"display_name":"A"}');

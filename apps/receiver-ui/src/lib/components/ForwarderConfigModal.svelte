@@ -88,7 +88,12 @@
 
     try {
       const response = await getForwarderConfig(targetEndpointId);
-      const parsed = JSON.parse(response.config_json) as unknown;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(response.config_json) as unknown;
+      } catch {
+        throw new Error("Failed to read forwarder config (invalid response).");
+      }
       if (!isRecord(parsed)) {
         throw new Error("Forwarder config must be a JSON object");
       }
