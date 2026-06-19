@@ -64,6 +64,17 @@ pub enum ForwarderConnState {
     Disconnected,
 }
 
+/// A point-in-time view of one forwarder's connection state.
+///
+/// Contract for consumers (notably the UI): while `pending == true` the
+/// forwarder is still within the initial 5s connect grace window
+/// ([`FORWARDER_PENDING_GRACE`]) after a dial attempt began, and consumers MUST
+/// present it as a transient "connecting" status — NOT as the underlying
+/// `state`, which during the grace window is reported as
+/// [`ForwarderConnState::Unavailable`] even though no real failure has been
+/// confirmed yet. Only once `pending == false` does `state` reflect the
+/// settled, user-facing condition. (Phase 2 UI maps `pending` → an amber
+/// "Connecting…" badge.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ForwarderStateSnapshot {
     pub state: ForwarderConnState,

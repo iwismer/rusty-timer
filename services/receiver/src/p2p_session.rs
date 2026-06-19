@@ -14,9 +14,11 @@
 //!    durable contiguous cursor — never the latest *received* seq.
 //!
 //! On [`GapNotice`](rt_p2p_protocol::GapNotice) the session records a gap marker
-//! and jumps the cursor to `earliest_available_seq - 1`. On disconnect it
-//! reconnects with exponential backoff (1s → 30s) and resumes from the
-//! persisted cursor.
+//! and jumps the cursor to `earliest_available_seq - 1`. On disconnect a data
+//! subscription simply returns (a clean EOF is not an error); it does not loop.
+//! Reconnection with exponential backoff (1s → 30s) and resume-from-cursor is
+//! owned by the per-forwarder connection in [`crate::p2p_forwarder`], which
+//! reopens the subscription on the next reconcile.
 //!
 //! This module provides the testable session core: the control handshake
 //! ([`connect_and_hello`]) and a single data-plane subscription
@@ -199,13 +201,23 @@ pub enum P2pSessionError {
 }
 
 impl P2pSessionError {
-    /// Whether the reconnect loop should retry after this error.
+    /// Classifies an error as a transient transport failure versus a durable
+    /// protocol/data-integrity failure.
     ///
-    /// Transient transport/read/write failures are retryable (the loop backs
-    /// off and resumes from the persisted cursor). Durable failures — decode,
+    /// Transient transport/read/write failures (`true`) are the expected
+    /// disconnect/EOF signals when a connection drops; resuming from the
+    /// persisted cursor is safe. Durable failures (`false`) — decode,
     /// frame-size, protocol-sequencing, and data-integrity errors, plus durable
-    /// store errors — are surfaced to the caller instead of being retried
-    /// forever.
+    /// store errors — indicate the forwarder sent something the session must
+    /// not silently ack past.
+    ///
+    /// This is a pure classifier, *not* a retry gate: the production runtime no
+    /// longer loops forever inside a single data subscription. A data task that
+    /// ends (for any reason) is logged and then recreated on the next reconcile
+    /// by [`crate::p2p_forwarder`], which reopens the subscription from the
+    /// persisted cursor. Callers use this method to decide whether an ended
+    /// subscription is a routine disconnect worth a quiet log or a durable fault
+    /// worth surfacing.
     pub fn is_retryable(&self) -> bool {
         match self {
             P2pSessionError::Iroh(_)

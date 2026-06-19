@@ -1151,6 +1151,12 @@ fn script_two_echo(raw: &[u8]) -> ForwarderScript {
 /// session multiplexing two data streams over the SAME QUIC connection: both
 /// deliver their records, only one connection is opened, and removing one
 /// subscription leaves the other's durable rows and the control session intact.
+///
+/// Note: after the unsubscribe this asserts durable rows + control-session
+/// survival (one connection, still `Connected`/`Subscribed`), NOT live-stream
+/// liveness on the remaining stream — the scripted mock completes each data
+/// subscription after its replay, so the harness cannot observe an ongoing live
+/// stream here.
 #[tokio::test]
 async fn one_connection_multiplexes_multiple_data_streams() {
     tokio::time::timeout(TEST_TIMEOUT, async {
