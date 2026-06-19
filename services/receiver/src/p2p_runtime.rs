@@ -405,6 +405,11 @@ async fn server_startup(thin: ServerClientConfig, endpoint_id: String) -> Result
 /// the task never crashes. The optional explicit `seed` forwarder is preserved
 /// in the refreshed map when the server has not advertised that endpoint, so
 /// the loopback/dev path keeps working alongside discovery.
+///
+/// When a refresh changes the discovered map, a streams snapshot is broadcast
+/// to UI clients so server-side renames (and address/stream changes) surface
+/// without a manual reconnect. The snapshot is SSE-only and never restarts
+/// stream workers, so active streams are not interrupted.
 async fn run_discovery_loop(
     state: Arc<AppState>,
     thin: ServerClientConfig,
@@ -417,7 +422,25 @@ async fn run_discovery_loop(
         match fetch_forwarders(&thin).await {
             Ok(entries) => {
                 let map = build_discovered_forwarders(entries, seed.as_ref());
-                *state.discovered_forwarders.write().await = map;
+                let changed = {
+                    let mut current = state.discovered_forwarders.write().await;
+                    if *current == map {
+                        false
+                    } else {
+                        *current = map;
+                        true
+                    }
+                };
+                // When discovery metadata changes (e.g. a forwarder was
+                // renamed on the server, or its addresses/streams changed),
+                // push a streams snapshot so the UI reflects the new
+                // `display_alias` promptly. This is purely an SSE broadcast and
+                // does not restart stream workers, so live streams keep flowing
+                // uninterrupted. The write guard is dropped before emitting
+                // because `emit_streams_snapshot` re-reads the same map.
+                if changed {
+                    state.emit_streams_snapshot().await;
+                }
             }
             Err(e) => {
                 warn!(error = %e, "forwarder discovery fetch failed; will retry");
