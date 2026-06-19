@@ -18,12 +18,25 @@ pub struct ReceiverAllowListResponse {
 
 /// `GET /allowlist/receivers` — M2M allow-list fetch for forwarders.
 pub async fn receiver_allowlist(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !register::authorized(&headers, &state.provisioning_token_hash) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let receiver_endpoint_ids = {
         let conn = state.conn.lock().expect("registry mutex poisoned");
+        let authorized = if register::authorized(&headers, &state.provisioning_token_hash) {
+            true
+        } else if let Some(raw_bearer) = register::bearer_token(&headers) {
+            match registry::any_device_token_authorized(&conn, DeviceKind::Forwarder, raw_bearer) {
+                Ok(authorized) => authorized,
+                Err(err) => {
+                    tracing::error!(error = %err, "allow-list token authorization failed");
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+            }
+        } else {
+            false
+        };
+        if !authorized {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+
         match registry::list_devices(&conn) {
             Ok(devices) => devices
                 .into_iter()
@@ -125,6 +138,93 @@ mod tests {
             body["receiver_endpoint_ids"],
             serde_json::json!(["receiver-active"])
         );
+    }
+
+    #[tokio::test]
+    async fn allowlist_accepts_registered_forwarder_device_token() {
+        let state = test_state();
+        {
+            let conn = state.conn.lock().unwrap();
+            crate::registry::create_enrollment_token(
+                &conn,
+                "tok-1",
+                crate::registry::DeviceKind::Forwarder,
+                None,
+                "forwarder-secret",
+            )
+            .unwrap();
+            crate::registry::register_device_with_enrollment_token(
+                &conn,
+                "ep-fwd",
+                crate::registry::DeviceKind::Forwarder,
+                "forwarder-secret",
+            )
+            .unwrap()
+            .unwrap();
+        }
+
+        let resp = router(state)
+            .oneshot(allowlist_request("forwarder-secret"))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn allowlist_rejects_receiver_device_token() {
+        let state = test_state();
+        {
+            let conn = state.conn.lock().unwrap();
+            crate::registry::register_device(
+                &conn,
+                "ep-receiver",
+                crate::registry::DeviceKind::Receiver,
+                "receiver-secret",
+            )
+            .unwrap();
+        }
+
+        let resp = router(state)
+            .oneshot(allowlist_request("receiver-secret"))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn allowlist_rejects_revoked_forwarder_device_token() {
+        let state = test_state();
+        {
+            let conn = state.conn.lock().unwrap();
+            crate::registry::create_enrollment_token(
+                &conn,
+                "tok-1",
+                crate::registry::DeviceKind::Forwarder,
+                None,
+                "forwarder-secret",
+            )
+            .unwrap();
+            crate::registry::register_device_with_enrollment_token(
+                &conn,
+                "ep-fwd",
+                crate::registry::DeviceKind::Forwarder,
+                "forwarder-secret",
+            )
+            .unwrap()
+            .unwrap();
+            crate::registry::revoke_enrollment_token(&conn, "tok-1")
+                .unwrap()
+                .unwrap();
+        }
+
+        let resp = router(state)
+            .oneshot(allowlist_request("forwarder-secret"))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

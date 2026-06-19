@@ -9,7 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::http::{AppState, register};
-use crate::registry::{self, ForwarderCatalogStreamRecord};
+use crate::registry::{self, DeviceKind, ForwarderCatalogStreamRecord};
 
 #[derive(Debug, Deserialize)]
 pub struct ForwarderCatalogRequest {
@@ -34,24 +34,34 @@ pub struct ForwarderCatalogResponse {
 
 /// `POST /forwarder/catalog` — M2M forwarder identity and stream catalog push.
 ///
-/// SECURITY (known limitation): this is authorized by the *shared* provisioning
-/// bearer token, so any holder of that token can push a catalog for an
-/// arbitrary `endpoint_id` — there is currently no cryptographic binding
-/// between the caller and the `endpoint_id` it claims. When per-device auth
-/// lands (each device registers its own token under TOFU; see
-/// [`crate::registry::register_device`]), this handler MUST be changed to
-/// authenticate against the per-device token for `req.endpoint_id` and reject
-/// pushes signed by the provisioning token or any other device's token.
-/// Tracked as a post-review follow-up.
+/// Accepts the shared provisioning token for legacy deployments and enrolled
+/// forwarder-scoped device tokens for per-device authorization. Receiver tokens
+/// must not authorize this endpoint.
 pub async fn push_catalog(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<ForwarderCatalogRequest>,
 ) -> Response {
-    // TODO(per-device-auth): bind this to the per-device token for
-    // `req.endpoint_id` instead of the shared provisioning token (see the
-    // SECURITY note above).
-    if !register::authorized(&headers, &state.provisioning_token_hash) {
+    let authorized = if register::authorized(&headers, &state.provisioning_token_hash) {
+        true
+    } else if let Some(raw_bearer) = register::bearer_token(&headers) {
+        let conn = state.conn.lock().expect("registry mutex poisoned");
+        match registry::device_token_authorized(
+            &conn,
+            &req.endpoint_id,
+            DeviceKind::Forwarder,
+            raw_bearer,
+        ) {
+            Ok(authorized) => authorized,
+            Err(err) => {
+                tracing::error!(error = %err, "catalog token authorization failed");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        }
+    } else {
+        false
+    };
+    if !authorized {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
@@ -91,5 +101,132 @@ pub async fn push_catalog(
             tracing::error!(error = %err, "forwarder catalog push failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::http::{AppState, router};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rusqlite::Connection;
+    use tower::ServiceExt;
+
+    const PROV_TOKEN: &str = "prov-secret";
+
+    fn test_state() -> AppState {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&conn).unwrap();
+        crate::registry::migrate(&conn).unwrap();
+        AppState::new(conn, PROV_TOKEN, true)
+    }
+
+    fn catalog_request(token: &str, endpoint_id: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/forwarder/catalog")
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "endpoint_id": endpoint_id,
+                    "display_name": "Start Line",
+                    "direct_addrs": ["127.0.0.1:5000"],
+                    "streams": [{
+                        "stream_id": "reader-a",
+                        "epoch": 1,
+                        "next_seq": 2
+                    }]
+                }))
+                .unwrap(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn catalog_accepts_registered_forwarder_device_token() {
+        let state = test_state();
+        {
+            let conn = state.conn.lock().unwrap();
+            crate::registry::create_enrollment_token(
+                &conn,
+                "tok-1",
+                crate::registry::DeviceKind::Forwarder,
+                None,
+                "forwarder-secret",
+            )
+            .unwrap();
+            crate::registry::register_device_with_enrollment_token(
+                &conn,
+                "ep-fwd",
+                crate::registry::DeviceKind::Forwarder,
+                "forwarder-secret",
+            )
+            .unwrap()
+            .unwrap();
+        }
+
+        let resp = router(state)
+            .oneshot(catalog_request("forwarder-secret", "ep-fwd"))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn catalog_rejects_receiver_device_token() {
+        let state = test_state();
+        {
+            let conn = state.conn.lock().unwrap();
+            crate::registry::register_device(
+                &conn,
+                "ep-receiver",
+                crate::registry::DeviceKind::Receiver,
+                "receiver-secret",
+            )
+            .unwrap();
+        }
+
+        let resp = router(state)
+            .oneshot(catalog_request("receiver-secret", "ep-receiver"))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn catalog_rejects_revoked_registered_device_token() {
+        let state = test_state();
+        {
+            let conn = state.conn.lock().unwrap();
+            crate::registry::create_enrollment_token(
+                &conn,
+                "tok-1",
+                crate::registry::DeviceKind::Forwarder,
+                None,
+                "forwarder-secret",
+            )
+            .unwrap();
+            crate::registry::register_device_with_enrollment_token(
+                &conn,
+                "ep-fwd",
+                crate::registry::DeviceKind::Forwarder,
+                "forwarder-secret",
+            )
+            .unwrap()
+            .unwrap();
+            crate::registry::revoke_enrollment_token(&conn, "tok-1")
+                .unwrap()
+                .unwrap();
+        }
+
+        let resp = router(state)
+            .oneshot(catalog_request("forwarder-secret", "ep-fwd"))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

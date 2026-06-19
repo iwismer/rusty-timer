@@ -440,6 +440,7 @@ def main() -> int:
                 "SERVER_DB_PATH": str(thin_db_path),
                 "BIND_ADDR": f"127.0.0.1:{server_port}",
                 "SERVER_PROVISIONING_TOKEN": PROVISIONING_TOKEN,
+                "SERVER_TRUSTED_PROXY": "1",
                 "LOG_LEVEL": "info",
             },
         ))
@@ -557,6 +558,7 @@ def print_summary(**kw) -> None:
     print("=" * 72)
     print(f"  Server UI:       {thin}/         (status dashboard)")
     print(f"  Server admin:    {thin}/admin    (APPROVE devices here)")
+    print(f"  SBC setup:       {thin}/sbc-setup")
     print(f"  Server announcer:{thin}/announcer")
     print(f"  Forwarder UI:       http://127.0.0.1:{kw['forwarder_status_port']}/   (status API at /api/v1/status)")
     print(f"  Emulator (reads):   127.0.0.1:{kw['emulator_port']}   (log: {kw['work_dir']}/emulator.log)")

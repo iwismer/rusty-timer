@@ -9,7 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::http::AppState;
-use crate::registry::{self, ApprovalState, DeviceKind};
+use crate::registry::{self, ApprovalState, DeviceKind, DeviceRecord};
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
@@ -37,21 +37,23 @@ pub async fn register(
     headers: HeaderMap,
     Json(req): Json<RegisterRequest>,
 ) -> Response {
-    if !authorized(&headers, &state.provisioning_token_hash) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let Some(device_kind) = DeviceKind::parse(&req.device_kind) else {
         return (StatusCode::BAD_REQUEST, "invalid device_kind").into_response();
     };
 
     let result = {
         let conn = state.conn.lock().expect("registry mutex poisoned");
-        registry::register_device(&conn, &req.endpoint_id, device_kind, &req.device_token)
+        register_authorized_device(
+            &conn,
+            &headers,
+            &state.provisioning_token_hash,
+            &req,
+            device_kind,
+        )
     };
 
     match result {
-        Ok(record) => (
+        Ok(Some(record)) => (
             StatusCode::OK,
             Json(RegisterResponse {
                 endpoint_id: record.endpoint_id,
@@ -60,6 +62,7 @@ pub async fn register(
             }),
         )
             .into_response(),
+        Ok(None) => StatusCode::UNAUTHORIZED.into_response(),
         Err(err) => {
             tracing::error!(error = %err, "device registration failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -67,21 +70,45 @@ pub async fn register(
     }
 }
 
+fn register_authorized_device(
+    conn: &rusqlite::Connection,
+    headers: &HeaderMap,
+    provisioning_token_hash: &[u8],
+    req: &RegisterRequest,
+    device_kind: DeviceKind,
+) -> rusqlite::Result<Option<DeviceRecord>> {
+    if authorized(headers, provisioning_token_hash) {
+        return registry::register_device(conn, &req.endpoint_id, device_kind, &req.device_token)
+            .map(Some);
+    }
+
+    let Some(raw_bearer) = bearer_token(headers) else {
+        return Ok(None);
+    };
+    if raw_bearer != req.device_token {
+        return Ok(None);
+    }
+
+    if registry::device_token_authorized(conn, &req.endpoint_id, device_kind, raw_bearer)? {
+        return registry::register_device(conn, &req.endpoint_id, device_kind, &req.device_token)
+            .map(Some);
+    }
+
+    registry::register_device_with_enrollment_token(conn, &req.endpoint_id, device_kind, raw_bearer)
+}
+
 /// Authorize a request against the provisioning bearer token.
 pub(super) fn authorized(headers: &HeaderMap, expected_hash: &[u8]) -> bool {
-    let Some(value) = headers.get(AUTHORIZATION) else {
-        return false;
-    };
-    let Ok(value) = value.to_str() else {
-        return false;
-    };
-    let Some(token) = value.strip_prefix("Bearer ") else {
-        return false;
-    };
+    bearer_token(headers).is_some_and(|token| registry::verify_token(token, expected_hash))
+}
+
+pub(super) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(AUTHORIZATION)?.to_str().ok()?;
+    let token = value.strip_prefix("Bearer ")?;
     if token.is_empty() {
-        return false;
+        return None;
     }
-    registry::verify_token(token, expected_hash)
+    Some(token)
 }
 
 #[cfg(test)]
@@ -168,6 +195,276 @@ mod tests {
             crate::registry::ApprovalState::Active
         );
         assert_eq!(approved.display_name.as_deref(), Some("Finish Line"));
+    }
+
+    #[tokio::test]
+    async fn register_accepts_active_enrollment_token() {
+        let state = test_state();
+        {
+            let conn = state.conn.lock().unwrap();
+            crate::registry::create_enrollment_token(
+                &conn,
+                "tok-1",
+                crate::registry::DeviceKind::Forwarder,
+                None,
+                "enroll-secret",
+            )
+            .unwrap();
+        }
+
+        let resp = router(state.clone())
+            .oneshot(register_request(
+                "enroll-secret",
+                &serde_json::json!({
+                    "endpoint_id": "ep-forwarder-enrolled",
+                    "device_kind": "forwarder",
+                    "device_token": "enroll-secret"
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let conn = state.conn.lock().unwrap();
+        let device = crate::registry::get_device(&conn, "ep-forwarder-enrolled")
+            .unwrap()
+            .expect("device recorded");
+        assert_eq!(device.device_kind, crate::registry::DeviceKind::Forwarder);
+    }
+
+    #[tokio::test]
+    async fn register_consumes_enrollment_token() {
+        let state = test_state();
+        {
+            let conn = state.conn.lock().unwrap();
+            crate::registry::create_enrollment_token(
+                &conn,
+                "tok-1",
+                crate::registry::DeviceKind::Forwarder,
+                None,
+                "enroll-secret",
+            )
+            .unwrap();
+        }
+
+        let resp = router(state.clone())
+            .oneshot(register_request(
+                "enroll-secret",
+                &serde_json::json!({
+                    "endpoint_id": "ep-forwarder-enrolled",
+                    "device_kind": "forwarder",
+                    "device_token": "enroll-secret"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let conn = state.conn.lock().unwrap();
+        let tokens = crate::registry::list_enrollment_tokens(&conn).unwrap();
+        assert_eq!(
+            tokens[0].status,
+            crate::registry::EnrollmentTokenStatus::Used
+        );
+        assert_eq!(
+            tokens[0].used_endpoint_id.as_deref(),
+            Some("ep-forwarder-enrolled")
+        );
+    }
+
+    #[tokio::test]
+    async fn register_allows_reregistration_with_used_token_for_same_endpoint() {
+        let state = test_state();
+        {
+            let conn = state.conn.lock().unwrap();
+            crate::registry::create_enrollment_token(
+                &conn,
+                "tok-1",
+                crate::registry::DeviceKind::Forwarder,
+                None,
+                "enroll-secret",
+            )
+            .unwrap();
+        }
+
+        for _ in 0..2 {
+            let resp = router(state.clone())
+                .oneshot(register_request(
+                    "enroll-secret",
+                    &serde_json::json!({
+                        "endpoint_id": "ep-forwarder-enrolled",
+                        "device_kind": "forwarder",
+                        "device_token": "enroll-secret"
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn register_rejects_consumed_enrollment_token_for_second_endpoint() {
+        let state = test_state();
+        {
+            let conn = state.conn.lock().unwrap();
+            crate::registry::create_enrollment_token(
+                &conn,
+                "tok-1",
+                crate::registry::DeviceKind::Forwarder,
+                None,
+                "enroll-secret",
+            )
+            .unwrap();
+        }
+
+        let first = router(state.clone())
+            .oneshot(register_request(
+                "enroll-secret",
+                &serde_json::json!({
+                    "endpoint_id": "ep-forwarder-one",
+                    "device_kind": "forwarder",
+                    "device_token": "enroll-secret"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = router(state)
+            .oneshot(register_request(
+                "enroll-secret",
+                &serde_json::json!({
+                    "endpoint_id": "ep-forwarder-two",
+                    "device_kind": "forwarder",
+                    "device_token": "enroll-secret"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn register_rejects_unused_enrollment_token_for_existing_endpoint() {
+        let state = test_state();
+        {
+            let conn = state.conn.lock().unwrap();
+            crate::registry::register_device(
+                &conn,
+                "ep-forwarder-existing",
+                crate::registry::DeviceKind::Forwarder,
+                "existing-secret",
+            )
+            .unwrap();
+            crate::registry::approve_device(&conn, "ep-forwarder-existing", "Start Line")
+                .unwrap()
+                .unwrap();
+            crate::registry::create_enrollment_token(
+                &conn,
+                "tok-1",
+                crate::registry::DeviceKind::Forwarder,
+                None,
+                "enroll-secret",
+            )
+            .unwrap();
+        }
+
+        let resp = router(state.clone())
+            .oneshot(register_request(
+                "enroll-secret",
+                &serde_json::json!({
+                    "endpoint_id": "ep-forwarder-existing",
+                    "device_kind": "forwarder",
+                    "device_token": "enroll-secret"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let conn = state.conn.lock().unwrap();
+        let device = crate::registry::get_device(&conn, "ep-forwarder-existing")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            device.approval_state,
+            crate::registry::ApprovalState::Active
+        );
+        assert!(
+            crate::registry::device_token_authorized(
+                &conn,
+                "ep-forwarder-existing",
+                crate::registry::DeviceKind::Forwarder,
+                "existing-secret",
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            crate::registry::list_enrollment_tokens(&conn).unwrap()[0].status,
+            crate::registry::EnrollmentTokenStatus::Active,
+        );
+    }
+
+    #[tokio::test]
+    async fn register_rejects_revoked_enrollment_token() {
+        let state = test_state();
+        {
+            let conn = state.conn.lock().unwrap();
+            crate::registry::create_enrollment_token(
+                &conn,
+                "tok-1",
+                crate::registry::DeviceKind::Forwarder,
+                None,
+                "enroll-secret",
+            )
+            .unwrap();
+            crate::registry::revoke_enrollment_token(&conn, "tok-1")
+                .unwrap()
+                .unwrap();
+        }
+
+        let resp = router(state)
+            .oneshot(register_request(
+                "enroll-secret",
+                &serde_json::json!({
+                    "endpoint_id": "ep-forwarder-enrolled",
+                    "device_kind": "forwarder",
+                    "device_token": "enroll-secret"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn register_rejects_enrollment_token_device_token_mismatch() {
+        let state = test_state();
+        {
+            let conn = state.conn.lock().unwrap();
+            crate::registry::create_enrollment_token(
+                &conn,
+                "tok-1",
+                crate::registry::DeviceKind::Forwarder,
+                None,
+                "enroll-secret",
+            )
+            .unwrap();
+        }
+
+        let resp = router(state)
+            .oneshot(register_request(
+                "enroll-secret",
+                &serde_json::json!({
+                    "endpoint_id": "ep-forwarder-enrolled",
+                    "device_kind": "forwarder",
+                    "device_token": "different-secret"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

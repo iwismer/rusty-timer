@@ -3,6 +3,7 @@
 pub mod allowlist;
 pub mod announcer;
 pub mod catalog;
+pub mod enrollment_tokens;
 pub mod forwarders;
 pub mod register;
 pub mod status;
@@ -20,9 +21,10 @@ use crate::announcer::AnnouncerRuntime;
 /// Shared application state for HTTP handlers.
 ///
 /// Holds the `SQLite` connection (guarded by a mutex, since rusqlite connections
-/// are single-threaded) and the hashed provisioning bearer token used to
-/// authorize `POST /register`, `POST /forwarder/catalog`, `POST
-/// /announcer/rows`, and `POST /announcer/takeover`.
+/// are single-threaded) and the hashed provisioning bearer token used by legacy
+/// device routes. Enrolled forwarders can also use their non-revoked forwarder
+/// token for `POST /register`, `POST /forwarder/catalog`, and `GET
+/// /allowlist/receivers`.
 ///
 /// `admin_proxy_trusted` is the fail-closed guard for `/admin/*` routes: those
 /// routes trust the upstream-injected [`status::ADMIN_HEADER`] only when this is
@@ -55,9 +57,12 @@ impl AppState {
 ///
 /// - Public (unauthenticated): `GET /status`.
 /// - Admin (upstream [`status::ADMIN_HEADER`] required): `POST
-///   /admin/devices/approve`, `POST /admin/devices/rename`.
-/// - M2M/device (in-process provisioning bearer auth): `POST /register`, `POST
-///   /forwarder/catalog`, `POST /announcer/rows`, `POST /announcer/takeover`.
+///   /admin/devices/approve`, `POST /admin/devices/rename`, and enrollment
+///   token management under `/admin/enrollment-tokens`.
+/// - M2M/device: `POST /register`, `POST /forwarder/catalog`, and `GET
+///   /allowlist/receivers` accept the provisioning token or an enrolled
+///   forwarder's non-revoked token. Announcer push/takeover routes use the
+///   provisioning token.
 pub fn router(state: AppState) -> Router {
     Router::new()
         // Public, unauthenticated read endpoints.
@@ -65,6 +70,14 @@ pub fn router(state: AppState) -> Router {
         // Admin endpoints — must be protected by Caddy/Authelia.
         .route("/admin/devices/approve", post(status::approve_device))
         .route("/admin/devices/rename", post(status::rename_device))
+        .route(
+            "/admin/enrollment-tokens",
+            get(enrollment_tokens::list_tokens).post(enrollment_tokens::create_token),
+        )
+        .route(
+            "/admin/enrollment-tokens/{token_id}/revoke",
+            post(enrollment_tokens::revoke_token),
+        )
         // M2M/device endpoints — in-process provisioning bearer auth.
         .route("/register", post(register::register))
         .route("/forwarder/catalog", post(catalog::push_catalog))

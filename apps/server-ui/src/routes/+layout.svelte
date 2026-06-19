@@ -28,6 +28,11 @@
         label: "Announcer",
         active: currentPath === "/announcer",
       },
+      {
+        href: "/sbc-setup",
+        label: "SBC Setup",
+        active: currentPath === "/sbc-setup",
+      },
       { href: "/admin", label: "Admin", active: currentPath === "/admin" },
     ]}
   />

@@ -1,0 +1,157 @@
+import type { SbcSetupFormData } from "./types";
+
+export const DEFAULT_SETUP_SCRIPT_URL =
+  "https://raw.githubusercontent.com/iwismer/rusty-timer/main/deploy/sbc/rt-setup.sh";
+
+function yamlQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value) && value.length > 0) {
+    return value;
+  }
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function normalizedReaderTargets(value: string): string {
+  return value
+    .replace(/[;\n]/g, ",")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .join(",");
+}
+
+function renderSetupEnv(config: SbcSetupFormData): string {
+  const lines = [
+    "RT_SETUP_NONINTERACTIVE=1",
+    "RT_SETUP_ALLOW_POWER_ACTIONS=1",
+    "RT_SETUP_OVERWRITE_CONFIG=0",
+    "RT_SETUP_RESTART_IF_RUNNING=1",
+    `RT_SETUP_DISPLAY_NAME=${shellQuote(config.displayName || config.hostname)}`,
+    `RT_SETUP_SERVER_URL=${shellQuote(config.serverUrl)}`,
+    `RT_SETUP_AUTH_TOKEN=${shellQuote(config.authToken)}`,
+    `RT_SETUP_READER_TARGETS=${shellQuote(normalizedReaderTargets(config.readerTargets))}`,
+    `RT_SETUP_STATUS_BIND=${shellQuote(config.statusBind)}`,
+    `RT_SETUP_DONE_MARKER=${shellQuote("/var/lib/rusty-timer/.first-boot-setup-done")}`,
+  ];
+  if (config.upsEnabled) {
+    lines.push("RT_SETUP_UPS_ENABLED=1");
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+export function generateUserData(config: SbcSetupFormData): string {
+  const packages = [
+    "avahi-daemon",
+    "ca-certificates",
+    "jq",
+    "curl",
+    "tar",
+    "coreutils",
+  ];
+  if (config.upsEnabled) packages.push("i2c-tools");
+  const packageLines = packages.map((pkg) => `  - ${pkg}`).join("\n");
+  const setupEnv = renderSetupEnv(config);
+  const setupEnvLines = setupEnv
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => `      ${line}\n`)
+    .join("");
+  const setupScriptUrl = config.setupScriptUrl || DEFAULT_SETUP_SCRIPT_URL;
+
+  return (
+    "#cloud-config\n" +
+    `hostname: ${config.hostname}\n` +
+    "manage_etc_hosts: true\n" +
+    "enable_ssh: true\n" +
+    "ssh_pwauth: false\n" +
+    "\n" +
+    "users:\n" +
+    `  - name: ${config.adminUsername}\n` +
+    "    groups: sudo\n" +
+    "    shell: /bin/bash\n" +
+    "    lock_passwd: true\n" +
+    "    sudo: ALL=(ALL) NOPASSWD:ALL\n" +
+    "    ssh_authorized_keys:\n" +
+    `      - ${yamlQuote(config.sshPublicKey)}\n` +
+    "  - name: rt-forwarder\n" +
+    "    system: true\n" +
+    "    shell: /bin/false\n" +
+    "    homedir: /var/lib/rusty-timer\n" +
+    "    no_create_home: false\n" +
+    "\n" +
+    "packages:\n" +
+    `${packageLines}\n` +
+    "\n" +
+    "bootcmd:\n" +
+    "  - >-\n" +
+    "    if [ -f /boot/firmware/config.txt ]; then BOOT_CFG=/boot/firmware/config.txt;\n" +
+    "    elif [ -f /boot/config.txt ]; then BOOT_CFG=/boot/config.txt;\n" +
+    "    else exit 0; fi;\n" +
+    '    grep -q "^dtparam=spi=on" "$BOOT_CFG" || echo "dtparam=spi=on" >> "$BOOT_CFG";\n' +
+    '    grep -q "^dtparam=i2c_arm=on" "$BOOT_CFG" || echo "dtparam=i2c_arm=on" >> "$BOOT_CFG"\n' +
+    "\n" +
+    "write_files:\n" +
+    "  - path: /etc/rusty-timer/rt-setup.env\n" +
+    "    owner: root:root\n" +
+    "    permissions: '0600'\n" +
+    "    content: |\n" +
+    setupEnvLines +
+    "\n" +
+    "runcmd:\n" +
+    "  - mkdir -p /etc/rusty-timer\n" +
+    "  - mkdir -p /var/lib/rusty-timer\n" +
+    "  - chown rt-forwarder:rt-forwarder /var/lib/rusty-timer\n" +
+    `  - curl -fsSL ${yamlQuote(setupScriptUrl)} -o /var/tmp/rt-setup.sh\n` +
+    "  - chmod 0755 /var/tmp/rt-setup.sh\n" +
+    "  - bash -lc 'set -a; . /etc/rusty-timer/rt-setup.env; set +a; /var/tmp/rt-setup.sh'\n"
+  );
+}
+
+export function generateNetworkConfig(config: SbcSetupFormData): string {
+  const dnsLines = config.dnsServers
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => `          - ${entry}`)
+    .join("\n");
+
+  let text =
+    "network:\n" +
+    "  version: 2\n" +
+    "  ethernets:\n" +
+    "    eth0:\n" +
+    "      dhcp4: false\n" +
+    "      dhcp6: false\n" +
+    "      optional: true\n" +
+    "      addresses:\n" +
+    `        - ${config.staticIpv4Cidr}\n` +
+    "      routes:\n" +
+    "        - to: default\n" +
+    `          via: ${config.gateway}\n` +
+    "          metric: 600\n" +
+    "      nameservers:\n" +
+    "        addresses:\n" +
+    `${dnsLines}\n`;
+
+  if (!config.wifiEnabled || !config.wifiSsid.trim()) return text;
+
+  text +=
+    "  wifis:\n" +
+    "    wlan0:\n" +
+    "      dhcp4: true\n" +
+    "      optional: true\n" +
+    `      regulatory-domain: ${yamlQuote((config.wifiCountry || "US").toUpperCase())}\n` +
+    "      access-points:\n";
+
+  if (config.wifiPassword) {
+    text += `        ${yamlQuote(config.wifiSsid)}:\n`;
+    text += `          password: ${yamlQuote(config.wifiPassword)}\n`;
+  } else {
+    text += `        ${yamlQuote(config.wifiSsid)}: {}\n`;
+  }
+
+  return text;
+}
