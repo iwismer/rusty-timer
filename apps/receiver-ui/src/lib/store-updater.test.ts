@@ -6,6 +6,14 @@ const apiMocks = vi.hoisted(() => ({
     local_ok: true,
     streams_count: 0,
     receiver_id: "recv-test",
+    thin_node: {
+      configured: false,
+      endpoint_id: null,
+      reachable: null,
+      approval_state: null,
+      waiting_for_approval: false,
+      message: null,
+    },
   }),
   getStreams: vi.fn().mockResolvedValue({
     streams: [],
@@ -29,6 +37,7 @@ const apiMocks = vi.hoisted(() => ({
   clearDbf: vi.fn().mockResolvedValue(undefined),
   updateSubscriptionEventType: vi.fn().mockResolvedValue(undefined),
   getStreamMetrics: vi.fn().mockResolvedValue([]),
+  reconnectThinNode: vi.fn().mockResolvedValue(undefined),
 }));
 
 const desktopUpdaterMocks = vi.hoisted(() => ({
@@ -235,6 +244,39 @@ describe("receiver updater store", () => {
     expect(store.savedModePayload).toBe(
       JSON.stringify({ mode: "live", streams: [], earliest_epochs: [] }),
     );
+  });
+
+  it("preserves thin-node status across incremental status events", async () => {
+    const sseState = mockSseInitWithCallbacks();
+    const { initStore, store } = await import("./store.svelte");
+
+    apiMocks.getStatus.mockResolvedValueOnce({
+      connection_state: "connecting",
+      local_ok: true,
+      streams_count: 0,
+      receiver_id: "recv-test",
+      thin_node: {
+        configured: true,
+        endpoint_id: "node-1",
+        reachable: true,
+        approval_state: "pending",
+        waiting_for_approval: true,
+        message: "Waiting for thin-node admin approval",
+      },
+    });
+
+    initStore();
+    await flushAsyncWork();
+
+    sseState.callbacks?.onStatusChanged({
+      connection_state: "connected",
+      local_ok: true,
+      streams_count: 1,
+      receiver_id: "recv-test",
+    });
+
+    expect(store.status?.connection_state).toBe("connected");
+    expect(store.status?.thin_node.waiting_for_approval).toBe(true);
   });
 
   it("clears cached metrics for a stream when a snapshot reports a newer epoch", async () => {
@@ -1055,6 +1097,35 @@ describe("canonical-only stream identity", () => {
 
     expect(selectedEarliestEpochValue(streamA)).toBe("5");
     expect(selectedEarliestEpochValue(streamB)).toBe("9");
+  });
+
+  it("uses advertised stream epochs for canonical-only epoch options", async () => {
+    const { store, streamIdentity, prefetchEarliestEpochOptions } =
+      await import("./store.svelte");
+
+    store.earliestEpochOptions = {};
+    store.earliestEpochLoading = {};
+
+    const stream = {
+      forwarder_endpoint_id: "endpoint-1",
+      stream_id: "11111111-1111-1111-1111-111111111111",
+      subscribed: true,
+      local_port: null,
+      stream_epoch: 12,
+      current_epoch_name: "Race Morning",
+    };
+
+    await prefetchEarliestEpochOptions([stream]);
+
+    expect(store.earliestEpochOptions[streamIdentity(stream)]).toEqual([
+      {
+        stream_epoch: 12,
+        name: "Race Morning",
+        first_seen_at: null,
+        race_names: [],
+      },
+    ]);
+    expect(apiMocks.getReplayTargetEpochs).not.toHaveBeenCalled();
   });
 
   it("excludes canonical-only streams from the legacy live mode payload but keeps legacy ones", async () => {

@@ -174,6 +174,9 @@ pub async fn start_receiver_p2p(
         .map_err(|e| format!("failed to bind p2p endpoint: {e}"))?;
     // Stdout line consumed by T5.4 orchestration to learn this receiver's id.
     println!("p2p_node_id={}", endpoint.node_id());
+    state
+        .set_p2p_endpoint_id(endpoint.node_id().to_string())
+        .await;
     let local_addr = endpoint.node_addr().await;
     info!(
         p2p_node_id = %endpoint.node_id(),
@@ -288,6 +291,8 @@ async fn run_reconcile_loop(
 ) {
     let endpoint = Arc::new(endpoint);
     let mut workers: HashMap<String, StreamWorker> = HashMap::new();
+    let mut connect_attempt_rx = state.connect_attempt_rx();
+    let mut force_reconnect = false;
 
     // When a thin node is configured, periodically refresh the discovered
     // forwarders map from its `GET /forwarders` feed. The task observes the
@@ -299,6 +304,7 @@ async fn run_reconcile_loop(
             config.forwarder.clone(),
             config.reconcile_interval,
             shutdown_rx.clone(),
+            state.connect_attempt_rx(),
         ))
     });
 
@@ -312,6 +318,16 @@ async fn run_reconcile_loop(
     let mut announcer_generation: Option<i64> = None;
 
     loop {
+        if force_reconnect {
+            info!("receiver p2p reconnect requested; restarting stream workers");
+            for (_stream_id, worker) in workers.drain() {
+                worker.stop().await;
+            }
+            state.clear_stream_metrics_cache().await;
+            state.emit_streams_snapshot().await;
+            force_reconnect = false;
+        }
+
         if announcer_generation.is_none()
             && let Some(thin) = config.thin_node.clone()
         {
@@ -347,6 +363,11 @@ async fn run_reconcile_loop(
             biased;
             changed = shutdown_rx.changed() => {
                 if changed.is_err() || *shutdown_rx.borrow() { break; }
+            }
+            changed = connect_attempt_rx.changed() => {
+                if changed.is_ok() {
+                    force_reconnect = true;
+                }
             }
             () = tokio::time::sleep(config.reconcile_interval) => {}
         }
@@ -390,6 +411,7 @@ async fn run_discovery_loop(
     seed: Option<ForwarderPeerConfig>,
     interval: Duration,
     mut shutdown_rx: watch::Receiver<bool>,
+    mut connect_attempt_rx: watch::Receiver<u64>,
 ) {
     loop {
         match fetch_forwarders(&thin).await {
@@ -406,6 +428,11 @@ async fn run_discovery_loop(
             biased;
             changed = shutdown_rx.changed() => {
                 if changed.is_err() || *shutdown_rx.borrow() { break; }
+            }
+            changed = connect_attempt_rx.changed() => {
+                if changed.is_err() {
+                    break;
+                }
             }
             () = tokio::time::sleep(interval) => {}
         }

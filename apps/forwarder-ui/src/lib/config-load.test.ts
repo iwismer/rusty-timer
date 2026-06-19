@@ -18,6 +18,14 @@ function makeStatus(restart_needed: boolean): ForwarderStatus {
     ready_reason: null,
     p2p_connected: true,
     restart_needed,
+    thin_node: {
+      configured: false,
+      endpoint_id: null,
+      reachable: null,
+      approval_state: null,
+      waiting_for_approval: false,
+      message: null,
+    },
     readers: [],
   };
 }

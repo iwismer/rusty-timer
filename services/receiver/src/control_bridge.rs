@@ -279,6 +279,7 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
         "get_subscriptions" => ok(control_api::get_subscriptions(state).await?),
         "put_subscriptions" => ok(control_api::put_subscriptions(state, arg(args, "body")?).await?),
         "get_status" => ok(control_api::get_status(state).await),
+        "reconnect_thin_node" => ok(control_api::reconnect_thin_node(state).await?),
         "get_version" => ok(control_api::get_version()),
         "get_logs" => ok(control_api::get_logs(state).await),
         "admin_reset_cursor" => {

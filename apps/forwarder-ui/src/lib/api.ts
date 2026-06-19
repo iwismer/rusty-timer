@@ -43,6 +43,15 @@ export interface ReaderStatus {
   reader_info?: ReaderInfo | null;
 }
 
+export interface ThinNodeDeviceStatus {
+  configured: boolean;
+  endpoint_id: string | null;
+  reachable: boolean | null;
+  approval_state: string | null;
+  waiting_for_approval: boolean;
+  message: string | null;
+}
+
 export interface ForwarderStatus {
   forwarder_id: string;
   version: string;
@@ -50,6 +59,7 @@ export interface ForwarderStatus {
   ready_reason: string | null;
   p2p_connected: boolean;
   restart_needed: boolean;
+  thin_node: ThinNodeDeviceStatus;
   ups_status?: {
     available: boolean;
     status: {

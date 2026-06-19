@@ -82,7 +82,12 @@ pub struct AppState {
     /// available-but-unsubscribed entries in the streams response and the
     /// per-subscription dial address resolution in the P2P runtime.
     pub discovered_forwarders: Arc<tokio::sync::RwLock<DiscoveredForwarders>>,
+    pub p2p_endpoint_id: Arc<RwLock<Option<String>>>,
     connect_attempt: AtomicU64,
+    connect_attempt_version: watch::Sender<u64>,
+    /// Keepalive receiver to prevent the connect-attempt watch channel from being dropped
+    /// when no runtime subscriber is active.
+    _connect_attempt_keepalive: watch::Receiver<u64>,
     retry_streak: AtomicU64,
     /// Monotonic counter incremented when DBF config changes; subscribers
     /// (runtime.rs) use this to restart the DBF writer. Use
@@ -106,6 +111,7 @@ impl AppState {
         let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownSignal::None);
         let (ui_tx, _) = broadcast::channel(256);
         let (conn_tx, conn_keepalive_rx) = watch::channel(ConnectionState::Disconnected);
+        let (connect_attempt_version, _connect_attempt_keepalive) = watch::channel(0u64);
         let (dbf_config_version, _dbf_config_keepalive) = watch::channel(0u64);
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3))
@@ -129,7 +135,10 @@ impl AppState {
             http_client,
             chip_lookup: Arc::new(tokio::sync::RwLock::new(ChipLookup::new())),
             discovered_forwarders: Arc::new(tokio::sync::RwLock::new(DiscoveredForwarders::new())),
+            p2p_endpoint_id: Arc::new(RwLock::new(None)),
             connect_attempt: AtomicU64::new(0),
+            connect_attempt_version,
+            _connect_attempt_keepalive,
             retry_streak: AtomicU64::new(0),
             dbf_config_version,
             _dbf_config_keepalive,
@@ -150,6 +159,16 @@ impl AppState {
         self.dbf_config_version.subscribe()
     }
 
+    pub fn connect_attempt_rx(&self) -> watch::Receiver<u64> {
+        self.connect_attempt_version.subscribe()
+    }
+
+    fn bump_connect_attempt(&self) -> u64 {
+        let next = self.connect_attempt.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = self.connect_attempt_version.send(next);
+        next
+    }
+
     pub async fn cache_stream_metrics(&self, payload: &crate::ui_events::StreamMetricsPayload) {
         let key = (payload.forwarder_id.clone(), payload.reader_ip.clone());
         self.stream_metrics_cache
@@ -160,6 +179,10 @@ impl AppState {
 
     pub async fn clear_stream_metrics_cache(&self) {
         self.stream_metrics_cache.write().await.clear();
+    }
+
+    pub async fn set_p2p_endpoint_id(&self, endpoint_id: String) {
+        *self.p2p_endpoint_id.write().await = Some(endpoint_id);
     }
 
     pub async fn get_stream_metrics_snapshot(&self) -> Vec<crate::ui_events::StreamMetricsPayload> {
@@ -193,13 +216,13 @@ impl AppState {
 
     pub async fn request_connect(&self) {
         self.reset_retry_streak();
-        self.connect_attempt.fetch_add(1, Ordering::SeqCst);
+        self.bump_connect_attempt();
         self.set_connection_state(ConnectionState::Connecting).await;
     }
 
     pub async fn request_retry_connect(&self) {
         self.retry_streak.fetch_add(1, Ordering::SeqCst);
-        self.connect_attempt.fetch_add(1, Ordering::SeqCst);
+        self.bump_connect_attempt();
         self.set_connection_state(ConnectionState::Connecting).await;
     }
 
@@ -216,7 +239,7 @@ impl AppState {
             return false;
         }
         self.retry_streak.fetch_add(1, Ordering::SeqCst);
-        self.connect_attempt.fetch_add(1, Ordering::SeqCst);
+        self.bump_connect_attempt();
         self.emit_connection_state_side_effects(ConnectionState::Connecting)
             .await;
         true
@@ -280,6 +303,19 @@ impl AppState {
 
         let cursor_map: HashMap<&str, &crate::db::StreamCursorRecord> =
             cursors.iter().map(|c| (c.stream_id.as_str(), c)).collect();
+        let discovered = self.discovered_forwarders.read().await;
+        let discovered_streams: HashMap<(&str, &str), (&DiscoveredForwarder, &DiscoveredStream)> =
+            discovered
+                .iter()
+                .flat_map(|(endpoint_id, forwarder)| {
+                    forwarder.streams.iter().map(move |stream| {
+                        (
+                            (endpoint_id.as_str(), stream.stream_id.as_str()),
+                            (forwarder, stream),
+                        )
+                    })
+                })
+                .collect();
 
         let mut streams: Vec<StreamEntry> = Vec::new();
 
@@ -298,6 +334,8 @@ impl AppState {
                     counts_snapshot.get(&sk)
                 });
             let cursor = cursor_map.get(sub.stream_id.as_str());
+            let discovered_stream = discovered_streams
+                .get(&(sub.forwarder_endpoint_id.as_str(), sub.stream_id.as_str()));
             streams.push(StreamEntry {
                 forwarder_endpoint_id: sub.forwarder_endpoint_id.clone(),
                 stream_id: sub.stream_id.clone(),
@@ -308,8 +346,9 @@ impl AppState {
                 event_type: Some(sub.event_type),
                 online: None,
                 reader_connected: None,
-                display_alias: None,
-                stream_epoch: None,
+                display_alias: discovered_stream
+                    .and_then(|(forwarder, _)| forwarder.display_name.clone()),
+                stream_epoch: discovered_stream.map(|(_, stream)| stream.epoch),
                 current_epoch_name: None,
                 reads_total: counts.as_ref().map(|c| c.total),
                 reads_epoch: counts.as_ref().map(|c| c.epoch),
@@ -326,7 +365,6 @@ impl AppState {
             .iter()
             .map(|s| (s.forwarder_endpoint_id.clone(), s.stream_id.clone()))
             .collect();
-        let discovered = self.discovered_forwarders.read().await;
         for (endpoint_id, forwarder) in discovered.iter() {
             for stream in &forwarder.streams {
                 let key = (endpoint_id.clone(), stream.stream_id.clone());
@@ -486,12 +524,36 @@ pub struct StreamsResponse {
     pub upstream_error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ThinNodeDeviceStatus {
+    pub configured: bool,
+    pub endpoint_id: Option<String>,
+    pub reachable: Option<bool>,
+    pub approval_state: Option<String>,
+    pub waiting_for_approval: bool,
+    pub message: Option<String>,
+}
+
+impl ThinNodeDeviceStatus {
+    fn not_configured() -> Self {
+        Self {
+            configured: false,
+            endpoint_id: None,
+            reachable: None,
+            approval_state: None,
+            waiting_for_approval: false,
+            message: None,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct StatusResponse {
     pub receiver_id: String,
     pub connection_state: ConnectionState,
     pub local_ok: bool,
     pub streams_count: usize,
+    pub thin_node: ThinNodeDeviceStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -759,12 +821,122 @@ pub async fn get_status(state: &AppState) -> StatusResponse {
     let db = state.db.lock().await;
     let streams_count = db.load_stream_subscriptions().map(|s| s.len()).unwrap_or(0);
     let local_ok = state.db_integrity_ok;
+    drop(db);
+    let thin_node = thin_node_device_status(state).await;
     StatusResponse {
         receiver_id,
         connection_state: conn,
         local_ok,
         streams_count,
+        thin_node,
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ThinNodeStatusBoard {
+    #[serde(default)]
+    devices: Vec<ThinNodeStatusDevice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ThinNodeStatusDevice {
+    endpoint_id: String,
+    approval_state: String,
+}
+
+async fn thin_node_device_status(state: &AppState) -> ThinNodeDeviceStatus {
+    let thin_node_url = {
+        let db = state.db.lock().await;
+        match db.load_profile() {
+            Ok(Some(profile)) if !profile.thin_node_url.trim().is_empty() => profile.thin_node_url,
+            _ => return ThinNodeDeviceStatus::not_configured(),
+        }
+    };
+    let endpoint_id = state.p2p_endpoint_id.read().await.clone();
+
+    let Some(endpoint_id) = endpoint_id else {
+        return ThinNodeDeviceStatus {
+            configured: true,
+            endpoint_id: None,
+            reachable: None,
+            approval_state: None,
+            waiting_for_approval: true,
+            message: Some("Waiting for the local P2P endpoint to start".to_owned()),
+        };
+    };
+
+    let status_url = format!("{}/status", thin_node_url.trim_end_matches('/'));
+    let response = match state.http_client.get(status_url).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return ThinNodeDeviceStatus {
+                configured: true,
+                endpoint_id: Some(endpoint_id),
+                reachable: Some(false),
+                approval_state: None,
+                waiting_for_approval: false,
+                message: Some(format!("Thin node status unavailable: {error}")),
+            };
+        }
+    };
+    let board = match response.error_for_status() {
+        Ok(response) => match response.json::<ThinNodeStatusBoard>().await {
+            Ok(board) => board,
+            Err(error) => {
+                return ThinNodeDeviceStatus {
+                    configured: true,
+                    endpoint_id: Some(endpoint_id),
+                    reachable: Some(false),
+                    approval_state: None,
+                    waiting_for_approval: false,
+                    message: Some(format!("Thin node status response was invalid: {error}")),
+                };
+            }
+        },
+        Err(error) => {
+            return ThinNodeDeviceStatus {
+                configured: true,
+                endpoint_id: Some(endpoint_id),
+                reachable: Some(false),
+                approval_state: None,
+                waiting_for_approval: false,
+                message: Some(format!("Thin node status returned an error: {error}")),
+            };
+        }
+    };
+
+    match board
+        .devices
+        .into_iter()
+        .find(|device| device.endpoint_id == endpoint_id)
+    {
+        Some(device) => {
+            let waiting_for_approval = device.approval_state == "pending";
+            ThinNodeDeviceStatus {
+                configured: true,
+                endpoint_id: Some(endpoint_id),
+                reachable: Some(true),
+                approval_state: Some(device.approval_state),
+                waiting_for_approval,
+                message: waiting_for_approval
+                    .then(|| "Waiting for thin-node admin approval".to_owned()),
+            }
+        }
+        None => ThinNodeDeviceStatus {
+            configured: true,
+            endpoint_id: Some(endpoint_id),
+            reachable: Some(true),
+            approval_state: None,
+            waiting_for_approval: true,
+            message: Some("Waiting for this receiver to register with the thin node".to_owned()),
+        },
+    }
+}
+
+pub async fn reconnect_thin_node(state: &AppState) -> Result<(), ReceiverError> {
+    state.request_connect().await;
+    state.emit_resync();
+    Ok(())
 }
 
 pub async fn get_logs(state: &AppState) -> LogsResponse {
@@ -1095,6 +1267,7 @@ macro_rules! receiver_command_list {
             get_subscriptions() -> "SubscriptionsBody",
             put_subscriptions(body: "SubscriptionsBody") -> "()",
             get_status() -> "StatusResponse",
+            reconnect_thin_node() -> "()",
             get_version() -> "String",
             get_logs() -> "LogsResponse",
             admin_reset_cursor(body: "CursorResetRequest") -> "()",
@@ -1314,6 +1487,60 @@ mod tests {
                 "event name {name:?} is not snake_case"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn build_streams_response_uses_discovered_epoch_for_subscription() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[crate::db::StreamSubscription {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: "stream-a".to_owned(),
+            local_port_override: None,
+            event_type: crate::db::EventType::Finish,
+            forwarder_id: None,
+            reader_ip: None,
+        }])
+        .unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        state.discovered_forwarders.write().await.insert(
+            "endpoint-1".to_owned(),
+            DiscoveredForwarder {
+                display_name: Some("Start Line".to_owned()),
+                direct_addrs: Vec::new(),
+                streams: vec![DiscoveredStream {
+                    stream_id: "stream-a".to_owned(),
+                    epoch: 7,
+                    next_seq: 42,
+                }],
+            },
+        );
+
+        let response = state.build_streams_response().await;
+
+        assert_eq!(response.streams.len(), 1);
+        assert!(response.streams[0].subscribed);
+        assert_eq!(response.streams[0].stream_epoch, Some(7));
+        assert_eq!(
+            response.streams[0].display_alias.as_deref(),
+            Some("Start Line")
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_thin_node_notifies_connect_watchers() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        let mut connect_rx = state.connect_attempt_rx();
+
+        reconnect_thin_node(&state).await.unwrap();
+
+        connect_rx.changed().await.unwrap();
+        assert_eq!(*connect_rx.borrow(), 1);
+        assert_eq!(state.current_connect_attempt(), 1);
+        assert_eq!(
+            state.connection_state.borrow().clone(),
+            ConnectionState::Connecting
+        );
     }
 
     #[tokio::test]

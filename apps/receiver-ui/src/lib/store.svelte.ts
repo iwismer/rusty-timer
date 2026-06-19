@@ -519,10 +519,27 @@ export async function prefetchEarliestEpochOptions(
     )
       return;
 
-    // Replay-target epochs are a legacy (forwarder_id, reader_ip)-keyed lookup;
-    // skip canonical-only streams that lack legacy metadata.
+    // Replay-target epochs are a legacy (forwarder_id, reader_ip)-keyed lookup.
+    // For thin-node-discovered canonical streams, fall back to the advertised
+    // current epoch so the controls do not show "No epochs available" before
+    // data-plane metrics arrive.
     const { forwarder_id, reader_ip } = stream;
-    if (forwarder_id == null || reader_ip == null) return;
+    if (forwarder_id == null || reader_ip == null) {
+      if (stream.stream_epoch != null) {
+        store.earliestEpochOptions = {
+          ...store.earliestEpochOptions,
+          [key]: [
+            {
+              stream_epoch: stream.stream_epoch,
+              name: stream.current_epoch_name ?? null,
+              first_seen_at: null,
+              race_names: [],
+            },
+          ],
+        };
+      }
+      return;
+    }
 
     store.earliestEpochLoading = { ...store.earliestEpochLoading, [key]: true };
     store.earliestEpochLoadErrors = {
@@ -929,6 +946,16 @@ export async function replayAll(): Promise<void> {
   }
 }
 
+export async function reconnectThinNode(): Promise<void> {
+  try {
+    store.error = null;
+    await api.reconnectThinNode();
+    await loadAll();
+  } catch (e) {
+    store.error = `Failed to reconnect thin node: ${e}`;
+  }
+}
+
 export async function saveProfile(): Promise<void> {
   store.saving = true;
   const payload = {
@@ -1122,7 +1149,15 @@ export function initStore(): void {
 
   initSSE({
     onStatusChanged: (s) => {
-      store.status = s;
+      const thinNode = store.status?.thin_node ?? {
+        configured: false,
+        endpoint_id: null,
+        reachable: null,
+        approval_state: null,
+        waiting_for_approval: false,
+        message: null,
+      };
+      store.status = { ...s, thin_node: thinNode };
       if (s.connection_state === "disconnected") {
         store.streamMetrics = new Map();
       }

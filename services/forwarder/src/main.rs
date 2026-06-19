@@ -260,6 +260,9 @@ async fn main() {
     .await
     {
         Ok(Some(runtime)) => {
+            status_server
+                .set_p2p_endpoint_id(runtime.node_id().to_string())
+                .await;
             status_server.set_p2p_connected(true).await;
             let node_addr = runtime.node_addr().await;
             info!(

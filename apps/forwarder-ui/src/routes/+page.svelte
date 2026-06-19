@@ -95,6 +95,17 @@
       : { connected: 0, configured: 0, label: "0 connected / 0 configured" },
   );
 
+  function thinNodeApprovalLabel(): string | null {
+    const thin = status?.thin_node;
+    if (!thin?.configured) return null;
+    if (thin.waiting_for_approval)
+      return thin.message ?? "Waiting for thin-node approval";
+    if (thin.reachable === false)
+      return thin.message ?? "Thin node unreachable";
+    if (thin.approval_state === "active") return "Approved by thin node";
+    return thin.message;
+  }
+
   async function loadAll() {
     error = null;
     try {
@@ -803,6 +814,21 @@
               state={status.p2p_connected ? "ok" : "err"}
             />
           </dd>
+          {#if thinNodeApprovalLabel()}
+            <dt class="text-text-muted">Thin Node</dt>
+            <dd>
+              <span
+                data-testid="thin-node-approval-state"
+                class="text-xs {status.thin_node.waiting_for_approval
+                  ? 'text-status-warn'
+                  : status.thin_node.reachable === false
+                    ? 'text-status-err'
+                    : 'text-text-muted'}"
+              >
+                {thinNodeApprovalLabel()}
+              </span>
+            </dd>
+          {/if}
           <dt class="text-text-muted">Restart Needed</dt>
           <dd>
             <StatusBadge

@@ -27,6 +27,14 @@ describe("forwarder api client", () => {
         ready_reason: null,
         p2p_connected: true,
         restart_needed: false,
+        thin_node: {
+          configured: true,
+          endpoint_id: "node-1",
+          reachable: true,
+          approval_state: "pending",
+          waiting_for_approval: true,
+          message: "Waiting for thin-node admin approval",
+        },
         readers: [],
       }),
     );

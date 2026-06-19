@@ -64,7 +64,7 @@ use std::io::Write as _;
 use std::net::{SocketAddr, SocketAddrV4};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify};
 use tracing::Instrument;
@@ -140,6 +140,7 @@ pub struct SubsystemStatus {
     reason: Option<String>,
     /// P2P session state is tracked for the status page but does NOT affect readiness.
     p2p_connected: bool,
+    p2p_endpoint_id: Option<String>,
     forwarder_id: String,
     local_ip: Option<String>,
     readers: HashMap<String, ReaderStatus>,
@@ -159,6 +160,7 @@ impl SubsystemStatus {
             ready: true,
             reason: None,
             p2p_connected: false,
+            p2p_endpoint_id: None,
             forwarder_id: String::new(),
             local_ip: None,
             readers: HashMap::new(),
@@ -176,6 +178,7 @@ impl SubsystemStatus {
             ready: false,
             reason: Some(reason),
             p2p_connected: false,
+            p2p_endpoint_id: None,
             forwarder_id: String::new(),
             local_ip: None,
             readers: HashMap::new(),
@@ -200,6 +203,10 @@ impl SubsystemStatus {
     /// Return the P2P session state.
     pub fn p2p_connected(&self) -> bool {
         self.p2p_connected
+    }
+
+    pub fn set_p2p_endpoint_id(&mut self, endpoint_id: String) {
+        self.p2p_endpoint_id = Some(endpoint_id);
     }
 
     /// Return whether a restart is needed to apply saved config changes.
@@ -421,6 +428,11 @@ impl StatusServer {
     /// Return whether a restart is needed to apply saved config changes.
     pub async fn restart_needed(&self) -> bool {
         self.subsystem.lock().await.restart_needed()
+    }
+
+    pub async fn set_p2p_endpoint_id(&self, endpoint_id: String) {
+        let mut ss = self.subsystem.lock().await;
+        ss.set_p2p_endpoint_id(endpoint_id);
     }
 
     /// Update the P2P session state (does not affect readiness).
@@ -1974,6 +1986,29 @@ fn get_config_state<J: JournalAccess + Send + 'static>(
 }
 
 #[derive(serde::Serialize)]
+struct ThinNodeDeviceStatusJson {
+    configured: bool,
+    endpoint_id: Option<String>,
+    reachable: Option<bool>,
+    approval_state: Option<String>,
+    waiting_for_approval: bool,
+    message: Option<String>,
+}
+
+impl ThinNodeDeviceStatusJson {
+    fn not_configured() -> Self {
+        Self {
+            configured: false,
+            endpoint_id: None,
+            reachable: None,
+            approval_state: None,
+            waiting_for_approval: false,
+            message: None,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
 struct StatusJsonResponse {
     forwarder_id: String,
     version: String,
@@ -1982,6 +2017,7 @@ struct StatusJsonResponse {
     p2p_connected: bool,
     restart_needed: bool,
     ups_status: Option<UpsStatusState>,
+    thin_node: ThinNodeDeviceStatusJson,
     readers: Vec<ReaderStatusJson>,
 }
 
@@ -1997,9 +2033,136 @@ struct ReaderStatusJson {
     reader_info: Option<crate::reader_control::ReaderInfo>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct ThinNodeStatusBoardJson {
+    #[serde(default)]
+    devices: Vec<ThinNodeStatusDeviceJson>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ThinNodeStatusDeviceJson {
+    endpoint_id: String,
+    approval_state: String,
+}
+
+async fn forwarder_thin_node_status<J: JournalAccess + Send + 'static>(
+    state: &AppState<J>,
+) -> ThinNodeDeviceStatusJson {
+    let endpoint_id = state.subsystem.lock().await.p2p_endpoint_id.clone();
+    let Some(endpoint_id) = endpoint_id else {
+        return ThinNodeDeviceStatusJson::not_configured();
+    };
+    let Some(config_state) = get_config_state(state) else {
+        return ThinNodeDeviceStatusJson::not_configured();
+    };
+    let thin_node_url = {
+        let _guard = config_state.write_lock.lock().await;
+        match crate::config::load_config_from_path(&config_state.path) {
+            Ok(config) => config.p2p.thin_node_url,
+            Err(error) => {
+                return ThinNodeDeviceStatusJson {
+                    configured: true,
+                    endpoint_id: Some(endpoint_id),
+                    reachable: None,
+                    approval_state: None,
+                    waiting_for_approval: false,
+                    message: Some(format!("Forwarder config unavailable: {error}")),
+                };
+            }
+        }
+    };
+    let Some(thin_node_url) = thin_node_url else {
+        return ThinNodeDeviceStatusJson::not_configured();
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(1))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return ThinNodeDeviceStatusJson {
+                configured: true,
+                endpoint_id: Some(endpoint_id),
+                reachable: Some(false),
+                approval_state: None,
+                waiting_for_approval: false,
+                message: Some(format!("Thin node status client unavailable: {error}")),
+            };
+        }
+    };
+    let status_url = format!("{}/status", thin_node_url.trim_end_matches('/'));
+    let response = match client.get(status_url).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return ThinNodeDeviceStatusJson {
+                configured: true,
+                endpoint_id: Some(endpoint_id),
+                reachable: Some(false),
+                approval_state: None,
+                waiting_for_approval: false,
+                message: Some(format!("Thin node status unavailable: {error}")),
+            };
+        }
+    };
+    let board = match response.error_for_status() {
+        Ok(response) => match response.json::<ThinNodeStatusBoardJson>().await {
+            Ok(board) => board,
+            Err(error) => {
+                return ThinNodeDeviceStatusJson {
+                    configured: true,
+                    endpoint_id: Some(endpoint_id),
+                    reachable: Some(false),
+                    approval_state: None,
+                    waiting_for_approval: false,
+                    message: Some(format!("Thin node status response was invalid: {error}")),
+                };
+            }
+        },
+        Err(error) => {
+            return ThinNodeDeviceStatusJson {
+                configured: true,
+                endpoint_id: Some(endpoint_id),
+                reachable: Some(false),
+                approval_state: None,
+                waiting_for_approval: false,
+                message: Some(format!("Thin node status returned an error: {error}")),
+            };
+        }
+    };
+
+    match board
+        .devices
+        .into_iter()
+        .find(|device| device.endpoint_id == endpoint_id)
+    {
+        Some(device) => {
+            let waiting_for_approval = device.approval_state == "pending";
+            ThinNodeDeviceStatusJson {
+                configured: true,
+                endpoint_id: Some(endpoint_id),
+                reachable: Some(true),
+                approval_state: Some(device.approval_state),
+                waiting_for_approval,
+                message: waiting_for_approval
+                    .then(|| "Waiting for thin-node admin approval".to_owned()),
+            }
+        }
+        None => ThinNodeDeviceStatusJson {
+            configured: true,
+            endpoint_id: Some(endpoint_id),
+            reachable: Some(true),
+            approval_state: None,
+            waiting_for_approval: true,
+            message: Some("Waiting for this forwarder to register with the thin node".to_owned()),
+        },
+    }
+}
+
 async fn status_json_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> Response {
+    let thin_node = forwarder_thin_node_status(&state).await;
     let ss = state.subsystem.lock().await;
     let mut readers: Vec<_> = ss
         .readers
@@ -2032,6 +2195,7 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
         p2p_connected: ss.p2p_connected(),
         restart_needed: ss.restart_needed(),
         ups_status: ss.ups_status().cloned(),
+        thin_node,
         readers,
     };
 

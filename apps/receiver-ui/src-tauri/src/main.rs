@@ -308,6 +308,13 @@ async fn get_status(state: State<'_, Arc<AppState>>) -> CmdResult<control_api::S
 }
 
 #[tauri::command]
+async fn reconnect_thin_node(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
+    control_api::reconnect_thin_node(&state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_version() -> String {
     control_api::get_version()
 }

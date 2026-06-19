@@ -6,6 +6,7 @@
     getConnectionState,
     getConnectionBadgeState,
     saveProfile,
+    reconnectThinNode,
     saveDbfConfig,
     clearDbfFile,
     setEditThinNodeUrl,
@@ -25,6 +26,17 @@
       store.editDbfEnabled !== store.dbfEnabled ||
       store.editDbfPath !== store.dbfPath
     );
+  }
+
+  function approvalLabel(): string | null {
+    const thin = store.status?.thin_node;
+    if (!thin?.configured) return null;
+    if (thin.waiting_for_approval)
+      return thin.message ?? "Waiting for thin-node approval";
+    if (thin.reachable === false)
+      return thin.message ?? "Thin node unreachable";
+    if (thin.approval_state === "active") return "Thin node approved";
+    return thin.message;
   }
 
   function connectionLabel(state: string): string {
@@ -105,16 +117,42 @@
         <p class="mt-1 text-xs text-text-muted">
           Connects automatically to the forwarder over the peer-to-peer link.
         </p>
+        {#if approvalLabel()}
+          <p
+            data-testid="thin-node-approval-state"
+            class="mt-2 text-xs {store.status?.thin_node?.waiting_for_approval
+              ? 'text-status-warn'
+              : store.status?.thin_node?.reachable === false
+                ? 'text-status-err'
+                : 'text-text-muted'}"
+          >
+            {approvalLabel()}
+          </p>
+        {/if}
       </div>
 
-      <span
-        data-testid="config-connection-state"
-        class="flex shrink-0 items-center gap-2 text-sm text-text-primary"
-      >
-        <span class="h-2 w-2 rounded-full {dotClass[getConnectionBadgeState()]}"
-        ></span>
-        {connectionLabel(getConnectionState())}
-      </span>
+      <div class="flex shrink-0 items-center gap-2">
+        <span
+          data-testid="config-connection-state"
+          class="flex items-center gap-2 text-sm text-text-primary"
+        >
+          <span
+            class="h-2 w-2 rounded-full {dotClass[getConnectionBadgeState()]}"
+          ></span>
+          {connectionLabel(getConnectionState())}
+        </span>
+        <button
+          data-testid="reconnect-thin-node-btn"
+          class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
+          onclick={() => void reconnectThinNode()}
+          disabled={getConfigDirty() || store.saving}
+          title={getConfigDirty()
+            ? "Save thin-node configuration before reconnecting"
+            : "Retry thin-node discovery and P2P subscriptions"}
+        >
+          Reconnect
+        </button>
+      </div>
     </div>
   </section>
 

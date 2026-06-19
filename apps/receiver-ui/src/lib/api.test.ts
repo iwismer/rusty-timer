@@ -68,11 +68,29 @@ describe("api client", () => {
       local_ok: true,
       streams_count: 0,
       receiver_id: "recv-status",
+      thin_node: {
+        configured: true,
+        endpoint_id: "node-1",
+        reachable: true,
+        approval_state: "pending",
+        waiting_for_approval: true,
+        message: "Waiting for thin-node admin approval",
+      },
     });
     const s = await getStatus();
     expect(mockInvoke).toHaveBeenCalledWith("get_status");
     expect(s.connection_state).toBe("disconnected");
     expect(s.receiver_id).toBe("recv-status");
+    expect(s.thin_node.waiting_for_approval).toBe(true);
+  });
+
+  it("reconnectThinNode calls reconnect command", async () => {
+    const { reconnectThinNode } = await import("./api");
+    mockInvoke.mockResolvedValue(undefined);
+
+    await reconnectThinNode();
+
+    expect(mockInvoke).toHaveBeenCalledWith("reconnect_thin_node");
   });
 
   it("putSubscriptions sends body with subscriptions", async () => {

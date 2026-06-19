@@ -18,6 +18,7 @@ type StatusChangedPayload = {
   streams_count: number;
   receiver_id?: string;
 };
+type StatusChangedUpdate = Omit<StatusResponse, "thin_node">;
 type StreamsSnapshotPayload = {
   streams: StreamsResponse["streams"];
   degraded: boolean;
@@ -43,7 +44,7 @@ export type ForwarderUpsUpdatedPayload = {
 };
 
 export type SseCallbacks = {
-  onStatusChanged: (status: StatusResponse) => void;
+  onStatusChanged: (status: StatusChangedUpdate) => void;
   onStreamsSnapshot: (streams: StreamsResponse) => void;
   onLogEntry: (entry: string) => void;
   onResync: () => void;

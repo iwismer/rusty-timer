@@ -98,11 +98,21 @@ export type ConnectionState =
   | "connected"
   | "disconnecting";
 
+export interface ThinNodeDeviceStatus {
+  configured: boolean;
+  endpoint_id: string | null;
+  reachable: boolean | null;
+  approval_state: string | null;
+  waiting_for_approval: boolean;
+  message: string | null;
+}
+
 export interface StatusResponse {
   connection_state: ConnectionState;
   local_ok: boolean;
   streams_count: number;
   receiver_id: string;
+  thin_node: ThinNodeDeviceStatus;
 }
 
 export interface LogsResponse {
@@ -217,6 +227,10 @@ export async function putSubscriptions(
 
 export async function getStatus(): Promise<StatusResponse> {
   return invoke<StatusResponse>("get_status");
+}
+
+export async function reconnectThinNode(): Promise<void> {
+  await invoke("reconnect_thin_node");
 }
 
 export async function getLogs(): Promise<LogsResponse> {
