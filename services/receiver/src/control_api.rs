@@ -1051,7 +1051,7 @@ struct ServerStatusDevice {
     approval_state: String,
 }
 
-async fn server_device_status(state: &AppState) -> ServerDeviceStatus {
+pub(crate) async fn server_device_status(state: &AppState) -> ServerDeviceStatus {
     let server_url = {
         let db = state.db.lock().await;
         match db.load_profile() {

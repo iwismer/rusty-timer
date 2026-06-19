@@ -49,9 +49,10 @@ use crate::announcer_push::{
     self, AnnouncerPushClient, ParticipantResolver, ResolvedParticipant, ServerAnnouncerClient,
 };
 use crate::cache::StreamKey;
-use crate::control_api::AppState;
 use crate::control_api::ConnectionState;
-use crate::control_api::{DiscoveredForwarder, DiscoveredForwarders, DiscoveredStream};
+use crate::control_api::{
+    AppState, DiscoveredForwarder, DiscoveredForwarders, DiscoveredStream, server_device_status,
+};
 use crate::db::{Db, ReceivedEvent, StreamSubscription};
 use crate::local_proxy::LocalProxy;
 use crate::p2p_forwarder::{ForwarderConnection, ForwarderDataStream};
@@ -139,6 +140,11 @@ fn now_unix_ms() -> i64 {
             .as_millis(),
     )
     .unwrap_or(i64::MAX)
+}
+
+/// Returns true iff this is the rising edge into "active".
+fn approval_became_active(previous: Option<&str>, current: Option<&str>) -> bool {
+    previous != Some("active") && current == Some("active")
 }
 
 /// A running P2P receiver runtime. Dropping or [`shutdown`](Self::shutdown)ing
@@ -295,6 +301,13 @@ async fn run_reconcile_loop(
             state.connect_attempt_rx(),
         ))
     });
+    let approval_watch_task = config.server.as_ref().map(|_| {
+        tokio::spawn(run_approval_watch_loop(
+            Arc::clone(&state),
+            config.reconcile_interval,
+            shutdown_rx.clone(),
+        ))
+    });
 
     // Server announcer generation, acquired by registering this endpoint and
     // taking over the announcer generation. When the server is unavailable
@@ -381,6 +394,10 @@ async fn run_reconcile_loop(
         task.abort();
         let _ = task.await;
     }
+    if let Some(task) = approval_watch_task {
+        task.abort();
+        let _ = task.await;
+    }
     endpoint.close().await;
     // The runtime is shutting down: no sessions remain and none will be
     // reattempted, so report a clean Disconnected. `P2pReceiverRuntime::shutdown`
@@ -457,6 +474,37 @@ async fn run_discovery_loop(
                 if changed.is_err() {
                     break;
                 }
+            }
+            () = tokio::time::sleep(interval) => {}
+        }
+    }
+}
+
+async fn run_approval_watch_loop(
+    state: Arc<AppState>,
+    interval: Duration,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    let mut previous_approval: Option<String> = None;
+    loop {
+        let status = server_device_status(&state).await;
+        if approval_became_active(
+            previous_approval.as_deref(),
+            status.approval_state.as_deref(),
+        ) {
+            info!(
+                endpoint_id = status.endpoint_id.as_deref().unwrap_or("<unknown>"),
+                "server approval became active; reconnecting receiver"
+            );
+            state.request_connect().await;
+            state.emit_resync();
+        }
+        previous_approval = status.approval_state;
+
+        tokio::select! {
+            biased;
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() { break; }
             }
             () = tokio::time::sleep(interval) => {}
         }
@@ -1362,6 +1410,15 @@ mod tests {
     #[test]
     fn p2p_config_from_lookup_none_when_no_keys() {
         assert!(p2p_config_from_lookup(lookup(&[])).unwrap().is_none());
+    }
+
+    #[test]
+    fn approval_became_active_detects_only_rising_edge() {
+        assert!(approval_became_active(None, Some("active")));
+        assert!(approval_became_active(Some("pending"), Some("active")));
+        assert!(!approval_became_active(Some("active"), Some("active")));
+        assert!(!approval_became_active(Some("active"), Some("pending")));
+        assert!(!approval_became_active(Some("pending"), Some("pending")));
     }
 
     #[test]
