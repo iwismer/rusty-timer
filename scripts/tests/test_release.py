@@ -52,7 +52,7 @@ class TransactionTests(unittest.TestCase):
     @patch("scripts.release.write_version")
     @patch("scripts.release.compute_new_version")
     @patch("scripts.release.read_version")
-    @patch("scripts.release.git_current_branch", return_value="master")
+    @patch("scripts.release.git_current_branch", return_value="main")
     @patch("scripts.release.git_is_dirty", return_value=False)
     def test_rolls_back_commits_and_tags_when_later_service_fails(
         self,
@@ -106,7 +106,7 @@ class PushTests(unittest.TestCase):
     @patch("scripts.release.write_version")
     @patch("scripts.release.compute_new_version")
     @patch("scripts.release.read_version")
-    @patch("scripts.release.git_current_branch", return_value="master")
+    @patch("scripts.release.git_current_branch", return_value="main")
     @patch("scripts.release.git_is_dirty", return_value=False)
     def test_pushes_branch_then_each_tag_separately(
         self,
@@ -146,7 +146,7 @@ class PushTests(unittest.TestCase):
             ["git", "add", "services/forwarder/Cargo.toml", "Cargo.lock"],
             calls,
         )
-        self.assertIn(["git", "push", "origin", "master"], calls)
+        self.assertIn(["git", "push", "origin", "main"], calls)
         self.assertIn(["git", "push", "origin", "forwarder-v0.1.1"], calls)
 
 
@@ -167,7 +167,7 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
     @patch("scripts.release.write_version")
     @patch("scripts.release.compute_new_version")
     @patch("scripts.release.read_version")
-    @patch("scripts.release.git_current_branch", return_value="master")
+    @patch("scripts.release.git_current_branch", return_value="main")
     @patch("scripts.release.git_is_dirty", return_value=False)
     def test_forwarder_runs_ui_checks_and_embed_ui_release_build(
         self,
@@ -235,7 +235,7 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
     @patch("scripts.release.write_version")
     @patch("scripts.release.compute_new_version")
     @patch("scripts.release.read_version")
-    @patch("scripts.release.git_current_branch", return_value="master")
+    @patch("scripts.release.git_current_branch", return_value="main")
     @patch("scripts.release.git_is_dirty", return_value=False)
     def test_receiver_stages_tauri_conf_and_pushes_receiver_ui_tag(
         self,
@@ -288,7 +288,7 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
     @patch("scripts.release.write_version")
     @patch("scripts.release.compute_new_version")
     @patch("scripts.release.read_version")
-    @patch("scripts.release.git_current_branch", return_value="master")
+    @patch("scripts.release.git_current_branch", return_value="main")
     @patch("scripts.release.git_is_dirty", return_value=False)
     def test_streamer_runs_release_build_without_ui_checks(
         self,
@@ -341,7 +341,7 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
     @patch("scripts.release.write_version")
     @patch("scripts.release.compute_new_version")
     @patch("scripts.release.read_version")
-    @patch("scripts.release.git_current_branch", return_value="master")
+    @patch("scripts.release.git_current_branch", return_value="main")
     @patch("scripts.release.git_is_dirty", return_value=False)
     def test_server_runs_release_build_without_ui_checks(
         self,
@@ -402,7 +402,7 @@ class DryRunBehaviorTests(unittest.TestCase):
     @patch("scripts.release.write_version")
     @patch("scripts.release.compute_new_version")
     @patch("scripts.release.read_version")
-    @patch("scripts.release.git_current_branch", return_value="master")
+    @patch("scripts.release.git_current_branch", return_value="main")
     @patch("scripts.release.git_is_dirty", return_value=False)
     def test_dry_run_executes_checks_but_skips_mutating_release_commands(
         self,
@@ -477,7 +477,7 @@ class DryRunBehaviorTests(unittest.TestCase):
             calls,
         )
         self.assertNotIn(["git", "tag", "forwarder-v0.1.1"], calls)
-        self.assertNotIn(["git", "push", "origin", "master"], calls)
+        self.assertNotIn(["git", "push", "origin", "main"], calls)
 
 
 if __name__ == "__main__":

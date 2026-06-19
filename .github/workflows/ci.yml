@@ -2,7 +2,7 @@ name: Rust CI
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     paths:
       - "**/*.rs"
       - "**/Cargo.toml"
@@ -15,7 +15,7 @@ on:
       - "scripts/validate-packaging.sh"
       - ".github/workflows/*.yml"
   pull_request:
-    branches: [master]
+    branches: [main]
     paths:
       - "**/*.rs"
       - "**/Cargo.toml"

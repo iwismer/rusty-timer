@@ -81,8 +81,8 @@ It supports these services:
 ### Prerequisites
 
 - Run from a clean git working tree.
-- Be on the `master` branch.
-- Have push access to `origin/master`.
+- Be on the `main` branch.
+- Have push access to `origin/main`.
 - Have Rust available (`cargo build --release` is run per service).
 - For `forwarder`/`receiver` releases, have Node.js + npm available for UI
   lint/check/test.

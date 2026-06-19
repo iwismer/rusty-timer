@@ -2,7 +2,7 @@ name: Embed UI CI
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     paths:
       - "apps/forwarder-ui/**"
       - "apps/shared-ui/**"
@@ -13,7 +13,7 @@ on:
       - "!**/*.md"
       - "!**/LICENSE*"
   pull_request:
-    branches: [master]
+    branches: [main]
     paths:
       - "apps/forwarder-ui/**"
       - "apps/shared-ui/**"

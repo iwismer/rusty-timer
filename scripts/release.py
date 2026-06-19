@@ -335,12 +335,12 @@ def main() -> None:
         sys.exit(1)
 
     branch = git_current_branch()
-    if branch != "master":
-        print(f"Error: must be on the master branch (currently on: {branch})", file=sys.stderr)
+    if branch != "main":
+        print(f"Error: must be on the main branch (currently on: {branch})", file=sys.stderr)
         sys.exit(1)
 
     print(style("Pulling latest changes from origin...", role="step"))
-    log_command(["git", "pull", "--ff-only", "origin", "master"], execute=True)
+    log_command(["git", "pull", "--ff-only", "origin", "main"], execute=True)
 
     # --- Build release plan ---
     plan: list[tuple[str, str, str]] = []  # (service, current, new)
@@ -485,7 +485,7 @@ def main() -> None:
             push_tags = tags
 
         # 1. Push commits (without tags)
-        log_command(["git", "push", "origin", "master"], execute=not args.dry_run)
+        log_command(["git", "push", "origin", "main"], execute=not args.dry_run)
 
         # 2. Push each tag individually so each triggers its own workflow run
         for tag in push_tags:

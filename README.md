@@ -1,8 +1,8 @@
 # Rusty Timer
 
-[![Rust CI](https://github.com/iwismer/rusty-timer/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/ci.yml)
-[![UI CI](https://github.com/iwismer/rusty-timer/actions/workflows/ui.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/ui.yml)
-[![Embed UI CI](https://github.com/iwismer/rusty-timer/actions/workflows/embed-ui.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/embed-ui.yml)
+[![Rust CI](https://github.com/iwismer/rusty-timer/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/iwismer/rusty-timer/actions/workflows/ci.yml)
+[![UI CI](https://github.com/iwismer/rusty-timer/actions/workflows/ui.yml/badge.svg?branch=main)](https://github.com/iwismer/rusty-timer/actions/workflows/ui.yml)
+[![Embed UI CI](https://github.com/iwismer/rusty-timer/actions/workflows/embed-ui.yml/badge.svg?branch=main)](https://github.com/iwismer/rusty-timer/actions/workflows/embed-ui.yml)
 
 Rusty Timer forwards IPICO chip-timing reads over the internet so timing
 software does not need a direct cable to each reader. It is designed for

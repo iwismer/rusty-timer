@@ -144,7 +144,7 @@ You have two options:
 ### Option A -- Download and run directly
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/iwismer/rusty-timer/master/deploy/sbc/rt-setup.sh -o rt-setup.sh
+curl -fsSL https://raw.githubusercontent.com/iwismer/rusty-timer/main/deploy/sbc/rt-setup.sh -o rt-setup.sh
 sudo bash rt-setup.sh
 ```
 

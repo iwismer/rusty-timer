@@ -31,7 +31,7 @@ DEFAULT_DNS = "8.8.8.8,8.8.4.4"
 DEFAULT_WIFI_COUNTRY = "US"
 DEFAULT_STATUS_BIND = "0.0.0.0:80"
 DEFAULT_SETUP_SCRIPT_URL = (
-    "https://raw.githubusercontent.com/iwismer/rusty-timer/master/deploy/sbc/rt-setup.sh"
+    "https://raw.githubusercontent.com/iwismer/rusty-timer/main/deploy/sbc/rt-setup.sh"
 )
 DEFAULT_DONE_MARKER = "/var/lib/rusty-timer/.first-boot-setup-done"
 HOSTNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62})$")
