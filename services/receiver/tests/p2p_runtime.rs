@@ -90,6 +90,7 @@ fn script_two(raw: &[u8]) -> ForwarderScript {
         caught_up_through: Some(2),
         data_fault: ConnectivityFault::healthy(),
         echo_subscribed_stream_id: false,
+        close_connection_after_data: false,
     }
 }
 
@@ -619,6 +620,7 @@ fn script_stream_mismatch() -> ForwarderScript {
         caught_up_through: None,
         data_fault: ConnectivityFault::healthy(),
         echo_subscribed_stream_id: false,
+        close_connection_after_data: false,
     }
 }
 

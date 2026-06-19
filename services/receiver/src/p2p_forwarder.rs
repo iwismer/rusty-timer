@@ -296,7 +296,9 @@ mod tests {
     use std::time::Duration;
 
     use rt_iroh::{Endpoint, EndpointBuilder};
-    use rt_p2p_protocol::{Hello, MAX_FRAME_BYTES, StreamCatalog, SubscribeMode, SubscribeOk};
+    use rt_p2p_protocol::{
+        EventBatch, Hello, MAX_FRAME_BYTES, ReadRecord, StreamCatalog, SubscribeMode, SubscribeOk,
+    };
     use rt_test_utils::p2p::{ConnectivityFault, ForwarderScript, MockForwarderPeer};
     use rt_test_utils::poll_until;
     use tokio::sync::{Mutex, broadcast};
@@ -336,6 +338,7 @@ mod tests {
             caught_up_through: None,
             data_fault: ConnectivityFault::delayed(Duration::from_secs(2)),
             echo_subscribed_stream_id: false,
+            close_connection_after_data: false,
         }
     }
 
@@ -447,5 +450,116 @@ mod tests {
         assert_eq!(super::next_backoff(Duration::from_secs(60), max), max);
         // Saturating multiply guards against overflow at huge delays.
         assert_eq!(super::next_backoff(Duration::MAX, max), max);
+    }
+
+    fn record(seq: u64) -> ReadRecord {
+        ReadRecord {
+            stream_id: STREAM_ID.as_bytes().to_vec(),
+            seq,
+            epoch: 1,
+            raw_frame: format!("frame-{seq}").into_bytes(),
+            read_kind: "chip".to_owned(),
+            reader_timestamp: 0,
+            received_unix_ms: 0,
+        }
+    }
+
+    /// A script that delivers `[1, 2]` then drops the whole connection after the
+    /// first data stream is acked, forcing the per-forwarder connection to
+    /// reconnect. Each reconnect is served from scratch (re-sending `[1, 2]`),
+    /// so the receiver must dedup on resume.
+    fn reconnect_script() -> ForwarderScript {
+        let mut script = base_script();
+        script.subscribe_ok = SubscribeOk {
+            stream_id: STREAM_ID.as_bytes().to_vec(),
+            earliest_available_seq: 1,
+            latest_seq_at_open: 2,
+        };
+        script.batches = vec![EventBatch {
+            records: vec![record(1), record(2)],
+            replay: false,
+        }];
+        script.caught_up_through = Some(2);
+        script.data_fault = ConnectivityFault::healthy();
+        script.close_connection_after_data = true;
+        script
+    }
+
+    #[tokio::test]
+    async fn control_reconnect_resumes_from_cursor_without_duplicates() {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let forwarder = MockForwarderPeer::start([42; 32], reconnect_script())
+                .await
+                .unwrap();
+            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint = Arc::new(test_endpoint(43).await);
+            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+            let (state, _shutdown_rx) =
+                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
+
+            let connection = ForwarderConnection::start(
+                endpoint_id.clone(),
+                Arc::clone(&endpoint),
+                forwarder.node_addr(),
+                Arc::clone(&db),
+                test_hello(),
+                Arc::clone(&reporter),
+                BackoffConfig {
+                    initial: Duration::from_millis(50),
+                    max: Duration::from_millis(50),
+                },
+            );
+
+            let (hint_tx, _hint_rx) = broadcast::channel(16);
+            connection.set_desired_streams(vec![ForwarderDataStream {
+                stream_id: STREAM_ID.to_owned(),
+                mode: SubscribeMode::Replay,
+                durable_hint_tx: Some(hint_tx),
+            }]);
+
+            // The forwarder drops the control connection after the first data
+            // stream is acked; the per-forwarder connection must reconnect and
+            // resubscribe, proving the control reconnect loop is live.
+            poll_until(
+                || async { forwarder.subscribes().len() >= 2 },
+                Duration::from_secs(10),
+            )
+            .await;
+
+            // The resubscribe resumes from the persisted cursor, not from 0.
+            let subscribes = forwarder.subscribes();
+            assert_eq!(
+                subscribes[0].after_seq, 0,
+                "first subscribe starts at the empty cursor"
+            );
+            assert_eq!(
+                subscribes[1].after_seq, 2,
+                "reconnect must resume from the persisted contiguous cursor"
+            );
+
+            // Resuming re-delivers [1, 2]; dedup keeps exactly one durable row
+            // per seq, with no duplicate seqs in the final durable set.
+            let guard = db.lock().await;
+            let seqs: Vec<i64> = guard
+                .load_received_events(STREAM_ID)
+                .unwrap()
+                .iter()
+                .map(|e| e.seq)
+                .collect();
+            assert_eq!(
+                seqs,
+                vec![1, 2],
+                "resume must not produce duplicate durable rows"
+            );
+            assert_eq!(guard.load_stream_cursor(STREAM_ID).unwrap(), 2);
+            drop(guard);
+
+            connection.stop().await;
+            forwarder.shutdown().await;
+            endpoint.close().await;
+        })
+        .await
+        .expect("control reconnect resume test timed out");
     }
 }

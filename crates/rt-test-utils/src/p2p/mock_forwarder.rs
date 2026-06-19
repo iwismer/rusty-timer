@@ -39,6 +39,14 @@ pub struct ForwarderScript {
     /// id) without a per-stream script. Defaults to `false`, which serves the
     /// script's verbatim `stream_id`s (so stream-id-mismatch tests still work).
     pub echo_subscribed_stream_id: bool,
+    /// When `true`, the mock closes the whole QUIC connection immediately after
+    /// the first data stream is served (through its ack), instead of keeping the
+    /// control session open for further data streams. This forces a connecting
+    /// peer's per-forwarder connection to observe a control disconnect and
+    /// reconnect. Each reconnect is accepted as a fresh connection and served
+    /// from scratch (re-sending the scripted batches), so it exercises
+    /// resume-from-cursor dedup. Defaults to `false`.
+    pub close_connection_after_data: bool,
 }
 
 /// A scripted forwarder peer bound to a loopback iroh endpoint.
@@ -173,6 +181,14 @@ async fn serve_data_loop(
             // Connection closed (receiver disconnected / shutdown): stop.
             Err(_) => return,
         };
+        if script.close_connection_after_data {
+            // Serve this one stream inline (so the ack is recorded), then close
+            // the whole connection to force the receiver to reconnect and
+            // resume from its persisted cursor.
+            let _ = serve_one_data_stream(send, recv, script, acks, subscribes).await;
+            connection.close(0u32.into(), b"mock-reconnect");
+            return;
+        }
         let script = Arc::clone(script);
         let acks = Arc::clone(acks);
         let subscribes = Arc::clone(subscribes);

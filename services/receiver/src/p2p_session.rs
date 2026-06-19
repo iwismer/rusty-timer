@@ -703,6 +703,7 @@ mod tests {
             caught_up_through: None,
             data_fault: ConnectivityFault::healthy(),
             echo_subscribed_stream_id: false,
+            close_connection_after_data: false,
         }
     }
 
