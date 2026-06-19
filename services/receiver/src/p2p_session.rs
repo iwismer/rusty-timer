@@ -56,6 +56,10 @@ impl SessionStatusReporter {
         Self { state }
     }
 
+    pub(crate) fn app_state(&self) -> &Arc<AppState> {
+        &self.state
+    }
+
     /// Record that a forwarder's control session is up.
     pub async fn on_control_connected(&self, endpoint_id: &str) -> ControlConnectedGuard {
         self.state
@@ -294,9 +298,10 @@ pub struct ControlSession {
     pub hello_ok: HelloOk,
     /// The catalog delivered immediately after the handshake.
     pub catalog: StreamCatalog,
-    // Held to keep the control stream alive for the connection's lifetime.
-    _control_send: SendStream,
-    _control_recv: RecvStream,
+    /// Held to keep the control send stream alive for the connection's lifetime.
+    pub control_send: SendStream,
+    /// Control receive stream used by connection managers to detect disconnects.
+    pub control_recv: RecvStream,
 }
 
 fn stream_id_bytes(stream_id: &str) -> Vec<u8> {
@@ -399,9 +404,20 @@ pub async fn connect_and_hello(
         connection,
         hello_ok,
         catalog,
-        _control_send: send,
-        _control_recv: recv,
+        control_send: send,
+        control_recv: recv,
     })
+}
+
+/// Read control-plane frames until the control stream closes.
+pub async fn wait_control_stream_closed(recv: &mut RecvStream) -> Result<(), P2pSessionError> {
+    loop {
+        match read_frame::<ControlF2C>(recv).await {
+            Ok(_frame) => {}
+            Err(P2pSessionError::Read(_)) => return Ok(()),
+            Err(other) => return Err(other),
+        }
+    }
 }
 
 /// Insert every record of `batch` into the durable store (idempotent on

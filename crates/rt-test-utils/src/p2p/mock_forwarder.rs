@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use prost::Message;
-use rt_iroh::{Connection, Endpoint, EndpointBuilder, NodeAddr, SendStream};
+use rt_iroh::{Connection, Endpoint, EndpointBuilder, NodeAddr, RecvStream, SendStream};
 use rt_p2p_protocol::{
     Ack, CaughtUp, ControlC2F, ControlF2C, DataC2F, DataF2C, DataSubscribe, EventBatch, GapNotice,
     Hello, StreamCatalog, SubscribeOk, control_c2f, control_f2c, data_c2f, data_f2c, negotiate,
@@ -124,12 +124,15 @@ async fn handle_connection(
     acks: Arc<Mutex<Vec<Ack>>>,
     subscribes: Arc<Mutex<Vec<DataSubscribe>>>,
 ) -> HarnessResult {
-    serve_control(&connection, &script).await?;
+    let _control_streams = serve_control(&connection, &script).await?;
     serve_data(&connection, &script, &acks, &subscribes).await?;
     Ok(())
 }
 
-async fn serve_control(connection: &Connection, script: &ForwarderScript) -> HarnessResult {
+async fn serve_control(
+    connection: &Connection,
+    script: &ForwarderScript,
+) -> Result<(SendStream, RecvStream), Box<dyn std::error::Error + Send + Sync>> {
     let (mut send, mut recv) = connection.accept_bi().await?;
 
     let control = read_frame::<ControlC2F>(&mut recv).await?;
@@ -154,7 +157,7 @@ async fn serve_control(connection: &Connection, script: &ForwarderScript) -> Har
     )
     .await?;
 
-    Ok(())
+    Ok((send, recv))
 }
 
 async fn serve_data(
