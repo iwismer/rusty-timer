@@ -10,9 +10,33 @@ use crate::ui_events::ReceiverUiEvent;
 use rt_domain::ReceiverMode;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 pub type ChipLookup = HashMap<String, HashMap<String, (String, String)>>;
+
+/// One stream a discovered forwarder exposes, learned from the thin-node
+/// `GET /forwarders` discovery feed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredStream {
+    pub stream_id: String,
+    pub epoch: i64,
+    pub next_seq: i64,
+}
+
+/// An approved forwarder discovered from the thin-node (or seeded from an
+/// explicit local forwarder config). `direct_addrs` are the addresses the
+/// receiver dials; `streams` is the forwarder's advertised stream catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredForwarder {
+    pub display_name: Option<String>,
+    pub direct_addrs: Vec<SocketAddr>,
+    pub streams: Vec<DiscoveredStream>,
+}
+
+/// Shared map of discovered forwarders keyed by their endpoint id (string node
+/// id). Populated by the discovery task and/or seeded from explicit config.
+pub type DiscoveredForwarders = HashMap<String, DiscoveredForwarder>;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
 use tracing::warn;
@@ -53,6 +77,11 @@ pub struct AppState {
     pub db_integrity_ok: bool,
     pub http_client: reqwest::Client,
     pub chip_lookup: Arc<tokio::sync::RwLock<ChipLookup>>,
+    /// Approved forwarders discovered from the thin-node (or seeded from an
+    /// explicit local forwarder config), keyed by endpoint id. Drives both the
+    /// available-but-unsubscribed entries in the streams response and the
+    /// per-subscription dial address resolution in the P2P runtime.
+    pub discovered_forwarders: Arc<tokio::sync::RwLock<DiscoveredForwarders>>,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
     /// Monotonic counter incremented when DBF config changes; subscribers
@@ -99,6 +128,7 @@ impl AppState {
             db_integrity_ok,
             http_client,
             chip_lookup: Arc::new(tokio::sync::RwLock::new(ChipLookup::new())),
+            discovered_forwarders: Arc::new(tokio::sync::RwLock::new(DiscoveredForwarders::new())),
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
             dbf_config_version,
@@ -287,6 +317,43 @@ impl AppState {
                 cursor_seq: cursor.map(|c| c.last_seq),
             });
         }
+
+        // Append discovered-but-unsubscribed streams as `subscribed = false`
+        // so the UI can list streams that are available to subscribe to. A
+        // (forwarder_endpoint_id, stream_id) already present as a subscription
+        // takes precedence and is not duplicated.
+        let mut seen: std::collections::HashSet<(String, String)> = streams
+            .iter()
+            .map(|s| (s.forwarder_endpoint_id.clone(), s.stream_id.clone()))
+            .collect();
+        let discovered = self.discovered_forwarders.read().await;
+        for (endpoint_id, forwarder) in discovered.iter() {
+            for stream in &forwarder.streams {
+                let key = (endpoint_id.clone(), stream.stream_id.clone());
+                if !seen.insert(key) {
+                    continue;
+                }
+                streams.push(StreamEntry {
+                    forwarder_endpoint_id: endpoint_id.clone(),
+                    stream_id: stream.stream_id.clone(),
+                    forwarder_id: None,
+                    reader_ip: None,
+                    subscribed: false,
+                    local_port: None,
+                    event_type: None,
+                    online: None,
+                    reader_connected: None,
+                    display_alias: forwarder.display_name.clone(),
+                    stream_epoch: Some(stream.epoch),
+                    current_epoch_name: None,
+                    reads_total: None,
+                    reads_epoch: None,
+                    cursor_epoch: None,
+                    cursor_seq: None,
+                });
+            }
+        }
+        drop(discovered);
 
         let degraded = cursors_degraded;
         let upstream_error = cursors_degraded.then(|| "failed to load cursors".to_owned());

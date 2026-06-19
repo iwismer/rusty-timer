@@ -158,10 +158,10 @@ async fn p2p_startup_failure_does_not_leak_control_server() {
         receiver_id: None,
         p2p: Some(P2pReceiverConfig {
             secret_key_seed: [9u8; 32],
-            forwarder: ForwarderPeerConfig {
+            forwarder: Some(ForwarderPeerConfig {
                 node_id: "not-a-valid-node-id".to_owned(),
                 direct_addr: "127.0.0.1:5000".parse().expect("parse addr"),
-            },
+            }),
             thin_node: None,
             reconcile_interval: Duration::from_millis(100),
         }),

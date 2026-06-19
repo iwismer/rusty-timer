@@ -12,7 +12,7 @@ use std::time::Duration;
 use axum::Json;
 use axum::extract::State;
 use axum::routing::post;
-use receiver::control_api::ConnectionState;
+use receiver::control_api::{ConnectionState, DiscoveredForwarder, DiscoveredStream};
 use receiver::db::{DbfConfig, EventType, StreamSubscription};
 use receiver::p2p_runtime::{
     ForwarderPeerConfig, P2pReceiverConfig, ThinNodeClientConfig, start_receiver_p2p,
@@ -131,10 +131,10 @@ fn base_config(
     let sub = stream_subscription(&node_id, local_port_override);
     let config = P2pReceiverConfig {
         secret_key_seed: [seed; 32],
-        forwarder: ForwarderPeerConfig {
+        forwarder: Some(ForwarderPeerConfig {
             node_id,
             direct_addr: direct,
-        },
+        }),
         thin_node: None,
         reconcile_interval: Duration::from_millis(50),
     };
@@ -874,6 +874,141 @@ async fn connection_state_reflects_p2p_session_lifecycle() {
     })
     .await
     .expect("connection_state_reflects_p2p_session_lifecycle timed out");
+}
+
+/// Discovered-but-unsubscribed forwarder streams must surface in the streams
+/// response as `subscribed = false` so the UI can list them, and a subscription
+/// for the same (forwarder_endpoint_id, stream_id) must take precedence without
+/// producing a duplicate entry.
+#[tokio::test]
+async fn discovered_streams_appear_as_unsubscribed_then_subscribed_dedup() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = init_state(dir.path()).await;
+
+    state.discovered_forwarders.write().await.insert(
+        "fwd-endpoint-1".to_owned(),
+        DiscoveredForwarder {
+            display_name: Some("Start Line".to_owned()),
+            direct_addrs: vec!["127.0.0.1:5000".parse().unwrap()],
+            streams: vec![DiscoveredStream {
+                stream_id: "reader-a".to_owned(),
+                epoch: 2,
+                next_seq: 5,
+            }],
+        },
+    );
+
+    let resp = state.build_streams_response().await;
+    assert_eq!(resp.streams.len(), 1, "discovered stream is listed");
+    let entry = &resp.streams[0];
+    assert_eq!(entry.forwarder_endpoint_id, "fwd-endpoint-1");
+    assert_eq!(entry.stream_id, "reader-a");
+    assert!(
+        !entry.subscribed,
+        "discovered stream is available, not subscribed"
+    );
+    assert_eq!(entry.display_alias.as_deref(), Some("Start Line"));
+    assert_eq!(entry.stream_epoch, Some(2));
+
+    // Subscribe to the same stream: the subscribed entry replaces the discovered
+    // one (dedupe by (forwarder_endpoint_id, stream_id)).
+    state
+        .db
+        .lock()
+        .await
+        .replace_stream_subscriptions(&[StreamSubscription {
+            forwarder_endpoint_id: "fwd-endpoint-1".to_owned(),
+            stream_id: "reader-a".to_owned(),
+            local_port_override: None,
+            event_type: EventType::Finish,
+            forwarder_id: None,
+            reader_ip: None,
+        }])
+        .unwrap();
+
+    let resp = state.build_streams_response().await;
+    assert_eq!(
+        resp.streams.len(),
+        1,
+        "subscribed entry dedupes the discovered one"
+    );
+    assert!(resp.streams[0].subscribed);
+}
+
+/// With no explicit forwarder config, a forwarder learned only from discovery
+/// (injected into `discovered_forwarders`, as the thin-node feed would) must be
+/// dialed and its events persisted once a subscription names it.
+#[tokio::test]
+async fn discovered_forwarder_is_dialed_and_persists_events() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let forwarder = MockForwarderPeer::start([92; 32], script_two(b"frame"))
+            .await
+            .unwrap();
+        let (node_id, direct) = forwarder_config(&forwarder);
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_state(dir.path()).await;
+
+        // Populate discovery WITHOUT any explicit forwarder config.
+        state.discovered_forwarders.write().await.insert(
+            node_id.clone(),
+            DiscoveredForwarder {
+                display_name: Some("Finish".to_owned()),
+                direct_addrs: vec![direct],
+                streams: vec![DiscoveredStream {
+                    stream_id: STREAM_ID.to_owned(),
+                    epoch: 1,
+                    next_seq: 3,
+                }],
+            },
+        );
+
+        state
+            .db
+            .lock()
+            .await
+            .replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
+            .unwrap();
+
+        let config = P2pReceiverConfig {
+            secret_key_seed: [93; 32],
+            forwarder: None,
+            thin_node: None,
+            reconcile_interval: Duration::from_millis(50),
+        };
+        let runtime = start_receiver_p2p(Arc::clone(&state), config)
+            .await
+            .unwrap();
+
+        poll_until(
+            || {
+                let state = Arc::clone(&state);
+                async move {
+                    let db = state.db.lock().await;
+                    db.load_received_events(STREAM_ID)
+                        .map(|e| e.len() >= 2)
+                        .unwrap_or(false)
+                }
+            },
+            Duration::from_secs(10),
+        )
+        .await;
+
+        let db = state.db.lock().await;
+        let seqs: Vec<i64> = db
+            .load_received_events(STREAM_ID)
+            .unwrap()
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        assert_eq!(seqs, vec![1, 2], "discovery-driven dial persisted events");
+        drop(db);
+
+        runtime.shutdown().await;
+        forwarder.shutdown().await;
+    })
+    .await
+    .expect("discovered_forwarder_is_dialed_and_persists_events timed out");
 }
 
 #[tokio::test]

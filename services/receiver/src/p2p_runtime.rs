@@ -51,6 +51,7 @@ use crate::announcer_push::{
 };
 use crate::control_api::AppState;
 use crate::control_api::ConnectionState;
+use crate::control_api::{DiscoveredForwarder, DiscoveredForwarders, DiscoveredStream};
 use crate::db::{Db, StreamSubscription};
 use crate::local_proxy::LocalProxy;
 use crate::p2p_session::{
@@ -106,9 +107,12 @@ pub struct P2pReceiverConfig {
     /// Deterministic loopback secret-key seed (see
     /// [`EndpointBuilder::test`]).
     pub secret_key_seed: [u8; 32],
-    /// The forwarder peer to dial.
-    pub forwarder: ForwarderPeerConfig,
-    /// Optional thin-node client for announcer push.
+    /// An optional explicit forwarder peer to dial. When present it is seeded
+    /// into the discovered-forwarders map at startup so the loopback/dev path
+    /// works without a thin node. When absent, forwarders are learned entirely
+    /// from the thin-node discovery feed.
+    pub forwarder: Option<ForwarderPeerConfig>,
+    /// Optional thin-node client for announcer push and forwarder discovery.
     pub thin_node: Option<ThinNodeClientConfig>,
     /// How often to reconcile canonical subscriptions. Must be at least
     /// [`MIN_RECONCILE_INTERVAL`]; also used as the delivery retry cadence.
@@ -177,13 +181,25 @@ pub async fn start_receiver_p2p(
         "receiver p2p endpoint bound"
     );
 
-    let forwarder_node_id = config
-        .forwarder
-        .node_id
-        .parse::<NodeId>()
-        .map_err(|e| format!("invalid forwarder node id: {e}"))?;
-    let forwarder_addr =
-        NodeAddr::new(forwarder_node_id).with_direct_addresses([config.forwarder.direct_addr]);
+    // Seed the discovered-forwarders map from the optional explicit forwarder
+    // so the loopback/dev path (and tests) dial it without a thin node. The
+    // discovery task (when a thin node is configured) refreshes the map but
+    // preserves this seed if the thin node hasn't advertised the same endpoint.
+    // An already-present entry (e.g. injected by a test) is left untouched.
+    if let Some(forwarder) = &config.forwarder {
+        forwarder
+            .node_id
+            .parse::<NodeId>()
+            .map_err(|e| format!("invalid forwarder node id: {e}"))?;
+        let mut discovered = state.discovered_forwarders.write().await;
+        discovered
+            .entry(forwarder.node_id.clone())
+            .or_insert_with(|| DiscoveredForwarder {
+                display_name: None,
+                direct_addrs: vec![forwarder.direct_addr],
+                streams: Vec::new(),
+            });
+    }
 
     // P2P is configured and the runtime is attempting to reach the forwarder:
     // surface that as Connecting until a session actually connects. A shared
@@ -205,7 +221,6 @@ pub async fn start_receiver_p2p(
         state,
         config,
         endpoint,
-        forwarder_addr,
         reporter,
         shutdown_rx,
     ));
@@ -268,12 +283,24 @@ async fn run_reconcile_loop(
     state: Arc<AppState>,
     config: P2pReceiverConfig,
     endpoint: Endpoint,
-    forwarder_addr: NodeAddr,
     reporter: Arc<SessionStatusReporter>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let endpoint = Arc::new(endpoint);
     let mut workers: HashMap<String, StreamWorker> = HashMap::new();
+
+    // When a thin node is configured, periodically refresh the discovered
+    // forwarders map from its `GET /forwarders` feed. The task observes the
+    // same shutdown signal and is awaited/aborted below.
+    let discovery_task = config.thin_node.clone().map(|thin| {
+        tokio::spawn(run_discovery_loop(
+            Arc::clone(&state),
+            thin,
+            config.forwarder.clone(),
+            config.reconcile_interval,
+            shutdown_rx.clone(),
+        ))
+    });
 
     // Thin-node announcer generation, acquired by registering this endpoint and
     // taking over the announcer generation. When the thin-node is unavailable
@@ -310,7 +337,6 @@ async fn run_reconcile_loop(
             &state,
             &config,
             &endpoint,
-            &forwarder_addr,
             &reporter,
             announcer_generation,
             &mut workers,
@@ -328,6 +354,10 @@ async fn run_reconcile_loop(
 
     for (_stream_id, worker) in workers.drain() {
         worker.stop().await;
+    }
+    if let Some(task) = discovery_task {
+        task.abort();
+        let _ = task.await;
     }
     endpoint.close().await;
     // The runtime is shutting down: no sessions remain and none will be
@@ -349,11 +379,105 @@ async fn thin_node_startup(thin: ThinNodeClientConfig, endpoint_id: String) -> R
     .map_err(|e| format!("thin-node startup task failed: {e}"))?
 }
 
+/// Periodically refresh [`AppState::discovered_forwarders`] from the thin-node
+/// `GET /forwarders` feed. Failures are logged and retried on the next interval;
+/// the task never crashes. The optional explicit `seed` forwarder is preserved
+/// in the refreshed map when the thin node has not advertised that endpoint, so
+/// the loopback/dev path keeps working alongside discovery.
+async fn run_discovery_loop(
+    state: Arc<AppState>,
+    thin: ThinNodeClientConfig,
+    seed: Option<ForwarderPeerConfig>,
+    interval: Duration,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    loop {
+        match fetch_forwarders(&thin).await {
+            Ok(entries) => {
+                let mut map = DiscoveredForwarders::new();
+                for entry in entries {
+                    let direct_addrs = entry
+                        .direct_addrs
+                        .iter()
+                        .filter_map(|addr| addr.parse::<SocketAddr>().ok())
+                        .collect::<Vec<_>>();
+                    let streams = entry
+                        .streams
+                        .into_iter()
+                        .map(|stream| DiscoveredStream {
+                            stream_id: stream.stream_id,
+                            epoch: stream.epoch,
+                            next_seq: stream.next_seq,
+                        })
+                        .collect::<Vec<_>>();
+                    map.insert(
+                        entry.endpoint_id,
+                        DiscoveredForwarder {
+                            display_name: entry.display_name,
+                            direct_addrs,
+                            streams,
+                        },
+                    );
+                }
+                if let Some(forwarder) = &seed {
+                    map.entry(forwarder.node_id.clone())
+                        .or_insert_with(|| DiscoveredForwarder {
+                            display_name: None,
+                            direct_addrs: vec![forwarder.direct_addr],
+                            streams: Vec::new(),
+                        });
+                }
+                *state.discovered_forwarders.write().await = map;
+            }
+            Err(e) => {
+                warn!(error = %e, "forwarder discovery fetch failed; will retry");
+            }
+        }
+
+        tokio::select! {
+            biased;
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() { break; }
+            }
+            () = tokio::time::sleep(interval) => {}
+        }
+    }
+}
+
+async fn fetch_forwarders(
+    thin: &ThinNodeClientConfig,
+) -> Result<Vec<announcer_push::ForwarderDiscoveryEntry>, String> {
+    let url = thin.url.clone();
+    let token = thin.token.clone();
+    tokio::task::spawn_blocking(move || {
+        announcer_push::fetch_approved_forwarders(&url, &token).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("forwarder discovery task failed: {e}"))?
+}
+
+/// Resolve a forwarder endpoint id to a dialable [`NodeAddr`] from the
+/// discovered-forwarders snapshot. Returns `None` when the forwarder is not yet
+/// discovered or its endpoint id is not a valid node id.
+fn resolve_forwarder_addr(
+    endpoint_id: &str,
+    discovered: &DiscoveredForwarders,
+) -> Option<NodeAddr> {
+    let forwarder = discovered.get(endpoint_id)?;
+    let node_id = match endpoint_id.parse::<NodeId>() {
+        Ok(node_id) => node_id,
+        Err(e) => {
+            warn!(%endpoint_id, error = %e, "discovered forwarder has invalid node id; skipping");
+            return None;
+        }
+    };
+    Some(NodeAddr::new(node_id).with_direct_addresses(forwarder.direct_addrs.iter().copied()))
+}
+
 async fn reconcile_once(
     state: &Arc<AppState>,
     config: &P2pReceiverConfig,
     endpoint: &Arc<Endpoint>,
-    forwarder_addr: &NodeAddr,
     reporter: &Arc<SessionStatusReporter>,
     announcer_generation: Option<i64>,
     workers: &mut HashMap<String, StreamWorker>,
@@ -369,11 +493,12 @@ async fn reconcile_once(
         }
     };
 
+    // All subscriptions are desired, keyed by stream id (globally unique in the
+    // receiver's durable model). The forwarder that serves each stream is
+    // resolved per-subscription from the discovered-forwarders map below.
     let mut desired: HashMap<String, StreamSubscription> = HashMap::new();
     for sub in subs {
-        if sub.forwarder_endpoint_id == config.forwarder.node_id {
-            desired.insert(sub.stream_id.clone(), sub);
-        }
+        desired.insert(sub.stream_id.clone(), sub);
     }
 
     // Stop workers whose subscription disappeared.
@@ -393,10 +518,21 @@ async fn reconcile_once(
     // fenced generation has been acquired.
     let announcer_desired = config.thin_node.is_some() && announcer_generation.is_some();
 
+    // Snapshot discovered forwarders for per-subscription address resolution.
+    let discovered = state.discovered_forwarders.read().await.clone();
+
     // Start workers for newly-seen subscriptions, and rebuild workers whose
     // effective config changed, whose session task has exited non-retryably, or
     // that need an announcer push worker now that a generation is available.
     for (stream_id, sub) in desired {
+        // Resolve the forwarder that serves this subscription. If it isn't
+        // discovered yet, skip this pass (no worker started); an existing worker
+        // is left running so it keeps reconnecting. The worker starts once
+        // discovery learns the forwarder.
+        let Some(forwarder_addr) = resolve_forwarder_addr(&sub.forwarder_endpoint_id, &discovered)
+        else {
+            continue;
+        };
         if let Some(existing) = workers.get(&stream_id) {
             let config_changed = existing.sub != sub;
             let session_dead = existing.session_finished();
@@ -419,7 +555,7 @@ async fn reconcile_once(
             state,
             config,
             endpoint,
-            forwarder_addr,
+            &forwarder_addr,
             reporter,
             announcer_generation,
             &sub,
@@ -510,7 +646,7 @@ async fn start_stream_worker(
         let db = Arc::clone(&state.db);
         let dbf_path = dbf.path.clone();
         let stream_id = stream_id.clone();
-        let forwarder_endpoint_id = config.forwarder.node_id.clone();
+        let forwarder_endpoint_id = sub.forwarder_endpoint_id.clone();
         let hint_rx = hint_tx.subscribe();
         let dbf_shutdown = shutdown_rx.clone();
         tasks.push(tokio::spawn(run_dbf_worker(
@@ -828,11 +964,12 @@ pub const ENV_P2P_RECONCILE_MS: &str = "RT_P2P_RECONCILE_MS";
 /// Build an optional [`P2pReceiverConfig`] from a key->value lookup (e.g. env).
 ///
 /// Mirrors the `receiver-headless` CLI validation: P2P is enabled only when at
-/// least one key is present; the forwarder node id, forwarder direct address,
-/// and secret-key seed are then all required; the thin-node URL and token must
-/// be supplied together; and the reconcile interval defaults to 1000ms and must
-/// be at least [`MIN_RECONCILE_INTERVAL`]. Empty/whitespace-only values are
-/// treated as absent.
+/// least one key is present; the secret-key seed is then required; the forwarder
+/// node id and direct address must be supplied together (both or neither); the
+/// thin-node URL and token must be supplied together; at least one of an
+/// explicit forwarder or a thin node must be configured; and the reconcile
+/// interval defaults to 1000ms and must be at least [`MIN_RECONCILE_INTERVAL`].
+/// Empty/whitespace-only values are treated as absent.
 pub fn p2p_config_from_lookup(
     get: impl Fn(&str) -> Option<String>,
 ) -> Result<Option<P2pReceiverConfig>, String> {
@@ -859,19 +996,28 @@ pub fn p2p_config_from_lookup(
         return Ok(None);
     }
 
-    let forwarder_node_id = forwarder_node_id.ok_or_else(|| {
-        format!("{ENV_P2P_FORWARDER_NODE_ID} is required when any P2P env var is set")
-    })?;
-    let direct_addr_raw = forwarder_direct_addr.ok_or_else(|| {
-        format!("{ENV_P2P_FORWARDER_DIRECT_ADDR} is required when any P2P env var is set")
-    })?;
-    let direct_addr: SocketAddr = direct_addr_raw
-        .parse()
-        .map_err(|e| format!("invalid {ENV_P2P_FORWARDER_DIRECT_ADDR}: {e}"))?;
-    let secret_key_seed_hex = secret_key_seed_hex.ok_or_else(|| {
-        format!("{ENV_P2P_SECRET_KEY_SEED_HEX} is required when any P2P env var is set")
-    })?;
-    let secret_key_seed = parse_secret_key_seed_hex(&secret_key_seed_hex)?;
+    let forwarder = match (forwarder_node_id, forwarder_direct_addr) {
+        (Some(node_id), Some(direct_addr_raw)) => {
+            let direct_addr: SocketAddr = direct_addr_raw
+                .parse()
+                .map_err(|e| format!("invalid {ENV_P2P_FORWARDER_DIRECT_ADDR}: {e}"))?;
+            Some(ForwarderPeerConfig {
+                node_id,
+                direct_addr,
+            })
+        }
+        (None, None) => None,
+        (Some(_), None) => {
+            return Err(format!(
+                "{ENV_P2P_FORWARDER_DIRECT_ADDR} is required when {ENV_P2P_FORWARDER_NODE_ID} is set"
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(format!(
+                "{ENV_P2P_FORWARDER_NODE_ID} is required when {ENV_P2P_FORWARDER_DIRECT_ADDR} is set"
+            ));
+        }
+    };
 
     let thin_node = match (thin_node_url, thin_node_token) {
         (Some(url), Some(token)) => Some(ThinNodeClientConfig { url, token }),
@@ -882,6 +1028,19 @@ pub fn p2p_config_from_lookup(
             ));
         }
     };
+
+    if forwarder.is_none() && thin_node.is_none() {
+        return Err(format!(
+            "P2P requires either an explicit forwarder ({ENV_P2P_FORWARDER_NODE_ID} + \
+             {ENV_P2P_FORWARDER_DIRECT_ADDR}) or a thin node ({ENV_P2P_THIN_NODE_URL} + \
+             {ENV_P2P_THIN_NODE_TOKEN})"
+        ));
+    }
+
+    let secret_key_seed_hex = secret_key_seed_hex.ok_or_else(|| {
+        format!("{ENV_P2P_SECRET_KEY_SEED_HEX} is required when any P2P env var is set")
+    })?;
+    let secret_key_seed = parse_secret_key_seed_hex(&secret_key_seed_hex)?;
 
     let reconcile_ms = match reconcile_ms_raw {
         Some(raw) => raw
@@ -899,10 +1058,7 @@ pub fn p2p_config_from_lookup(
 
     Ok(Some(P2pReceiverConfig {
         secret_key_seed,
-        forwarder: ForwarderPeerConfig {
-            node_id: forwarder_node_id,
-            direct_addr,
-        },
+        forwarder,
         thin_node,
         reconcile_interval,
     }))
@@ -952,11 +1108,35 @@ mod tests {
         ]))
         .unwrap()
         .expect("config present");
-        assert_eq!(cfg.forwarder.node_id, "endpoint-x");
-        assert_eq!(cfg.forwarder.direct_addr, "127.0.0.1:5000".parse().unwrap());
+        let fwd = cfg.forwarder.as_ref().expect("forwarder present");
+        assert_eq!(fwd.node_id, "endpoint-x");
+        assert_eq!(fwd.direct_addr, "127.0.0.1:5000".parse().unwrap());
         assert_eq!(cfg.secret_key_seed, [0xab; 32]);
         assert!(cfg.thin_node.is_none());
         assert_eq!(cfg.reconcile_interval, Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn p2p_config_from_lookup_accepts_thin_node_only_without_forwarder() {
+        let cfg = p2p_config_from_lookup(lookup(&[
+            (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
+            (ENV_P2P_THIN_NODE_URL, "http://127.0.0.1:8080"),
+            (ENV_P2P_THIN_NODE_TOKEN, "tok"),
+        ]))
+        .unwrap()
+        .expect("config present");
+        assert!(
+            cfg.forwarder.is_none(),
+            "thin-node-only config must not require an explicit forwarder"
+        );
+        assert!(cfg.thin_node.is_some());
+    }
+
+    #[test]
+    fn p2p_config_from_lookup_requires_forwarder_or_thin_node() {
+        let err = p2p_config_from_lookup(lookup(&[(ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX)]))
+            .unwrap_err();
+        assert!(err.contains("either an explicit forwarder"), "got: {err}");
     }
 
     #[test]
@@ -1145,10 +1325,10 @@ mod tests {
         // The outer config derives Debug and must inherit the redaction.
         let outer = P2pReceiverConfig {
             secret_key_seed: [0u8; 32],
-            forwarder: ForwarderPeerConfig {
+            forwarder: Some(ForwarderPeerConfig {
                 node_id: "node".to_owned(),
                 direct_addr: "127.0.0.1:1".parse().unwrap(),
-            },
+            }),
             thin_node: Some(cfg),
             reconcile_interval: Duration::from_millis(50),
         };

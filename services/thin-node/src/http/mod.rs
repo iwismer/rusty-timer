@@ -3,6 +3,7 @@
 pub mod allowlist;
 pub mod announcer;
 pub mod catalog;
+pub mod forwarders;
 pub mod register;
 pub mod status;
 
@@ -61,6 +62,7 @@ pub fn router(state: AppState) -> Router {
         .route("/announcer/rows", post(announcer::push_row))
         .route("/announcer/takeover", post(announcer::takeover))
         .route("/allowlist/receivers", get(allowlist::receiver_allowlist))
+        .route("/forwarders", get(forwarders::list_forwarders))
         .fallback(crate::ui_server::serve_ui)
         .with_state(state)
 }

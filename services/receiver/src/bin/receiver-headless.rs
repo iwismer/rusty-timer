@@ -186,8 +186,10 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<HeadlessConfig
 }
 
 /// Assemble the optional P2P config from parsed flags. P2P is enabled only when
-/// at least one P2P flag is present; partial config is rejected with a clear
-/// message. The thin-node URL and token must be supplied together.
+/// at least one P2P flag is present; the secret-key seed is then required; the
+/// forwarder node id and direct address must be supplied together (both or
+/// neither); the thin-node URL and token must be supplied together; and at
+/// least one of an explicit forwarder or a thin node must be configured.
 fn build_p2p_config(
     forwarder_node_id: Option<String>,
     forwarder_direct_addr: Option<SocketAddr>,
@@ -206,24 +208,25 @@ fn build_p2p_config(
         return Ok(None);
     }
 
-    let forwarder_node_id = forwarder_node_id.ok_or_else(|| {
-        format!(
-            "--p2p-forwarder-node-id is required when P2P flags are set\n{}",
-            usage()
-        )
-    })?;
-    let direct_addr = forwarder_direct_addr.ok_or_else(|| {
-        format!(
-            "--p2p-forwarder-direct-addr is required when P2P flags are set\n{}",
-            usage()
-        )
-    })?;
-    let secret_key_seed = secret_key_seed.ok_or_else(|| {
-        format!(
-            "--p2p-secret-key-seed-hex is required when P2P flags are set\n{}",
-            usage()
-        )
-    })?;
+    let forwarder = match (forwarder_node_id, forwarder_direct_addr) {
+        (Some(node_id), Some(direct_addr)) => Some(ForwarderPeerConfig {
+            node_id,
+            direct_addr,
+        }),
+        (None, None) => None,
+        (Some(_), None) => {
+            return Err(format!(
+                "--p2p-forwarder-direct-addr is required when --p2p-forwarder-node-id is set\n{}",
+                usage()
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(format!(
+                "--p2p-forwarder-node-id is required when --p2p-forwarder-direct-addr is set\n{}",
+                usage()
+            ));
+        }
+    };
 
     let thin_node = match (thin_node_url, thin_node_token) {
         (Some(url), Some(token)) => Some(ThinNodeClientConfig { url, token }),
@@ -236,6 +239,22 @@ fn build_p2p_config(
         }
     };
 
+    if forwarder.is_none() && thin_node.is_none() {
+        return Err(format!(
+            "P2P requires either an explicit forwarder (--p2p-forwarder-node-id + \
+             --p2p-forwarder-direct-addr) or a thin node (--p2p-thin-node-url + \
+             --p2p-thin-node-token)\n{}",
+            usage()
+        ));
+    }
+
+    let secret_key_seed = secret_key_seed.ok_or_else(|| {
+        format!(
+            "--p2p-secret-key-seed-hex is required when P2P flags are set\n{}",
+            usage()
+        )
+    })?;
+
     let reconcile_interval = Duration::from_millis(reconcile_ms.unwrap_or(1000));
     if reconcile_interval < MIN_RECONCILE_INTERVAL {
         return Err(format!(
@@ -247,10 +266,7 @@ fn build_p2p_config(
 
     Ok(Some(P2pReceiverConfig {
         secret_key_seed,
-        forwarder: ForwarderPeerConfig {
-            node_id: forwarder_node_id,
-            direct_addr,
-        },
+        forwarder,
         thin_node,
         reconcile_interval,
     }))
@@ -260,10 +276,9 @@ fn usage() -> String {
     concat!(
         "usage: receiver-headless --data-dir <path> [--bind-addr <addr:port>] [--receiver-id <id>]\n",
         "\n",
-        "P2P (forwarder-node-id, forwarder-direct-addr, secret-key-seed-hex required together):\n",
-        "  --p2p-forwarder-node-id <node-id>\n",
-        "  --p2p-forwarder-direct-addr <ip:port>\n",
-        "  --p2p-secret-key-seed-hex <64-hex>\n",
+        "P2P (secret-key-seed-hex required; configure an explicit forwarder, a thin node, or both):\n",
+        "  --p2p-secret-key-seed-hex <64-hex>  (required)\n",
+        "  [--p2p-forwarder-node-id <node-id> --p2p-forwarder-direct-addr <ip:port>]\n",
         "  [--p2p-thin-node-url <url> --p2p-thin-node-token <token>]\n",
         "  [--p2p-reconcile-ms <ms>]  (must be >= 50)",
     )
@@ -331,11 +346,46 @@ mod tests {
         ]))
         .unwrap();
         let p2p = config.p2p.expect("p2p config present");
-        assert_eq!(p2p.forwarder.node_id, node_id);
-        assert_eq!(p2p.forwarder.direct_addr, "127.0.0.1:5000".parse().unwrap());
+        let fwd = p2p.forwarder.as_ref().expect("forwarder present");
+        assert_eq!(fwd.node_id, node_id);
+        assert_eq!(fwd.direct_addr, "127.0.0.1:5000".parse().unwrap());
         assert_eq!(p2p.secret_key_seed, [0xab; 32]);
         assert_eq!(p2p.reconcile_interval, Duration::from_millis(50));
         assert!(p2p.thin_node.is_none());
+    }
+
+    #[test]
+    fn thin_node_only_flags_parse_without_forwarder() {
+        let config = parse_args(args(&[
+            "--data-dir",
+            "/tmp/x",
+            "--p2p-secret-key-seed-hex",
+            SEED_HEX,
+            "--p2p-thin-node-url",
+            "http://127.0.0.1:8080",
+            "--p2p-thin-node-token",
+            "secret-token",
+        ]))
+        .unwrap();
+        let p2p = config.p2p.expect("p2p config present");
+        assert!(
+            p2p.forwarder.is_none(),
+            "thin-node-only config must not require an explicit forwarder"
+        );
+        let thin = p2p.thin_node.expect("thin node config");
+        assert_eq!(thin.url, "http://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn p2p_requires_forwarder_or_thin_node() {
+        let err = parse_args(args(&[
+            "--data-dir",
+            "/tmp/x",
+            "--p2p-secret-key-seed-hex",
+            SEED_HEX,
+        ]))
+        .unwrap_err();
+        assert!(err.contains("either an explicit forwarder"), "got: {err}");
     }
 
     #[test]

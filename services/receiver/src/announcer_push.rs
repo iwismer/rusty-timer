@@ -21,7 +21,7 @@
 //! * **Resolved participant name when available.** Names/bibs are resolved
 //!   locally from race/participant data via the injected resolver.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, MutexGuard as StdMutexGuard, PoisonError};
 use std::time::Duration;
@@ -222,6 +222,61 @@ pub fn takeover_announcer_generation(
             )
         })?;
     Ok(generation)
+}
+
+/// One stream entry from the thin-node `GET /forwarders` discovery feed.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ForwarderDiscoveryStream {
+    pub stream_id: String,
+    pub epoch: i64,
+    pub next_seq: i64,
+}
+
+/// One forwarder entry from the thin-node `GET /forwarders` discovery feed.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ForwarderDiscoveryEntry {
+    pub endpoint_id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub direct_addrs: Vec<String>,
+    #[serde(default)]
+    pub streams: Vec<ForwarderDiscoveryStream>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForwardersResponse {
+    #[serde(default)]
+    forwarders: Vec<ForwarderDiscoveryEntry>,
+}
+
+/// Fetch the approved-forwarder discovery feed from the thin-node
+/// `GET /forwarders` endpoint (bearer auth). Blocking; intended to run inside a
+/// blocking task. The bearer token is never logged.
+pub fn fetch_approved_forwarders(
+    base_url: &str,
+    token: &str,
+) -> Result<Vec<ForwarderDiscoveryEntry>, AnnouncerPushError> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .connect_timeout(HTTP_TIMEOUT)
+        .build()
+        .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
+    let response = client
+        .get(format!("{}/forwarders", base_url.trim_end_matches('/')))
+        .bearer_auth(token)
+        .send()
+        .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
+    if !response.status().is_success() {
+        return Err(AnnouncerPushError::Transport(format!(
+            "thin-node /forwarders returned {}",
+            response.status()
+        )));
+    }
+    let body: ForwardersResponse = response
+        .json()
+        .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
+    Ok(body.forwarders)
 }
 
 type StreamPushLock = Arc<StdMutex<()>>;
