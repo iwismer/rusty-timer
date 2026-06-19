@@ -615,7 +615,11 @@ async fn reconcile_once(
     }
 
     for endpoint_id in desired_forwarders.keys() {
-        state.mark_forwarder_dial_started(endpoint_id).await;
+        // The pending grace clock is driven by the `ForwarderConnection` state
+        // machine (set-once on the first dial attempt, cleared on connect,
+        // re-armed on disconnect), not by the reconcile cadence. Marking it here
+        // on every pass would reset it every reconcile interval so it could
+        // never elapse to `Unavailable`.
         if workers.contains_key(endpoint_id) {
             continue;
         }

@@ -313,9 +313,17 @@ impl AppState {
         self.recompute_aggregate_connection_state().await;
     }
 
+    /// Start the per-forwarder pending grace clock when a dial attempt begins,
+    /// but only if it is not already running. This is idempotent: repeated calls
+    /// while still dialing (e.g. across reconnect retries) do not reset the
+    /// clock, so the grace window measures from the *first* dial attempt and can
+    /// actually elapse to [`ForwarderConnState::Unavailable`]. The clock is
+    /// cleared on control connect and re-armed on control disconnect.
     pub async fn mark_forwarder_dial_started(&self, endpoint_id: &str) {
         self.mark_forwarder_runtime(endpoint_id, |status| {
-            status.pending_started_at = Some(Instant::now());
+            if status.pending_started_at.is_none() {
+                status.pending_started_at = Some(Instant::now());
+            }
         })
         .await;
     }
@@ -1562,6 +1570,42 @@ pub fn event_name(event: &ReceiverUiEvent) -> &'static str {
 mod tests {
     use super::*;
     use crate::db::Db;
+
+    #[test]
+    fn derive_forwarder_state_pending_grace_expires_to_unavailable() {
+        // Intent to connect, control not up, and the pending clock was started
+        // more than the grace window ago: the forwarder must read as
+        // Unavailable with `pending=false` (the grace has elapsed).
+        let runtime = ForwarderRuntimeStatus {
+            control_up: false,
+            data_sessions: 0,
+            pending_started_at: Some(std::time::Instant::now() - std::time::Duration::from_secs(6)),
+        };
+        let snapshot = derive_forwarder_state(runtime, true);
+        assert_eq!(snapshot.state, ForwarderConnState::Unavailable);
+        assert!(
+            !snapshot.pending,
+            "grace older than FORWARDER_PENDING_GRACE must clear pending"
+        );
+    }
+
+    #[test]
+    fn derive_forwarder_state_within_grace_stays_pending() {
+        // Same as above but the pending clock just started: still within the
+        // grace window, so `pending=true` (not yet treated as Unavailable to
+        // the user, even though the underlying state is Unavailable).
+        let runtime = ForwarderRuntimeStatus {
+            control_up: false,
+            data_sessions: 0,
+            pending_started_at: Some(std::time::Instant::now()),
+        };
+        let snapshot = derive_forwarder_state(runtime, true);
+        assert_eq!(snapshot.state, ForwarderConnState::Unavailable);
+        assert!(
+            snapshot.pending,
+            "a freshly started grace clock must keep pending=true"
+        );
+    }
 
     #[test]
     fn command_registry_names_are_unique() {
