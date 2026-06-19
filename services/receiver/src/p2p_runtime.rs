@@ -39,7 +39,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rt_iroh::{Endpoint, EndpointBuilder, NodeAddr, NodeId, SecretKey};
+use rt_iroh::{
+    Endpoint, EndpointBuilder, NodeAddr, NodeId, RelayMode, SecretKey, load_or_create_secret_key,
+};
 use rt_p2p_protocol::{
     CAP_CONTROL_EVENTS, CAP_REMOTE_CONFIG, Hello, MAX_FRAME_BYTES, SubscribeMode,
 };
@@ -104,13 +106,30 @@ impl std::fmt::Debug for ServerClientConfig {
     }
 }
 
+/// The receiver's iroh identity source. Decoupled from transport so a
+/// persistent production identity can run with or without relays/discovery,
+/// mirroring the forwarder (`services/forwarder/src/p2p`).
+#[derive(Clone, Debug)]
+pub enum ReceiverIdentity {
+    /// Persistent production identity: load-or-create a secret key at this path.
+    KeyPath(std::path::PathBuf),
+    /// Deterministic loopback/dev seed.
+    Seed([u8; 32]),
+}
+
 /// Full P2P receiver configuration. Presence of this in
 /// [`HeadlessConfig`](crate::headless::HeadlessConfig) enables the P2P lane.
 #[derive(Clone, Debug)]
 pub struct P2pReceiverConfig {
-    /// Deterministic loopback secret-key seed (see
-    /// [`EndpointBuilder::test`]).
-    pub secret_key_seed: [u8; 32],
+    /// How this receiver's iroh secret key is sourced (persistent key path for
+    /// production, or a deterministic seed for loopback/dev).
+    pub identity: ReceiverIdentity,
+    /// Disable iroh relays (loopback/LAN/air-gapped deployments).
+    pub relay_disabled: bool,
+    /// Disable iroh discovery services.
+    pub discovery_disabled: bool,
+    /// Optional explicit IPv4 bind address for the endpoint.
+    pub bind_addr_v4: Option<std::net::SocketAddrV4>,
     /// An optional explicit forwarder peer to dial. When present it is seeded
     /// into the discovered-forwarders map at startup so the loopback/dev path
     /// works without a server. When absent, forwarders are learned entirely
@@ -121,6 +140,41 @@ pub struct P2pReceiverConfig {
     /// How often to reconcile canonical subscriptions. Must be at least
     /// [`MIN_RECONCILE_INTERVAL`]; also used as the delivery retry cadence.
     pub reconcile_interval: Duration,
+}
+
+#[cfg(test)]
+impl P2pReceiverConfig {
+    /// Loopback/dev config from a seed, replicating `EndpointBuilder::test`
+    /// transport (relay off, discovery off, loopback bind). `relay_disabled`
+    /// is overridable so tests can exercise the transport knob independently.
+    pub(crate) fn for_test_seed(seed: [u8; 32], relay_disabled: bool) -> Self {
+        Self {
+            identity: ReceiverIdentity::Seed(seed),
+            relay_disabled,
+            discovery_disabled: true,
+            bind_addr_v4: Some(std::net::SocketAddrV4::new(
+                std::net::Ipv4Addr::LOCALHOST,
+                0,
+            )),
+            forwarder: None,
+            server: None,
+            reconcile_interval: Duration::from_millis(1000),
+        }
+    }
+
+    /// Production-style config using a persistent key path; relays/discovery
+    /// enabled by default (transport defaults are independent of identity).
+    pub(crate) fn for_test_keypath(path: std::path::PathBuf) -> Self {
+        Self {
+            identity: ReceiverIdentity::KeyPath(path),
+            relay_disabled: false,
+            discovery_disabled: false,
+            bind_addr_v4: None,
+            forwarder: None,
+            server: None,
+            reconcile_interval: Duration::from_millis(1000),
+        }
+    }
 }
 
 /// Build the client `Hello` presented during control-plane negotiation.
@@ -181,7 +235,22 @@ pub async fn start_receiver_p2p(
             config.reconcile_interval, MIN_RECONCILE_INTERVAL
         ));
     }
-    let endpoint = EndpointBuilder::test(config.secret_key_seed)
+    let secret_key = match &config.identity {
+        ReceiverIdentity::KeyPath(path) => load_or_create_secret_key(path)
+            .map_err(|e| format!("failed to load/create p2p key at {}: {e}", path.display()))?,
+        ReceiverIdentity::Seed(seed) => SecretKey::from_bytes(seed),
+    };
+    let mut builder = EndpointBuilder::default().secret_key(secret_key);
+    if config.relay_disabled {
+        builder = builder.relay_mode(RelayMode::Disabled);
+    }
+    if config.discovery_disabled {
+        builder = builder.clear_discovery();
+    }
+    if let Some(addr) = config.bind_addr_v4 {
+        builder = builder.bind_addr_v4(addr);
+    }
+    let endpoint = builder
         .bind()
         .await
         .map_err(|e| format!("failed to bind p2p endpoint: {e}"))?;
@@ -1384,7 +1453,13 @@ pub fn p2p_config_from_lookup(
     }
 
     Ok(Some(P2pReceiverConfig {
-        secret_key_seed,
+        identity: ReceiverIdentity::Seed(secret_key_seed),
+        relay_disabled: true,
+        discovery_disabled: true,
+        bind_addr_v4: Some(std::net::SocketAddrV4::new(
+            std::net::Ipv4Addr::LOCALHOST,
+            0,
+        )),
         forwarder,
         server,
         reconcile_interval,
@@ -1407,6 +1482,58 @@ mod tests {
 
     /// A valid IPICO chip-read frame (chip id `000000012345`).
     const SAMPLE_FRAME: &[u8] = b"aa400000000123450a2a01123018455927a7";
+
+    #[test]
+    fn config_supports_keypath_and_seed_identities_independent_of_transport() {
+        let p = std::path::PathBuf::from("/tmp/k.key");
+        let c1 = P2pReceiverConfig::for_test_keypath(p.clone());
+        assert!(matches!(c1.identity, ReceiverIdentity::KeyPath(ref x) if *x == p));
+        assert!(!c1.relay_disabled);
+        let c2 = P2pReceiverConfig::for_test_seed([7u8; 32], /*relay_disabled*/ true);
+        assert!(matches!(c2.identity, ReceiverIdentity::Seed(s) if s == [7u8; 32]));
+        assert!(c2.relay_disabled);
+    }
+
+    #[tokio::test]
+    async fn keypath_identity_persists_node_id_across_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("p2p_secret.key");
+        let id1 = bind_node_id(ReceiverIdentity::KeyPath(key.clone())).await;
+        let id2 = bind_node_id(ReceiverIdentity::KeyPath(key)).await;
+        assert_eq!(id1, id2);
+    }
+
+    /// Bind a minimal loopback runtime with the given identity, capture the
+    /// resulting p2p node id, and shut it down.
+    #[cfg(test)]
+    async fn bind_node_id(identity: ReceiverIdentity) -> String {
+        use crate::control_api::AppState;
+        use crate::db::Db;
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let cfg = P2pReceiverConfig {
+            identity,
+            relay_disabled: true,
+            discovery_disabled: true,
+            bind_addr_v4: Some(std::net::SocketAddrV4::new(
+                std::net::Ipv4Addr::LOCALHOST,
+                0,
+            )),
+            forwarder: None,
+            server: None,
+            reconcile_interval: Duration::from_millis(1000),
+        };
+        let rt = start_receiver_p2p(Arc::clone(&state), cfg)
+            .await
+            .expect("runtime starts");
+        let id = state
+            .p2p_endpoint_id
+            .read()
+            .await
+            .clone()
+            .expect("endpoint id set after start");
+        rt.shutdown().await;
+        id
+    }
 
     /// A valid 64-hex-character secret-key seed for config-builder tests.
     const TEST_SEED_HEX: &str = "abababababababababababababababababababababababababababababababab";
@@ -1514,7 +1641,7 @@ mod tests {
         let fwd = cfg.forwarder.as_ref().expect("forwarder present");
         assert_eq!(fwd.node_id, "endpoint-x");
         assert_eq!(fwd.direct_addr, "127.0.0.1:5000".parse().unwrap());
-        assert_eq!(cfg.secret_key_seed, [0xab; 32]);
+        assert!(matches!(cfg.identity, ReceiverIdentity::Seed(s) if s == [0xab; 32]));
         assert!(cfg.server.is_none());
         assert_eq!(cfg.reconcile_interval, Duration::from_millis(1000));
     }
@@ -1741,7 +1868,10 @@ mod tests {
 
         // The outer config derives Debug and must inherit the redaction.
         let outer = P2pReceiverConfig {
-            secret_key_seed: [0u8; 32],
+            identity: ReceiverIdentity::Seed([0u8; 32]),
+            relay_disabled: true,
+            discovery_disabled: true,
+            bind_addr_v4: None,
             forwarder: Some(ForwarderPeerConfig {
                 node_id: "node".to_owned(),
                 direct_addr: "127.0.0.1:1".parse().unwrap(),

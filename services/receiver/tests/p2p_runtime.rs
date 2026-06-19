@@ -16,7 +16,8 @@ use axum::routing::post;
 use receiver::control_api::{ConnectionState, DiscoveredForwarder, DiscoveredStream};
 use receiver::db::{DbfConfig, EventType, StreamSubscription};
 use receiver::p2p_runtime::{
-    ForwarderPeerConfig, P2pReceiverConfig, ServerClientConfig, start_receiver_p2p,
+    ForwarderPeerConfig, P2pReceiverConfig, ReceiverIdentity, ServerClientConfig,
+    start_receiver_p2p,
 };
 use receiver::ui_events::ReceiverUiEvent;
 use rt_p2p_protocol::{
@@ -140,7 +141,13 @@ fn base_config(
 ) -> (P2pReceiverConfig, StreamSubscription) {
     let sub = stream_subscription(&node_id, local_port_override);
     let config = P2pReceiverConfig {
-        secret_key_seed: [seed; 32],
+        identity: ReceiverIdentity::Seed([seed; 32]),
+        relay_disabled: true,
+        discovery_disabled: true,
+        bind_addr_v4: Some(std::net::SocketAddrV4::new(
+            std::net::Ipv4Addr::LOCALHOST,
+            0,
+        )),
         forwarder: Some(ForwarderPeerConfig {
             node_id,
             direct_addr: direct,
@@ -1051,7 +1058,13 @@ async fn discovered_forwarder_is_dialed_and_persists_events() {
             .unwrap();
 
         let config = P2pReceiverConfig {
-            secret_key_seed: [93; 32],
+            identity: ReceiverIdentity::Seed([93; 32]),
+            relay_disabled: true,
+            discovery_disabled: true,
+            bind_addr_v4: Some(std::net::SocketAddrV4::new(
+                std::net::Ipv4Addr::LOCALHOST,
+                0,
+            )),
             forwarder: None,
             server: None,
             reconcile_interval: Duration::from_millis(50),

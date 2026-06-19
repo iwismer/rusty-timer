@@ -1,7 +1,7 @@
 use receiver::headless::{HeadlessConfig, HeadlessHost};
 use receiver::p2p_runtime::{
-    ForwarderPeerConfig, MIN_RECONCILE_INTERVAL, P2pReceiverConfig, ServerClientConfig,
-    node_id_for_seed, parse_secret_key_seed_hex,
+    ForwarderPeerConfig, MIN_RECONCILE_INTERVAL, P2pReceiverConfig, ReceiverIdentity,
+    ServerClientConfig, node_id_for_seed, parse_secret_key_seed_hex,
 };
 use std::ffi::OsString;
 use std::net::SocketAddr;
@@ -265,7 +265,13 @@ fn build_p2p_config(
     }
 
     Ok(Some(P2pReceiverConfig {
-        secret_key_seed,
+        identity: ReceiverIdentity::Seed(secret_key_seed),
+        relay_disabled: true,
+        discovery_disabled: true,
+        bind_addr_v4: Some(std::net::SocketAddrV4::new(
+            std::net::Ipv4Addr::LOCALHOST,
+            0,
+        )),
         forwarder,
         server,
         reconcile_interval,
@@ -349,7 +355,7 @@ mod tests {
         let fwd = p2p.forwarder.as_ref().expect("forwarder present");
         assert_eq!(fwd.node_id, node_id);
         assert_eq!(fwd.direct_addr, "127.0.0.1:5000".parse().unwrap());
-        assert_eq!(p2p.secret_key_seed, [0xab; 32]);
+        assert!(matches!(p2p.identity, ReceiverIdentity::Seed(s) if s == [0xab; 32]));
         assert_eq!(p2p.reconcile_interval, Duration::from_millis(50));
         assert!(p2p.server.is_none());
     }
