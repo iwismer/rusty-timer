@@ -42,13 +42,13 @@ pub struct DiscoveredForwarder {
 /// id). Populated by the discovery task and/or seeded from explicit config.
 pub type DiscoveredForwarders = HashMap<String, DiscoveredForwarder>;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot, watch};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc, mpsc::error::TrySendError, oneshot, watch};
 use tracing::warn;
 
 /// How long a remote-config command waits for the forwarder's response before
 /// failing, so a missing/late reply can never hang the caller. The response is
 /// routed back to the awaiting command by the per-forwarder control loop.
-const FORWARDER_CONFIG_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const FORWARDER_CONFIG_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A remote-config request bridged from a control-API command (`&AppState`) to
 /// the live [`ForwarderConnection`](crate::p2p_forwarder) control loop that
@@ -136,6 +136,7 @@ struct ForwarderConnectionsFingerprint {
     intent: bool,
     discovered: bool,
     display_name: Option<String>,
+    remote_config_available: bool,
     subscribed_count: usize,
     available_count: usize,
     readers: Vec<ReaderLiveStatus>,
@@ -544,24 +545,38 @@ impl AppState {
     /// control session negotiated `CAP_REMOTE_CONFIG`. Called by the
     /// [`ForwarderConnection`](crate::p2p_forwarder) on control connect.
     pub(crate) fn register_forwarder_config_tx(
-        &self,
+        self: &Arc<Self>,
         endpoint_id: &str,
         tx: mpsc::Sender<ConfigCommand>,
-    ) {
+    ) -> ForwarderConfigRegistrationGuard {
         self.forwarder_config_tx
             .lock()
             .unwrap()
-            .insert(endpoint_id.to_owned(), tx);
+            .insert(endpoint_id.to_owned(), tx.clone());
+        ForwarderConfigRegistrationGuard {
+            state: Arc::clone(self),
+            endpoint_id: endpoint_id.to_owned(),
+            tx,
+        }
     }
 
     /// Drop a forwarder's remote-config channel on control disconnect/stop so
     /// subsequent config commands fail fast instead of hanging on a dead
     /// session.
-    pub(crate) fn deregister_forwarder_config_tx(&self, endpoint_id: &str) {
-        self.forwarder_config_tx.lock().unwrap().remove(endpoint_id);
+    fn deregister_forwarder_config_tx(&self, endpoint_id: &str, tx: &mpsc::Sender<ConfigCommand>) {
+        let mut registrations = self.forwarder_config_tx.lock().unwrap();
+        if registrations
+            .get(endpoint_id)
+            .is_some_and(|registered| registered.same_channel(tx))
+        {
+            registrations.remove(endpoint_id);
+        }
     }
 
-    fn forwarder_config_tx(&self, endpoint_id: &str) -> Option<mpsc::Sender<ConfigCommand>> {
+    pub(crate) fn forwarder_config_tx(
+        &self,
+        endpoint_id: &str,
+    ) -> Option<mpsc::Sender<ConfigCommand>> {
         self.forwarder_config_tx
             .lock()
             .unwrap()
@@ -656,6 +671,7 @@ impl AppState {
         };
         let discovered = self.discovered_forwarders.read().await.clone();
         let live_statuses = self.forwarder_live_status.lock().unwrap().clone();
+        let config_endpoints = self.forwarder_config_endpoints();
         let fingerprint = Self::connections_fingerprint(
             next.clone(),
             &statuses,
@@ -663,6 +679,7 @@ impl AppState {
             &discovered,
             &subscriptions,
             &live_statuses,
+            &config_endpoints,
         );
         let connections_changed = {
             let mut last = self.last_connections_fingerprint.lock().unwrap();
@@ -686,11 +703,13 @@ impl AppState {
         discovered: &DiscoveredForwarders,
         subscriptions: &[StreamSubscription],
         live_statuses: &HashMap<String, ForwarderLiveStatus>,
+        config_endpoints: &[String],
     ) -> ConnectionsFingerprint {
         let mut endpoints: BTreeSet<String> = statuses.keys().cloned().collect();
         endpoints.extend(intents.keys().cloned());
         endpoints.extend(discovered.keys().cloned());
         endpoints.extend(live_statuses.keys().cloned());
+        endpoints.extend(config_endpoints.iter().cloned());
 
         let mut subscribed_counts: HashMap<String, usize> = HashMap::new();
         for subscription in subscriptions {
@@ -716,6 +735,7 @@ impl AppState {
                     discovered: discovered_forwarder.is_some(),
                     display_name: discovered_forwarder
                         .and_then(|forwarder| forwarder.display_name.clone()),
+                    remote_config_available: config_endpoints.contains(&endpoint_id),
                     subscribed_count: subscribed_counts.get(&endpoint_id).copied().unwrap_or(0),
                     available_count: discovered_forwarder
                         .map_or(0, |forwarder| forwarder.streams.len()),
@@ -946,6 +966,30 @@ impl AppState {
     /// Ask UI clients to reload full state from the control API.
     pub fn emit_resync(&self) {
         let _ = self.ui_tx.send(ReceiverUiEvent::Resync);
+    }
+}
+
+/// RAII registration for a forwarder's live remote-config command channel.
+/// Dropping the guard deregisters the channel even if the owning connection
+/// task is aborted or panics.
+pub(crate) struct ForwarderConfigRegistrationGuard {
+    state: Arc<AppState>,
+    endpoint_id: String,
+    tx: mpsc::Sender<ConfigCommand>,
+}
+
+impl Drop for ForwarderConfigRegistrationGuard {
+    fn drop(&mut self) {
+        self.state
+            .deregister_forwarder_config_tx(&self.endpoint_id, &self.tx);
+        self.state
+            .recompute_aggregate_connection_state_sync_default_trying();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let state = Arc::clone(&self.state);
+            handle.spawn(async move {
+                state.recompute_aggregate_connection_state().await;
+            });
+        }
     }
 }
 
@@ -1638,6 +1682,19 @@ fn forwarder_remote_config_unavailable() -> ReceiverError {
     ReceiverError::NotConnected("forwarder not connected or remote config unavailable".to_owned())
 }
 
+fn enqueue_config_command(
+    tx: &mpsc::Sender<ConfigCommand>,
+    command: ConfigCommand,
+) -> Result<(), ReceiverError> {
+    match tx.try_send(command) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(_)) => Err(ReceiverError::UpstreamError(
+            "forwarder remote config channel busy".to_owned(),
+        )),
+        Err(TrySendError::Closed(_)) => Err(forwarder_remote_config_unavailable()),
+    }
+}
+
 /// Await a remote-config `oneshot` response with a bounded timeout. A dropped
 /// sender (control session torn down before replying) and an elapsed timeout
 /// both surface as errors so the command never hangs.
@@ -1663,9 +1720,7 @@ pub async fn get_forwarder_config(
         .forwarder_config_tx(&endpoint_id)
         .ok_or_else(forwarder_remote_config_unavailable)?;
     let (resp_tx, resp_rx) = oneshot::channel();
-    tx.send(ConfigCommand::Get { resp: resp_tx })
-        .await
-        .map_err(|_| forwarder_remote_config_unavailable())?;
+    enqueue_config_command(&tx, ConfigCommand::Get { resp: resp_tx })?;
     let response = await_config_response(resp_rx).await?;
     Ok(ForwarderConfigResponse {
         config_json: response.config_json,
@@ -1684,12 +1739,13 @@ pub async fn set_forwarder_config(
         .forwarder_config_tx(&endpoint_id)
         .ok_or_else(forwarder_remote_config_unavailable)?;
     let (resp_tx, resp_rx) = oneshot::channel();
-    tx.send(ConfigCommand::Set {
-        config_json,
-        resp: resp_tx,
-    })
-    .await
-    .map_err(|_| forwarder_remote_config_unavailable())?;
+    enqueue_config_command(
+        &tx,
+        ConfigCommand::Set {
+            config_json,
+            resp: resp_tx,
+        },
+    )?;
     let response = await_config_response(resp_rx).await?;
     Ok(ForwarderConfigSetResult {
         ok: response.ok,
@@ -1707,9 +1763,7 @@ pub async fn restart_forwarder(
         .forwarder_config_tx(&endpoint_id)
         .ok_or_else(forwarder_remote_config_unavailable)?;
     let (resp_tx, resp_rx) = oneshot::channel();
-    tx.send(ConfigCommand::Restart { resp: resp_tx })
-        .await
-        .map_err(|_| forwarder_remote_config_unavailable())?;
+    enqueue_config_command(&tx, ConfigCommand::Restart { resp: resp_tx })?;
     let response = await_config_response(resp_rx).await?;
     Ok(ForwarderRestartResult {
         accepted: response.accepted,
@@ -2635,6 +2689,57 @@ mod tests {
             connections_changed_count <= 1,
             "unchanged connections view should emit at most one ConnectionsChanged event, got {connections_changed_count}"
         );
+    }
+
+    #[tokio::test]
+    async fn recompute_emits_connections_changed_when_remote_config_availability_changes() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        state
+            .mark_forwarder_runtime("endpoint-a", |status| status.control_up = true)
+            .await;
+        let mut ui_rx = state.ui_tx.subscribe();
+        let _ = count_connections_changed_events(&mut ui_rx).await;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let _guard = state.register_forwarder_config_tx("endpoint-a", tx);
+        state.recompute_aggregate_connection_state().await;
+
+        let connections_changed_count = count_connections_changed_events(&mut ui_rx).await;
+        assert_eq!(
+            connections_changed_count, 1,
+            "remote_config_available changing should emit ConnectionsChanged"
+        );
+        let response = get_connections(&state).await;
+        let forwarder = response
+            .forwarders
+            .iter()
+            .find(|forwarder| forwarder.endpoint_id == "endpoint-a")
+            .expect("forwarder should be present");
+        assert!(forwarder.remote_config_available);
+    }
+
+    #[tokio::test]
+    async fn config_command_fast_fails_when_session_queue_is_full() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let (held_resp_tx, _held_resp_rx) = tokio::sync::oneshot::channel();
+        tx.try_send(ConfigCommand::Get { resp: held_resp_tx })
+            .expect("test setup should fill the one-slot queue");
+        let _guard = state.register_forwarder_config_tx("endpoint-a", tx);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            get_forwarder_config(&state, "endpoint-a".to_owned()),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "full config command queue should fail fast, not wait for enqueue capacity"
+        );
+        assert!(result.unwrap().is_err());
     }
 
     #[tokio::test]

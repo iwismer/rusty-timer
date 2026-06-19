@@ -724,6 +724,7 @@ mod tests {
             control_ping_interval: Duration::from_millis(50),
             config_get_json: String::new(),
             config_restart_needed: false,
+            respond_to_config_requests: true,
         }
     }
 

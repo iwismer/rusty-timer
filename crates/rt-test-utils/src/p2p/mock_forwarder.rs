@@ -70,6 +70,11 @@ pub struct ForwarderScript {
     /// `restart_needed` flag echoed in both `ConfigGetResponse` and
     /// `ConfigSetResponse`. Defaults to `false`.
     pub config_restart_needed: bool,
+    /// When false, inbound remote-config requests are recorded where relevant
+    /// but deliberately left unanswered. This lets receiver tests exercise
+    /// timeout/prune behavior against a forwarder that heartbeats but never
+    /// answers config commands.
+    pub respond_to_config_requests: bool,
 }
 
 /// A scripted forwarder peer bound to a loopback iroh endpoint.
@@ -273,6 +278,9 @@ async fn serve_control_loop(
                     pongs.lock().expect("pongs mutex poisoned").push(pong);
                 }
                 Some(control_c2f::Msg::ConfigGetRequest(request)) => {
+                    if !script.respond_to_config_requests {
+                        continue;
+                    }
                     let response = ControlF2C {
                         msg: Some(control_f2c::Msg::ConfigGetResponse(ConfigGetResponse {
                             request_id: request.request_id,
@@ -289,6 +297,9 @@ async fn serve_control_loop(
                         .lock()
                         .expect("config_sets mutex poisoned")
                         .push(request.clone());
+                    if !script.respond_to_config_requests {
+                        continue;
+                    }
                     let response = ControlF2C {
                         msg: Some(control_f2c::Msg::ConfigSetResponse(ConfigSetResponse {
                             request_id: request.request_id,
@@ -302,6 +313,9 @@ async fn serve_control_loop(
                     }
                 }
                 Some(control_c2f::Msg::RestartRequest(request)) => {
+                    if !script.respond_to_config_requests {
+                        continue;
+                    }
                     let response = ControlF2C {
                         msg: Some(control_f2c::Msg::RestartResponse(RestartResponse {
                             request_id: request.request_id,

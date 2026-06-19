@@ -12,9 +12,10 @@ use rt_p2p_protocol::{
 };
 use tokio::sync::{Mutex, Notify, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
+use tokio::time::{Instant, MissedTickBehavior};
 use tracing::warn;
 
-use crate::control_api::ConfigCommand;
+use crate::control_api::{ConfigCommand, FORWARDER_CONFIG_TIMEOUT};
 use crate::db::Db;
 use crate::p2p_session::{
     BackoffConfig, P2pSessionError, SessionStatusReporter, connect_and_hello, read_frame,
@@ -193,17 +194,28 @@ async fn run_connected_forwarder(
     // lookup plus a non-blocking send, so neither path can stall the heartbeat.
     let remote_config = has_capability(&hello_ok.capabilities, CAP_REMOTE_CONFIG);
     let (config_tx, mut config_rx) = mpsc::channel::<ConfigCommand>(32);
-    if remote_config {
-        reporter
+    let _config_registration_guard = if remote_config {
+        let guard = reporter
             .app_state()
             .register_forwarder_config_tx(endpoint_id, config_tx.clone());
-    }
+        reporter
+            .app_state()
+            .recompute_aggregate_connection_state()
+            .await;
+        Some(guard)
+    } else {
+        None
+    };
     // Hold the original sender for the session's lifetime so `config_rx.recv()`
     // never returns `None` while connected (only the registered clone is handed
     // to commands; an incapable session simply never receives any).
     let _config_tx_keepalive = config_tx;
-    let mut pending_config: HashMap<String, PendingConfigResponder> = HashMap::new();
+    let mut pending_config: HashMap<String, PendingConfigRequest> = HashMap::new();
     let mut next_config_request_id: u64 = 0;
+    let prune_interval = FORWARDER_CONFIG_TIMEOUT.min(Duration::from_secs(1));
+    let mut pending_config_prune_tick =
+        tokio::time::interval_at(Instant::now() + prune_interval, prune_interval);
+    pending_config_prune_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     let desired = desired_rx.borrow().clone();
     sync_data_tasks(
@@ -310,6 +322,9 @@ async fn run_connected_forwarder(
                     break;
                 }
             }
+            _ = pending_config_prune_tick.tick() => {
+                prune_expired_pending_config(&mut pending_config, Instant::now());
+            }
         }
     }
 
@@ -319,13 +334,10 @@ async fn run_connected_forwarder(
     // (and does its own synchronous recompute), with no task left racing it.
     reader_task.abort();
     recompute_task.abort();
-    // Deregister the remote-config channel so commands to this now-down session
-    // fail fast. Dropping `pending_config` drops every pending `oneshot` sender,
-    // so any in-flight command awaiting a response is woken with an error rather
-    // than hanging until its timeout. (No-op when remote config was unavailable.)
-    reporter
-        .app_state()
-        .deregister_forwarder_config_tx(endpoint_id);
+    // Dropping `pending_config` drops every pending `oneshot` sender, so any
+    // in-flight command awaiting a response is woken with an error rather than
+    // hanging until its timeout. The remote-config channel is deregistered by
+    // `_config_registration_guard` on normal exit, panic, or task abort.
     drop(pending_config);
     reporter
         .app_state()
@@ -370,6 +382,15 @@ enum PendingConfigResponder {
     Restart(oneshot::Sender<RestartResponse>),
 }
 
+struct PendingConfigRequest {
+    deadline: Instant,
+    responder: PendingConfigResponder,
+}
+
+fn prune_expired_pending_config(pending: &mut HashMap<String, PendingConfigRequest>, now: Instant) {
+    pending.retain(|_, request| request.deadline > now);
+}
+
 /// Translate a [`ConfigCommand`] into its wire request, register the pending
 /// responder under a fresh per-connection `request_id`, and write the request
 /// frame. Runs in the main control loop (same serialized send path as `Pong`),
@@ -377,9 +398,10 @@ enum PendingConfigResponder {
 async fn handle_config_command(
     command: ConfigCommand,
     send: &mut SendStream,
-    pending: &mut HashMap<String, PendingConfigResponder>,
+    pending: &mut HashMap<String, PendingConfigRequest>,
     next_request_id: &mut u64,
 ) -> Result<(), P2pSessionError> {
+    prune_expired_pending_config(pending, Instant::now());
     *next_request_id += 1;
     let request_id = next_request_id.to_string();
     let (frame, responder) = match command {
@@ -409,8 +431,18 @@ async fn handle_config_command(
             PendingConfigResponder::Restart(resp),
         ),
     };
-    pending.insert(request_id, responder);
-    write_frame(send, &frame).await
+    pending.insert(
+        request_id.clone(),
+        PendingConfigRequest {
+            deadline: Instant::now() + FORWARDER_CONFIG_TIMEOUT,
+            responder,
+        },
+    );
+    let result = write_frame(send, &frame).await;
+    if result.is_err() {
+        pending.remove(&request_id);
+    }
+    result
 }
 
 async fn handle_control_frame(
@@ -419,7 +451,7 @@ async fn handle_control_frame(
     send: &mut SendStream,
     reporter: &Arc<SessionStatusReporter>,
     recompute_notify: &Notify,
-    pending_config: &mut HashMap<String, PendingConfigResponder>,
+    pending_config: &mut HashMap<String, PendingConfigRequest>,
 ) -> Result<(), P2pSessionError> {
     match frame.msg {
         Some(control_f2c::Msg::ReaderStatus(status)) => {
@@ -457,22 +489,22 @@ async fn handle_control_frame(
         // reader-fed frame path (and thus never the heartbeat). An unknown
         // request_id (timed-out/cancelled command) is dropped.
         Some(control_f2c::Msg::ConfigGetResponse(response)) => {
-            if let Some(PendingConfigResponder::Get(tx)) =
-                pending_config.remove(&response.request_id)
+            if let Some(request) = pending_config.remove(&response.request_id)
+                && let PendingConfigResponder::Get(tx) = request.responder
             {
                 let _ = tx.send(response);
             }
         }
         Some(control_f2c::Msg::ConfigSetResponse(response)) => {
-            if let Some(PendingConfigResponder::Set(tx)) =
-                pending_config.remove(&response.request_id)
+            if let Some(request) = pending_config.remove(&response.request_id)
+                && let PendingConfigResponder::Set(tx) = request.responder
             {
                 let _ = tx.send(response);
             }
         }
         Some(control_f2c::Msg::RestartResponse(response)) => {
-            if let Some(PendingConfigResponder::Restart(tx)) =
-                pending_config.remove(&response.request_id)
+            if let Some(request) = pending_config.remove(&response.request_id)
+                && let PendingConfigResponder::Restart(tx) = request.responder
             {
                 let _ = tx.send(response);
             }
@@ -575,16 +607,19 @@ mod tests {
     };
     use rt_test_utils::p2p::{ConnectivityFault, ForwarderScript, MockForwarderPeer};
     use rt_test_utils::poll_until;
-    use tokio::sync::{Mutex, broadcast};
+    use tokio::sync::{Mutex, broadcast, oneshot};
 
     use crate::control_api::{
-        AppState, ForwarderConnState, get_connections, get_forwarder_config, restart_forwarder,
-        set_forwarder_config,
+        AppState, ConfigCommand, ForwarderConnState, get_connections, get_forwarder_config,
+        restart_forwarder, set_forwarder_config,
     };
     use crate::db::Db;
     use crate::p2p_session::{BackoffConfig, SessionStatusReporter};
 
-    use super::{ForwarderConnection, ForwarderDataStream};
+    use super::{
+        FORWARDER_CONFIG_TIMEOUT, ForwarderConnection, ForwarderDataStream, PendingConfigRequest,
+        PendingConfigResponder, prune_expired_pending_config,
+    };
 
     const STREAM_ID: &str = "127.0.0.1:10000";
 
@@ -621,6 +656,7 @@ mod tests {
             control_ping_interval: Duration::from_millis(50),
             config_get_json: String::new(),
             config_restart_needed: false,
+            respond_to_config_requests: true,
         }
     }
 
@@ -1000,6 +1036,12 @@ mod tests {
         script
     }
 
+    fn remote_config_no_response_script() -> ForwarderScript {
+        let mut script = remote_config_script();
+        script.respond_to_config_requests = false;
+        script
+    }
+
     /// Over a REAL control session that negotiated `CAP_REMOTE_CONFIG`, the
     /// receiver must round-trip config get/set and restart, surface
     /// `remote_config_available = true`, and keep the heartbeat alive
@@ -1017,6 +1059,7 @@ mod tests {
                 AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
             let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
 
+            let mut ui_rx = state.ui_tx.subscribe();
             let connection = ForwarderConnection::start(
                 endpoint_id.clone(),
                 Arc::clone(&endpoint),
@@ -1031,7 +1074,31 @@ mod tests {
             );
 
             // The remote-config channel is registered only once the session is
-            // up and `CAP_REMOTE_CONFIG` was negotiated.
+            // up and `CAP_REMOTE_CONFIG` was negotiated, and the registration
+            // emits a follow-up ConnectionsChanged event so UI refetches can
+            // observe `remote_config_available = true`.
+            let mut saw_remote_config_event = false;
+            for _ in 0..8 {
+                let event = tokio::time::timeout(Duration::from_secs(2), ui_rx.recv())
+                    .await
+                    .expect("remote-config connection should emit connection events")
+                    .expect("UI event channel should stay open");
+                if matches!(event, crate::ui_events::ReceiverUiEvent::ConnectionsChanged)
+                    && get_connections(&state)
+                        .await
+                        .forwarders
+                        .iter()
+                        .any(|f| f.endpoint_id == endpoint_id && f.remote_config_available)
+                {
+                    saw_remote_config_event = true;
+                    break;
+                }
+            }
+            assert!(
+                saw_remote_config_event,
+                "remote_config_available=true should be visible after a ConnectionsChanged event"
+            );
+
             poll_until(
                 || {
                     let state = Arc::clone(&state);
@@ -1098,6 +1165,304 @@ mod tests {
         })
         .await
         .expect("remote config get/set/restart test timed out");
+    }
+
+    #[test]
+    fn prune_expired_pending_config_drops_only_expired_responders() {
+        let now = tokio::time::Instant::now();
+        let (expired_tx, mut expired_rx) = oneshot::channel();
+        let (fresh_tx, mut fresh_rx) = oneshot::channel();
+        let mut pending = std::collections::HashMap::from([
+            (
+                "expired".to_owned(),
+                PendingConfigRequest {
+                    deadline: now - Duration::from_millis(1),
+                    responder: PendingConfigResponder::Get(expired_tx),
+                },
+            ),
+            (
+                "fresh".to_owned(),
+                PendingConfigRequest {
+                    deadline: now + Duration::from_millis(1),
+                    responder: PendingConfigResponder::Get(fresh_tx),
+                },
+            ),
+        ]);
+
+        prune_expired_pending_config(&mut pending, now);
+
+        assert!(!pending.contains_key("expired"));
+        assert!(pending.contains_key("fresh"));
+        assert!(matches!(
+            expired_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+        assert!(matches!(
+            fresh_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn unanswered_raw_config_requests_are_pruned_without_breaking_heartbeat() {
+        tokio::time::timeout(Duration::from_secs(25), async {
+            let forwarder = MockForwarderPeer::start([50; 32], remote_config_no_response_script())
+                .await
+                .unwrap();
+            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint = Arc::new(test_endpoint(51).await);
+            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+            let (state, _shutdown_rx) =
+                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
+
+            let connection = ForwarderConnection::start(
+                endpoint_id.clone(),
+                Arc::clone(&endpoint),
+                forwarder.node_addr(),
+                Arc::clone(&db),
+                remote_config_hello(),
+                Arc::clone(&reporter),
+                BackoffConfig {
+                    initial: Duration::from_millis(50),
+                    max: Duration::from_millis(50),
+                },
+            );
+
+            poll_until(
+                || {
+                    let state = Arc::clone(&state);
+                    let endpoint_id = endpoint_id.clone();
+                    async move { state.forwarder_config_tx(&endpoint_id).is_some() }
+                },
+                Duration::from_secs(5),
+            )
+            .await;
+
+            let tx = state
+                .forwarder_config_tx(&endpoint_id)
+                .expect("remote-config tx should be registered");
+            let mut receivers = Vec::new();
+            for _ in 0..3 {
+                let (resp_tx, resp_rx) = oneshot::channel();
+                tx.try_send(ConfigCommand::Get { resp: resp_tx })
+                    .expect("test request should enqueue");
+                receivers.push(resp_rx);
+            }
+
+            for rx in receivers {
+                tokio::time::timeout(FORWARDER_CONFIG_TIMEOUT + Duration::from_secs(2), rx)
+                    .await
+                    .expect("expired pending config request should be pruned")
+                    .expect_err("pruning should drop the pending responder");
+            }
+
+            poll_until(
+                || async { forwarder.pongs().len() >= 4 },
+                Duration::from_secs(10),
+            )
+            .await;
+
+            connection.stop().await;
+            forwarder.shutdown().await;
+            endpoint.close().await;
+        })
+        .await
+        .expect("unanswered config request prune test timed out");
+    }
+
+    #[tokio::test]
+    async fn config_registration_deregisters_on_control_disconnect_and_task_abort() {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let forwarder = MockForwarderPeer::start([52; 32], remote_config_script())
+                .await
+                .unwrap();
+            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint = Arc::new(test_endpoint(53).await);
+            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+            let (state, _shutdown_rx) =
+                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
+
+            let connection = ForwarderConnection::start(
+                endpoint_id.clone(),
+                Arc::clone(&endpoint),
+                forwarder.node_addr(),
+                Arc::clone(&db),
+                remote_config_hello(),
+                Arc::clone(&reporter),
+                BackoffConfig {
+                    initial: Duration::from_millis(50),
+                    max: Duration::from_millis(50),
+                },
+            );
+
+            poll_until(
+                || {
+                    let state = Arc::clone(&state);
+                    let endpoint_id = endpoint_id.clone();
+                    async move { state.forwarder_remote_config_available(&endpoint_id) }
+                },
+                Duration::from_secs(5),
+            )
+            .await;
+
+            forwarder.shutdown().await;
+            poll_until(
+                || {
+                    let state = Arc::clone(&state);
+                    let endpoint_id = endpoint_id.clone();
+                    async move { !state.forwarder_remote_config_available(&endpoint_id) }
+                },
+                Duration::from_secs(5),
+            )
+            .await;
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                get_forwarder_config(&state, endpoint_id.clone()),
+            )
+            .await
+            .expect("command after disconnect should fail fast")
+            .expect_err("command after disconnect should error");
+
+            let ForwarderConnection { task, .. } = connection;
+            task.abort();
+            let _ = task.await;
+            endpoint.close().await;
+        })
+        .await
+        .expect("config deregister on disconnect test timed out");
+
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let forwarder = MockForwarderPeer::start([54; 32], remote_config_script())
+                .await
+                .unwrap();
+            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint = Arc::new(test_endpoint(55).await);
+            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+            let (state, _shutdown_rx) =
+                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
+
+            let connection = ForwarderConnection::start(
+                endpoint_id.clone(),
+                Arc::clone(&endpoint),
+                forwarder.node_addr(),
+                Arc::clone(&db),
+                remote_config_hello(),
+                Arc::clone(&reporter),
+                BackoffConfig {
+                    initial: Duration::from_millis(50),
+                    max: Duration::from_millis(50),
+                },
+            );
+
+            poll_until(
+                || {
+                    let state = Arc::clone(&state);
+                    let endpoint_id = endpoint_id.clone();
+                    async move { state.forwarder_remote_config_available(&endpoint_id) }
+                },
+                Duration::from_secs(5),
+            )
+            .await;
+
+            let ForwarderConnection { task, .. } = connection;
+            task.abort();
+            let _ = task.await;
+            poll_until(
+                || {
+                    let state = Arc::clone(&state);
+                    let endpoint_id = endpoint_id.clone();
+                    async move { !state.forwarder_remote_config_available(&endpoint_id) }
+                },
+                Duration::from_secs(5),
+            )
+            .await;
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                get_forwarder_config(&state, endpoint_id.clone()),
+            )
+            .await
+            .expect("command after task abort should fail fast")
+            .expect_err("command after task abort should error");
+
+            forwarder.shutdown().await;
+            endpoint.close().await;
+        })
+        .await
+        .expect("config deregister on task abort test timed out");
+    }
+
+    #[tokio::test]
+    async fn config_registration_is_restored_after_reconnect() {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let mut script = remote_config_script();
+            script.close_connection_after_data = true;
+            let forwarder = MockForwarderPeer::start([56; 32], script).await.unwrap();
+            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint = Arc::new(test_endpoint(57).await);
+            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+            let (state, _shutdown_rx) =
+                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
+
+            let connection = ForwarderConnection::start(
+                endpoint_id.clone(),
+                Arc::clone(&endpoint),
+                forwarder.node_addr(),
+                Arc::clone(&db),
+                remote_config_hello(),
+                Arc::clone(&reporter),
+                BackoffConfig {
+                    initial: Duration::from_millis(50),
+                    max: Duration::from_millis(50),
+                },
+            );
+
+            poll_until(
+                || {
+                    let state = Arc::clone(&state);
+                    let endpoint_id = endpoint_id.clone();
+                    async move { state.forwarder_remote_config_available(&endpoint_id) }
+                },
+                Duration::from_secs(5),
+            )
+            .await;
+
+            let (hint_tx, _hint_rx) = broadcast::channel(16);
+            connection.set_desired_streams(vec![ForwarderDataStream {
+                stream_id: STREAM_ID.to_owned(),
+                mode: SubscribeMode::Replay,
+                durable_hint_tx: Some(hint_tx),
+            }]);
+            poll_until(
+                || async { forwarder.connection_count() >= 2 },
+                Duration::from_secs(10),
+            )
+            .await;
+            connection.set_desired_streams(Vec::new());
+
+            poll_until(
+                || {
+                    let state = Arc::clone(&state);
+                    let endpoint_id = endpoint_id.clone();
+                    async move { state.forwarder_remote_config_available(&endpoint_id) }
+                },
+                Duration::from_secs(5),
+            )
+            .await;
+            let config = get_forwarder_config(&state, endpoint_id.clone())
+                .await
+                .expect("remote config should work after reconnect");
+            assert_eq!(config.config_json, "{\"sample\":true}");
+
+            connection.stop().await;
+            forwarder.shutdown().await;
+            endpoint.close().await;
+        })
+        .await
+        .expect("config registration reconnect test timed out");
     }
 
     /// A forwarder that does NOT advertise `CAP_REMOTE_CONFIG` must leave

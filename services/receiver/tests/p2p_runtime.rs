@@ -96,6 +96,7 @@ fn script_two(raw: &[u8]) -> ForwarderScript {
         control_ping_interval: std::time::Duration::from_millis(50),
         config_get_json: String::new(),
         config_restart_needed: false,
+        respond_to_config_requests: true,
     }
 }
 
@@ -631,6 +632,7 @@ fn script_stream_mismatch() -> ForwarderScript {
         control_ping_interval: std::time::Duration::from_millis(50),
         config_get_json: String::new(),
         config_restart_needed: false,
+        respond_to_config_requests: true,
     }
 }
 
