@@ -310,6 +310,17 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 CREATE TABLE IF NOT EXISTS announcer_publish_streams (
     stream_id TEXT PRIMARY KEY
 );
+CREATE TABLE IF NOT EXISTS participants (
+    bib         INTEGER PRIMARY KEY,
+    last        TEXT NOT NULL,
+    first       TEXT NOT NULL,
+    affiliation TEXT NOT NULL,
+    gender      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bib_chips (
+    chip_id TEXT PRIMARY KEY,
+    bib     INTEGER NOT NULL
+);
 """
 
 
@@ -338,6 +349,19 @@ def preseed_receiver_db(db_path: Path, forwarder_node_id: str, stream_id: str,
             "INSERT INTO announcer_publish_streams (stream_id) VALUES (?)",
             (stream_id,),
         )
+        # Seed participant + chip data so announcer rows carry bib/name. Each
+        # emulated chip tag (EXPECTED_TAGS, bibs 1..NUM_READS) maps to a named
+        # participant.
+        for i, tag in enumerate(EXPECTED_TAGS, start=1):
+            conn.execute(
+                "INSERT INTO participants (bib, last, first, affiliation, gender) "
+                "VALUES (?,?,?,?,?)",
+                (i, f"Last{i}", f"First{i}", "", "X"),
+            )
+            conn.execute(
+                "INSERT INTO bib_chips (chip_id, bib) VALUES (?,?)",
+                (tag, i),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -1198,10 +1222,21 @@ static_allowed_receivers = ["{receiver_node_id}"]
                   f"generation={status.get('announcer_source_generation')}")
     results.expect_eq(f"server finisher_count == {NUM_READS} (distinct chips)",
                       status.get("finisher_count"), NUM_READS)
-    pushed_chips = {row.get("chip_id") for row in status.get("announcer_rows", [])}
+    announcer_rows = status.get("announcer_rows", [])
+    pushed_chips = {row.get("chip_id") for row in announcer_rows}
     results.check("server announcer rows cover all expected chips",
                   set(EXPECTED_TAGS).issubset(pushed_chips),
                   f"missing={set(EXPECTED_TAGS) - pushed_chips}")
+    # Every announcer row must carry a resolved bib and display name (seeded
+    # participant + chip data resolved locally on the receiver).
+    rows_missing_identity = [
+        row.get("chip_id")
+        for row in announcer_rows
+        if row.get("bib") is None or not row.get("display_name")
+    ]
+    results.check("server announcer rows carry bib + name",
+                  not rows_missing_identity,
+                  f"rows missing bib/name: {rows_missing_identity}")
 
     # DBF stability re-check: a second read must be identical (idempotent rebuild).
     results.expect_eq("DBF record count stable on recheck (no dup rows)",
