@@ -1521,6 +1521,29 @@ pub async fn apply_section_update(
     }
 }
 
+/// Read the config TOML file as a JSON value plus the current `restart_needed`
+/// state, returning a plain error message on failure.
+///
+/// Shared core for both the HTTP `GET /api/v1/config` endpoint and the P2P
+/// remote-config get verb, so the two always agree on the serialized shape.
+async fn read_config_value(
+    config_state: &ConfigState,
+    subsystem: &Arc<Mutex<SubsystemStatus>>,
+) -> Result<(serde_json::Value, bool), String> {
+    let _lock = config_state.write_lock.lock().await;
+
+    let toml_str =
+        std::fs::read_to_string(&config_state.path).map_err(|e| format!("File read error: {e}"))?;
+
+    let raw: crate::config::RawConfig =
+        toml::from_str(&toml_str).map_err(|e| format!("TOML parse error: {e}"))?;
+
+    let json = serde_json::to_value(&raw).map_err(|e| format!("JSON serialize error: {e}"))?;
+
+    let restart_needed = subsystem.lock().await.restart_needed();
+    Ok((json, restart_needed))
+}
+
 /// Read the config TOML file as JSON.
 ///
 /// Returns `(config_json, restart_needed)` on success.
@@ -1528,34 +1551,62 @@ pub async fn read_config_json(
     config_state: &ConfigState,
     subsystem: &Arc<Mutex<SubsystemStatus>>,
 ) -> Result<(serde_json::Value, bool), (u16, String)> {
+    read_config_value(config_state, subsystem)
+        .await
+        .map_err(|e| {
+            (
+                500u16,
+                serde_json::json!({"ok": false, "error": e}).to_string(),
+            )
+        })
+}
+
+/// Serialize the current config to a JSON string (identical to the body
+/// `GET /api/v1/config` returns) plus the current `restart_needed` state.
+///
+/// Used by the P2P remote-config get verb so the receiver UI round-trips the
+/// same document whether it reads config over HTTP or P2P.
+pub async fn config_json_string(
+    config_state: &ConfigState,
+    subsystem: &Arc<Mutex<SubsystemStatus>>,
+) -> Result<(String, bool), String> {
+    let (value, restart_needed) = read_config_value(config_state, subsystem).await?;
+    let json = serde_json::to_string(&value).map_err(|e| format!("JSON serialize error: {e}"))?;
+    Ok((json, restart_needed))
+}
+
+/// Persist a full config document (the same JSON shape `config_json_string`
+/// returns) to the TOML config file, then mark a restart as needed.
+///
+/// The document is parsed into the same [`crate::config::RawConfig`] the get
+/// path serializes, re-serialized to TOML, and validated by running the
+/// canonical loader before anything is written — so a document that would fail
+/// to load on restart is rejected without corrupting the on-disk file. Reuses
+/// the same atomic writer and `restart_needed` signal as the per-section HTTP
+/// writers. Returns a plain error message on failure.
+pub async fn write_config_json(
+    config_json: &str,
+    config_state: &ConfigState,
+    subsystem: &Arc<Mutex<SubsystemStatus>>,
+    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
+) -> Result<(), String> {
+    let raw: crate::config::RawConfig =
+        serde_json::from_str(config_json).map_err(|e| format!("invalid config JSON: {e}"))?;
+
     let _lock = config_state.write_lock.lock().await;
 
-    let toml_str = std::fs::read_to_string(&config_state.path).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
-                .to_string(),
-        )
-    })?;
+    let new_toml =
+        toml::to_string_pretty(&raw).map_err(|e| format!("TOML serialize error: {e}"))?;
 
-    let raw: crate::config::RawConfig = toml::from_str(&toml_str).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("TOML parse error: {}", e)})
-                .to_string(),
-        )
-    })?;
+    // Validate via the canonical loader so we never persist a config that would
+    // fail to load on the next restart.
+    crate::config::load_config_from_str(&new_toml, &config_state.path)
+        .map_err(|e| format!("config validation failed: {e}"))?;
 
-    let json = serde_json::to_value(&raw).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("JSON serialize error: {}", e)})
-                .to_string(),
-        )
-    })?;
+    write_atomic(&config_state.path, &new_toml).map_err(|e| format!("File write error: {e}"))?;
 
-    let restart_needed = subsystem.lock().await.restart_needed();
-    Ok((json, restart_needed))
+    mark_restart_needed_and_emit(subsystem, ui_tx).await;
+    Ok(())
 }
 
 fn text_response(status: StatusCode, body: impl Into<String>) -> Response {

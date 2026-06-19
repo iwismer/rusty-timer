@@ -24,8 +24,8 @@ use crate::storage::journal::Journal;
 
 use super::allowlist::AllowList;
 use super::control::{
-    CatalogProvider, ControlEvent, ControlEventSender, HeartbeatConfig, control_event_channel,
-    negotiate_control_stream, run_control_stream_loop,
+    CatalogProvider, ControlEvent, ControlEventSender, HeartbeatConfig, NoopRemoteConfigHandler,
+    RemoteConfigHandler, control_event_channel, negotiate_control_stream, run_control_stream_loop,
 };
 use super::data::{DataConfig, serve_data_streams};
 
@@ -50,6 +50,7 @@ struct ConnectionConfig {
     status_feed: Option<ForwarderStatusFeed>,
     handshake_timeout: Duration,
     heartbeat: HeartbeatConfig,
+    remote_config: Arc<dyn RemoteConfigHandler>,
 }
 
 /// The forwarder's P2P endpoint and accept loop.
@@ -63,6 +64,7 @@ pub struct P2pEndpoint {
     status_feed: Option<ForwarderStatusFeed>,
     handshake_timeout: Duration,
     heartbeat: HeartbeatConfig,
+    remote_config: Arc<dyn RemoteConfigHandler>,
     #[cfg(test)]
     _test_tempdir: Option<Arc<tempfile::TempDir>>,
 }
@@ -77,6 +79,7 @@ impl std::fmt::Debug for P2pEndpoint {
             .field("status_feed", &self.status_feed.is_some())
             .field("handshake_timeout", &self.handshake_timeout)
             .field("heartbeat", &self.heartbeat)
+            .field("remote_config", &self.remote_config)
             .finish_non_exhaustive()
     }
 }
@@ -121,6 +124,7 @@ impl P2pEndpoint {
             status_feed: None,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             heartbeat: HeartbeatConfig::default(),
+            remote_config: Arc::new(NoopRemoteConfigHandler),
             #[cfg(test)]
             _test_tempdir: None,
         })
@@ -130,6 +134,14 @@ impl P2pEndpoint {
     #[must_use]
     pub fn with_status_feed(mut self, status_feed: ForwarderStatusFeed) -> Self {
         self.status_feed = Some(status_feed);
+        self
+    }
+
+    /// Installs the remote-config handler that serves config get/set/restart
+    /// verbs on the control plane and drives `CAP_REMOTE_CONFIG` advertisement.
+    #[must_use]
+    pub fn with_remote_config(mut self, remote_config: Arc<dyn RemoteConfigHandler>) -> Self {
+        self.remote_config = remote_config;
         self
     }
 
@@ -166,6 +178,7 @@ impl P2pEndpoint {
                         status_feed: self.status_feed.clone(),
                         handshake_timeout: self.handshake_timeout,
                         heartbeat: self.heartbeat,
+                        remote_config: Arc::clone(&self.remote_config),
                     };
                     tokio::spawn(async move {
                         handle_connection(connection, allow_list, catalog, journal, config).await;
@@ -236,6 +249,7 @@ async fn handle_connection(
         catalog.as_ref(),
         config.handshake_timeout,
         config.heartbeat,
+        config.remote_config.as_ref(),
     )
     .await
     {
@@ -279,6 +293,7 @@ async fn handle_connection(
         control_recv,
         config.heartbeat,
         outbound_events,
+        config.remote_config,
     )
     .await;
     if let Some(task) = status_bridge_task {
@@ -454,6 +469,7 @@ mod tests {
                 status_feed: None,
                 handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
                 heartbeat: HeartbeatConfig::default(),
+                remote_config: Arc::new(NoopRemoteConfigHandler),
                 _test_tempdir: Some(tempdir),
             })
         }
@@ -635,6 +651,101 @@ mod tests {
         .await??;
         assert_eq!(hello_ok.protocol_minor, PROTOCOL_MINOR);
 
+        accept.abort();
+        receiver.close().await;
+        forwarder.endpoint().close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remote_config_get_roundtrips_over_p2p() -> TestResult {
+        use rt_p2p_protocol::{CAP_REMOTE_CONFIG, ConfigGetRequest, Pong};
+
+        let receiver = EndpointBuilder::test([80; 32]).bind().await?;
+        let allow_list = AllowList::new([receiver.node_id()]);
+
+        // Seed a minimal valid config (with a real token file) so the handler
+        // can serialize it.
+        let dir = tempfile::tempdir()?;
+        let token_path = dir.path().join("token");
+        std::fs::write(&token_path, "tok\n")?;
+        let config_path = dir.path().join("forwarder.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "schema_version = 1\n\n[auth]\ntoken_file = '{}'\n\n[[readers]]\ntarget = \"192.168.1.100\"\n\n[control]\nallow_remote_config = true\n",
+                token_path.display()
+            ),
+        )?;
+
+        let (ui_tx, _ui_rx) = broadcast::channel(16);
+        let handler = Arc::new(crate::p2p::ForwarderRemoteConfigHandler::new(
+            true,
+            Arc::new(crate::status_http::ConfigState::new(config_path)),
+            Arc::new(Mutex::new(SubsystemStatus::ready())),
+            ui_tx,
+            Arc::new(tokio::sync::Notify::new()),
+        ));
+
+        let forwarder = P2pEndpoint::bind_test([81; 32], allow_list)
+            .await?
+            .with_remote_config(handler);
+        let forwarder_addr = forwarder.node_addr().await;
+
+        let accept = {
+            let forwarder = forwarder.clone();
+            tokio::spawn(async move { forwarder.run().await })
+        };
+
+        let (connection, hello_ok, mut send, mut recv) = tokio::time::timeout(
+            Duration::from_secs(5),
+            dial_hello_connection_with_capabilities(
+                &receiver,
+                forwarder_addr,
+                vec![CAP_CONTROL_EVENTS.to_owned(), CAP_REMOTE_CONFIG.to_owned()],
+            ),
+        )
+        .await??;
+        assert!(
+            has_capability(&hello_ok.capabilities, CAP_REMOTE_CONFIG),
+            "forwarder must advertise remote-config when enabled"
+        );
+
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::ConfigGetRequest(ConfigGetRequest {
+                    request_id: "e2e".to_owned(),
+                })),
+            },
+        )
+        .await?;
+
+        // Answer any heartbeat pings while waiting for the config response.
+        let response = loop {
+            let frame =
+                tokio::time::timeout(Duration::from_secs(5), read_frame::<ControlF2C>(&mut recv))
+                    .await??;
+            match frame.msg {
+                Some(control_f2c::Msg::ConfigGetResponse(response)) => break response,
+                Some(control_f2c::Msg::Ping(ping)) => {
+                    write_frame(
+                        &mut send,
+                        &ControlC2F {
+                            msg: Some(control_c2f::Msg::Pong(Pong { nonce: ping.nonce })),
+                        },
+                    )
+                    .await?;
+                }
+                other => return Err(format!("unexpected control frame: {other:?}").into()),
+            }
+        };
+
+        assert_eq!(response.request_id, "e2e");
+        let value: serde_json::Value = serde_json::from_str(&response.config_json)?;
+        assert_eq!(value["schema_version"], serde_json::json!(1));
+
+        connection.close(0u32.into(), b"done");
         accept.abort();
         receiver.close().await;
         forwarder.endpoint().close().await;
