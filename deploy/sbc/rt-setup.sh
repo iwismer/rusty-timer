@@ -59,6 +59,30 @@ allow_power_actions_toml_value() {
   fi
 }
 
+# Mirrors allow_power_actions_toml_value but defaults to TRUE (the forwarder's
+# product default for control.allow_remote_config). Unlike power actions, a
+# malformed override falls back to the default (true) rather than failing safe
+# to false: remote config is a fleet-management capability, so an operator
+# typo should not silently strip remote manageability from a field device.
+# Disabling it therefore requires an explicit, recognized falsey value.
+allow_remote_config_toml_value() {
+  local raw="${RT_SETUP_ALLOW_REMOTE_CONFIG:-}"
+  if [[ -z "${raw}" ]]; then
+    printf 'true\n'
+    return 0
+  fi
+  local lower
+  lower="$(printf '%s' "${raw}" | tr '[:upper:]' '[:lower:]')"
+  case "${lower}" in
+    0|false|no|n|off)
+      printf 'false\n'
+      ;;
+    *)
+      printf 'true\n'
+      ;;
+  esac
+}
+
 is_noninteractive_mode() {
   [[ "$(bool_env_is_true "${RT_SETUP_NONINTERACTIVE:-0}")" == "1" ]]
 }
@@ -717,6 +741,8 @@ configure() {
   escaped_forwarder_display_name="$(toml_escape_string "${forwarder_display_name}")"
   local control_allow_power_actions
   control_allow_power_actions="$(allow_power_actions_toml_value)"
+  local control_allow_remote_config
+  control_allow_remote_config="$(allow_remote_config_toml_value)"
 
   # Generate config file
   cat > "${CONFIG_DIR}/forwarder.toml" <<EOF
@@ -741,6 +767,7 @@ bind = "${STATUS_BIND}"
 
 [control]
 allow_power_actions = ${control_allow_power_actions}
+allow_remote_config = ${control_allow_remote_config}
 
 [update]
 mode = "check-only"

@@ -112,6 +112,24 @@ assert_eq "0" "$(expected_allow_power_actions_for_install "/tmp/does-not-exist.t
 
 unset RT_SETUP_ALLOW_POWER_ACTIONS || true
 
+# --- allow_remote_config env helper ---
+unset RT_SETUP_ALLOW_REMOTE_CONFIG || true
+assert_eq "true" "$(allow_remote_config_toml_value)" "allow_remote_config_toml_value should default to true when env unset"
+
+RT_SETUP_ALLOW_REMOTE_CONFIG="false"
+assert_eq "false" "$(allow_remote_config_toml_value)" "allow_remote_config_toml_value should honor false override"
+
+RT_SETUP_ALLOW_REMOTE_CONFIG="0"
+assert_eq "false" "$(allow_remote_config_toml_value)" "allow_remote_config_toml_value should treat 0 as false"
+
+RT_SETUP_ALLOW_REMOTE_CONFIG="off"
+assert_eq "false" "$(allow_remote_config_toml_value)" "allow_remote_config_toml_value should treat off as false"
+
+RT_SETUP_ALLOW_REMOTE_CONFIG="bogus"
+assert_eq "true" "$(allow_remote_config_toml_value)" "allow_remote_config_toml_value should fall back to default true on malformed override"
+
+unset RT_SETUP_ALLOW_REMOTE_CONFIG || true
+
 assert_eq "/etc/polkit-1/rules.d/90-rt-forwarder-power-actions.rules" "${POWER_ACTIONS_POLKIT_RULES_PATH}" "polkit rules path constant should match expected location"
 assert_eq "/etc/sudoers.d/90-rt-forwarder-power-actions" "${POWER_ACTIONS_SUDOERS_PATH}" "legacy sudoers path constant should remain for cleanup"
 
@@ -157,6 +175,7 @@ assert_contains "${polkit_rules}" "action.lookup(\"unit\") == \"poweroff.target\
 
 setup_script="$(cat "${SCRIPT_PATH}")"
 assert_contains "${setup_script}" $'[p2p]\nenabled = true\nsecret_key_path' "generated forwarder config should enable P2P on SBC installs"
+assert_contains "${setup_script}" $'[control]\nallow_power_actions = ${control_allow_power_actions}\nallow_remote_config = ${control_allow_remote_config}' "generated [control] section should provision allow_remote_config alongside allow_power_actions"
 
 tmp_cfg="$(mktemp)"
 cat > "${tmp_cfg}" <<'EOF'
