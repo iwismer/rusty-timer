@@ -16,20 +16,20 @@ export interface StreamEntry {
   stream_id: string;
   // Optional display metadata, populated when the backend has it from the
   // forwarder's P2P catalog.
-  forwarder_id?: string;
-  reader_ip?: string;
+  forwarder_id?: string | null;
+  reader_ip?: string | null;
   subscribed: boolean;
   local_port: number | null;
   event_type?: "start" | "finish";
-  online?: boolean;
-  reader_connected?: boolean;
-  display_alias?: string;
-  stream_epoch?: number;
+  online?: boolean | null;
+  reader_connected?: boolean | null;
+  display_alias?: string | null;
+  stream_epoch?: number | null;
   current_epoch_name?: string | null;
-  reads_total?: number;
-  reads_epoch?: number;
-  cursor_epoch?: number;
-  cursor_seq?: number;
+  reads_total?: number | null;
+  reads_epoch?: number | null;
+  cursor_epoch?: number | null;
+  cursor_seq?: number | null;
 }
 
 export interface StreamCountUpdate {

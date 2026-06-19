@@ -11,7 +11,7 @@
       if (s.online === true && s.reader_connected === true) online++;
       else if (s.online === false) offline++;
       else degraded++;
-      if (s.subscribed && s.reads_total !== undefined) {
+      if (s.subscribed && s.reads_total != null) {
         totalReads += s.reads_total;
       }
     }

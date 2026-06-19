@@ -6,8 +6,8 @@ export interface ParsedPortOverride {
 export interface SubscriptionBuildStream {
   forwarder_endpoint_id: string;
   stream_id: string;
-  forwarder_id?: string;
-  reader_ip?: string;
+  forwarder_id?: string | null;
+  reader_ip?: string | null;
   subscribed: boolean;
   local_port: number | null;
   event_type?: "start" | "finish";
@@ -63,10 +63,10 @@ function legacyMetadata(stream: SubscriptionBuildStream | undefined): {
   reader_ip?: string;
 } {
   return {
-    ...(stream?.forwarder_id !== undefined
+    ...(stream?.forwarder_id != null
       ? { forwarder_id: stream.forwarder_id }
       : {}),
-    ...(stream?.reader_ip !== undefined ? { reader_ip: stream.reader_ip } : {}),
+    ...(stream?.reader_ip != null ? { reader_ip: stream.reader_ip } : {}),
   };
 }
 

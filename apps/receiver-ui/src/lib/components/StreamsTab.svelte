@@ -128,6 +128,21 @@
     return () => clearInterval(interval);
   });
 
+  function streamPrimaryLabel(stream: StreamEntry): string {
+    if (!stream.subscribed) return stream.stream_id;
+    return stream.display_alias ?? stream.forwarder_id ?? stream.stream_id;
+  }
+
+  function streamSecondaryLabel(stream: StreamEntry): string | null {
+    if (stream.subscribed) return null;
+    const alias = stream.display_alias?.trim();
+    return alias ? alias : null;
+  }
+
+  function formatOptional(value: string | null | undefined): string {
+    return value ?? "\u2014";
+  }
+
   function formatLastRead(key: string): string {
     const read = store.lastReads.get(key);
     if (!read) return "\u2014";
@@ -221,8 +236,12 @@
               stream.forwarder_id,
               stream.reader_ip,
             )}
+            {@const primaryLabel = streamPrimaryLabel(stream)}
+            {@const secondaryLabel = streamSecondaryLabel(stream)}
             <tr
-              class="border-b border-border/50 hover:bg-surface-1/50 cursor-pointer"
+              class="border-b border-border/50 hover:bg-surface-1/50 cursor-pointer {stream.subscribed
+                ? ''
+                : 'bg-surface-1/20'}"
               role="button"
               tabindex="0"
               onclick={() => toggleExpand(stream)}
@@ -241,9 +260,29 @@
                       stream.reader_connected,
                     )}"
                   ></span>
-                  <span class="text-text-primary">
-                    {stream.display_alias ?? stream.forwarder_id}
-                  </span>
+                  <div class="min-w-0">
+                    <div class="flex items-center gap-2">
+                      <span
+                        class={stream.subscribed
+                          ? "text-text-primary"
+                          : "text-text-secondary font-mono"}
+                      >
+                        {primaryLabel}
+                      </span>
+                      {#if !stream.subscribed}
+                        <span
+                          class="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-muted"
+                        >
+                          Available
+                        </span>
+                      {/if}
+                    </div>
+                    {#if secondaryLabel}
+                      <div class="text-xs text-text-muted truncate">
+                        {secondaryLabel}
+                      </div>
+                    {/if}
+                  </div>
                   {#if stream.forwarder_id && store.upsState.get(stream.forwarder_id)}
                     {@const upsEntry = store.upsState.get(stream.forwarder_id)}
                     <BatteryIndicator
@@ -286,16 +325,16 @@
                       <div>
                         <span class="text-text-muted">Reader IP:</span>
                         <span class="font-mono text-text-primary ml-1"
-                          >{stream.reader_ip}</span
+                          >{formatOptional(stream.reader_ip)}</span
                         >
                       </div>
                       <div>
                         <span class="text-text-muted">Forwarder:</span>
                         <span class="font-mono text-text-primary ml-1"
-                          >{stream.forwarder_id}</span
+                          >{formatOptional(stream.forwarder_id)}</span
                         >
                       </div>
-                      {#if stream.stream_epoch !== undefined}
+                      {#if stream.stream_epoch != null}
                         <div>
                           <span class="text-text-muted">Epoch:</span>
                           <span class="font-mono text-text-primary ml-1">
@@ -409,7 +448,7 @@
                     {/if}
 
                     <div class="flex items-center gap-2 flex-wrap">
-                      {#if store.dbfEnabled && stream.subscribed}
+                      {#if stream.subscribed && store.dbfEnabled}
                         <select
                           data-testid="dbf-event-type-{key}"
                           class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-28 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
@@ -429,7 +468,7 @@
                         </select>
                       {/if}
 
-                      {#if store.modeDraft === "targeted_replay"}
+                      {#if stream.subscribed && store.modeDraft === "targeted_replay"}
                         {@const options = store.earliestEpochOptions[key] ?? []}
                         {@const selectedTargeted =
                           selectedTargetedEpochValue(stream)}
@@ -471,7 +510,7 @@
                         >
                           Replay
                         </button>
-                      {:else}
+                      {:else if stream.subscribed}
                         {@const options = store.earliestEpochOptions[key] ?? []}
                         {@const selectedEarliest =
                           selectedEarliestEpochValue(stream)}

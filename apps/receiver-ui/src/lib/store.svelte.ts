@@ -205,8 +205,8 @@ export function setTargetedEpochInputs(value: Record<string, string>): void {
 // --------------- Helpers ---------------
 
 export function streamKey(
-  forwarder_id: string | undefined,
-  reader_ip: string | undefined,
+  forwarder_id: string | null | undefined,
+  reader_ip: string | null | undefined,
 ): string {
   return `${forwarder_id ?? ""}/${reader_ip ?? ""}`;
 }
@@ -322,7 +322,7 @@ export function selectedEarliestEpochValue(stream: api.StreamEntry): string {
   }
   if (options.length === 0) return "";
   if (
-    stream.stream_epoch !== undefined &&
+    stream.stream_epoch != null &&
     options.some((option) => option.stream_epoch === stream.stream_epoch)
   ) {
     return String(stream.stream_epoch);
@@ -342,7 +342,7 @@ export function selectedTargetedEpochValue(stream: api.StreamEntry): string {
   if (configured !== null) return String(configured);
   if (options.length === 0) return "";
   if (
-    stream.stream_epoch !== undefined &&
+    stream.stream_epoch != null &&
     isApiReturnedEpoch(key, stream.stream_epoch)
   ) {
     return String(stream.stream_epoch);

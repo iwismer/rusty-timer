@@ -1,5 +1,13 @@
-import { fireEvent, render, screen } from "@testing-library/svelte";
+import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const apiMocks = vi.hoisted(() => ({
+  getStreams: vi.fn(),
+  putSubscriptions: vi.fn(),
+  getReplayTargetEpochs: vi.fn().mockResolvedValue({ epochs: [] }),
+}));
+
+vi.mock("$lib/api", () => apiMocks);
 
 import StreamsTab from "./StreamsTab.svelte";
 import { store, streamKey } from "$lib/store.svelte";
@@ -11,6 +19,20 @@ describe("StreamsTab", () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.clearAllMocks();
+    apiMocks.getStreams.mockResolvedValue({
+      streams: [],
+      degraded: false,
+      upstream_error: null,
+    });
+    apiMocks.putSubscriptions.mockResolvedValue(undefined);
+    store.streamActionBusy = false;
+    store.streamEventTypeBusy = {};
+    store.earliestEpochOptions = {};
+    store.earliestEpochLoading = {};
+    store.earliestEpochLoadErrors = {};
+    store.earliestEpochSaving = {};
+    store.targetedEpochInputs = {};
     vi.stubGlobal(
       "ResizeObserver",
       class {
@@ -146,6 +168,57 @@ describe("StreamsTab", () => {
       "w-px",
       "whitespace-nowrap",
     );
+  });
+
+  it("renders discovered streams by stream id and subscribes by canonical identity", async () => {
+    store.streams = {
+      streams: [
+        {
+          forwarder_endpoint_id: "endpoint-abc",
+          stream_id: "reader-finish-1",
+          forwarder_id: null,
+          reader_ip: null,
+          subscribed: false,
+          local_port: null,
+          display_alias: "North Gate",
+          stream_epoch: 7,
+          reads_total: null,
+          reads_epoch: null,
+          cursor_epoch: null,
+          cursor_seq: null,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    };
+    store.lastReads = new Map();
+    store.streamMetrics = new Map();
+
+    render(StreamsTab);
+
+    expect(screen.getByText("reader-finish-1")).toBeInTheDocument();
+    expect(screen.getByText("North Gate")).toBeInTheDocument();
+    expect(screen.getByText("Available")).toBeInTheDocument();
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+
+    await fireEvent.click(screen.getByText("reader-finish-1").closest("tr")!);
+    const subscribe = screen.getByTestId(
+      "subscribe-toggle-endpoint-abc/reader-finish-1",
+    );
+    expect(subscribe).toHaveTextContent("Subscribe");
+
+    await fireEvent.click(subscribe);
+
+    await waitFor(() => {
+      expect(apiMocks.putSubscriptions).toHaveBeenCalledWith([
+        {
+          forwarder_endpoint_id: "endpoint-abc",
+          stream_id: "reader-finish-1",
+          local_port_override: null,
+          event_type: "finish",
+        },
+      ]);
+    });
   });
 
   it("renders canonical-only streams with distinct identity and expand state", async () => {
