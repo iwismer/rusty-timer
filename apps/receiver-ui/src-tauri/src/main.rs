@@ -747,7 +747,19 @@ fn main() {
             let p2p_handle = app.handle().clone();
             let p2p_key_path = data_dir.join("p2p_secret.key");
             match receiver::p2p_runtime::p2p_config_from_env(p2p_key_path) {
-                Ok(Some(p2p_config)) => {
+                Ok(Some(mut p2p_config)) => {
+                    // The stored profile is the source of truth for the server
+                    // URL+token; the RT_P2P_SERVER_* env vars override it.
+                    let profile = tauri::async_runtime::block_on(async {
+                        state.db.lock().await.load_profile().ok().flatten()
+                    });
+                    p2p_config.server = receiver::runtime::resolve_server_config(
+                        profile.as_ref(),
+                        (
+                            std::env::var(receiver::p2p_runtime::ENV_P2P_SERVER_URL).ok(),
+                            std::env::var(receiver::p2p_runtime::ENV_P2P_SERVER_TOKEN).ok(),
+                        ),
+                    );
                     let p2p_state = state.clone();
                     let p2p_runtime = tauri::async_runtime::block_on(async {
                         receiver::p2p_runtime::start_receiver_p2p(p2p_state, p2p_config).await
