@@ -8,19 +8,19 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class CutoverCleanupTests(unittest.TestCase):
-    def test_legacy_server_and_rt_protocol_are_removed_from_workspace(self) -> None:
+    def test_legacy_rt_protocol_is_removed_from_workspace(self) -> None:
+        # The central "server" component name is reused by the current P2P
+        # registry service (services/server); only the legacy WebSocket data
+        # plane (rt-protocol) stays guarded.
         workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())
 
-        self.assertNotIn("services/server", workspace["workspace"]["members"])
         self.assertNotIn("crates/rt-protocol", workspace["workspace"]["members"])
-        self.assertFalse((ROOT / "services/server").exists())
         self.assertFalse((ROOT / "crates/rt-protocol").exists())
 
     def test_workspace_has_no_postgres_or_ws_data_plane_dependencies(self) -> None:
         workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())
         dev_dependencies = workspace.get("dev-dependencies", {})
 
-        self.assertNotIn("server", dev_dependencies)
         self.assertNotIn("rt-protocol", dev_dependencies)
         self.assertNotIn("sqlx", dev_dependencies)
         self.assertNotIn("testcontainers", dev_dependencies)
@@ -35,9 +35,7 @@ class CutoverCleanupTests(unittest.TestCase):
             self.assertNotIn("postgres", text.lower(), f"stale postgres dependency in {manifest}")
             self.assertNotIn("testcontainers", text, f"stale Docker test dependency in {manifest}")
 
-    def test_legacy_server_ui_and_deploy_paths_are_removed(self) -> None:
-        self.assertFalse((ROOT / "apps/server-ui").exists())
-        self.assertFalse((ROOT / "deploy/server").exists())
+    def test_legacy_deploy_paths_are_removed(self) -> None:
         self.assertFalse((ROOT / "deploy/quickstart").exists())
 
         package = tomllib.loads((ROOT / "pyproject.toml").read_text()) if (ROOT / "pyproject.toml").exists() else None
@@ -50,7 +48,6 @@ class CutoverCleanupTests(unittest.TestCase):
         for text, label in [(docs_readme, "docs/README.md"), (agent_notes, "AGENTS.md")]:
             self.assertIn("server", text, label)
             self.assertIn("P2P", text, label)
-            self.assertNotIn("services/server", text, label)
             self.assertNotIn("Postgres", text, label)
             self.assertNotIn("WebSocket", text, label)
             self.assertNotIn("rt-protocol", text, label)

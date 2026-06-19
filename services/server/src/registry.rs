@@ -451,8 +451,8 @@ pub fn upsert_forwarder_catalog(
 /// List all registered forwarder identities, ordered by endpoint id.
 pub fn list_forwarders(conn: &Connection) -> rusqlite::Result<Vec<ForwarderRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT f.endpoint_id, f.display_name, f.direct_addrs, f.last_seen_unix_ms,
-                d.approval_state
+        "SELECT f.endpoint_id, COALESCE(d.display_name, f.display_name), f.direct_addrs,
+                f.last_seen_unix_ms, d.approval_state
          FROM forwarders f
          JOIN devices d ON d.endpoint_id = f.endpoint_id
          ORDER BY f.endpoint_id",
@@ -492,7 +492,7 @@ pub fn list_approved_forwarders_with_streams(
     conn: &Connection,
 ) -> rusqlite::Result<Vec<ApprovedForwarderWithStreams>> {
     let mut stmt = conn.prepare(
-        "SELECT f.endpoint_id, f.display_name, f.direct_addrs
+        "SELECT f.endpoint_id, COALESCE(d.display_name, f.display_name), f.direct_addrs
          FROM forwarders f
          JOIN devices d ON d.endpoint_id = f.endpoint_id
          WHERE d.device_kind = 'forwarder' AND d.approval_state = 'active'
@@ -827,6 +827,33 @@ mod tests {
     fn rename_missing_device_returns_none() {
         let conn = test_conn();
         assert!(rename_device(&conn, "missing", "name").unwrap().is_none());
+    }
+
+    #[test]
+    fn rename_forwarder_overrides_pushed_name_in_listings() {
+        let conn = test_conn();
+        let token_hash = hash_token("prov-secret");
+        upsert_forwarder_catalog(
+            &conn,
+            "ep-fwd",
+            Some("Pushed Name"),
+            &["127.0.0.1:5000".to_owned()],
+            &[ForwarderCatalogStreamRecord {
+                stream_id: "reader-a".to_owned(),
+                epoch: 1,
+                next_seq: 10,
+            }],
+            &token_hash,
+        )
+        .unwrap();
+        approve_device(&conn, "ep-fwd", "Approved Name").unwrap();
+        rename_device(&conn, "ep-fwd", "Renamed Name").unwrap();
+
+        let forwarders = list_forwarders(&conn).unwrap();
+        assert_eq!(forwarders[0].display_name.as_deref(), Some("Renamed Name"));
+
+        let approved = list_approved_forwarders_with_streams(&conn).unwrap();
+        assert_eq!(approved[0].display_name.as_deref(), Some("Renamed Name"));
     }
 
     #[test]

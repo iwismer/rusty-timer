@@ -17,6 +17,14 @@ export interface ForwarderStreamRecord {
   next_seq: number;
 }
 
+export interface ForwarderRecord {
+  endpoint_id: string;
+  display_name: string | null;
+  direct_addrs: string[];
+  last_seen_unix_ms: number;
+  approval_state: ApprovalState;
+}
+
 export interface AnnouncerRow {
   stream_id: string;
   seq: number;
@@ -32,6 +40,7 @@ export interface StatusResponse {
   finisher_count: number;
   announcer_rows: AnnouncerRow[];
   devices: DeviceRecord[];
+  forwarders: ForwarderRecord[];
   forwarder_streams: ForwarderStreamRecord[];
 }
 

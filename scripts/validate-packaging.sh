@@ -78,11 +78,10 @@ check_file_not_contains() {
 }
 
 echo ""
-echo "=== Cutover removals ==="
+echo "=== Cutover removals (legacy WebSocket/Postgres data plane) ==="
 
-check_file_absent "services/server" "Legacy central service removed"
-check_file_absent "deploy/server" "Legacy central deployment removed"
-check_file_absent "apps/server-ui" "Legacy server dashboard removed"
+# The central "server" component name is reused by the current P2P registry
+# service; only the legacy WebSocket/Postgres data-plane artifacts are guarded.
 check_file_absent "crates/rt-protocol" "Legacy WebSocket protocol crate removed"
 check_file_absent "contracts/ws" "Legacy WebSocket contract removed"
 
@@ -110,8 +109,8 @@ if [[ -f "${REPO_ROOT}/${FORWARDER_DF}" ]]; then
         "Forwarder Dockerfile has ENTRYPOINT or CMD"
     check_file_contains "${FORWARDER_DF}" '(HEALTHCHECK|healthz|readyz)' \
         "Forwarder Dockerfile references health endpoint"
-    check_file_not_contains "${FORWARDER_DF}" 'services/server|rt-protocol|tokio-tungstenite|postgres' \
-        "Forwarder Dockerfile has no legacy server data-plane references"
+    check_file_not_contains "${FORWARDER_DF}" 'rt-protocol|tokio-tungstenite|postgres' \
+        "Forwarder Dockerfile has no legacy data-plane references"
 fi
 
 echo ""
@@ -147,8 +146,8 @@ check_runbook() {
             "${runbook_name}: covers startup"
         check_file_contains "${runbook_path}" '(recovery|Recovery|recover|reconnect|restart)' \
             "${runbook_name}: covers recovery"
-        check_file_not_contains "${runbook_path}" '(rt-server|Postgres|WebSocket|deploy/server|services/server|rt-protocol)' \
-            "${runbook_name}: has no legacy server data-plane references"
+        check_file_not_contains "${runbook_path}" '(Postgres|WebSocket|rt-protocol)' \
+            "${runbook_name}: has no legacy data-plane references"
     fi
 }
 
@@ -162,15 +161,15 @@ if [[ -f "${REPO_ROOT}/${FWRD_RUNBOOK}" ]]; then
         "Forwarder runbook: covers epoch operations"
 fi
 
-THIN_RUNBOOK="docs/runbooks/server-operations.md"
-if [[ -f "${REPO_ROOT}/${THIN_RUNBOOK}" ]]; then
-    check_file_contains "${THIN_RUNBOOK}" '(SERVER_PROVISIONING_TOKEN|provisioning token)' \
+SERVER_RUNBOOK="docs/runbooks/server-operations.md"
+if [[ -f "${REPO_ROOT}/${SERVER_RUNBOOK}" ]]; then
+    check_file_contains "${SERVER_RUNBOOK}" '(SERVER_PROVISIONING_TOKEN|provisioning token)' \
         "Server runbook: covers provisioning token"
-    check_file_contains "${THIN_RUNBOOK}" '(allow-list|allowlist|allow list)' \
+    check_file_contains "${SERVER_RUNBOOK}" '(allow-list|allowlist|allow list)' \
         "Server runbook: covers allow-list distribution"
-    check_file_contains "${THIN_RUNBOOK}" '(announcer|generation|lease)' \
+    check_file_contains "${SERVER_RUNBOOK}" '(announcer|generation|lease)' \
         "Server runbook: covers announcer push"
-    check_file_contains "${THIN_RUNBOOK}" '(Authelia|M2M|Bearer|public read)' \
+    check_file_contains "${SERVER_RUNBOOK}" '(Authelia|M2M|Bearer|public read)' \
         "Server runbook: covers auth posture"
 fi
 
@@ -184,8 +183,8 @@ if [[ -f "${REPO_ROOT}/${RELEASE_WF}" ]]; then
         "Release workflow publishes server tags"
     check_file_contains "${RELEASE_WF}" 'aarch64-unknown-linux-gnu' \
         "Release workflow includes Linux arm64 target"
-    check_file_not_contains "${RELEASE_WF}" '(server-v\*|SERVER_DOCKER_IMAGE|rt-server|services/server|apps/server-ui|armv7)' \
-        "Release workflow has no legacy server or armv7 packaging"
+    check_file_not_contains "${RELEASE_WF}" '(armv7)' \
+        "Release workflow has no armv7 packaging"
 fi
 
 echo ""
