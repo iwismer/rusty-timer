@@ -145,9 +145,49 @@ export function getConnectionState(): string {
   return store.status?.connection_state ?? "unknown";
 }
 
+export type OverallHealth = "ok" | "warn" | "err";
+
 export function getConnectionBadgeState(): "ok" | "warn" | "err" {
   const cs = getConnectionState();
   return cs === "connected" ? "ok" : cs === "disconnected" ? "err" : "warn";
+}
+
+export function getOverallHealth(): OverallHealth {
+  const connections = store.connections;
+
+  // With no connections payload, or no configured server yet, the roll-up is
+  // unknown rather than healthy. Show warn until the receiver has enough data.
+  if (!connections || !connections.server.configured) return "warn";
+
+  const { server, forwarders } = connections;
+  const intendedForwarders = forwarders.filter(
+    (forwarder) => forwarder.pending || forwarder.state !== "disconnected",
+  );
+  const unavailableForwarders = intendedForwarders.filter(
+    (forwarder) => forwarder.state === "unavailable",
+  );
+
+  // Reader-level offline status is not available to this roll-up yet; Phase 3
+  // should fold reader connectivity into the same err > warn > ok precedence.
+  if (server.reachable === false) return "err";
+  if (server.approval_state !== "active" && !server.waiting_for_approval) {
+    return "err";
+  }
+  if (
+    intendedForwarders.length > 0 &&
+    unavailableForwarders.length === intendedForwarders.length
+  ) {
+    return "err";
+  }
+
+  if (server.waiting_for_approval) return "warn";
+  if (server.reachable !== true) return "warn";
+  if (unavailableForwarders.length > 0) return "warn";
+  if (intendedForwarders.some((forwarder) => forwarder.pending)) {
+    return "warn";
+  }
+
+  return "ok";
 }
 
 // --------------- Setters (for components that need to write imported state) ---------------

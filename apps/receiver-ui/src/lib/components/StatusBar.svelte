@@ -1,5 +1,10 @@
 <script lang="ts">
-  import { openUpdateModal, store } from "$lib/store.svelte";
+  import {
+    getOverallHealth,
+    openUpdateModal,
+    store,
+    type OverallHealth,
+  } from "$lib/store.svelte";
 
   function computeCounts() {
     const list = store.streams?.streams ?? [];
@@ -18,13 +23,33 @@
     return { online, degraded, offline, totalReads };
   }
 
+  function healthLabel(health: OverallHealth): string {
+    if (health === "ok") return "All connected";
+    if (health === "err") return "Disconnected";
+    return "Some connections degraded";
+  }
+
+  function healthDotClass(health: OverallHealth): string {
+    if (health === "ok") return "bg-status-ok";
+    if (health === "err") return "bg-status-err";
+    return "bg-status-warn";
+  }
+
   let c = $derived(computeCounts());
+  let overallHealth = $derived(getOverallHealth());
 </script>
 
 <div
   class="flex items-center justify-between px-3 h-7 bg-surface-1 border-t border-border shrink-0 text-xs @container"
 >
   <div class="flex items-center gap-3">
+    <span
+      data-testid="overall-health-dot"
+      data-health={overallHealth}
+      class="h-2.5 w-2.5 rounded-full {healthDotClass(overallHealth)}"
+      title={healthLabel(overallHealth)}
+      aria-label={healthLabel(overallHealth)}
+    ></span>
     {#if c.online > 0}
       <span class="flex items-center gap-1">
         <span class="w-2 h-2 rounded-full bg-status-ok"></span>
