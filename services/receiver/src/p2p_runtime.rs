@@ -396,6 +396,19 @@ async fn run_discovery_loop(
             Ok(entries) => {
                 let mut map = DiscoveredForwarders::new();
                 for entry in entries {
+                    // Validate the discovered endpoint id is a dialable node id
+                    // once here, at discovery cadence, so a malformed id is
+                    // dropped before it reaches the map. This avoids per-reconcile
+                    // log-spam from `resolve_forwarder_addr`, which runs over
+                    // every subscription on each reconcile pass.
+                    if let Err(e) = entry.endpoint_id.parse::<NodeId>() {
+                        warn!(
+                            endpoint_id = %entry.endpoint_id,
+                            error = %e,
+                            "discovered forwarder has invalid node id; skipping"
+                        );
+                        continue;
+                    }
                     let direct_addrs = entry
                         .direct_addrs
                         .iter()
@@ -459,18 +472,16 @@ async fn fetch_forwarders(
 /// Resolve a forwarder endpoint id to a dialable [`NodeAddr`] from the
 /// discovered-forwarders snapshot. Returns `None` when the forwarder is not yet
 /// discovered or its endpoint id is not a valid node id.
+///
+/// Endpoint ids are validated once when they enter the map (the discovery loop
+/// and the startup seed both reject invalid node ids), so the parse here is a
+/// cheap, non-logging fallback that cannot spam at reconcile cadence.
 fn resolve_forwarder_addr(
     endpoint_id: &str,
     discovered: &DiscoveredForwarders,
 ) -> Option<NodeAddr> {
     let forwarder = discovered.get(endpoint_id)?;
-    let node_id = match endpoint_id.parse::<NodeId>() {
-        Ok(node_id) => node_id,
-        Err(e) => {
-            warn!(%endpoint_id, error = %e, "discovered forwarder has invalid node id; skipping");
-            return None;
-        }
-    };
+    let node_id = endpoint_id.parse::<NodeId>().ok()?;
     Some(NodeAddr::new(node_id).with_direct_addresses(forwarder.direct_addrs.iter().copied()))
 }
 

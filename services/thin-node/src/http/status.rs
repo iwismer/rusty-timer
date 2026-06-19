@@ -14,7 +14,10 @@
 //!   this header *after* authenticating the user and strips any client-supplied
 //!   copy, so the node trusts its presence as proof of an authenticated admin.
 //!   **Caddy/Authelia MUST protect every `/admin/*` route** and MUST strip
-//!   inbound copies of [`ADMIN_HEADER`] from untrusted clients.
+//!   inbound copies of [`ADMIN_HEADER`] from untrusted clients. As a
+//!   fail-closed guard, the node ignores [`ADMIN_HEADER`] entirely unless the
+//!   operator sets `THIN_NODE_TRUSTED_PROXY` at startup to assert that such a
+//!   proxy is present; otherwise every `/admin/*` request is denied.
 //! - **M2M / device write routes** (`POST /register`, `POST /forwarder/catalog`,
 //!   `POST /announcer/rows`, `POST /announcer/takeover`): bearer auth against
 //!   the provisioning bearer token, enforced in-process. These do not depend on
@@ -132,7 +135,7 @@ pub async fn approve_device(
     headers: HeaderMap,
     Json(req): Json<ApproveRequest>,
 ) -> Response {
-    if !admin_authorized(&headers) {
+    if !admin_authorized(&headers, state.admin_proxy_trusted) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
@@ -153,7 +156,16 @@ pub async fn approve_device(
 
 /// Authorize an admin request by the presence of a non-empty upstream identity
 /// header injected by Authelia.
-pub(super) fn admin_authorized(headers: &HeaderMap) -> bool {
+///
+/// Fail-closed: when `proxy_trusted` is `false` the node has not been told a
+/// header-stripping reverse proxy sits in front of it, so the [`ADMIN_HEADER`]
+/// cannot be trusted and admin access is always denied — otherwise any client
+/// could forge the header and self-authorize. The operator opts in via
+/// `THIN_NODE_TRUSTED_PROXY` at startup.
+pub(super) fn admin_authorized(headers: &HeaderMap, proxy_trusted: bool) -> bool {
+    if !proxy_trusted {
+        return false;
+    }
     headers
         .get(ADMIN_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -175,7 +187,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrate(&conn).unwrap();
         crate::registry::migrate(&conn).unwrap();
-        AppState::new(conn, PROV_TOKEN)
+        AppState::new(conn, PROV_TOKEN, true)
     }
 
     async fn response_json(resp: axum::response::Response) -> serde_json::Value {
@@ -404,5 +416,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_denied_when_proxy_untrusted() {
+        // Fail-closed: with admin_proxy_trusted = false, even a present
+        // Remote-User header must not authorize an admin request.
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&conn).unwrap();
+        crate::registry::migrate(&conn).unwrap();
+        let state = AppState::new(conn, PROV_TOKEN, false);
+        {
+            let conn = state.conn.lock().unwrap();
+            crate::registry::register_device(
+                &conn,
+                "ep-1",
+                crate::registry::DeviceKind::Receiver,
+                "tok",
+            )
+            .unwrap();
+        }
+        let app = router(state.clone());
+
+        let resp = app
+            .oneshot(approve_request(
+                Some("alice"),
+                &serde_json::json!({
+                    "endpoint_id": "ep-1",
+                    "display_name": "Finish"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // Device must remain unapproved when the proxy is untrusted.
+        let conn = state.conn.lock().unwrap();
+        let device = crate::registry::get_device(&conn, "ep-1").unwrap().unwrap();
+        assert_eq!(
+            device.approval_state,
+            crate::registry::ApprovalState::Pending
+        );
     }
 }

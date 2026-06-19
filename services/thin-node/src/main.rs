@@ -15,9 +15,21 @@ async fn main() {
     let conn = thin_node::db::open(&db_path).expect("failed to open thin-node SQLite database");
 
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_owned());
+    // Fail-closed admin guard: only trust the upstream-injected Remote-User
+    // header when the operator explicitly asserts a header-stripping reverse
+    // proxy (Caddy/Authelia) sits in front of the node. Without this, any
+    // direct client could forge the header and self-authorize admin routes.
+    let admin_proxy_trusted = env_flag("THIN_NODE_TRUSTED_PROXY");
+    if !admin_proxy_trusted {
+        warn!(
+            "THIN_NODE_TRUSTED_PROXY not set; /admin/* routes are disabled (fail-closed). \
+             Set THIN_NODE_TRUSTED_PROXY=1 only when behind a trusted, header-stripping proxy."
+        );
+    }
+
     let mut router = Router::new().route("/healthz", get(healthz));
     if let Ok(provisioning_token) = env::var("THIN_NODE_PROVISIONING_TOKEN") {
-        let state = thin_node::http::AppState::new(conn, &provisioning_token);
+        let state = thin_node::http::AppState::new(conn, &provisioning_token, admin_proxy_trusted);
         router = router.merge(thin_node::http::router(state));
     } else {
         warn!("THIN_NODE_PROVISIONING_TOKEN not set; /register disabled");
@@ -34,4 +46,16 @@ async fn main() {
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+/// Read a boolean-ish environment flag. Treats `1`, `true`, `yes`, and `on`
+/// (case-insensitive) as enabled; everything else (including unset) is
+/// disabled, keeping the admin guard fail-closed by default.
+fn env_flag(name: &str) -> bool {
+    env::var(name).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }

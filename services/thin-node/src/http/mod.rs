@@ -23,20 +23,28 @@ use crate::announcer::AnnouncerRuntime;
 /// are single-threaded) and the hashed provisioning bearer token used to
 /// authorize `POST /register`, `POST /forwarder/catalog`, `POST
 /// /announcer/rows`, and `POST /announcer/takeover`.
+///
+/// `admin_proxy_trusted` is the fail-closed guard for `/admin/*` routes: those
+/// routes trust the upstream-injected [`status::ADMIN_HEADER`] only when this is
+/// `true`, which an operator opts into at startup to assert that a header-
+/// stripping reverse proxy (Caddy/Authelia) sits in front of the node. When
+/// `false`, admin routes are denied regardless of any client-supplied header.
 #[derive(Clone)]
 pub struct AppState {
     pub conn: Arc<Mutex<Connection>>,
     pub provisioning_token_hash: Arc<Vec<u8>>,
     pub announcer_runtime: Arc<Mutex<AnnouncerRuntime>>,
+    pub admin_proxy_trusted: bool,
 }
 
 impl AppState {
     #[must_use]
-    pub fn new(conn: Connection, provisioning_token: &str) -> Self {
+    pub fn new(conn: Connection, provisioning_token: &str, admin_proxy_trusted: bool) -> Self {
         Self {
             conn: Arc::new(Mutex::new(conn)),
             provisioning_token_hash: Arc::new(crate::registry::hash_token(provisioning_token)),
             announcer_runtime: Arc::new(Mutex::new(AnnouncerRuntime::new())),
+            admin_proxy_trusted,
         }
     }
 }
