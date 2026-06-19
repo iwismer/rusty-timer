@@ -349,6 +349,37 @@ async fn reconnect_forwarder(
 }
 
 #[tauri::command]
+async fn get_forwarder_config(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+) -> CmdResult<control_api::ForwarderConfigResponse> {
+    control_api::get_forwarder_config(&state, endpoint_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_forwarder_config(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+    config_json: String,
+) -> CmdResult<control_api::ForwarderConfigSetResult> {
+    control_api::set_forwarder_config(&state, endpoint_id, config_json)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn restart_forwarder(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+) -> CmdResult<control_api::ForwarderRestartResult> {
+    control_api::restart_forwarder(&state, endpoint_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_version() -> String {
     control_api::get_version()
 }

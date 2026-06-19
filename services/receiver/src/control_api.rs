@@ -8,7 +8,9 @@ use crate::db::{DEFAULT_UPDATE_MODE, Db, StreamSubscription};
 use crate::error::ReceiverError;
 use crate::ui_events::ReceiverUiEvent;
 use rt_domain::ReceiverMode;
-use rt_p2p_protocol::{ReaderInfo, ReaderStatus, UpsStatus};
+use rt_p2p_protocol::{
+    ConfigGetResponse, ConfigSetResponse, ReaderInfo, ReaderStatus, RestartResponse, UpsStatus,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
@@ -40,8 +42,32 @@ pub struct DiscoveredForwarder {
 /// id). Populated by the discovery task and/or seeded from explicit config.
 pub type DiscoveredForwarders = HashMap<String, DiscoveredForwarder>;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{Mutex, RwLock, broadcast, watch};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot, watch};
 use tracing::warn;
+
+/// How long a remote-config command waits for the forwarder's response before
+/// failing, so a missing/late reply can never hang the caller. The response is
+/// routed back to the awaiting command by the per-forwarder control loop.
+const FORWARDER_CONFIG_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A remote-config request bridged from a control-API command (`&AppState`) to
+/// the live [`ForwarderConnection`](crate::p2p_forwarder) control loop that
+/// owns the QUIC control session. Each variant carries a `oneshot` responder
+/// the control loop completes once the forwarder replies (routed by
+/// `request_id`). Only registered for forwarders whose live session negotiated
+/// `CAP_REMOTE_CONFIG`.
+pub(crate) enum ConfigCommand {
+    Get {
+        resp: oneshot::Sender<ConfigGetResponse>,
+    },
+    Set {
+        config_json: String,
+        resp: oneshot::Sender<ConfigSetResponse>,
+    },
+    Restart {
+        resp: oneshot::Sender<RestartResponse>,
+    },
+}
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -198,6 +224,14 @@ pub struct AppState {
     pub p2p_endpoint_id: Arc<RwLock<Option<String>>>,
     forwarder_runtime: Arc<StdMutex<HashMap<String, ForwarderRuntimeStatus>>>,
     forwarder_live_status: Arc<StdMutex<HashMap<String, ForwarderLiveStatus>>>,
+    /// Per-forwarder remote-config request channels, keyed by endpoint id. An
+    /// entry exists only while that forwarder has a live control session whose
+    /// negotiated `HelloOk` advertised `CAP_REMOTE_CONFIG`; the
+    /// [`ForwarderConnection`](crate::p2p_forwarder) registers its sender on
+    /// connect and deregisters on disconnect/stop. Presence therefore doubles
+    /// as the `remote_config_available` signal, so a command to a down or
+    /// incapable forwarder fails fast.
+    forwarder_config_tx: StdMutex<HashMap<String, mpsc::Sender<ConfigCommand>>>,
     last_connections_fingerprint: StdMutex<Option<ConnectionsFingerprint>>,
     connect_attempt: AtomicU64,
     connect_attempt_version: watch::Sender<ConnectAttempt>,
@@ -259,6 +293,7 @@ impl AppState {
             p2p_endpoint_id: Arc::new(RwLock::new(None)),
             forwarder_runtime: Arc::new(StdMutex::new(HashMap::new())),
             forwarder_live_status: Arc::new(StdMutex::new(HashMap::new())),
+            forwarder_config_tx: StdMutex::new(HashMap::new()),
             last_connections_fingerprint: StdMutex::new(None),
             connect_attempt: AtomicU64::new(0),
             connect_attempt_version,
@@ -503,6 +538,56 @@ impl AppState {
             battery_percent: status.battery_percent,
             runtime_seconds: status.runtime_seconds,
         });
+    }
+
+    /// Register the remote-config request channel for a forwarder whose live
+    /// control session negotiated `CAP_REMOTE_CONFIG`. Called by the
+    /// [`ForwarderConnection`](crate::p2p_forwarder) on control connect.
+    pub(crate) fn register_forwarder_config_tx(
+        &self,
+        endpoint_id: &str,
+        tx: mpsc::Sender<ConfigCommand>,
+    ) {
+        self.forwarder_config_tx
+            .lock()
+            .unwrap()
+            .insert(endpoint_id.to_owned(), tx);
+    }
+
+    /// Drop a forwarder's remote-config channel on control disconnect/stop so
+    /// subsequent config commands fail fast instead of hanging on a dead
+    /// session.
+    pub(crate) fn deregister_forwarder_config_tx(&self, endpoint_id: &str) {
+        self.forwarder_config_tx.lock().unwrap().remove(endpoint_id);
+    }
+
+    fn forwarder_config_tx(&self, endpoint_id: &str) -> Option<mpsc::Sender<ConfigCommand>> {
+        self.forwarder_config_tx
+            .lock()
+            .unwrap()
+            .get(endpoint_id)
+            .cloned()
+    }
+
+    /// Whether the forwarder's live session negotiated `CAP_REMOTE_CONFIG`
+    /// (mirrors the presence of its registered remote-config channel).
+    pub(crate) fn forwarder_remote_config_available(&self, endpoint_id: &str) -> bool {
+        self.forwarder_config_tx
+            .lock()
+            .unwrap()
+            .contains_key(endpoint_id)
+    }
+
+    /// Endpoint ids that currently have a live remote-config channel, so
+    /// [`get_connections`] can list a forwarder whose only notable state is
+    /// remote-config availability.
+    fn forwarder_config_endpoints(&self) -> Vec<String> {
+        self.forwarder_config_tx
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
     }
 
     pub(crate) async fn clear_forwarder_live_status(&self, endpoint_id: &str) {
@@ -1031,6 +1116,33 @@ pub struct ForwarderConnectionStatus {
     pub readers: Vec<ReaderLiveStatus>,
     pub ups: Option<UpsStatusPayload>,
     pub restart_needed: Option<bool>,
+    /// `true` only when this forwarder has a live control session that
+    /// negotiated `CAP_REMOTE_CONFIG`; gates the UI's view/edit/restart
+    /// affordances.
+    pub remote_config_available: bool,
+}
+
+/// Result of [`get_forwarder_config`]: the forwarder's full config document and
+/// whether applying the currently-persisted config requires a restart.
+#[derive(Debug, Clone, Serialize)]
+pub struct ForwarderConfigResponse {
+    pub config_json: String,
+    pub restart_needed: bool,
+}
+
+/// Result of [`set_forwarder_config`].
+#[derive(Debug, Clone, Serialize)]
+pub struct ForwarderConfigSetResult {
+    pub ok: bool,
+    pub restart_needed: bool,
+    pub error: Option<String>,
+}
+
+/// Result of [`restart_forwarder`].
+#[derive(Debug, Clone, Serialize)]
+pub struct ForwarderRestartResult {
+    pub accepted: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1332,6 +1444,7 @@ pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
     let live_statuses = state.forwarder_live_status.lock().unwrap().clone();
     let mut endpoints: BTreeSet<String> = discovered.keys().cloned().collect();
     endpoints.extend(live_statuses.keys().cloned());
+    endpoints.extend(state.forwarder_config_endpoints());
     let mut subscribed_counts: HashMap<String, usize> = HashMap::new();
     for subscription in &subscriptions {
         endpoints.insert(subscription.forwarder_endpoint_id.clone());
@@ -1355,6 +1468,7 @@ pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
             readers: sorted_reader_statuses(&live_status),
             ups: live_status.ups,
             restart_needed: None,
+            remote_config_available: state.forwarder_remote_config_available(&endpoint_id),
         });
     }
 
@@ -1516,6 +1630,91 @@ pub async fn reconnect_forwarder(
     state.request_forwarder_reconnect(endpoint_id).await;
     state.emit_resync();
     Ok(())
+}
+
+/// Error returned when a remote-config command targets a forwarder that has no
+/// live control session, or whose session did not negotiate `CAP_REMOTE_CONFIG`.
+fn forwarder_remote_config_unavailable() -> ReceiverError {
+    ReceiverError::NotConnected("forwarder not connected or remote config unavailable".to_owned())
+}
+
+/// Await a remote-config `oneshot` response with a bounded timeout. A dropped
+/// sender (control session torn down before replying) and an elapsed timeout
+/// both surface as errors so the command never hangs.
+async fn await_config_response<T>(rx: oneshot::Receiver<T>) -> Result<T, ReceiverError> {
+    match tokio::time::timeout(FORWARDER_CONFIG_TIMEOUT, rx).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(_)) => Err(ReceiverError::NotConnected(
+            "forwarder control session ended before responding".to_owned(),
+        )),
+        Err(_) => Err(ReceiverError::UpstreamError(
+            "timed out waiting for forwarder config response".to_owned(),
+        )),
+    }
+}
+
+/// Fetch the forwarder's full config document over its live P2P control
+/// session (requires a negotiated `CAP_REMOTE_CONFIG` session).
+pub async fn get_forwarder_config(
+    state: &AppState,
+    endpoint_id: String,
+) -> Result<ForwarderConfigResponse, ReceiverError> {
+    let tx = state
+        .forwarder_config_tx(&endpoint_id)
+        .ok_or_else(forwarder_remote_config_unavailable)?;
+    let (resp_tx, resp_rx) = oneshot::channel();
+    tx.send(ConfigCommand::Get { resp: resp_tx })
+        .await
+        .map_err(|_| forwarder_remote_config_unavailable())?;
+    let response = await_config_response(resp_rx).await?;
+    Ok(ForwarderConfigResponse {
+        config_json: response.config_json,
+        restart_needed: response.restart_needed,
+    })
+}
+
+/// Replace the forwarder's config with `config_json` (the full document, sent
+/// verbatim — no merge/patch) over its live P2P control session.
+pub async fn set_forwarder_config(
+    state: &AppState,
+    endpoint_id: String,
+    config_json: String,
+) -> Result<ForwarderConfigSetResult, ReceiverError> {
+    let tx = state
+        .forwarder_config_tx(&endpoint_id)
+        .ok_or_else(forwarder_remote_config_unavailable)?;
+    let (resp_tx, resp_rx) = oneshot::channel();
+    tx.send(ConfigCommand::Set {
+        config_json,
+        resp: resp_tx,
+    })
+    .await
+    .map_err(|_| forwarder_remote_config_unavailable())?;
+    let response = await_config_response(resp_rx).await?;
+    Ok(ForwarderConfigSetResult {
+        ok: response.ok,
+        restart_needed: response.restart_needed,
+        error: optional_non_empty(response.error),
+    })
+}
+
+/// Ask the forwarder to restart over its live P2P control session.
+pub async fn restart_forwarder(
+    state: &AppState,
+    endpoint_id: String,
+) -> Result<ForwarderRestartResult, ReceiverError> {
+    let tx = state
+        .forwarder_config_tx(&endpoint_id)
+        .ok_or_else(forwarder_remote_config_unavailable)?;
+    let (resp_tx, resp_rx) = oneshot::channel();
+    tx.send(ConfigCommand::Restart { resp: resp_tx })
+        .await
+        .map_err(|_| forwarder_remote_config_unavailable())?;
+    let response = await_config_response(resp_rx).await?;
+    Ok(ForwarderRestartResult {
+        accepted: response.accepted,
+        error: optional_non_empty(response.error),
+    })
 }
 
 pub async fn get_logs(state: &AppState) -> LogsResponse {
@@ -1851,6 +2050,12 @@ macro_rules! receiver_command_list {
             connect_forwarder(endpoint_id: "String") -> "()",
             disconnect_forwarder(endpoint_id: "String") -> "()",
             reconnect_forwarder(endpoint_id: "String") -> "()",
+            get_forwarder_config(endpoint_id: "String") -> "ForwarderConfigResponse",
+            set_forwarder_config(
+                endpoint_id: "String",
+                config_json: "String"
+            ) -> "ForwarderConfigSetResult",
+            restart_forwarder(endpoint_id: "String") -> "ForwarderRestartResult",
             get_version() -> "String",
             get_logs() -> "LogsResponse",
             admin_reset_cursor(body: "CursorResetRequest") -> "()",

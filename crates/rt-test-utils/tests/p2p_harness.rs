@@ -73,6 +73,8 @@ async fn run_harness_self_test() {
         control_events: Vec::new(),
         control_pings: 0,
         control_ping_interval: std::time::Duration::from_millis(50),
+        config_get_json: String::new(),
+        config_restart_needed: false,
     };
 
     let forwarder = MockForwarderPeer::start([1; 32], script)
@@ -200,6 +202,8 @@ async fn p2p_harness_data_fault_drop_outbound_suppresses_subscribe_response() {
         control_events: Vec::new(),
         control_pings: 0,
         control_ping_interval: std::time::Duration::from_millis(50),
+        config_get_json: String::new(),
+        config_restart_needed: false,
     };
 
     let forwarder = MockForwarderPeer::start([3; 32], script)
@@ -280,6 +284,8 @@ async fn run_partition_ack_test() {
         control_events: Vec::new(),
         control_pings: 0,
         control_ping_interval: std::time::Duration::from_millis(50),
+        config_get_json: String::new(),
+        config_restart_needed: false,
     };
 
     let forwarder = MockForwarderPeer::start([5; 32], script)

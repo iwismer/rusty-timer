@@ -6,12 +6,15 @@ use std::time::Duration;
 
 use rt_iroh::{Endpoint, NodeAddr, RecvStream, SendStream};
 use rt_p2p_protocol::{
-    ControlC2F, ControlF2C, Hello, Pong, SubscribeMode, control_c2f, control_f2c,
+    CAP_REMOTE_CONFIG, ConfigGetRequest, ConfigGetResponse, ConfigSetRequest, ConfigSetResponse,
+    ControlC2F, ControlF2C, Hello, Pong, RestartRequest, RestartResponse, SubscribeMode,
+    control_c2f, control_f2c, has_capability,
 };
-use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
+use tokio::sync::{Mutex, Notify, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
+use crate::control_api::ConfigCommand;
 use crate::db::Db;
 use crate::p2p_session::{
     BackoffConfig, P2pSessionError, SessionStatusReporter, connect_and_hello, read_frame,
@@ -176,10 +179,31 @@ async fn run_connected_forwarder(
 
     let crate::p2p_session::ControlSession {
         connection,
+        hello_ok,
         mut control_send,
         control_recv,
         ..
     } = session;
+
+    // Remote-config bridge: when the negotiated session advertises
+    // `CAP_REMOTE_CONFIG`, register an mpsc sender so `&AppState` control-API
+    // commands can reach this live session. The request write happens in the
+    // main loop below (serialized with the heartbeat `Pong`), and responses are
+    // routed back by `request_id` to the matching pending `oneshot` — a map
+    // lookup plus a non-blocking send, so neither path can stall the heartbeat.
+    let remote_config = has_capability(&hello_ok.capabilities, CAP_REMOTE_CONFIG);
+    let (config_tx, mut config_rx) = mpsc::channel::<ConfigCommand>(32);
+    if remote_config {
+        reporter
+            .app_state()
+            .register_forwarder_config_tx(endpoint_id, config_tx.clone());
+    }
+    // Hold the original sender for the session's lifetime so `config_rx.recv()`
+    // never returns `None` while connected (only the registered clone is handed
+    // to commands; an incapable session simply never receives any).
+    let _config_tx_keepalive = config_tx;
+    let mut pending_config: HashMap<String, PendingConfigResponder> = HashMap::new();
+    let mut next_config_request_id: u64 = 0;
 
     let desired = desired_rx.borrow().clone();
     sync_data_tasks(
@@ -257,6 +281,7 @@ async fn run_connected_forwarder(
                             &mut control_send,
                             reporter,
                             &recompute_notify,
+                            &mut pending_config,
                         ).await {
                             warn!(%endpoint_id, %error, "failed to handle forwarder control frame");
                             break;
@@ -265,6 +290,24 @@ async fn run_connected_forwarder(
                     // The reader task ended: clean disconnect/EOF or a decode/
                     // protocol error (already logged by the reader task).
                     None => break,
+                }
+            }
+            command = config_rx.recv() => {
+                // A config command is consumed here in the main loop (NOT the
+                // reader task): we generate a request_id, register the pending
+                // responder, and write the request frame on `control_send` —
+                // the same serialized send path as `Pong`, so a config exchange
+                // never delays a heartbeat answer.
+                if let Some(command) = command
+                    && let Err(error) = handle_config_command(
+                        command,
+                        &mut control_send,
+                        &mut pending_config,
+                        &mut next_config_request_id,
+                    ).await
+                {
+                    warn!(%endpoint_id, %error, "failed to send forwarder config request");
+                    break;
                 }
             }
         }
@@ -276,6 +319,14 @@ async fn run_connected_forwarder(
     // (and does its own synchronous recompute), with no task left racing it.
     reader_task.abort();
     recompute_task.abort();
+    // Deregister the remote-config channel so commands to this now-down session
+    // fail fast. Dropping `pending_config` drops every pending `oneshot` sender,
+    // so any in-flight command awaiting a response is woken with an error rather
+    // than hanging until its timeout. (No-op when remote config was unavailable.)
+    reporter
+        .app_state()
+        .deregister_forwarder_config_tx(endpoint_id);
+    drop(pending_config);
     reporter
         .app_state()
         .clear_forwarder_live_status(endpoint_id)
@@ -309,12 +360,66 @@ async fn control_reader_loop(
     }
 }
 
+/// The awaiting side of an in-flight remote-config request, keyed in the
+/// per-connection `pending_config` map by `request_id`. When the reader task
+/// delivers the matching response the main loop routes it here with a single
+/// non-blocking `oneshot` send.
+enum PendingConfigResponder {
+    Get(oneshot::Sender<ConfigGetResponse>),
+    Set(oneshot::Sender<ConfigSetResponse>),
+    Restart(oneshot::Sender<RestartResponse>),
+}
+
+/// Translate a [`ConfigCommand`] into its wire request, register the pending
+/// responder under a fresh per-connection `request_id`, and write the request
+/// frame. Runs in the main control loop (same serialized send path as `Pong`),
+/// so issuing a config request can never delay a heartbeat answer.
+async fn handle_config_command(
+    command: ConfigCommand,
+    send: &mut SendStream,
+    pending: &mut HashMap<String, PendingConfigResponder>,
+    next_request_id: &mut u64,
+) -> Result<(), P2pSessionError> {
+    *next_request_id += 1;
+    let request_id = next_request_id.to_string();
+    let (frame, responder) = match command {
+        ConfigCommand::Get { resp } => (
+            ControlC2F {
+                msg: Some(control_c2f::Msg::ConfigGetRequest(ConfigGetRequest {
+                    request_id: request_id.clone(),
+                })),
+            },
+            PendingConfigResponder::Get(resp),
+        ),
+        ConfigCommand::Set { config_json, resp } => (
+            ControlC2F {
+                msg: Some(control_c2f::Msg::ConfigSetRequest(ConfigSetRequest {
+                    request_id: request_id.clone(),
+                    config_json,
+                })),
+            },
+            PendingConfigResponder::Set(resp),
+        ),
+        ConfigCommand::Restart { resp } => (
+            ControlC2F {
+                msg: Some(control_c2f::Msg::RestartRequest(RestartRequest {
+                    request_id: request_id.clone(),
+                })),
+            },
+            PendingConfigResponder::Restart(resp),
+        ),
+    };
+    pending.insert(request_id, responder);
+    write_frame(send, &frame).await
+}
+
 async fn handle_control_frame(
     endpoint_id: &str,
     frame: ControlF2C,
     send: &mut SendStream,
     reporter: &Arc<SessionStatusReporter>,
     recompute_notify: &Notify,
+    pending_config: &mut HashMap<String, PendingConfigResponder>,
 ) -> Result<(), P2pSessionError> {
     match frame.msg {
         Some(control_f2c::Msg::ReaderStatus(status)) => {
@@ -347,14 +452,36 @@ async fn handle_control_frame(
         Some(control_f2c::Msg::ProtocolError(error)) => {
             warn!(%endpoint_id, code = error.code, message = %error.message, "forwarder sent protocol error");
         }
+        // Route config responses by request_id to the awaiting command. A pure
+        // map lookup plus a non-blocking `oneshot` send — never blocks the
+        // reader-fed frame path (and thus never the heartbeat). An unknown
+        // request_id (timed-out/cancelled command) is dropped.
+        Some(control_f2c::Msg::ConfigGetResponse(response)) => {
+            if let Some(PendingConfigResponder::Get(tx)) =
+                pending_config.remove(&response.request_id)
+            {
+                let _ = tx.send(response);
+            }
+        }
+        Some(control_f2c::Msg::ConfigSetResponse(response)) => {
+            if let Some(PendingConfigResponder::Set(tx)) =
+                pending_config.remove(&response.request_id)
+            {
+                let _ = tx.send(response);
+            }
+        }
+        Some(control_f2c::Msg::RestartResponse(response)) => {
+            if let Some(PendingConfigResponder::Restart(tx)) =
+                pending_config.remove(&response.request_id)
+            {
+                let _ = tx.send(response);
+            }
+        }
         Some(
             control_f2c::Msg::Pong(_)
             | control_f2c::Msg::DownloadProgress(_)
             | control_f2c::Msg::SyncClock(_)
             | control_f2c::Msg::ReaderControlResponse(_)
-            | control_f2c::Msg::ConfigGetResponse(_)
-            | control_f2c::Msg::ConfigSetResponse(_)
-            | control_f2c::Msg::RestartResponse(_)
             | control_f2c::Msg::HelloOk(_)
             | control_f2c::Msg::StreamCatalog(_),
         )
@@ -443,14 +570,17 @@ mod tests {
 
     use rt_iroh::{Endpoint, EndpointBuilder};
     use rt_p2p_protocol::{
-        ControlF2C, DownloadProgress, EventBatch, Hello, MAX_FRAME_BYTES, ReadRecord, ReaderStatus,
-        StreamCatalog, SubscribeMode, SubscribeOk, control_f2c,
+        CAP_REMOTE_CONFIG, ControlF2C, DownloadProgress, EventBatch, Hello, MAX_FRAME_BYTES,
+        ReadRecord, ReaderStatus, StreamCatalog, SubscribeMode, SubscribeOk, control_f2c,
     };
     use rt_test_utils::p2p::{ConnectivityFault, ForwarderScript, MockForwarderPeer};
     use rt_test_utils::poll_until;
     use tokio::sync::{Mutex, broadcast};
 
-    use crate::control_api::{AppState, ForwarderConnState, get_connections};
+    use crate::control_api::{
+        AppState, ForwarderConnState, get_connections, get_forwarder_config, restart_forwarder,
+        set_forwarder_config,
+    };
     use crate::db::Db;
     use crate::p2p_session::{BackoffConfig, SessionStatusReporter};
 
@@ -489,6 +619,8 @@ mod tests {
             control_events: Vec::new(),
             control_pings: 0,
             control_ping_interval: Duration::from_millis(50),
+            config_get_json: String::new(),
+            config_restart_needed: false,
         }
     }
 
@@ -839,5 +971,218 @@ mod tests {
         })
         .await
         .expect("control live status + heartbeat test timed out");
+    }
+
+    /// A client `Hello` advertising `CAP_REMOTE_CONFIG` (alongside data), so the
+    /// negotiated session intersects to remote-config support when the
+    /// forwarder also advertises it.
+    fn remote_config_hello() -> Hello {
+        Hello {
+            min_minor: 1,
+            max_minor: 1,
+            capabilities: vec!["data".to_owned(), CAP_REMOTE_CONFIG.to_owned()],
+            max_frame_bytes: u32::try_from(MAX_FRAME_BYTES).unwrap(),
+            catalog_generation: 0,
+        }
+    }
+
+    /// A forwarder script that advertises `CAP_REMOTE_CONFIG`, returns a canned
+    /// config document for `ConfigGet`, acks `ConfigSet` with
+    /// `restart_needed = true`, accepts `Restart`, and keeps issuing heartbeat
+    /// pings so a config exchange can be shown not to disrupt the heartbeat.
+    fn remote_config_script() -> ForwarderScript {
+        let mut script = base_script();
+        script.server_hello = remote_config_hello();
+        script.config_get_json = "{\"sample\":true}".to_owned();
+        script.config_restart_needed = true;
+        script.control_pings = 4;
+        script.control_ping_interval = Duration::from_millis(40);
+        script
+    }
+
+    /// Over a REAL control session that negotiated `CAP_REMOTE_CONFIG`, the
+    /// receiver must round-trip config get/set and restart, surface
+    /// `remote_config_available = true`, and keep the heartbeat alive
+    /// throughout the exchange.
+    #[tokio::test]
+    async fn remote_config_get_set_restart_over_real_session() {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let forwarder = MockForwarderPeer::start([46; 32], remote_config_script())
+                .await
+                .unwrap();
+            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint = Arc::new(test_endpoint(47).await);
+            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+            let (state, _shutdown_rx) =
+                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
+
+            let connection = ForwarderConnection::start(
+                endpoint_id.clone(),
+                Arc::clone(&endpoint),
+                forwarder.node_addr(),
+                Arc::clone(&db),
+                remote_config_hello(),
+                Arc::clone(&reporter),
+                BackoffConfig {
+                    initial: Duration::from_millis(50),
+                    max: Duration::from_millis(50),
+                },
+            );
+
+            // The remote-config channel is registered only once the session is
+            // up and `CAP_REMOTE_CONFIG` was negotiated.
+            poll_until(
+                || {
+                    let state = Arc::clone(&state);
+                    let endpoint_id = endpoint_id.clone();
+                    async move {
+                        get_connections(&state)
+                            .await
+                            .forwarders
+                            .iter()
+                            .any(|f| f.endpoint_id == endpoint_id && f.remote_config_available)
+                    }
+                },
+                Duration::from_secs(5),
+            )
+            .await;
+
+            // get → the forwarder's canned config document.
+            let config = get_forwarder_config(&state, endpoint_id.clone())
+                .await
+                .expect("get_forwarder_config over a live remote-config session");
+            assert_eq!(config.config_json, "{\"sample\":true}");
+            assert!(config.restart_needed);
+
+            // set → round-trips the full document and returns ok + restart_needed.
+            let set =
+                set_forwarder_config(&state, endpoint_id.clone(), "{\"updated\":1}".to_owned())
+                    .await
+                    .expect("set_forwarder_config over a live remote-config session");
+            assert!(set.ok);
+            assert!(set.restart_needed);
+            assert!(set.error.is_none());
+            let sets = forwarder.config_sets();
+            assert_eq!(
+                sets.len(),
+                1,
+                "forwarder must observe exactly one ConfigSet"
+            );
+            assert_eq!(sets[0].config_json, "{\"updated\":1}");
+
+            // restart → accepted.
+            let restart = restart_forwarder(&state, endpoint_id.clone())
+                .await
+                .expect("restart_forwarder over a live remote-config session");
+            assert!(restart.accepted);
+            assert!(restart.error.is_none());
+
+            // Heartbeat maintained throughout: pongs continued to flow during
+            // the config exchange. If the request writes/response routing had
+            // blocked the heartbeat, pongs would stall here.
+            poll_until(
+                || async { forwarder.pongs().len() >= 4 },
+                Duration::from_secs(10),
+            )
+            .await;
+            assert_eq!(
+                state.forwarder_state(&endpoint_id).await.state,
+                ForwarderConnState::Connected,
+                "the config exchange must not disconnect the control session"
+            );
+
+            connection.stop().await;
+            forwarder.shutdown().await;
+            endpoint.close().await;
+        })
+        .await
+        .expect("remote config get/set/restart test timed out");
+    }
+
+    /// A forwarder that does NOT advertise `CAP_REMOTE_CONFIG` must leave
+    /// `remote_config_available = false`, and config commands must fail fast
+    /// (no registered channel) rather than hang.
+    #[tokio::test]
+    async fn config_command_without_negotiated_capability_errors_fast() {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            // base_script's server_hello advertises only "data".
+            let forwarder = MockForwarderPeer::start([48; 32], base_script())
+                .await
+                .unwrap();
+            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint = Arc::new(test_endpoint(49).await);
+            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+            let (state, _shutdown_rx) =
+                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
+
+            let connection = ForwarderConnection::start(
+                endpoint_id.clone(),
+                Arc::clone(&endpoint),
+                forwarder.node_addr(),
+                Arc::clone(&db),
+                // Client advertises remote-config, but the forwarder does not,
+                // so the negotiated session has no remote-config capability.
+                remote_config_hello(),
+                Arc::clone(&reporter),
+                BackoffConfig {
+                    initial: Duration::from_millis(50),
+                    max: Duration::from_millis(50),
+                },
+            );
+
+            poll_until(
+                || {
+                    let state = Arc::clone(&state);
+                    let endpoint_id = endpoint_id.clone();
+                    async move {
+                        state.forwarder_state(&endpoint_id).await.state
+                            == ForwarderConnState::Connected
+                    }
+                },
+                Duration::from_secs(5),
+            )
+            .await;
+
+            assert!(
+                !get_connections(&state)
+                    .await
+                    .forwarders
+                    .iter()
+                    .any(|f| f.endpoint_id == endpoint_id && f.remote_config_available),
+                "remote_config_available must be false without a negotiated capability"
+            );
+
+            // Must error fast (well under the 10s command timeout), not hang.
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                get_forwarder_config(&state, endpoint_id.clone()),
+            )
+            .await
+            .expect("config command must fail fast, not hang");
+            assert!(
+                result.is_err(),
+                "config command to an incapable forwarder must error"
+            );
+
+            connection.stop().await;
+            forwarder.shutdown().await;
+            endpoint.close().await;
+        })
+        .await
+        .expect("incapable config command test timed out");
+    }
+
+    /// With no live session at all, a config command errors immediately.
+    #[tokio::test]
+    async fn config_command_without_live_session_errors() {
+        let (state, _shutdown_rx) =
+            AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+        let result = get_forwarder_config(&state, "no-such-forwarder".to_owned()).await;
+        assert!(
+            result.is_err(),
+            "config command without a live session must error"
+        );
     }
 }

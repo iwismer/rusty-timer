@@ -94,6 +94,8 @@ fn script_two(raw: &[u8]) -> ForwarderScript {
         control_events: Vec::new(),
         control_pings: 0,
         control_ping_interval: std::time::Duration::from_millis(50),
+        config_get_json: String::new(),
+        config_restart_needed: false,
     }
 }
 
@@ -627,6 +629,8 @@ fn script_stream_mismatch() -> ForwarderScript {
         control_events: Vec::new(),
         control_pings: 0,
         control_ping_interval: std::time::Duration::from_millis(50),
+        config_get_json: String::new(),
+        config_restart_needed: false,
     }
 }
 

@@ -6,9 +6,9 @@ use std::time::Duration;
 use prost::Message;
 use rt_iroh::{Connection, Endpoint, EndpointBuilder, NodeAddr, RecvStream, SendStream};
 use rt_p2p_protocol::{
-    Ack, CaughtUp, ControlC2F, ControlF2C, DataC2F, DataF2C, DataSubscribe, EventBatch, GapNotice,
-    Hello, Ping, Pong, StreamCatalog, SubscribeOk, control_c2f, control_f2c, data_c2f, data_f2c,
-    negotiate,
+    Ack, CaughtUp, ConfigGetResponse, ConfigSetRequest, ConfigSetResponse, ControlC2F, ControlF2C,
+    DataC2F, DataF2C, DataSubscribe, EventBatch, GapNotice, Hello, Ping, Pong, RestartResponse,
+    StreamCatalog, SubscribeOk, control_c2f, control_f2c, data_c2f, data_f2c, negotiate,
 };
 use tokio::task::JoinHandle;
 
@@ -62,6 +62,14 @@ pub struct ForwarderScript {
     pub control_pings: u32,
     /// Delay between successive heartbeat pings (see [`Self::control_pings`]).
     pub control_ping_interval: Duration,
+    /// Canned config document returned in a `ConfigGetResponse` for any
+    /// inbound `ConfigGetRequest` (remote-config support). Only exercised when
+    /// the negotiated [`Self::server_hello`] advertises `CAP_REMOTE_CONFIG` so
+    /// the receiver actually issues config requests. Defaults to empty.
+    pub config_get_json: String,
+    /// `restart_needed` flag echoed in both `ConfigGetResponse` and
+    /// `ConfigSetResponse`. Defaults to `false`.
+    pub config_restart_needed: bool,
 }
 
 /// A scripted forwarder peer bound to a loopback iroh endpoint.
@@ -78,6 +86,7 @@ pub struct MockForwarderPeer {
     subscribes: Arc<Mutex<Vec<DataSubscribe>>>,
     connections: Arc<Mutex<usize>>,
     pongs: Arc<Mutex<Vec<Pong>>>,
+    config_sets: Arc<Mutex<Vec<ConfigSetRequest>>>,
 }
 
 impl MockForwarderPeer {
@@ -90,6 +99,7 @@ impl MockForwarderPeer {
         let subscribes = Arc::new(Mutex::new(Vec::new()));
         let connections = Arc::new(Mutex::new(0usize));
         let pongs = Arc::new(Mutex::new(Vec::new()));
+        let config_sets = Arc::new(Mutex::new(Vec::new()));
         let script = Arc::new(script);
 
         let accept_endpoint = endpoint.clone();
@@ -97,6 +107,7 @@ impl MockForwarderPeer {
         let accept_subscribes = Arc::clone(&subscribes);
         let accept_connections = Arc::clone(&connections);
         let accept_pongs = Arc::clone(&pongs);
+        let accept_config_sets = Arc::clone(&config_sets);
         let accept_task = tokio::spawn(async move {
             accept_loop(
                 accept_endpoint,
@@ -105,6 +116,7 @@ impl MockForwarderPeer {
                 accept_subscribes,
                 accept_connections,
                 accept_pongs,
+                accept_config_sets,
             )
             .await;
         });
@@ -117,6 +129,7 @@ impl MockForwarderPeer {
             subscribes,
             connections,
             pongs,
+            config_sets,
         })
     }
 
@@ -147,6 +160,16 @@ impl MockForwarderPeer {
         self.pongs.lock().expect("pongs mutex poisoned").clone()
     }
 
+    /// A snapshot of the `ConfigSetRequest`s received on the control stream, in
+    /// arrival order. Used to assert a `set_forwarder_config` round-trip
+    /// delivered the exact config document.
+    pub fn config_sets(&self) -> Vec<ConfigSetRequest> {
+        self.config_sets
+            .lock()
+            .expect("config_sets mutex poisoned")
+            .clone()
+    }
+
     /// The number of inbound QUIC connections accepted so far. A receiver that
     /// multiplexes several data streams over one control session opens exactly
     /// one connection, so this stays `1` while many streams are subscribed.
@@ -161,6 +184,7 @@ impl MockForwarderPeer {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn accept_loop(
     endpoint: Endpoint,
     script: Arc<ForwarderScript>,
@@ -168,6 +192,7 @@ async fn accept_loop(
     subscribes: Arc<Mutex<Vec<DataSubscribe>>>,
     connections: Arc<Mutex<usize>>,
     pongs: Arc<Mutex<Vec<Pong>>>,
+    config_sets: Arc<Mutex<Vec<ConfigSetRequest>>>,
 ) {
     while let Ok(Some(connection)) = endpoint.accept().await {
         *connections.lock().expect("connections mutex poisoned") += 1;
@@ -175,20 +200,24 @@ async fn accept_loop(
         let acks = Arc::clone(&acks);
         let subscribes = Arc::clone(&subscribes);
         let pongs = Arc::clone(&pongs);
+        let config_sets = Arc::clone(&config_sets);
         tokio::spawn(async move {
             // Errors here are surfaced via missing acks / failed reads on the
             // receiver side; the harness self-test asserts on those.
-            let _ = handle_connection(connection, script, acks, subscribes, pongs).await;
+            let _ =
+                handle_connection(connection, script, acks, subscribes, pongs, config_sets).await;
         });
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     connection: Connection,
     script: Arc<ForwarderScript>,
     acks: Arc<Mutex<Vec<Ack>>>,
     subscribes: Arc<Mutex<Vec<DataSubscribe>>>,
     pongs: Arc<Mutex<Vec<Pong>>>,
+    config_sets: Arc<Mutex<Vec<ConfigSetRequest>>>,
 ) -> HarnessResult {
     let (control_send, control_recv) = serve_control(&connection, &script).await?;
     // Drive live control-plane events (status pushes) and heartbeat pings on a
@@ -199,6 +228,7 @@ async fn handle_connection(
         control_recv,
         Arc::clone(&script),
         pongs,
+        config_sets,
     ));
     serve_data_loop(&connection, &script, &acks, &subscribes).await;
     control_task.abort();
@@ -213,6 +243,7 @@ async fn serve_control_loop(
     mut recv: RecvStream,
     script: Arc<ForwarderScript>,
     pongs: Arc<Mutex<Vec<Pong>>>,
+    config_sets: Arc<Mutex<Vec<ConfigSetRequest>>>,
 ) {
     for event in &script.control_events {
         if write_frame(&mut send, event).await.is_err() {
@@ -230,15 +261,60 @@ async fn serve_control_loop(
             return;
         }
     }
-    // Keep reading C2F frames (notably the receiver's Pong heartbeat answers)
-    // until the control stream closes, recording every Pong.
+    // Keep reading C2F frames until the control stream closes. Records every
+    // Pong (heartbeat answer) and responds to remote-config requests, mirroring
+    // a forwarder that advertised `CAP_REMOTE_CONFIG`. Config responses are
+    // written on the same control send stream, interleaved with heartbeat pings
+    // exactly as a real forwarder would.
     loop {
         match read_frame::<ControlC2F>(&mut recv).await {
-            Ok(frame) => {
-                if let Some(control_c2f::Msg::Pong(pong)) = frame.msg {
+            Ok(frame) => match frame.msg {
+                Some(control_c2f::Msg::Pong(pong)) => {
                     pongs.lock().expect("pongs mutex poisoned").push(pong);
                 }
-            }
+                Some(control_c2f::Msg::ConfigGetRequest(request)) => {
+                    let response = ControlF2C {
+                        msg: Some(control_f2c::Msg::ConfigGetResponse(ConfigGetResponse {
+                            request_id: request.request_id,
+                            config_json: script.config_get_json.clone(),
+                            restart_needed: script.config_restart_needed,
+                        })),
+                    };
+                    if write_frame(&mut send, &response).await.is_err() {
+                        return;
+                    }
+                }
+                Some(control_c2f::Msg::ConfigSetRequest(request)) => {
+                    config_sets
+                        .lock()
+                        .expect("config_sets mutex poisoned")
+                        .push(request.clone());
+                    let response = ControlF2C {
+                        msg: Some(control_f2c::Msg::ConfigSetResponse(ConfigSetResponse {
+                            request_id: request.request_id,
+                            ok: true,
+                            restart_needed: script.config_restart_needed,
+                            error: String::new(),
+                        })),
+                    };
+                    if write_frame(&mut send, &response).await.is_err() {
+                        return;
+                    }
+                }
+                Some(control_c2f::Msg::RestartRequest(request)) => {
+                    let response = ControlF2C {
+                        msg: Some(control_f2c::Msg::RestartResponse(RestartResponse {
+                            request_id: request.request_id,
+                            accepted: true,
+                            error: String::new(),
+                        })),
+                    };
+                    if write_frame(&mut send, &response).await.is_err() {
+                        return;
+                    }
+                }
+                _ => {}
+            },
             Err(_) => return,
         }
     }

@@ -722,6 +722,8 @@ mod tests {
             control_events: Vec::new(),
             control_pings: 0,
             control_ping_interval: Duration::from_millis(50),
+            config_get_json: String::new(),
+            config_restart_needed: false,
         }
     }
 
