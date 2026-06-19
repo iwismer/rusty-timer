@@ -1319,8 +1319,12 @@ pub async fn apply_section_update(
                 return apply_control_action_from_config(&action, config_state, logger).await;
             }
             update_config_file(config_state, subsystem, ui_tx, |raw| {
+                // Preserve any existing allow_remote_config setting; this handler
+                // only mutates allow_power_actions.
+                let allow_remote_config = raw.control.as_ref().and_then(|c| c.allow_remote_config);
                 raw.control = Some(crate::config::RawControlConfig {
                     allow_power_actions,
+                    allow_remote_config,
                 });
                 Ok(())
             })

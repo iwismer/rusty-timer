@@ -72,6 +72,10 @@ pub struct StatusHttpConfig {
 #[derive(Debug, Clone)]
 pub struct ControlConfig {
     pub allow_power_actions: bool,
+    /// Gates remote forwarder config get/set/restart over P2P (Phase 4/5).
+    /// Defaults to `true` per the product decision to allow remote config by
+    /// default.
+    pub allow_remote_config: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +159,7 @@ pub struct RawStatusHttpConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawControlConfig {
     pub allow_power_actions: Option<bool>,
+    pub allow_remote_config: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,9 +303,11 @@ pub fn load_config_from_str(
     let control = match raw.control {
         Some(c) => ControlConfig {
             allow_power_actions: c.allow_power_actions.unwrap_or(false),
+            allow_remote_config: c.allow_remote_config.unwrap_or(true),
         },
         None => ControlConfig {
             allow_power_actions: false,
+            allow_remote_config: true,
         },
     };
 
@@ -845,6 +852,32 @@ max_concurrent_bidi_streams = 2
             err.to_string().contains("ups.upstream_heartbeat_secs"),
             "error: {err}"
         );
+    }
+
+    #[test]
+    fn control_section_absent_defaults_allow_remote_config_true() {
+        let (toml, _dir) = minimal_toml("");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert!(cfg.control.allow_remote_config);
+        // Existing default for power actions is unchanged.
+        assert!(!cfg.control.allow_power_actions);
+    }
+
+    #[test]
+    fn control_section_present_without_allow_remote_config_defaults_true() {
+        let (toml, _dir) = minimal_toml("[control]\nallow_power_actions = true");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert!(cfg.control.allow_remote_config);
+        assert!(cfg.control.allow_power_actions);
+    }
+
+    #[test]
+    fn control_section_honors_explicit_allow_remote_config_false() {
+        let (toml, _dir) = minimal_toml("[control]\nallow_remote_config = false");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert!(!cfg.control.allow_remote_config);
+        // Power actions still default to false when unspecified.
+        assert!(!cfg.control.allow_power_actions);
     }
 
     #[test]
