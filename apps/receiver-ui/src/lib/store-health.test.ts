@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReaderLiveStatus, UpsStatusPayload } from "./api";
 
 vi.mock("./api", () => ({}));
 vi.mock("./desktop-updater", () => ({
@@ -30,8 +31,8 @@ type ForwarderOverrides = Partial<{
   pending: boolean;
   subscribed_count: number;
   available_count: number;
-  readers: unknown[];
-  ups: null;
+  readers: ReaderLiveStatus[];
+  ups: UpsStatusPayload | null;
   restart_needed: boolean | null;
 }>;
 
@@ -55,8 +56,8 @@ function forwarder(overrides: ForwarderOverrides = {}) {
     pending: false,
     subscribed_count: 1,
     available_count: 1,
-    readers: [],
-    ups: null,
+    readers: [] as ReaderLiveStatus[],
+    ups: null as UpsStatusPayload | null,
     restart_needed: null,
     ...overrides,
   };

@@ -12,6 +12,8 @@ const mockState = vi.hoisted(() => {
     waiting_for_approval: false,
     message: null as string | null,
   });
+  const readers = () => [] as import("./api").ReaderLiveStatus[];
+  const ups = () => null as import("./api").UpsStatusPayload | null;
 
   return {
     store: {
@@ -26,8 +28,8 @@ const mockState = vi.hoisted(() => {
             pending: false,
             subscribed_count: 2,
             available_count: 3,
-            readers: [],
-            ups: null,
+            readers: readers(),
+            ups: ups(),
             restart_needed: null,
           },
           {
@@ -37,8 +39,8 @@ const mockState = vi.hoisted(() => {
             pending: false,
             subscribed_count: 0,
             available_count: 1,
-            readers: [],
-            ups: null,
+            readers: readers(),
+            ups: ups(),
             restart_needed: false,
           },
           {
@@ -48,8 +50,8 @@ const mockState = vi.hoisted(() => {
             pending: true,
             subscribed_count: 0,
             available_count: 0,
-            readers: [],
-            ups: null,
+            readers: readers(),
+            ups: ups(),
             restart_needed: null,
           },
         ],
@@ -97,8 +99,8 @@ describe("ConnectionsTab", () => {
           pending: false,
           subscribed_count: 2,
           available_count: 3,
-          readers: [],
-          ups: null,
+          readers: [] as import("./api").ReaderLiveStatus[],
+          ups: null as import("./api").UpsStatusPayload | null,
           restart_needed: null,
         },
         {
@@ -108,8 +110,8 @@ describe("ConnectionsTab", () => {
           pending: false,
           subscribed_count: 0,
           available_count: 1,
-          readers: [],
-          ups: null,
+          readers: [] as import("./api").ReaderLiveStatus[],
+          ups: null as import("./api").UpsStatusPayload | null,
           restart_needed: false,
         },
         {
@@ -119,8 +121,8 @@ describe("ConnectionsTab", () => {
           pending: true,
           subscribed_count: 0,
           available_count: 0,
-          readers: [],
-          ups: null,
+          readers: [] as import("./api").ReaderLiveStatus[],
+          ups: null as import("./api").UpsStatusPayload | null,
           restart_needed: null,
         },
       ],
@@ -151,6 +153,48 @@ describe("ConnectionsTab", () => {
     );
   });
 
+  it("renders forwarder reader and UPS live status", () => {
+    mockState.store.connections.forwarders = [
+      {
+        endpoint_id: "endpoint-live",
+        display_name: "Live Forwarder",
+        state: "connected",
+        pending: false,
+        subscribed_count: 1,
+        available_count: 1,
+        readers: [
+          {
+            stream_id: "10.0.0.1:10000",
+            connected: false,
+            state: "offline",
+            last_read_unix_ms: null,
+            hardware_reader_id: "reader-42",
+            firmware_version: "1.2.3",
+            model: "IPICO",
+          },
+        ],
+        ups: {
+          on_battery: true,
+          battery_percent: 64,
+          runtime_seconds: 900,
+        },
+        restart_needed: null,
+      },
+    ];
+
+    render(ConnectionsTab);
+
+    expect(
+      screen.getByTestId("forwarder-reader-endpoint-live-10.0.0.1:10000"),
+    ).toHaveTextContent("reader-42");
+    expect(
+      screen.getByTestId("forwarder-reader-endpoint-live-10.0.0.1:10000"),
+    ).toHaveTextContent("offline");
+    expect(screen.getByTestId("forwarder-ups-endpoint-live")).toHaveTextContent(
+      "64%",
+    );
+  });
+
   it("calls the matching per-forwarder actions with the endpoint id", async () => {
     render(ConnectionsTab);
 
@@ -174,8 +218,8 @@ describe("ConnectionsTab", () => {
         pending: false,
         subscribed_count: 0,
         available_count: 0,
-        readers: [],
-        ups: null,
+        readers: [] as import("./api").ReaderLiveStatus[],
+        ups: null as import("./api").UpsStatusPayload | null,
         restart_needed: null,
       },
     ];
@@ -199,8 +243,8 @@ describe("ConnectionsTab", () => {
         pending: false,
         subscribed_count: 0,
         available_count: 0,
-        readers: [],
-        ups: null,
+        readers: [] as import("./api").ReaderLiveStatus[],
+        ups: null as import("./api").UpsStatusPayload | null,
         restart_needed: null,
       },
     ];

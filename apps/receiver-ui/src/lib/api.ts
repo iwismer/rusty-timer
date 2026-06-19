@@ -113,6 +113,22 @@ export type ForwarderConnState =
   | "unavailable"
   | "disconnected";
 
+export interface ReaderLiveStatus {
+  stream_id: string;
+  connected: boolean;
+  state: string;
+  last_read_unix_ms: number | null;
+  hardware_reader_id: string | null;
+  firmware_version: string | null;
+  model: string | null;
+}
+
+export interface UpsStatusPayload {
+  on_battery: boolean;
+  battery_percent: number;
+  runtime_seconds: number;
+}
+
 export interface ForwarderConnectionStatus {
   endpoint_id: string;
   display_name: string | null;
@@ -120,8 +136,8 @@ export interface ForwarderConnectionStatus {
   pending: boolean;
   subscribed_count: number;
   available_count: number;
-  readers: unknown[];
-  ups: ForwarderUpsState | null;
+  readers: ReaderLiveStatus[];
+  ups: UpsStatusPayload | null;
   restart_needed: boolean | null;
 }
 
