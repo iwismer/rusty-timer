@@ -169,7 +169,7 @@ pub(super) fn admin_authorized(headers: &HeaderMap, proxy_trusted: bool) -> bool
     headers
         .get(ADMIN_HEADER)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| !value.is_empty())
+        .is_some_and(|value| !value.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -416,6 +416,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn admin_authorized_fail_closed_and_trims() {
+        use crate::http::status::admin_authorized;
+        use axum::http::HeaderMap;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(ADMIN_HEADER, "alice".parse().unwrap());
+        // Header present but proxy not trusted -> denied (fail-closed).
+        assert!(!admin_authorized(&headers, false));
+        // Trusted proxy + real identity -> allowed.
+        assert!(admin_authorized(&headers, true));
+
+        // Whitespace-only identity is treated as absent even when trusted.
+        let mut blank = HeaderMap::new();
+        blank.insert(ADMIN_HEADER, "   ".parse().unwrap());
+        assert!(!admin_authorized(&blank, true));
+
+        // Missing header -> denied regardless of trust.
+        let empty = HeaderMap::new();
+        assert!(!admin_authorized(&empty, true));
     }
 
     #[tokio::test]

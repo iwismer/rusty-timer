@@ -211,13 +211,26 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 fn decode_hex(hex: &str) -> Option<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
+    // Decode byte-wise (never slice the `str`, which would panic on a
+    // multi-byte UTF-8 boundary). A malformed stored hash must fail closed by
+    // returning `None`, never by panicking.
+    let bytes = hex.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+    bytes
+        .chunks_exact(2)
+        .map(|pair| Some((hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?))
         .collect()
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Create the registry tables. Idempotent and safe to call on every open.
@@ -935,5 +948,10 @@ mod tests {
         assert!(!verify_token("x", b"deadbeef"));
         assert!(!verify_token("x", b"zz$zz"));
         assert!(!verify_token("x", &[0xff, 0xfe]));
+        // Valid UTF-8 but multi-byte hex parts must fail closed, not panic
+        // (would have panicked when slicing the str by byte index).
+        assert!(!verify_token("x", "é$é".as_bytes()));
+        assert!(!verify_token("x", "00$é".as_bytes()));
+        assert!(!verify_token("x", "abcd€xyz$0011".as_bytes()));
     }
 }
