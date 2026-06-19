@@ -18,9 +18,11 @@
 //! reconnects with exponential backoff (1s → 30s) and resumes from the
 //! persisted cursor.
 //!
-//! Production runtime wiring (dialing the configured forwarder for every
-//! subscription, multiplexing many streams) is intentionally minimal here and
-//! is owned by later tasks; this module provides the testable session core.
+//! This module provides the testable session core: the control handshake
+//! ([`connect_and_hello`]) and a single data-plane subscription
+//! ([`run_data_subscription_with_hint`]). Production runtime wiring — owning one
+//! control session per forwarder and multiplexing many data streams over it,
+//! with reconnection — lives in [`crate::p2p_forwarder`].
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,7 +34,7 @@ use rt_p2p_protocol::{
     HelloOk, MAX_FRAME_BYTES, StreamCatalog, SubscribeMode, control_c2f, control_f2c, data_c2f,
     data_f2c, encode_frame,
 };
-use tokio::sync::{Mutex, broadcast, watch};
+use tokio::sync::{Mutex, broadcast};
 
 use crate::control_api::AppState;
 use crate::db::{Db, GapMarkerInsert, ReceivedEventInsert};
@@ -85,13 +87,6 @@ impl SessionStatusReporter {
             state: Arc::clone(&self.state),
             endpoint_id: endpoint_id.to_owned(),
         }
-    }
-
-    /// Compatibility shim for the old per-stream worker path. It reports a
-    /// control session for a synthetic endpoint until Task 1.4 removes that
-    /// path from reconciliation.
-    async fn on_connected(&self) -> ControlConnectedGuard {
-        self.on_control_connected("__legacy_stream_session__").await
     }
 }
 
@@ -257,36 +252,6 @@ impl Default for BackoffConfig {
             max: Duration::from_secs(30),
         }
     }
-}
-
-/// Doubles `current`, capped at `max`.
-fn next_backoff(current: Duration, max: Duration) -> Duration {
-    current.saturating_mul(2).min(max)
-}
-
-/// Parameters for a reconnecting single-stream session.
-#[derive(Clone, Debug)]
-pub struct SessionParams {
-    /// The stream to subscribe to. An arbitrary UTF-8 stream key (e.g. the
-    /// forwarder journal key `ip:port`), stored verbatim in the durable store.
-    pub stream_id: String,
-    /// The client `Hello` to present during control-plane negotiation.
-    pub client_hello: Hello,
-    /// Subscription mode (typically [`SubscribeMode::Replay`] to resume + go live).
-    pub mode: SubscribeMode,
-    /// Reconnect backoff bounds.
-    pub backoff: BackoffConfig,
-    /// Optional post-commit durable hint sink. After every durable insert /
-    /// cursor advance (and on gap-jump), the contiguous durable cursor is
-    /// broadcast on this channel so downstream workers — the durable local
-    /// proxy, the DBF feed, and the announcer push — can drain freshly
-    /// persisted rows. The hint is sent *after* the durable write, preserving
-    /// the insert-before-ack contract.
-    pub durable_hint_tx: Option<broadcast::Sender<i64>>,
-    /// Optional reporter that reflects this session's connect/disconnect
-    /// lifecycle into the shared [`AppState`] connection state. `None` for
-    /// session-core tests that do not exercise the aggregate connection state.
-    pub reporter: Option<Arc<SessionStatusReporter>>,
 }
 
 /// An established control-plane session with a forwarder peer.
@@ -648,94 +613,6 @@ pub async fn run_data_subscription_with_hint(
     Ok(SessionOutcome::OpenedThenDisconnected)
 }
 
-async fn run_once(
-    endpoint: &Endpoint,
-    forwarder_addr: NodeAddr,
-    db: &Arc<Mutex<Db>>,
-    params: &SessionParams,
-) -> Result<SessionOutcome, P2pSessionError> {
-    let session = connect_and_hello(endpoint, forwarder_addr, params.client_hello.clone()).await?;
-    // The handshake succeeded: this session is live. Hold an RAII guard for the
-    // duration of the data subscription so the shared live-session count is
-    // released on drop even if this future is cancelled mid-session (worker
-    // rebuild on subscription edit/removal, or runtime shutdown) rather than
-    // only on a clean return.
-    let _connected_guard = match &params.reporter {
-        Some(reporter) => Some(reporter.on_connected().await),
-        None => None,
-    };
-    run_data_subscription_with_hint(
-        &session.connection,
-        db,
-        &params.stream_id,
-        params.mode,
-        params.durable_hint_tx.as_ref(),
-    )
-    .await
-}
-
-/// Run a reconnecting single-stream session: dial + hello + data subscription,
-/// and on disconnect back off (1s → 30s) and resume from the persisted cursor.
-///
-/// Returns `Ok(())` when `shutdown` is set to `true`. Each reconnect resumes
-/// from the cursor read inside [`run_data_subscription`], so no in-memory
-/// progress is lost across reconnects.
-///
-/// Only transient transport/read failures (see [`P2pSessionError::is_retryable`])
-/// are retried. Durable failures — decode, frame-size, protocol-sequencing, and
-/// data-integrity errors, plus durable store errors — are returned to the
-/// caller instead of being retried forever. Backoff resets only after a
-/// subscription actually opened ([`SessionOutcome::OpenedThenDisconnected`]); a
-/// pre-open disconnect or a retryable failure keeps growing the backoff window.
-pub async fn run_session_with_reconnect(
-    endpoint: &Endpoint,
-    forwarder_addr: NodeAddr,
-    db: &Arc<Mutex<Db>>,
-    params: &SessionParams,
-    mut shutdown: watch::Receiver<bool>,
-) -> Result<(), P2pSessionError> {
-    let mut backoff = params.backoff.initial;
-    loop {
-        if *shutdown.borrow() {
-            return Ok(());
-        }
-
-        let outcome = tokio::select! {
-            biased;
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() { return Ok(()); }
-                continue;
-            }
-            outcome = run_once(endpoint, forwarder_addr.clone(), db, params) => outcome,
-        };
-
-        let reset_backoff = match outcome {
-            Ok(SessionOutcome::OpenedThenDisconnected) => true,
-            Ok(SessionOutcome::DisconnectedBeforeOpen) => false,
-            Err(e) if e.is_retryable() => {
-                tracing::warn!(error = %e, "p2p session transient failure; retrying");
-                false
-            }
-            // Durable failures are not retryable: surface them to the caller.
-            Err(e) => return Err(e),
-        };
-
-        tokio::select! {
-            biased;
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() { return Ok(()); }
-            }
-            () = tokio::time::sleep(backoff) => {}
-        }
-
-        backoff = if reset_backoff {
-            params.backoff.initial
-        } else {
-            next_backoff(backoff, params.backoff.max)
-        };
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -879,10 +756,11 @@ mod tests {
 
     #[tokio::test]
     async fn connected_session_guard_releases_on_cancellation() {
-        // A connected session whose run_once future is cancelled (guard dropped
-        // without a clean return) must still release its live-session count and
-        // fall the aggregate state back to Connecting — otherwise the badge can
-        // stay falsely "Connected" after the last session ends.
+        // A connected session whose control guard is dropped without a clean
+        // return (e.g. the connection task is cancelled mid-session) must still
+        // release its live-session count and fall the aggregate state back to
+        // Connecting — otherwise the badge can stay falsely "Connected" after
+        // the last session ends.
         let (state, reporter) = reporter_state();
         let guard = reporter.on_control_connected("fwd-1").await;
         assert_eq!(
@@ -890,7 +768,7 @@ mod tests {
             ConnectionState::Connected
         );
 
-        drop(guard); // simulates run_once cancellation mid-session
+        drop(guard); // simulates connection-task cancellation mid-session
 
         assert_eq!(
             state.connection_state.borrow().clone(),
@@ -1067,71 +945,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconnect_storm_resumes_without_duplicates() {
-        tokio::time::timeout(TEST_TIMEOUT, async {
-            let stream_id = stream_id();
-            let mut script = base_script();
-            script.batches = vec![batch(&[1, 2, 3])];
-            script.caught_up_through = Some(3);
-
-            let forwarder = MockForwarderPeer::start([42; 32], script).await.unwrap();
-            let endpoint = test_endpoint(43).await;
-            let db = test_db();
-            let (shutdown_tx, shutdown_rx) = watch::channel(false);
-            let params = SessionParams {
-                stream_id: stream_id.to_owned(),
-                client_hello: test_hello(0),
-                mode: SubscribeMode::Replay,
-                backoff: BackoffConfig {
-                    initial: Duration::from_millis(1),
-                    max: Duration::from_millis(1),
-                },
-                durable_hint_tx: None,
-                reporter: None,
-            };
-
-            let session_task = tokio::spawn({
-                let endpoint = endpoint.clone();
-                let db = Arc::clone(&db);
-                let forwarder_addr = forwarder.node_addr();
-                async move {
-                    run_session_with_reconnect(&endpoint, forwarder_addr, &db, &params, shutdown_rx)
-                        .await
-                }
-            });
-
-            poll_until(
-                || async { forwarder.subscribes().len() >= 4 },
-                Duration::from_secs(5),
-            )
-            .await;
-            shutdown_tx.send(true).unwrap();
-            session_task.await.unwrap().unwrap();
-
-            let guard = db.lock().await;
-            let events = guard.load_received_events(stream_id).unwrap();
-            assert_eq!(events.len(), 3, "reconnect storm must not duplicate rows");
-            assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 3);
-            drop(guard);
-
-            let subscribes = forwarder.subscribes();
-            assert!(subscribes.len() >= 4);
-            assert_eq!(subscribes[0].after_seq, 0);
-            assert!(
-                subscribes
-                    .iter()
-                    .skip(1)
-                    .all(|subscribe| subscribe.after_seq == 3),
-                "all reconnects after the first must resume from the durable cursor: {subscribes:?}"
-            );
-
-            forwarder.shutdown().await;
-        })
-        .await
-        .expect("reconnect_storm_resumes_without_duplicates timed out");
-    }
-
-    #[tokio::test]
     async fn duplicate_seq_deduped() {
         tokio::time::timeout(TEST_TIMEOUT, async {
             let stream_id = stream_id();
@@ -1220,47 +1033,10 @@ mod tests {
     }
 
     #[test]
-    fn backoff_doubles_and_caps_at_max() {
+    fn backoff_default_bounds() {
         let config = BackoffConfig::default();
         assert_eq!(config.initial, Duration::from_secs(1));
         assert_eq!(config.max, Duration::from_secs(30));
-        assert_eq!(
-            next_backoff(Duration::from_secs(1), config.max),
-            Duration::from_secs(2)
-        );
-        assert_eq!(
-            next_backoff(Duration::from_secs(16), config.max),
-            Duration::from_secs(30)
-        );
-        assert_eq!(
-            next_backoff(Duration::from_secs(30), config.max),
-            Duration::from_secs(30)
-        );
-    }
-
-    #[tokio::test]
-    async fn reconnect_loop_returns_when_shutdown_already_set() {
-        let endpoint = test_endpoint(18).await;
-        let db = test_db();
-        let forwarder = MockForwarderPeer::start([19; 32], base_script())
-            .await
-            .unwrap();
-        let (_tx, shutdown_rx) = watch::channel(true);
-        let params = SessionParams {
-            stream_id: stream_id().to_owned(),
-            client_hello: test_hello(0),
-            mode: SubscribeMode::Replay,
-            backoff: BackoffConfig::default(),
-            durable_hint_tx: None,
-            reporter: None,
-        };
-
-        let result =
-            run_session_with_reconnect(&endpoint, forwarder.node_addr(), &db, &params, shutdown_rx)
-                .await;
-        assert!(result.is_ok());
-
-        forwarder.shutdown().await;
     }
 
     fn record_with(seq: u64, raw: &str) -> ReadRecord {
@@ -1602,41 +1378,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconnect_loop_exits_when_shutdown_sender_dropped() {
-        let endpoint = test_endpoint(40).await;
-        let db = test_db();
-        let forwarder = MockForwarderPeer::start([41; 32], base_script())
-            .await
-            .unwrap();
-        let (tx, shutdown_rx) = watch::channel(false);
-        drop(tx);
-        let params = SessionParams {
-            stream_id: stream_id().to_owned(),
-            client_hello: test_hello(0),
-            mode: SubscribeMode::Replay,
-            backoff: BackoffConfig {
-                initial: Duration::from_millis(10),
-                max: Duration::from_millis(10),
-            },
-            durable_hint_tx: None,
-            reporter: None,
-        };
-
-        let result = tokio::time::timeout(
-            Duration::from_millis(100),
-            run_session_with_reconnect(&endpoint, forwarder.node_addr(), &db, &params, shutdown_rx),
-        )
-        .await;
-
-        assert!(
-            matches!(result, Ok(Ok(()))),
-            "closed shutdown channel must exit instead of spinning, got {result:?}"
-        );
-
-        forwarder.shutdown().await;
-    }
-
-    #[tokio::test]
     async fn disconnect_before_subscribe_ok_reports_pre_open() {
         tokio::time::timeout(TEST_TIMEOUT, async {
             let stream_id = stream_id();
@@ -1666,54 +1407,6 @@ mod tests {
         })
         .await
         .expect("disconnect_before_subscribe_ok_reports_pre_open timed out");
-    }
-
-    #[tokio::test]
-    async fn reconnect_loop_surfaces_durable_error() {
-        tokio::time::timeout(TEST_TIMEOUT, async {
-            let mut script = base_script();
-            // A durable data-integrity error: the forwarder hands back a foreign
-            // stream_id on SubscribeOk. The reconnect loop must surface it, not
-            // retry forever.
-            script.subscribe_ok.stream_id = other_sid_bytes();
-            // Keep the forwarder blocked awaiting an ack so the SubscribeOk frame
-            // is reliably delivered before the connection closes.
-            script.batches = vec![batch(&[1])];
-
-            let forwarder = MockForwarderPeer::start([32; 32], script).await.unwrap();
-            let endpoint = test_endpoint(33).await;
-            let db = test_db();
-            let (_tx, shutdown_rx) = watch::channel(false);
-            let params = SessionParams {
-                stream_id: stream_id().to_owned(),
-                client_hello: test_hello(0),
-                mode: SubscribeMode::Replay,
-                backoff: BackoffConfig {
-                    initial: Duration::from_millis(10),
-                    max: Duration::from_millis(50),
-                },
-                durable_hint_tx: None,
-                reporter: None,
-            };
-
-            let result = run_session_with_reconnect(
-                &endpoint,
-                forwarder.node_addr(),
-                &db,
-                &params,
-                shutdown_rx,
-            )
-            .await;
-
-            assert!(
-                matches!(result, Err(P2pSessionError::StreamIdMismatch { .. })),
-                "reconnect loop must surface durable errors, got {result:?}"
-            );
-
-            forwarder.shutdown().await;
-        })
-        .await
-        .expect("reconnect_loop_surfaces_durable_error timed out");
     }
 
     #[test]
