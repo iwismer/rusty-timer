@@ -133,6 +133,30 @@ describe("api client", () => {
     });
   });
 
+  it("sends camelCase args for remote forwarder config commands", async () => {
+    const { getForwarderConfig, setForwarderConfig, restartForwarder } =
+      await import("./api");
+    mockInvoke
+      .mockResolvedValueOnce({ config_json: "{}", restart_needed: false })
+      .mockResolvedValueOnce({ ok: true, restart_needed: true, error: "" })
+      .mockResolvedValueOnce({ accepted: true, error: "" });
+
+    await getForwarderConfig("endpoint-1");
+    await setForwarderConfig("endpoint-1", '{"display_name":"A"}');
+    await restartForwarder("endpoint-1");
+
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "get_forwarder_config", {
+      endpointId: "endpoint-1",
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "set_forwarder_config", {
+      endpointId: "endpoint-1",
+      configJson: '{"display_name":"A"}',
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(3, "restart_forwarder", {
+      endpointId: "endpoint-1",
+    });
+  });
+
   it("putSubscriptions sends body with subscriptions", async () => {
     const { putSubscriptions } = await import("./api");
     mockInvoke.mockResolvedValue(undefined);

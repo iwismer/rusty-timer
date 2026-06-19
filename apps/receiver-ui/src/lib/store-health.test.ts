@@ -34,6 +34,7 @@ type ForwarderOverrides = Partial<{
   readers: ReaderLiveStatus[];
   ups: UpsStatusPayload | null;
   restart_needed: boolean | null;
+  remote_config_available: boolean;
 }>;
 
 function server(overrides: ServerOverrides = {}) {
@@ -59,6 +60,7 @@ function forwarder(overrides: ForwarderOverrides = {}) {
     readers: [] as ReaderLiveStatus[],
     ups: null as UpsStatusPayload | null,
     restart_needed: null,
+    remote_config_available: false,
     ...overrides,
   };
 }

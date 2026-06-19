@@ -31,6 +31,7 @@ const mockState = vi.hoisted(() => {
             readers: readers(),
             ups: ups(),
             restart_needed: null,
+            remote_config_available: true,
           },
           {
             endpoint_id: "endpoint-2",
@@ -42,6 +43,7 @@ const mockState = vi.hoisted(() => {
             readers: readers(),
             ups: ups(),
             restart_needed: false,
+            remote_config_available: false,
           },
           {
             endpoint_id: "endpoint-3",
@@ -53,6 +55,7 @@ const mockState = vi.hoisted(() => {
             readers: readers(),
             ups: ups(),
             restart_needed: null,
+            remote_config_available: true,
           },
         ],
       },
@@ -72,6 +75,9 @@ vi.mock("$lib/api", () => ({
   connectForwarder: mockState.connectForwarder,
   disconnectForwarder: mockState.disconnectForwarder,
   reconnectForwarder: mockState.reconnectForwarder,
+  getForwarderConfig: vi.fn(),
+  setForwarderConfig: vi.fn(),
+  restartForwarder: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
@@ -102,6 +108,7 @@ describe("ConnectionsTab", () => {
           readers: [] as import("./api").ReaderLiveStatus[],
           ups: null as import("./api").UpsStatusPayload | null,
           restart_needed: null,
+          remote_config_available: true,
         },
         {
           endpoint_id: "endpoint-2",
@@ -113,6 +120,7 @@ describe("ConnectionsTab", () => {
           readers: [] as import("./api").ReaderLiveStatus[],
           ups: null as import("./api").UpsStatusPayload | null,
           restart_needed: false,
+          remote_config_available: false,
         },
         {
           endpoint_id: "endpoint-3",
@@ -124,6 +132,7 @@ describe("ConnectionsTab", () => {
           readers: [] as import("./api").ReaderLiveStatus[],
           ups: null as import("./api").UpsStatusPayload | null,
           restart_needed: null,
+          remote_config_available: true,
         },
       ],
     };
@@ -179,6 +188,7 @@ describe("ConnectionsTab", () => {
           runtime_seconds: 900,
         },
         restart_needed: null,
+        remote_config_available: false,
       },
     ];
 
@@ -193,6 +203,20 @@ describe("ConnectionsTab", () => {
     expect(screen.getByTestId("forwarder-ups-endpoint-live")).toHaveTextContent(
       "64%",
     );
+  });
+
+  it("shows configure only for forwarders that support remote config", () => {
+    render(ConnectionsTab);
+
+    expect(
+      screen.getByTestId("forwarder-configure-endpoint-1"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("forwarder-configure-endpoint-2"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("forwarder-configure-endpoint-3"),
+    ).toBeInTheDocument();
   });
 
   it("calls the matching per-forwarder actions with the endpoint id", async () => {
@@ -221,6 +245,7 @@ describe("ConnectionsTab", () => {
         readers: [] as import("./api").ReaderLiveStatus[],
         ups: null as import("./api").UpsStatusPayload | null,
         restart_needed: null,
+        remote_config_available: false,
       },
     ];
 
@@ -246,6 +271,7 @@ describe("ConnectionsTab", () => {
         readers: [] as import("./api").ReaderLiveStatus[],
         ups: null as import("./api").UpsStatusPayload | null,
         restart_needed: null,
+        remote_config_available: false,
       },
     ];
 

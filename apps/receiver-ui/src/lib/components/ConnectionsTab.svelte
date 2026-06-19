@@ -13,6 +13,7 @@
     reconnectForwarder,
   } from "$lib/api";
   import { btnPrimary, btnSecondary } from "$lib/ui-classes";
+  import ForwarderConfigModal from "./ForwarderConfigModal.svelte";
 
   type StateDisplay = {
     label: string;
@@ -22,6 +23,7 @@
 
   let busyByEndpoint = $state<Record<string, boolean>>({});
   let actionError = $state<string | null>(null);
+  let configEndpointId = $state<string | null>(null);
 
   function approvalLabel(server: ServerDeviceStatus): string | null {
     if (!server.configured) return "Server not configured";
@@ -144,6 +146,15 @@
   function readerLabel(reader: ReaderLiveStatus): string {
     return reader.hardware_reader_id ?? reader.stream_id;
   }
+
+  function selectedConfigForwarder(): ForwarderConnectionStatus | null {
+    if (!configEndpointId || !store.connections) return null;
+    return (
+      store.connections.forwarders.find(
+        (forwarder) => forwarder.endpoint_id === configEndpointId,
+      ) ?? null
+    );
+  }
 </script>
 
 <div class="mx-auto max-w-[760px] px-6 py-6">
@@ -257,6 +268,15 @@
               </div>
 
               <div class="flex shrink-0 items-center gap-2">
+                {#if forwarder.remote_config_available === true}
+                  <button
+                    data-testid={`forwarder-configure-${forwarder.endpoint_id}`}
+                    class={btnSecondary}
+                    onclick={() => (configEndpointId = forwarder.endpoint_id)}
+                  >
+                    Configure
+                  </button>
+                {/if}
                 {#if showConnect(forwarder)}
                   <button
                     data-testid={`forwarder-connect-${forwarder.endpoint_id}`}
@@ -323,6 +343,14 @@
     {#if actionError}
       <p class="mt-3 text-xs text-status-err">{actionError}</p>
     {/if}
+
+    {@const configForwarder = selectedConfigForwarder()}
+    <ForwarderConfigModal
+      open={configEndpointId !== null}
+      endpointId={configEndpointId}
+      displayName={configForwarder?.display_name ?? null}
+      onClose={() => (configEndpointId = null)}
+    />
   {:else}
     <section
       data-testid="connections-server-card"

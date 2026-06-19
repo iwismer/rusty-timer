@@ -139,6 +139,7 @@ export interface ForwarderConnectionStatus {
   readers: ReaderLiveStatus[];
   ups: UpsStatusPayload | null;
   restart_needed: boolean | null;
+  remote_config_available: boolean;
 }
 
 export interface ConnectionsResponse {
@@ -286,6 +287,46 @@ export async function disconnectForwarder(endpointId: string): Promise<void> {
 
 export async function reconnectForwarder(endpointId: string): Promise<void> {
   await invoke("reconnect_forwarder", { endpointId });
+}
+
+export interface ForwarderConfigResponse {
+  config_json: string;
+  restart_needed: boolean;
+}
+
+export interface SetForwarderConfigResponse {
+  ok: boolean;
+  restart_needed: boolean;
+  error: string;
+}
+
+export interface RestartForwarderResponse {
+  accepted: boolean;
+  error: string;
+}
+
+export async function getForwarderConfig(
+  endpointId: string,
+): Promise<ForwarderConfigResponse> {
+  return invoke<ForwarderConfigResponse>("get_forwarder_config", {
+    endpointId,
+  });
+}
+
+export async function setForwarderConfig(
+  endpointId: string,
+  configJson: string,
+): Promise<SetForwarderConfigResponse> {
+  return invoke<SetForwarderConfigResponse>("set_forwarder_config", {
+    endpointId,
+    configJson,
+  });
+}
+
+export async function restartForwarder(
+  endpointId: string,
+): Promise<RestartForwarderResponse> {
+  return invoke<RestartForwarderResponse>("restart_forwarder", { endpointId });
 }
 
 export async function getLogs(): Promise<LogsResponse> {
