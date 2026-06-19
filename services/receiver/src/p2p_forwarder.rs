@@ -148,8 +148,17 @@ async fn run_forwarder_connection(
             }
             () = tokio::time::sleep(next_delay) => {}
         }
-        next_delay = next_delay.saturating_mul(2).min(backoff.max);
+        next_delay = next_backoff(next_delay, backoff.max);
     }
+}
+
+/// Compute the next reconnect backoff delay: double `current`, capped at `max`.
+///
+/// Pure helper so the doubling/capping contract can be unit-tested without
+/// spinning up a connection. The saturating multiply guards against overflow
+/// once the delay grows large.
+fn next_backoff(current: Duration, max: Duration) -> Duration {
+    current.saturating_mul(2).min(max)
 }
 
 async fn run_connected_forwarder(
@@ -413,5 +422,30 @@ mod tests {
         })
         .await
         .expect("forwarder connection state test timed out");
+    }
+
+    #[test]
+    fn backoff_doubles_and_caps_at_max() {
+        let max = Duration::from_secs(30);
+        // Doubling from the initial delay.
+        assert_eq!(
+            super::next_backoff(Duration::from_secs(1), max),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            super::next_backoff(Duration::from_secs(2), max),
+            Duration::from_secs(4)
+        );
+        assert_eq!(
+            super::next_backoff(Duration::from_secs(8), max),
+            Duration::from_secs(16)
+        );
+        // Doubling past the cap clamps to max.
+        assert_eq!(super::next_backoff(Duration::from_secs(16), max), max);
+        assert_eq!(super::next_backoff(max, max), max);
+        // A delay already above max stays at max (never grows unbounded).
+        assert_eq!(super::next_backoff(Duration::from_secs(60), max), max);
+        // Saturating multiply guards against overflow at huge delays.
+        assert_eq!(super::next_backoff(Duration::MAX, max), max);
     }
 }
