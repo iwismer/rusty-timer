@@ -721,14 +721,12 @@ fn main() {
             // block_on is safe here because setup() runs before the Tauri event
             // loop starts, so we won't deadlock the async runtime.
             let receiver_id_override = receiver_id_override_from_env();
-            let data_dir_override = data_dir_override_from_env();
+            // Resolve the data dir once so the DB and the persistent P2P
+            // secret-key file live in the same place.
+            let data_dir =
+                data_dir_override_from_env().unwrap_or_else(receiver::runtime::default_data_dir);
             let (state, shutdown_rx) = tauri::async_runtime::block_on(async {
-                match data_dir_override {
-                    Some(dir) => {
-                        receiver::runtime::init_with_data_dir(receiver_id_override, dir).await
-                    }
-                    None => receiver::runtime::init(receiver_id_override).await,
-                }
+                receiver::runtime::init_with_data_dir(receiver_id_override, data_dir.clone()).await
             })
             .map_err(|e| -> Box<dyn std::error::Error> {
                 let msg = format!("Fatal: failed to initialize receiver runtime: {e}");
@@ -747,7 +745,8 @@ fn main() {
             // `receiver-headless` so the desktop app connects to a forwarder
             // over iroh. Inert (no P2P) when the env vars are absent.
             let p2p_handle = app.handle().clone();
-            match receiver::p2p_runtime::p2p_config_from_env() {
+            let p2p_key_path = data_dir.join("p2p_secret.key");
+            match receiver::p2p_runtime::p2p_config_from_env(p2p_key_path) {
                 Ok(Some(p2p_config)) => {
                     let p2p_state = state.clone();
                     let p2p_runtime = tauri::async_runtime::block_on(async {

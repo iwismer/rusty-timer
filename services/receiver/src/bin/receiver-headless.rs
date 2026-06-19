@@ -86,6 +86,9 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<HeadlessConfig
     let mut forwarder_node_id: Option<String> = None;
     let mut forwarder_direct_addr: Option<SocketAddr> = None;
     let mut secret_key_seed: Option<[u8; 32]> = None;
+    let mut secret_key_path: Option<PathBuf> = None;
+    let mut relay_disabled = false;
+    let mut discovery_disabled = false;
     let mut server_url: Option<String> = None;
     let mut server_token: Option<String> = None;
     let mut reconcile_ms: Option<u64> = None;
@@ -140,6 +143,18 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<HeadlessConfig
                     .ok_or_else(|| "--p2p-secret-key-seed-hex requires a value".to_owned())?;
                 secret_key_seed = Some(parse_secret_key_seed_hex(&value.to_string_lossy())?);
             }
+            "--p2p-secret-key-path" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--p2p-secret-key-path requires a path".to_owned())?;
+                secret_key_path = Some(PathBuf::from(value));
+            }
+            "--p2p-relay-disabled" => {
+                relay_disabled = true;
+            }
+            "--p2p-discovery-disabled" => {
+                discovery_disabled = true;
+            }
             "--p2p-server-url" => {
                 let value = args
                     .next()
@@ -168,17 +183,23 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<HeadlessConfig
         }
     }
 
+    let data_dir = data_dir.ok_or_else(|| format!("--data-dir is required\n{}", usage()))?;
+    let default_key_path = data_dir.join("p2p_secret.key");
     let p2p = build_p2p_config(
         forwarder_node_id,
         forwarder_direct_addr,
         secret_key_seed,
+        secret_key_path,
+        relay_disabled,
+        discovery_disabled,
         server_url,
         server_token,
         reconcile_ms,
+        default_key_path,
     )?;
 
     Ok(HeadlessConfig {
-        data_dir: data_dir.ok_or_else(|| format!("--data-dir is required\n{}", usage()))?,
+        data_dir,
         bind_addr,
         receiver_id,
         p2p,
@@ -186,21 +207,34 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<HeadlessConfig
 }
 
 /// Assemble the optional P2P config from parsed flags. P2P is enabled only when
-/// at least one P2P flag is present; the secret-key seed is then required; the
-/// forwarder node id and direct address must be supplied together (both or
-/// neither); the server URL and token must be supplied together; and at
-/// least one of an explicit forwarder or a server must be configured.
+/// at least one P2P flag is present; the forwarder node id and direct address
+/// must be supplied together (both or neither); the server URL and token must
+/// be supplied together; and at least one of an explicit forwarder or a server
+/// must be configured.
+///
+/// Identity: a seed and an explicit key path are mutually exclusive; when
+/// neither is given, a persistent key at `default_key_path` is used. A seed
+/// implies the loopback/dev transport (relays + discovery off, loopback bind);
+/// a key path uses production transport unless the disable flags are set.
+#[allow(clippy::too_many_arguments)]
 fn build_p2p_config(
     forwarder_node_id: Option<String>,
     forwarder_direct_addr: Option<SocketAddr>,
     secret_key_seed: Option<[u8; 32]>,
+    secret_key_path: Option<PathBuf>,
+    relay_disabled: bool,
+    discovery_disabled: bool,
     server_url: Option<String>,
     server_token: Option<String>,
     reconcile_ms: Option<u64>,
+    default_key_path: PathBuf,
 ) -> Result<Option<P2pReceiverConfig>, String> {
     let any_p2p = forwarder_node_id.is_some()
         || forwarder_direct_addr.is_some()
         || secret_key_seed.is_some()
+        || secret_key_path.is_some()
+        || relay_disabled
+        || discovery_disabled
         || server_url.is_some()
         || server_token.is_some()
         || reconcile_ms.is_some();
@@ -248,12 +282,23 @@ fn build_p2p_config(
         ));
     }
 
-    let secret_key_seed = secret_key_seed.ok_or_else(|| {
-        format!(
-            "--p2p-secret-key-seed-hex is required when P2P flags are set\n{}",
-            usage()
-        )
-    })?;
+    let identity = match (secret_key_seed, secret_key_path) {
+        (Some(_), Some(_)) => {
+            return Err(format!(
+                "--p2p-secret-key-seed-hex and --p2p-secret-key-path are mutually exclusive\n{}",
+                usage()
+            ));
+        }
+        (Some(seed), None) => ReceiverIdentity::Seed(seed),
+        (None, Some(path)) => ReceiverIdentity::KeyPath(path),
+        (None, None) => ReceiverIdentity::KeyPath(default_key_path),
+    };
+    // A seed is loopback/dev: force relays + discovery off and bind loopback.
+    let seed_identity = matches!(identity, ReceiverIdentity::Seed(_));
+    let relay_disabled = relay_disabled || seed_identity;
+    let discovery_disabled = discovery_disabled || seed_identity;
+    let bind_addr_v4 =
+        seed_identity.then(|| std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0));
 
     let reconcile_interval = Duration::from_millis(reconcile_ms.unwrap_or(1000));
     if reconcile_interval < MIN_RECONCILE_INTERVAL {
@@ -265,13 +310,10 @@ fn build_p2p_config(
     }
 
     Ok(Some(P2pReceiverConfig {
-        identity: ReceiverIdentity::Seed(secret_key_seed),
-        relay_disabled: true,
-        discovery_disabled: true,
-        bind_addr_v4: Some(std::net::SocketAddrV4::new(
-            std::net::Ipv4Addr::LOCALHOST,
-            0,
-        )),
+        identity,
+        relay_disabled,
+        discovery_disabled,
+        bind_addr_v4,
         forwarder,
         server,
         reconcile_interval,
@@ -282,8 +324,10 @@ fn usage() -> String {
     concat!(
         "usage: receiver-headless --data-dir <path> [--bind-addr <addr:port>] [--receiver-id <id>]\n",
         "\n",
-        "P2P (secret-key-seed-hex required; configure an explicit forwarder, a server, or both):\n",
-        "  --p2p-secret-key-seed-hex <64-hex>  (required)\n",
+        "P2P (configure an explicit forwarder, a server, or both):\n",
+        "  [--p2p-secret-key-seed-hex <64-hex>]  (dev/loopback identity; default: persistent key in data dir)\n",
+        "  [--p2p-secret-key-path <path>]  (persistent identity; mutually exclusive with seed)\n",
+        "  [--p2p-relay-disabled] [--p2p-discovery-disabled]  (transport; forced on for a seed)\n",
         "  [--p2p-forwarder-node-id <node-id> --p2p-forwarder-direct-addr <ip:port>]\n",
         "  [--p2p-server-url <url> --p2p-server-token <token>]\n",
         "  [--p2p-reconcile-ms <ms>]  (must be >= 50)",
@@ -526,5 +570,47 @@ mod tests {
         ]))
         .unwrap_err();
         assert!(err.contains("64 hex characters"), "got: {err}");
+    }
+
+    #[test]
+    fn server_only_without_seed_uses_default_key_path() {
+        let config = parse_args(args(&[
+            "--data-dir",
+            "/tmp/x",
+            "--p2p-server-url",
+            "http://127.0.0.1:8080",
+            "--p2p-server-token",
+            "secret-token",
+        ]))
+        .unwrap();
+        let p2p = config.p2p.expect("p2p config present");
+        match p2p.identity {
+            ReceiverIdentity::KeyPath(path) => {
+                assert_eq!(path, PathBuf::from("/tmp/x").join("p2p_secret.key"));
+            }
+            other => panic!("expected KeyPath identity, got {other:?}"),
+        }
+        // Key-path identity defaults to production transport.
+        assert!(!p2p.relay_disabled);
+        assert!(!p2p.discovery_disabled);
+        assert!(p2p.bind_addr_v4.is_none());
+    }
+
+    #[test]
+    fn seed_and_key_path_mutually_exclusive() {
+        let err = parse_args(args(&[
+            "--data-dir",
+            "/tmp/x",
+            "--p2p-server-url",
+            "http://127.0.0.1:8080",
+            "--p2p-server-token",
+            "secret-token",
+            "--p2p-secret-key-seed-hex",
+            SEED_HEX,
+            "--p2p-secret-key-path",
+            "/tmp/x/key",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("mutually exclusive"), "got: {err}");
     }
 }

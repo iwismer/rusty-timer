@@ -1356,18 +1356,46 @@ pub const ENV_P2P_SERVER_URL: &str = "RT_P2P_SERVER_URL";
 pub const ENV_P2P_SERVER_TOKEN: &str = "RT_P2P_SERVER_TOKEN";
 /// Env var overriding the subscription reconcile interval, in milliseconds.
 pub const ENV_P2P_RECONCILE_MS: &str = "RT_P2P_RECONCILE_MS";
+/// Env var for an explicit persistent secret-key file path (production
+/// identity). Mutually exclusive with [`ENV_P2P_SECRET_KEY_SEED_HEX`].
+pub const ENV_P2P_SECRET_KEY_PATH: &str = "RT_P2P_SECRET_KEY_PATH";
+/// Env var disabling iroh relays (truthy value = disabled).
+pub const ENV_P2P_RELAY_DISABLED: &str = "RT_P2P_RELAY_DISABLED";
+/// Env var disabling iroh discovery services (truthy value = disabled).
+pub const ENV_P2P_DISCOVERY_DISABLED: &str = "RT_P2P_DISCOVERY_DISABLED";
+
+/// Parse a boolean-ish env flag: empty/absent is `false`; `1/true/yes/on`
+/// (case-insensitive) is `true`; `0/false/no/off` is `false`; anything else is
+/// an error so typos surface loudly.
+fn parse_env_flag(value: Option<String>, key: &str) -> Result<bool, String> {
+    match value.as_deref().map(str::trim) {
+        None | Some("") => Ok(false),
+        Some(v) => match v.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            other => Err(format!("invalid {key}: expected a boolean, got `{other}`")),
+        },
+    }
+}
 
 /// Build an optional [`P2pReceiverConfig`] from a key->value lookup (e.g. env).
 ///
 /// Mirrors the `receiver-headless` CLI validation: P2P is enabled only when at
-/// least one key is present; the secret-key seed is then required; the forwarder
-/// node id and direct address must be supplied together (both or neither); the
-/// server URL and token must be supplied together; at least one of an
-/// explicit forwarder or a server must be configured; and the reconcile
-/// interval defaults to 1000ms and must be at least [`MIN_RECONCILE_INTERVAL`].
-/// Empty/whitespace-only values are treated as absent.
+/// least one key is present; the forwarder node id and direct address must be
+/// supplied together (both or neither); the server URL and token must be
+/// supplied together; at least one of an explicit forwarder or a server must be
+/// configured; and the reconcile interval defaults to 1000ms and must be at
+/// least [`MIN_RECONCILE_INTERVAL`]. Empty/whitespace-only values are treated
+/// as absent.
+///
+/// Identity: a seed and an explicit key path are mutually exclusive. When
+/// neither is given the receiver uses a persistent key at `default_key_path`
+/// (production identity). A seed implies the loopback/dev transport (relays and
+/// discovery off, loopback bind) unless overridden; otherwise transport follows
+/// the relay/discovery flags (default: enabled, i.e. production).
 pub fn p2p_config_from_lookup(
     get: impl Fn(&str) -> Option<String>,
+    default_key_path: std::path::PathBuf,
 ) -> Result<Option<P2pReceiverConfig>, String> {
     let trimmed = |key: &str| {
         get(key)
@@ -1378,16 +1406,22 @@ pub fn p2p_config_from_lookup(
     let forwarder_node_id = trimmed(ENV_P2P_FORWARDER_NODE_ID);
     let forwarder_direct_addr = trimmed(ENV_P2P_FORWARDER_DIRECT_ADDR);
     let secret_key_seed_hex = trimmed(ENV_P2P_SECRET_KEY_SEED_HEX);
+    let secret_key_path = trimmed(ENV_P2P_SECRET_KEY_PATH);
     let server_url = trimmed(ENV_P2P_SERVER_URL);
     let server_token = trimmed(ENV_P2P_SERVER_TOKEN);
     let reconcile_ms_raw = trimmed(ENV_P2P_RECONCILE_MS);
+    let relay_disabled_raw = trimmed(ENV_P2P_RELAY_DISABLED);
+    let discovery_disabled_raw = trimmed(ENV_P2P_DISCOVERY_DISABLED);
 
     let any_present = forwarder_node_id.is_some()
         || forwarder_direct_addr.is_some()
         || secret_key_seed_hex.is_some()
+        || secret_key_path.is_some()
         || server_url.is_some()
         || server_token.is_some()
-        || reconcile_ms_raw.is_some();
+        || reconcile_ms_raw.is_some()
+        || relay_disabled_raw.is_some()
+        || discovery_disabled_raw.is_some();
     if !any_present {
         return Ok(None);
     }
@@ -1433,10 +1467,40 @@ pub fn p2p_config_from_lookup(
         ));
     }
 
-    let secret_key_seed_hex = secret_key_seed_hex.ok_or_else(|| {
-        format!("{ENV_P2P_SECRET_KEY_SEED_HEX} is required when any P2P env var is set")
-    })?;
-    let secret_key_seed = parse_secret_key_seed_hex(&secret_key_seed_hex)?;
+    // Identity: seed XOR explicit key path; fall back to the persistent default
+    // key path when neither is given.
+    let identity = match (secret_key_seed_hex, secret_key_path) {
+        (Some(_), Some(_)) => {
+            return Err(format!(
+                "{ENV_P2P_SECRET_KEY_SEED_HEX} and {ENV_P2P_SECRET_KEY_PATH} are mutually exclusive"
+            ));
+        }
+        (Some(seed_hex), None) => ReceiverIdentity::Seed(parse_secret_key_seed_hex(&seed_hex)?),
+        (None, Some(path)) => ReceiverIdentity::KeyPath(std::path::PathBuf::from(path)),
+        (None, None) => ReceiverIdentity::KeyPath(default_key_path),
+    };
+
+    // A seed identity defaults to the loopback/dev transport (relays + discovery
+    // off, loopback bind) to preserve deterministic local behavior; explicit
+    // flags still override. A key-path identity defaults to production
+    // transport (relays + discovery on, OS-chosen bind).
+    let seed_identity = matches!(identity, ReceiverIdentity::Seed(_));
+    let relay_disabled = match relay_disabled_raw {
+        Some(v) => parse_env_flag(Some(v), ENV_P2P_RELAY_DISABLED)?,
+        None => seed_identity,
+    };
+    let discovery_disabled = match discovery_disabled_raw {
+        Some(v) => parse_env_flag(Some(v), ENV_P2P_DISCOVERY_DISABLED)?,
+        None => seed_identity,
+    };
+    let bind_addr_v4 = if seed_identity {
+        Some(std::net::SocketAddrV4::new(
+            std::net::Ipv4Addr::LOCALHOST,
+            0,
+        ))
+    } else {
+        None
+    };
 
     let reconcile_ms = match reconcile_ms_raw {
         Some(raw) => raw
@@ -1453,13 +1517,10 @@ pub fn p2p_config_from_lookup(
     }
 
     Ok(Some(P2pReceiverConfig {
-        identity: ReceiverIdentity::Seed(secret_key_seed),
-        relay_disabled: true,
-        discovery_disabled: true,
-        bind_addr_v4: Some(std::net::SocketAddrV4::new(
-            std::net::Ipv4Addr::LOCALHOST,
-            0,
-        )),
+        identity,
+        relay_disabled,
+        discovery_disabled,
+        bind_addr_v4,
         forwarder,
         server,
         reconcile_interval,
@@ -1467,9 +1528,12 @@ pub fn p2p_config_from_lookup(
 }
 
 /// Build an optional [`P2pReceiverConfig`] from process environment variables.
-/// See [`p2p_config_from_lookup`] for the validation rules.
-pub fn p2p_config_from_env() -> Result<Option<P2pReceiverConfig>, String> {
-    p2p_config_from_lookup(|key| std::env::var(key).ok())
+/// See [`p2p_config_from_lookup`] for the validation rules. `default_key_path`
+/// is the persistent secret-key path used when no seed/key-path env is set.
+pub fn p2p_config_from_env(
+    default_key_path: std::path::PathBuf,
+) -> Result<Option<P2pReceiverConfig>, String> {
+    p2p_config_from_lookup(|key| std::env::var(key).ok(), default_key_path)
 }
 
 #[cfg(test)]
@@ -1548,6 +1612,17 @@ mod tests {
         move |key: &str| map.get(key).cloned()
     }
 
+    /// Default key path for config-builder tests; never written because these
+    /// tests do not bind an endpoint.
+    fn test_default_key_path() -> std::path::PathBuf {
+        std::path::PathBuf::from("/tmp/rt-p2p-test-default.key")
+    }
+
+    /// Wrapper over [`p2p_config_from_lookup`] supplying a test default key path.
+    fn cfg_from(pairs: &[(&str, &str)]) -> Result<Option<P2pReceiverConfig>, String> {
+        p2p_config_from_lookup(lookup(pairs), test_default_key_path())
+    }
+
     #[test]
     fn client_hello_advertises_control_events_capability() {
         let hello = client_hello();
@@ -1570,7 +1645,48 @@ mod tests {
 
     #[test]
     fn p2p_config_from_lookup_none_when_no_keys() {
-        assert!(p2p_config_from_lookup(lookup(&[])).unwrap().is_none());
+        assert!(cfg_from(&[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn lookup_defaults_to_keypath_when_no_seed_and_rejects_both() {
+        // Server set, no seed/key-path env -> persistent default key path.
+        let cfg = cfg_from(&[
+            (ENV_P2P_SERVER_URL, "http://x"),
+            (ENV_P2P_SERVER_TOKEN, "t"),
+        ])
+        .unwrap()
+        .expect("config present");
+        assert!(matches!(cfg.identity, ReceiverIdentity::KeyPath(_)));
+        // Key-path identity defaults to production transport.
+        assert!(!cfg.relay_disabled);
+        assert!(!cfg.discovery_disabled);
+        assert!(cfg.bind_addr_v4.is_none());
+
+        // Seed AND explicit key path -> mutually exclusive error.
+        let seed_hex = "ab".repeat(32);
+        let err = cfg_from(&[
+            (ENV_P2P_SERVER_URL, "http://x"),
+            (ENV_P2P_SERVER_TOKEN, "t"),
+            (ENV_P2P_SECRET_KEY_SEED_HEX, seed_hex.as_str()),
+            (ENV_P2P_SECRET_KEY_PATH, "/k"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("mutually exclusive"), "got: {err}");
+    }
+
+    #[test]
+    fn lookup_relay_and_discovery_flags_parse() {
+        let cfg = cfg_from(&[
+            (ENV_P2P_SERVER_URL, "http://x"),
+            (ENV_P2P_SERVER_TOKEN, "t"),
+            (ENV_P2P_RELAY_DISABLED, "1"),
+            (ENV_P2P_DISCOVERY_DISABLED, "true"),
+        ])
+        .unwrap()
+        .expect("config present");
+        assert!(cfg.relay_disabled);
+        assert!(cfg.discovery_disabled);
     }
 
     #[test]
@@ -1631,11 +1747,11 @@ mod tests {
 
     #[test]
     fn p2p_config_from_lookup_builds_minimal_config() {
-        let cfg = p2p_config_from_lookup(lookup(&[
+        let cfg = cfg_from(&[
             (ENV_P2P_FORWARDER_NODE_ID, "endpoint-x"),
             (ENV_P2P_FORWARDER_DIRECT_ADDR, "127.0.0.1:5000"),
             (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
-        ]))
+        ])
         .unwrap()
         .expect("config present");
         let fwd = cfg.forwarder.as_ref().expect("forwarder present");
@@ -1648,11 +1764,11 @@ mod tests {
 
     #[test]
     fn p2p_config_from_lookup_accepts_server_only_without_forwarder() {
-        let cfg = p2p_config_from_lookup(lookup(&[
+        let cfg = cfg_from(&[
             (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
             (ENV_P2P_SERVER_URL, "http://127.0.0.1:8080"),
             (ENV_P2P_SERVER_TOKEN, "tok"),
-        ]))
+        ])
         .unwrap()
         .expect("config present");
         assert!(
@@ -1664,40 +1780,38 @@ mod tests {
 
     #[test]
     fn p2p_config_from_lookup_requires_forwarder_or_server() {
-        let err = p2p_config_from_lookup(lookup(&[(ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX)]))
-            .unwrap_err();
+        let err = cfg_from(&[(ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX)]).unwrap_err();
         assert!(err.contains("either an explicit forwarder"), "got: {err}");
     }
 
     #[test]
     fn p2p_config_from_lookup_errors_on_partial_required_keys() {
-        let err = p2p_config_from_lookup(lookup(&[(ENV_P2P_FORWARDER_NODE_ID, "endpoint-x")]))
-            .unwrap_err();
+        let err = cfg_from(&[(ENV_P2P_FORWARDER_NODE_ID, "endpoint-x")]).unwrap_err();
         assert!(err.contains(ENV_P2P_FORWARDER_DIRECT_ADDR), "got: {err}");
     }
 
     #[test]
     fn p2p_config_from_lookup_server_requires_both() {
-        let err = p2p_config_from_lookup(lookup(&[
+        let err = cfg_from(&[
             (ENV_P2P_FORWARDER_NODE_ID, "endpoint-x"),
             (ENV_P2P_FORWARDER_DIRECT_ADDR, "127.0.0.1:5000"),
             (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
             (ENV_P2P_SERVER_URL, "http://127.0.0.1:8080"),
-        ]))
+        ])
         .unwrap_err();
         assert!(err.contains(ENV_P2P_SERVER_TOKEN), "got: {err}");
     }
 
     #[test]
     fn p2p_config_from_lookup_accepts_server_pair_and_reconcile_override() {
-        let cfg = p2p_config_from_lookup(lookup(&[
+        let cfg = cfg_from(&[
             (ENV_P2P_FORWARDER_NODE_ID, "endpoint-x"),
             (ENV_P2P_FORWARDER_DIRECT_ADDR, "127.0.0.1:5000"),
             (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
             (ENV_P2P_SERVER_URL, "http://127.0.0.1:8080"),
             (ENV_P2P_SERVER_TOKEN, "tok"),
             (ENV_P2P_RECONCILE_MS, "200"),
-        ]))
+        ])
         .unwrap()
         .expect("config present");
         let thin = cfg.server.expect("server configured");
@@ -1708,12 +1822,12 @@ mod tests {
 
     #[test]
     fn p2p_config_from_lookup_rejects_below_min_reconcile() {
-        let err = p2p_config_from_lookup(lookup(&[
+        let err = cfg_from(&[
             (ENV_P2P_FORWARDER_NODE_ID, "endpoint-x"),
             (ENV_P2P_FORWARDER_DIRECT_ADDR, "127.0.0.1:5000"),
             (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
             (ENV_P2P_RECONCILE_MS, "10"),
-        ]))
+        ])
         .unwrap_err();
         assert!(err.contains(ENV_P2P_RECONCILE_MS), "got: {err}");
     }

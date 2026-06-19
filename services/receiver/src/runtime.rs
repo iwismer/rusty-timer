@@ -60,14 +60,20 @@ pub fn profile_has_connect_credentials(profile: Option<&crate::db::Profile>) -> 
     })
 }
 
+/// The default receiver data directory (OS app-local data dir, namespaced).
+/// Shared by [`init`] and callers that need to derive sibling paths (e.g. the
+/// persistent P2P secret-key file) from the same location.
+pub fn default_data_dir() -> std::path::PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("rusty-timer")
+        .join("receiver")
+}
+
 pub async fn init(
     receiver_id: Option<String>,
 ) -> Result<(Arc<AppState>, watch::Receiver<ShutdownSignal>), String> {
-    let data_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("rusty-timer")
-        .join("receiver");
-    init_with_data_dir(receiver_id, data_dir).await
+    init_with_data_dir(receiver_id, default_data_dir()).await
 }
 
 pub async fn init_with_data_dir(
