@@ -78,6 +78,12 @@
           dotClass: "bg-text-muted",
           textClass: "text-text-muted",
         };
+      default:
+        return {
+          label: "Unknown",
+          dotClass: "bg-text-muted",
+          textClass: "text-text-muted",
+        };
     }
   }
 
@@ -118,6 +124,12 @@
 
   function showReconnect(forwarder: ForwarderConnectionStatus): boolean {
     return forwarder.pending || forwarder.state !== "disconnected";
+  }
+
+  function showReconnectBeforeDisconnect(
+    forwarder: ForwarderConnectionStatus,
+  ): boolean {
+    return !forwarder.pending && forwarder.state === "unavailable";
   }
 </script>
 
@@ -216,6 +228,20 @@
                     Connect
                   </button>
                 {/if}
+                {#if showReconnectBeforeDisconnect(forwarder)}
+                  <button
+                    data-testid={`forwarder-reconnect-${forwarder.endpoint_id}`}
+                    class={btnSecondary}
+                    onclick={() =>
+                      void runForwarderAction(
+                        forwarder.endpoint_id,
+                        reconnectForwarder,
+                      )}
+                    disabled={busyByEndpoint[forwarder.endpoint_id]}
+                  >
+                    Reconnect
+                  </button>
+                {/if}
                 {#if showDisconnect(forwarder)}
                   <button
                     data-testid={`forwarder-disconnect-${forwarder.endpoint_id}`}
@@ -230,7 +256,7 @@
                     Disconnect
                   </button>
                 {/if}
-                {#if showReconnect(forwarder)}
+                {#if showReconnect(forwarder) && !showReconnectBeforeDisconnect(forwarder)}
                   <button
                     data-testid={`forwarder-reconnect-${forwarder.endpoint_id}`}
                     class={btnSecondary}

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/svelte";
+import { fireEvent, render, screen, within } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import ConnectionsTab from "./components/ConnectionsTab.svelte";
@@ -163,6 +163,53 @@ describe("ConnectionsTab", () => {
     expect(mockState.disconnectForwarder).toHaveBeenCalledWith("endpoint-1");
     expect(mockState.connectForwarder).toHaveBeenCalledWith("endpoint-2");
     expect(mockState.reconnectForwarder).toHaveBeenCalledWith("endpoint-3");
+  });
+
+  it("shows reconnect before disconnect for unavailable forwarders", () => {
+    mockState.store.connections.forwarders = [
+      {
+        endpoint_id: "endpoint-unavailable",
+        display_name: "Unavailable Forwarder",
+        state: "unavailable",
+        pending: false,
+        subscribed_count: 0,
+        available_count: 0,
+        readers: [],
+        ups: null,
+        restart_needed: null,
+      },
+    ];
+
+    render(ConnectionsTab);
+
+    const row = screen.getByTestId("forwarder-row-endpoint-unavailable");
+    expect(
+      within(row)
+        .getAllByRole("button")
+        .map((b) => b.textContent),
+    ).toEqual(["Reconnect", "Disconnect"]);
+  });
+
+  it("renders unknown connection states with a safe fallback", () => {
+    mockState.store.connections.forwarders = [
+      {
+        endpoint_id: "endpoint-unknown",
+        display_name: "Unknown Forwarder",
+        state: "unexpected",
+        pending: false,
+        subscribed_count: 0,
+        available_count: 0,
+        readers: [],
+        ups: null,
+        restart_needed: null,
+      },
+    ];
+
+    render(ConnectionsTab);
+
+    expect(
+      screen.getByTestId("forwarder-state-endpoint-unknown"),
+    ).toHaveTextContent("Unknown");
   });
 
   it("opens the server admin panel in the system browser", async () => {

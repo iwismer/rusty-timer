@@ -201,6 +201,46 @@ describe("receiver updater store", () => {
     expect(store.savedReceiverId).toBe("recv-live");
   });
 
+  it("keeps loading status, streams, and logs when connections fail to load", async () => {
+    const { loadAll, store } = await import("./store.svelte");
+    const previousConnections = {
+      server: {
+        configured: true,
+        endpoint_id: "server-node-1",
+        reachable: true,
+        approval_state: "active",
+        waiting_for_approval: false,
+        message: null,
+      },
+      forwarders: [],
+    };
+    store.connections = previousConnections;
+    apiMocks.getConnections.mockRejectedValueOnce(
+      new Error("connections down"),
+    );
+    apiMocks.getStatus.mockResolvedValueOnce({
+      connection_state: "connected",
+      local_ok: true,
+      streams_count: 1,
+      receiver_id: "recv-after-connections-failure",
+      server: previousConnections.server,
+    });
+    apiMocks.getStreams.mockResolvedValueOnce({
+      streams: [],
+      degraded: true,
+      upstream_error: "stream warning",
+    });
+    apiMocks.getLogs.mockResolvedValueOnce({ entries: ["loaded logs"] });
+
+    await loadAll();
+
+    expect(store.error).toBeNull();
+    expect(store.status?.receiver_id).toBe("recv-after-connections-failure");
+    expect(store.streams?.degraded).toBe(true);
+    expect(store.logEntries).toEqual(["loaded logs"]);
+    expect(store.connections).toEqual(previousConnections);
+  });
+
   it("resets hydrated mode to default live mode when no mode is configured", async () => {
     apiMocks.getMode.mockResolvedValueOnce({
       mode: "race",

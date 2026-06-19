@@ -700,7 +700,7 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
       nextMetrics,
     ] = await Promise.all([
       api.getStatus(),
-      api.getConnections(),
+      api.getConnections().catch(() => null),
       api.getStreams(),
       api.getLogs(),
       api.getMode().catch(() => null),
@@ -716,7 +716,9 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
     await loadDbfConfig();
 
     store.status = nextStatus;
-    store.connections = nextConnections;
+    if (nextConnections) {
+      store.connections = nextConnections;
+    }
     if (streamRefreshVersion === streamRefreshVersionAtStart) {
       store.streams = nextStreams;
       lastConcreteEpochByKey = nextConcreteEpochs(
