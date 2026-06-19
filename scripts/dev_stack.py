@@ -87,6 +87,12 @@ PROVISIONING_TOKEN = "dev-provisioning-token"
 # Reads file shape (looped forever by the emulator).
 NUM_FRAMES = 25
 
+# Stable preferred ports for the two web UIs so their URLs are consistent across
+# runs. Overridable via CLI flags; each falls back to an OS-assigned free port
+# if the preferred one is already in use.
+DEFAULT_FORWARDER_STATUS_PORT = 8787
+DEFAULT_THIN_NODE_PORT = 8675
+
 
 # ---------------------------------------------------------------------------
 # Deterministic IPICO frame construction (mirrors ipico_core::read checksum).
@@ -106,6 +112,24 @@ def free_tcp_port() -> int:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def fixed_or_free_tcp_port(preferred: int, *, what: str) -> int:
+    """Use ``preferred`` if it is free, else fall back to an OS-assigned port.
+
+    Lets the dev stack expose stable UI URLs across runs while still degrading
+    gracefully (instead of crashing) if the preferred port is already taken.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("127.0.0.1", preferred))
+            return preferred
+        except OSError:
+            s.bind(("127.0.0.1", 0))
+            fallback = s.getsockname()[1]
+    print(f"[ports] {what} port {preferred} is in use; falling back to {fallback}")
+    return fallback
 
 
 def free_udp_port() -> int:
@@ -319,6 +343,26 @@ def main() -> int:
         action="store_true",
         help="keep the temp working dir on exit (implied when --data-dir is set)",
     )
+    parser.add_argument(
+        "--forwarder-status-port",
+        type=int,
+        default=DEFAULT_FORWARDER_STATUS_PORT,
+        help=(
+            "preferred port for the forwarder status HTTP/UI "
+            f"(default: {DEFAULT_FORWARDER_STATUS_PORT}; "
+            "falls back to a free port if taken)"
+        ),
+    )
+    parser.add_argument(
+        "--thin-node-port",
+        type=int,
+        default=DEFAULT_THIN_NODE_PORT,
+        help=(
+            "preferred port for the thin-node HTTP/UI "
+            f"(default: {DEFAULT_THIN_NODE_PORT}; "
+            "falls back to a free port if taken)"
+        ),
+    )
     args = parser.parse_args()
 
     if not args.no_build:
@@ -330,11 +374,16 @@ def main() -> int:
     receiver_data_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Ports (loopback only) ---
+    # The two web UIs use stable preferred ports (overridable) so their URLs
+    # stay consistent across runs; the rest stay ephemeral. Each preferred port
+    # falls back to an OS-assigned free port if it happens to be in use.
     emulator_port = free_tcp_port()
-    forwarder_status_port = free_tcp_port()
+    forwarder_status_port = fixed_or_free_tcp_port(
+        args.forwarder_status_port, what="forwarder status/UI"
+    )
     forwarder_fanout_port = free_tcp_port()
     forwarder_p2p_port = free_udp_port()
-    thin_node_port = free_tcp_port()
+    thin_node_port = fixed_or_free_tcp_port(args.thin_node_port, what="thin-node UI")
 
     thin_node_url = f"http://127.0.0.1:{thin_node_port}"
     receiver_id = "dev-receiver"
