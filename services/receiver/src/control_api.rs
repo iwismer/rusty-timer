@@ -11,7 +11,8 @@ use rt_domain::ReceiverMode;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 pub type ChipLookup = HashMap<String, HashMap<String, (String, String)>>;
 
@@ -54,6 +55,58 @@ pub enum ConnectionState {
     Disconnecting,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForwarderConnState {
+    Subscribed,
+    Connected,
+    Unavailable,
+    Disconnected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ForwarderStateSnapshot {
+    pub state: ForwarderConnState,
+    pub pending: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ForwarderRuntimeStatus {
+    pub control_up: bool,
+    pub data_sessions: usize,
+    pub pending_started_at: Option<Instant>,
+}
+
+const FORWARDER_PENDING_GRACE: Duration = Duration::from_secs(5);
+
+fn derive_forwarder_state(runtime: ForwarderRuntimeStatus, intent: bool) -> ForwarderStateSnapshot {
+    if runtime.data_sessions > 0 {
+        return ForwarderStateSnapshot {
+            state: ForwarderConnState::Subscribed,
+            pending: false,
+        };
+    }
+    if runtime.control_up {
+        return ForwarderStateSnapshot {
+            state: ForwarderConnState::Connected,
+            pending: false,
+        };
+    }
+    if intent {
+        let pending = runtime
+            .pending_started_at
+            .is_some_and(|started| started.elapsed() < FORWARDER_PENDING_GRACE);
+        return ForwarderStateSnapshot {
+            state: ForwarderConnState::Unavailable,
+            pending,
+        };
+    }
+    ForwarderStateSnapshot {
+        state: ForwarderConnState::Disconnected,
+        pending: false,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShutdownSignal {
     None,
@@ -83,6 +136,7 @@ pub struct AppState {
     /// per-subscription dial address resolution in the P2P runtime.
     pub discovered_forwarders: Arc<tokio::sync::RwLock<DiscoveredForwarders>>,
     pub p2p_endpoint_id: Arc<RwLock<Option<String>>>,
+    forwarder_runtime: Arc<StdMutex<HashMap<String, ForwarderRuntimeStatus>>>,
     connect_attempt: AtomicU64,
     connect_attempt_version: watch::Sender<u64>,
     /// Keepalive receiver to prevent the connect-attempt watch channel from being dropped
@@ -136,6 +190,7 @@ impl AppState {
             chip_lookup: Arc::new(tokio::sync::RwLock::new(ChipLookup::new())),
             discovered_forwarders: Arc::new(tokio::sync::RwLock::new(DiscoveredForwarders::new())),
             p2p_endpoint_id: Arc::new(RwLock::new(None)),
+            forwarder_runtime: Arc::new(StdMutex::new(HashMap::new())),
             connect_attempt: AtomicU64::new(0),
             connect_attempt_version,
             _connect_attempt_keepalive,
@@ -218,6 +273,112 @@ impl AppState {
         self.reset_retry_streak();
         self.bump_connect_attempt();
         self.set_connection_state(ConnectionState::Connecting).await;
+    }
+
+    pub(crate) fn update_forwarder_runtime_sync(
+        &self,
+        endpoint_id: &str,
+        update: impl FnOnce(&mut ForwarderRuntimeStatus),
+    ) {
+        let mut statuses = self.forwarder_runtime.lock().unwrap();
+        let status = statuses.entry(endpoint_id.to_owned()).or_default();
+        update(status);
+    }
+
+    pub(crate) async fn mark_forwarder_runtime(
+        &self,
+        endpoint_id: &str,
+        update: impl FnOnce(&mut ForwarderRuntimeStatus),
+    ) {
+        self.update_forwarder_runtime_sync(endpoint_id, update);
+        self.recompute_aggregate_connection_state().await;
+    }
+
+    pub async fn mark_forwarder_dial_started(&self, endpoint_id: &str) {
+        self.mark_forwarder_runtime(endpoint_id, |status| {
+            status.pending_started_at = Some(Instant::now());
+        })
+        .await;
+    }
+
+    pub async fn forwarder_state(&self, endpoint_id: &str) -> ForwarderStateSnapshot {
+        let runtime = self
+            .forwarder_runtime
+            .lock()
+            .unwrap()
+            .get(endpoint_id)
+            .copied()
+            .unwrap_or_default();
+        let intent = self
+            .db
+            .lock()
+            .await
+            .forwarder_should_connect(endpoint_id)
+            .unwrap_or(true);
+        derive_forwarder_state(runtime, intent)
+    }
+
+    pub(crate) fn recompute_aggregate_connection_state_sync_default_trying(&self) {
+        let statuses = self.forwarder_runtime.lock().unwrap().clone();
+        let any_connected = statuses
+            .values()
+            .any(|status| status.control_up || status.data_sessions > 0);
+        let any_trying = statuses
+            .values()
+            .any(|status| !status.control_up && status.data_sessions == 0);
+        let next = if any_connected {
+            ConnectionState::Connected
+        } else if any_trying {
+            ConnectionState::Connecting
+        } else {
+            ConnectionState::Disconnected
+        };
+        let _ = self.connection_state.send_if_modified(|state| {
+            if *state == next {
+                false
+            } else {
+                *state = next;
+                true
+            }
+        });
+    }
+
+    pub(crate) async fn recompute_aggregate_connection_state(&self) {
+        let statuses = self.forwarder_runtime.lock().unwrap().clone();
+        let intents = self
+            .db
+            .lock()
+            .await
+            .load_forwarder_intents()
+            .unwrap_or_default();
+        let any_connected = statuses
+            .values()
+            .any(|status| status.control_up || status.data_sessions > 0);
+        let any_trying = statuses.iter().any(|(endpoint_id, status)| {
+            !status.control_up
+                && status.data_sessions == 0
+                && *intents.get(endpoint_id).unwrap_or(&true)
+        });
+        let next = if any_connected {
+            ConnectionState::Connected
+        } else if any_trying {
+            ConnectionState::Connecting
+        } else {
+            ConnectionState::Disconnected
+        };
+        self.set_connection_state_if_changed(next).await;
+    }
+
+    async fn set_connection_state_if_changed(&self, new_state: ConnectionState) {
+        let changed = self.connection_state.send_if_modified(|state| {
+            *state != new_state && {
+                *state = new_state.clone();
+                true
+            }
+        });
+        if changed {
+            self.emit_connection_state_side_effects(new_state).await;
+        }
     }
 
     pub async fn request_retry_connect(&self) {

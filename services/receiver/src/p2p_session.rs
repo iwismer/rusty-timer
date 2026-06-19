@@ -23,7 +23,6 @@
 //! is owned by later tasks; this module provides the testable session core.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use prost::Message;
@@ -35,104 +34,108 @@ use rt_p2p_protocol::{
 };
 use tokio::sync::{Mutex, broadcast, watch};
 
-use crate::control_api::{AppState, ConnectionState};
+use crate::control_api::AppState;
 use crate::db::{Db, GapMarkerInsert, ReceivedEventInsert};
 
-/// Aggregates live-session connectivity across stream workers and reflects it
+/// Aggregates live control/data connectivity per forwarder and reflects it
 /// into the shared [`AppState`] connection state.
-///
-/// Each reconnecting session calls [`on_connected`](Self::on_connected) right
-/// after its control-plane handshake succeeds, which returns an RAII
-/// [`ConnectedSessionGuard`] that releases the session on drop. A shared
-/// atomic counter tracks how many sessions are currently live so the aggregate
-/// state is `Connected` while at least one session is up and falls back to
-/// `Connecting` when the last one drops (the runtime keeps retrying). Runtime
-/// start (`Connecting`) and shutdown (`Disconnected`) are driven separately by
-/// [`crate::p2p_runtime`].
 pub struct SessionStatusReporter {
     state: Arc<AppState>,
-    live_sessions: Arc<AtomicUsize>,
 }
 
 impl std::fmt::Debug for SessionStatusReporter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionStatusReporter")
-            .field("live_sessions", &self.live_sessions.load(Ordering::SeqCst))
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 impl SessionStatusReporter {
-    /// Build a reporter sharing `live_sessions` across every stream worker.
-    pub fn new(state: Arc<AppState>, live_sessions: Arc<AtomicUsize>) -> Self {
-        Self {
-            state,
-            live_sessions,
-        }
+    /// Build a reporter for per-forwarder connection state.
+    pub fn new(state: Arc<AppState>) -> Self {
+        Self { state }
     }
 
-    /// Record that a session's control-plane handshake just succeeded and
-    /// return an RAII guard whose drop releases the session.
-    ///
-    /// The guard's `Drop` decrements the shared live-session count even if the
-    /// owning `run_once` future is cancelled mid-session (e.g. a worker rebuild
-    /// on a subscription edit/removal races the session against the shutdown
-    /// signal). Without it a cancelled session would skip the decrement and the
-    /// aggregate status could remain falsely `Connected` after the last real
-    /// session ended.
-    async fn on_connected(&self) -> ConnectedSessionGuard {
-        self.live_sessions.fetch_add(1, Ordering::SeqCst);
+    /// Record that a forwarder's control session is up.
+    pub async fn on_control_connected(&self, endpoint_id: &str) -> ControlConnectedGuard {
         self.state
-            .set_connection_state(ConnectionState::Connected)
+            .mark_forwarder_runtime(endpoint_id, |status| {
+                status.control_up = true;
+                status.pending_started_at = None;
+            })
             .await;
-        ConnectedSessionGuard {
+        ControlConnectedGuard {
             state: Arc::clone(&self.state),
-            live_sessions: Arc::clone(&self.live_sessions),
+            endpoint_id: endpoint_id.to_owned(),
+        }
+    }
+
+    /// Record one active data subscription stream for a forwarder.
+    pub async fn on_data_session(&self, endpoint_id: &str) -> DataSessionGuard {
+        self.state
+            .mark_forwarder_runtime(endpoint_id, |status| {
+                status.data_sessions = status.data_sessions.saturating_add(1);
+            })
+            .await;
+        DataSessionGuard {
+            state: Arc::clone(&self.state),
+            endpoint_id: endpoint_id.to_owned(),
+        }
+    }
+
+    /// Compatibility shim for the old per-stream worker path. It reports a
+    /// control session for a synthetic endpoint until Task 1.4 removes that
+    /// path from reconciliation.
+    async fn on_connected(&self) -> ControlConnectedGuard {
+        self.on_control_connected("__legacy_stream_session__").await
+    }
+}
+
+/// RAII release guard for a forwarder control session. The release is
+/// cancellation-safe.
+pub struct ControlConnectedGuard {
+    state: Arc<AppState>,
+    endpoint_id: String,
+}
+
+impl Drop for ControlConnectedGuard {
+    fn drop(&mut self) {
+        self.state
+            .update_forwarder_runtime_sync(&self.endpoint_id, |status| {
+                status.control_up = false;
+                status.pending_started_at = Some(std::time::Instant::now());
+            });
+        self.state
+            .recompute_aggregate_connection_state_sync_default_trying();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let state = Arc::clone(&self.state);
+            handle.spawn(async move {
+                state.recompute_aggregate_connection_state().await;
+            });
         }
     }
 }
 
-/// RAII release guard for a connected P2P session (see
-/// [`SessionStatusReporter::on_connected`]). The decrement is cancellation-safe.
-struct ConnectedSessionGuard {
+/// RAII release guard for a forwarder data subscription stream. The decrement
+/// is cancellation-safe.
+pub struct DataSessionGuard {
     state: Arc<AppState>,
-    live_sessions: Arc<AtomicUsize>,
+    endpoint_id: String,
 }
 
-impl Drop for ConnectedSessionGuard {
+impl Drop for DataSessionGuard {
     fn drop(&mut self) {
-        let previous = self.live_sessions.fetch_sub(1, Ordering::SeqCst);
-        if previous > 1 {
-            // Other sessions are still live; the aggregate stays Connected.
-            return;
-        }
-        // This was the last live session. Synchronously fall back to Connecting
-        // on the watch channel so `get_status` reflects reality immediately even
-        // though Drop cannot await UI-event side effects. Only transition *from*
-        // Connected: never clobber a shutdown-set Disconnected, and skip if a
-        // new session already raced in (count back above 0).
-        let live = Arc::clone(&self.live_sessions);
-        let changed = self.state.connection_state.send_if_modified(|state| {
-            if *state == ConnectionState::Connected && live.load(Ordering::SeqCst) == 0 {
-                *state = ConnectionState::Connecting;
-                true
-            } else {
-                false
-            }
-        });
-        if changed {
-            // Best-effort: emit the StatusChanged UI event + log entry off the
-            // current (possibly cancelled) task. Skipped when no runtime handle
-            // is available (e.g. during runtime teardown, where the runtime
-            // force-sets Disconnected anyway).
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let state = Arc::clone(&self.state);
-                handle.spawn(async move {
-                    state
-                        .emit_connection_state_side_effects(ConnectionState::Connecting)
-                        .await;
-                });
-            }
+        self.state
+            .update_forwarder_runtime_sync(&self.endpoint_id, |status| {
+                status.data_sessions = status.data_sessions.saturating_sub(1);
+            });
+        self.state
+            .recompute_aggregate_connection_state_sync_default_trying();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let state = Arc::clone(&self.state);
+            handle.spawn(async move {
+                state.recompute_aggregate_connection_state().await;
+            });
         }
     }
 }
@@ -720,6 +723,7 @@ pub async fn run_session_with_reconnect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control_api::ConnectionState;
     use rt_iroh::EndpointBuilder;
     use rt_p2p_protocol::{ReadRecord, StreamCatalog, StreamEntry, SubscribeOk};
     use rt_test_utils::p2p::{ConnectivityFault, ForwarderScript, MockForwarderPeer};
@@ -812,15 +816,48 @@ mod tests {
         EndpointBuilder::test([seed; 32]).bind().await.unwrap()
     }
 
-    fn reporter_state() -> (Arc<AppState>, Arc<AtomicUsize>, Arc<SessionStatusReporter>) {
+    fn reporter_state() -> (Arc<AppState>, Arc<SessionStatusReporter>) {
         let (state, _shutdown_rx) =
             AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
-        let live = Arc::new(AtomicUsize::new(0));
-        let reporter = Arc::new(SessionStatusReporter::new(
-            Arc::clone(&state),
-            Arc::clone(&live),
-        ));
-        (state, live, reporter)
+        let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
+        (state, reporter)
+    }
+
+    #[tokio::test]
+    async fn reporter_tracks_per_forwarder_states() {
+        let (state, _shutdown_rx) =
+            AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+        let reporter = SessionStatusReporter::new(Arc::clone(&state));
+
+        let control_guard = reporter.on_control_connected("fwd-1").await;
+        assert_eq!(
+            state.forwarder_state("fwd-1").await.state,
+            crate::control_api::ForwarderConnState::Connected
+        );
+
+        let data_guard = reporter.on_data_session("fwd-1").await;
+        assert_eq!(
+            state.forwarder_state("fwd-1").await.state,
+            crate::control_api::ForwarderConnState::Subscribed
+        );
+
+        drop(data_guard);
+        assert_eq!(
+            state.forwarder_state("fwd-1").await.state,
+            crate::control_api::ForwarderConnState::Connected
+        );
+
+        state
+            .db
+            .lock()
+            .await
+            .set_forwarder_intent("fwd-1", false)
+            .unwrap();
+        drop(control_guard);
+        assert_eq!(
+            state.forwarder_state("fwd-1").await.state,
+            crate::control_api::ForwarderConnState::Disconnected
+        );
     }
 
     #[tokio::test]
@@ -829,9 +866,8 @@ mod tests {
         // without a clean return) must still release its live-session count and
         // fall the aggregate state back to Connecting — otherwise the badge can
         // stay falsely "Connected" after the last session ends.
-        let (state, live, reporter) = reporter_state();
-        let guard = reporter.on_connected().await;
-        assert_eq!(live.load(Ordering::SeqCst), 1);
+        let (state, reporter) = reporter_state();
+        let guard = reporter.on_control_connected("fwd-1").await;
         assert_eq!(
             state.connection_state.borrow().clone(),
             ConnectionState::Connected
@@ -839,7 +875,6 @@ mod tests {
 
         drop(guard); // simulates run_once cancellation mid-session
 
-        assert_eq!(live.load(Ordering::SeqCst), 0);
         assert_eq!(
             state.connection_state.borrow().clone(),
             ConnectionState::Connecting
@@ -850,20 +885,17 @@ mod tests {
     async fn connected_guard_keeps_connected_while_another_session_live() {
         // Dropping one of two live sessions must NOT fall back to Connecting:
         // the aggregate stays Connected until the last session drops.
-        let (state, live, reporter) = reporter_state();
-        let g1 = reporter.on_connected().await;
-        let g2 = reporter.on_connected().await;
-        assert_eq!(live.load(Ordering::SeqCst), 2);
+        let (state, reporter) = reporter_state();
+        let g1 = reporter.on_control_connected("fwd-1").await;
+        let g2 = reporter.on_control_connected("fwd-2").await;
 
         drop(g1);
-        assert_eq!(live.load(Ordering::SeqCst), 1);
         assert_eq!(
             state.connection_state.borrow().clone(),
             ConnectionState::Connected
         );
 
         drop(g2);
-        assert_eq!(live.load(Ordering::SeqCst), 0);
         assert_eq!(
             state.connection_state.borrow().clone(),
             ConnectionState::Connecting

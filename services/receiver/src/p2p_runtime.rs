@@ -37,7 +37,6 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use rt_iroh::{Endpoint, EndpointBuilder, NodeAddr, NodeId, SecretKey};
@@ -215,11 +214,7 @@ pub async fn start_receiver_p2p(
     state
         .set_connection_state(ConnectionState::Connecting)
         .await;
-    let live_sessions = Arc::new(AtomicUsize::new(0));
-    let reporter = Arc::new(SessionStatusReporter::new(
-        Arc::clone(&state),
-        live_sessions,
-    ));
+    let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let task = tokio::spawn(run_reconcile_loop(
