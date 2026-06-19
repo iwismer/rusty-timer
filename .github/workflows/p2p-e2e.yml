@@ -17,8 +17,6 @@ jobs:
     name: Full-stack + bridge agent (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
-    env:
-      AGENT_ARTIFACTS_DIR: ${{ runner.temp }}/rt-bridge-agent-artifacts
     strategy:
       fail-fast: false
       matrix:
@@ -48,15 +46,15 @@ jobs:
 
       - name: Run bridge-agent E2E and emit artifacts
         run: |
-          mkdir -p "${AGENT_ARTIFACTS_DIR}"
-          uv run scripts/e2e/agent_ui/run_bridge_goal.py --artifacts-dir "${AGENT_ARTIFACTS_DIR}"
+          mkdir -p "${RUNNER_TEMP}/rt-bridge-agent-artifacts"
+          uv run scripts/e2e/agent_ui/run_bridge_goal.py --artifacts-dir "${RUNNER_TEMP}/rt-bridge-agent-artifacts"
 
       - name: Upload bridge-agent artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bridge-agent-${{ matrix.os }}
-          path: ${{ env.AGENT_ARTIFACTS_DIR }}
+          path: ${{ runner.temp }}/rt-bridge-agent-artifacts
           if-no-files-found: warn
 
   connectivity-chaos:
