@@ -222,7 +222,7 @@ impl AppState {
         true
     }
 
-    async fn emit_connection_state_side_effects(&self, new_state: ConnectionState) {
+    pub(crate) async fn emit_connection_state_side_effects(&self, new_state: ConnectionState) {
         let streams_count = {
             let db = self.db.lock().await;
             match db.load_stream_subscriptions() {

@@ -42,8 +42,8 @@ use crate::db::{Db, GapMarkerInsert, ReceivedEventInsert};
 /// into the shared [`AppState`] connection state.
 ///
 /// Each reconnecting session calls [`on_connected`](Self::on_connected) right
-/// after its control-plane handshake succeeds and
-/// [`on_disconnected`](Self::on_disconnected) once that session ends. A shared
+/// after its control-plane handshake succeeds, which returns an RAII
+/// [`ConnectedSessionGuard`] that releases the session on drop. A shared
 /// atomic counter tracks how many sessions are currently live so the aggregate
 /// state is `Connected` while at least one session is up and falls back to
 /// `Connecting` when the last one drops (the runtime keeps retrying). Runtime
@@ -71,23 +71,68 @@ impl SessionStatusReporter {
         }
     }
 
-    /// Record that a session's control-plane handshake just succeeded.
-    async fn on_connected(&self) {
+    /// Record that a session's control-plane handshake just succeeded and
+    /// return an RAII guard whose drop releases the session.
+    ///
+    /// The guard's `Drop` decrements the shared live-session count even if the
+    /// owning `run_once` future is cancelled mid-session (e.g. a worker rebuild
+    /// on a subscription edit/removal races the session against the shutdown
+    /// signal). Without it a cancelled session would skip the decrement and the
+    /// aggregate status could remain falsely `Connected` after the last real
+    /// session ended.
+    async fn on_connected(&self) -> ConnectedSessionGuard {
         self.live_sessions.fetch_add(1, Ordering::SeqCst);
         self.state
             .set_connection_state(ConnectionState::Connected)
             .await;
+        ConnectedSessionGuard {
+            state: Arc::clone(&self.state),
+            live_sessions: Arc::clone(&self.live_sessions),
+        }
     }
+}
 
-    /// Record that a previously-connected session has ended. When no sessions
-    /// remain live the aggregate state falls back to `Connecting` (the runtime
-    /// keeps reconnecting with backoff).
-    async fn on_disconnected(&self) {
+/// RAII release guard for a connected P2P session (see
+/// [`SessionStatusReporter::on_connected`]). The decrement is cancellation-safe.
+struct ConnectedSessionGuard {
+    state: Arc<AppState>,
+    live_sessions: Arc<AtomicUsize>,
+}
+
+impl Drop for ConnectedSessionGuard {
+    fn drop(&mut self) {
         let previous = self.live_sessions.fetch_sub(1, Ordering::SeqCst);
-        if previous <= 1 {
-            self.state
-                .set_connection_state(ConnectionState::Connecting)
-                .await;
+        if previous > 1 {
+            // Other sessions are still live; the aggregate stays Connected.
+            return;
+        }
+        // This was the last live session. Synchronously fall back to Connecting
+        // on the watch channel so `get_status` reflects reality immediately even
+        // though Drop cannot await UI-event side effects. Only transition *from*
+        // Connected: never clobber a shutdown-set Disconnected, and skip if a
+        // new session already raced in (count back above 0).
+        let live = Arc::clone(&self.live_sessions);
+        let changed = self.state.connection_state.send_if_modified(|state| {
+            if *state == ConnectionState::Connected && live.load(Ordering::SeqCst) == 0 {
+                *state = ConnectionState::Connecting;
+                true
+            } else {
+                false
+            }
+        });
+        if changed {
+            // Best-effort: emit the StatusChanged UI event + log entry off the
+            // current (possibly cancelled) task. Skipped when no runtime handle
+            // is available (e.g. during runtime teardown, where the runtime
+            // force-sets Disconnected anyway).
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let state = Arc::clone(&self.state);
+                handle.spawn(async move {
+                    state
+                        .emit_connection_state_side_effects(ConnectionState::Connecting)
+                        .await;
+                });
+            }
         }
     }
 }
@@ -591,25 +636,23 @@ async fn run_once(
     params: &SessionParams,
 ) -> Result<SessionOutcome, P2pSessionError> {
     let session = connect_and_hello(endpoint, forwarder_addr, params.client_hello.clone()).await?;
-    // The handshake succeeded: this session is live. Record connected before the
-    // data subscription runs, and record disconnected once it ends for any
-    // reason (clean EOF or error) so the aggregate connection state tracks the
-    // real session lifecycle.
-    if let Some(reporter) = &params.reporter {
-        reporter.on_connected().await;
-    }
-    let outcome = run_data_subscription_with_hint(
+    // The handshake succeeded: this session is live. Hold an RAII guard for the
+    // duration of the data subscription so the shared live-session count is
+    // released on drop even if this future is cancelled mid-session (worker
+    // rebuild on subscription edit/removal, or runtime shutdown) rather than
+    // only on a clean return.
+    let _connected_guard = match &params.reporter {
+        Some(reporter) => Some(reporter.on_connected().await),
+        None => None,
+    };
+    run_data_subscription_with_hint(
         &session.connection,
         db,
         &params.stream_id,
         params.mode,
         params.durable_hint_tx.as_ref(),
     )
-    .await;
-    if let Some(reporter) = &params.reporter {
-        reporter.on_disconnected().await;
-    }
-    outcome
+    .await
 }
 
 /// Run a reconnecting single-stream session: dial + hello + data subscription,
@@ -767,6 +810,64 @@ mod tests {
 
     async fn test_endpoint(seed: u8) -> Endpoint {
         EndpointBuilder::test([seed; 32]).bind().await.unwrap()
+    }
+
+    fn reporter_state() -> (Arc<AppState>, Arc<AtomicUsize>, Arc<SessionStatusReporter>) {
+        let (state, _shutdown_rx) =
+            AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+        let live = Arc::new(AtomicUsize::new(0));
+        let reporter = Arc::new(SessionStatusReporter::new(
+            Arc::clone(&state),
+            Arc::clone(&live),
+        ));
+        (state, live, reporter)
+    }
+
+    #[tokio::test]
+    async fn connected_session_guard_releases_on_cancellation() {
+        // A connected session whose run_once future is cancelled (guard dropped
+        // without a clean return) must still release its live-session count and
+        // fall the aggregate state back to Connecting — otherwise the badge can
+        // stay falsely "Connected" after the last session ends.
+        let (state, live, reporter) = reporter_state();
+        let guard = reporter.on_connected().await;
+        assert_eq!(live.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state.connection_state.borrow().clone(),
+            ConnectionState::Connected
+        );
+
+        drop(guard); // simulates run_once cancellation mid-session
+
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            state.connection_state.borrow().clone(),
+            ConnectionState::Connecting
+        );
+    }
+
+    #[tokio::test]
+    async fn connected_guard_keeps_connected_while_another_session_live() {
+        // Dropping one of two live sessions must NOT fall back to Connecting:
+        // the aggregate stays Connected until the last session drops.
+        let (state, live, reporter) = reporter_state();
+        let g1 = reporter.on_connected().await;
+        let g2 = reporter.on_connected().await;
+        assert_eq!(live.load(Ordering::SeqCst), 2);
+
+        drop(g1);
+        assert_eq!(live.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state.connection_state.borrow().clone(),
+            ConnectionState::Connected
+        );
+
+        drop(g2);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            state.connection_state.borrow().clone(),
+            ConnectionState::Connecting
+        );
     }
 
     #[tokio::test]
