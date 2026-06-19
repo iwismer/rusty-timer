@@ -322,6 +322,33 @@ async fn reconnect_server(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
 }
 
 #[tauri::command]
+async fn connect_forwarder(state: State<'_, Arc<AppState>>, endpoint_id: String) -> CmdResult<()> {
+    control_api::connect_forwarder(&state, endpoint_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn disconnect_forwarder(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+) -> CmdResult<()> {
+    control_api::disconnect_forwarder(&state, endpoint_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reconnect_forwarder(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+) -> CmdResult<()> {
+    control_api::reconnect_forwarder(&state, endpoint_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_version() -> String {
     control_api::get_version()
 }

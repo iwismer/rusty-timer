@@ -281,6 +281,15 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
         "get_status" => ok(control_api::get_status(state).await),
         "get_connections" => ok(control_api::get_connections(state).await),
         "reconnect_server" => ok(control_api::reconnect_server(state).await?),
+        "connect_forwarder" => {
+            ok(control_api::connect_forwarder(state, arg(args, "endpoint_id")?).await?)
+        }
+        "disconnect_forwarder" => {
+            ok(control_api::disconnect_forwarder(state, arg(args, "endpoint_id")?).await?)
+        }
+        "reconnect_forwarder" => {
+            ok(control_api::reconnect_forwarder(state, arg(args, "endpoint_id")?).await?)
+        }
         "get_version" => ok(control_api::get_version()),
         "get_logs" => ok(control_api::get_logs(state).await),
         "admin_reset_cursor" => {

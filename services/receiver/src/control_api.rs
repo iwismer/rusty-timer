@@ -85,6 +85,7 @@ pub struct ForwarderStateSnapshot {
 pub struct ConnectAttempt {
     pub version: u64,
     pub endpoint_id: Option<String>,
+    pub restart: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -186,6 +187,7 @@ impl AppState {
             watch::channel(ConnectAttempt {
                 version: 0,
                 endpoint_id: None,
+                restart: false,
             });
         let (dbf_config_version, _dbf_config_keepalive) = watch::channel(0u64);
         let http_client = reqwest::Client::builder()
@@ -239,11 +241,12 @@ impl AppState {
         self.connect_attempt_version.subscribe()
     }
 
-    fn bump_connect_attempt(&self, endpoint_id: Option<String>) -> u64 {
+    fn bump_connect_attempt(&self, endpoint_id: Option<String>, restart: bool) -> u64 {
         let next = self.connect_attempt.fetch_add(1, Ordering::SeqCst) + 1;
         let _ = self.connect_attempt_version.send(ConnectAttempt {
             version: next,
             endpoint_id,
+            restart,
         });
         next
     }
@@ -295,14 +298,18 @@ impl AppState {
 
     pub async fn request_connect(&self) {
         self.reset_retry_streak();
-        self.bump_connect_attempt(None);
+        self.bump_connect_attempt(None, true);
         self.set_connection_state(ConnectionState::Connecting).await;
     }
 
     pub async fn request_forwarder_reconnect(&self, endpoint_id: String) {
         self.reset_retry_streak();
-        self.bump_connect_attempt(Some(endpoint_id));
+        self.bump_connect_attempt(Some(endpoint_id), true);
         self.set_connection_state(ConnectionState::Connecting).await;
+    }
+
+    fn wake_reconcile(&self) {
+        self.bump_connect_attempt(None, false);
     }
 
     pub(crate) fn update_forwarder_runtime_sync(
@@ -422,7 +429,7 @@ impl AppState {
 
     pub async fn request_retry_connect(&self) {
         self.retry_streak.fetch_add(1, Ordering::SeqCst);
-        self.bump_connect_attempt(None);
+        self.bump_connect_attempt(None, true);
         self.set_connection_state(ConnectionState::Connecting).await;
     }
 
@@ -439,7 +446,7 @@ impl AppState {
             return false;
         }
         self.retry_streak.fetch_add(1, Ordering::SeqCst);
-        self.bump_connect_attempt(None);
+        self.bump_connect_attempt(None, true);
         self.emit_connection_state_side_effects(ConnectionState::Connecting)
             .await;
         true
@@ -1223,6 +1230,48 @@ pub async fn reconnect_server(state: &AppState) -> Result<(), ReceiverError> {
     Ok(())
 }
 
+pub async fn connect_forwarder(state: &AppState, endpoint_id: String) -> Result<(), ReceiverError> {
+    {
+        let db = state.db.lock().await;
+        db.set_forwarder_intent(&endpoint_id, true)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    }
+    state.recompute_aggregate_connection_state().await;
+    state.wake_reconcile();
+    state.emit_resync();
+    Ok(())
+}
+
+pub async fn disconnect_forwarder(
+    state: &AppState,
+    endpoint_id: String,
+) -> Result<(), ReceiverError> {
+    {
+        let db = state.db.lock().await;
+        db.set_forwarder_intent(&endpoint_id, false)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    }
+    state.recompute_aggregate_connection_state().await;
+    state.wake_reconcile();
+    state.emit_resync();
+    Ok(())
+}
+
+pub async fn reconnect_forwarder(
+    state: &AppState,
+    endpoint_id: String,
+) -> Result<(), ReceiverError> {
+    {
+        let db = state.db.lock().await;
+        db.set_forwarder_intent(&endpoint_id, true)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    }
+    state.recompute_aggregate_connection_state().await;
+    state.request_forwarder_reconnect(endpoint_id).await;
+    state.emit_resync();
+    Ok(())
+}
+
 pub async fn get_logs(state: &AppState) -> LogsResponse {
     let entries = state.logger.entries();
     LogsResponse { entries }
@@ -1553,6 +1602,9 @@ macro_rules! receiver_command_list {
             get_status() -> "StatusResponse",
             get_connections() -> "ConnectionsResponse",
             reconnect_server() -> "()",
+            connect_forwarder(endpoint_id: "String") -> "()",
+            disconnect_forwarder(endpoint_id: "String") -> "()",
+            reconnect_forwarder(endpoint_id: "String") -> "()",
             get_version() -> "String",
             get_logs() -> "LogsResponse",
             admin_reset_cursor(body: "CursorResetRequest") -> "()",
@@ -1971,6 +2023,7 @@ mod tests {
         connect_rx.changed().await.unwrap();
         assert_eq!(connect_rx.borrow().version, 1);
         assert_eq!(connect_rx.borrow().endpoint_id, None);
+        assert!(connect_rx.borrow().restart);
         assert_eq!(state.current_connect_attempt(), 1);
         assert_eq!(
             state.connection_state.borrow().clone(),
@@ -1989,7 +2042,105 @@ mod tests {
         connect_rx.changed().await.unwrap();
         assert_eq!(connect_rx.borrow().version, 1);
         assert_eq!(connect_rx.borrow().endpoint_id.as_deref(), Some("fwd-1"));
+        assert!(connect_rx.borrow().restart);
         assert_eq!(state.current_connect_attempt(), 1);
+    }
+
+    #[tokio::test]
+    async fn disconnect_forwarder_sets_intent_false_preserves_subscriptions_and_notifies_ui() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[crate::db::StreamSubscription {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: "stream-1".to_owned(),
+            local_port_override: Some(9100),
+            event_type: crate::db::EventType::Finish,
+            forwarder_id: Some("legacy-fwd".to_owned()),
+            reader_ip: Some("10.0.0.1:10000".to_owned()),
+        }])
+        .unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        let mut ui_rx = state.ui_tx.subscribe();
+
+        disconnect_forwarder(&state, "endpoint-1".to_owned())
+            .await
+            .unwrap();
+
+        {
+            let db = state.db.lock().await;
+            assert!(!db.forwarder_should_connect("endpoint-1").unwrap());
+            assert_eq!(
+                db.load_stream_subscriptions().unwrap(),
+                vec![crate::db::StreamSubscription {
+                    forwarder_endpoint_id: "endpoint-1".to_owned(),
+                    stream_id: "stream-1".to_owned(),
+                    local_port_override: Some(9100),
+                    event_type: crate::db::EventType::Finish,
+                    forwarder_id: Some("legacy-fwd".to_owned()),
+                    reader_ip: Some("10.0.0.1:10000".to_owned()),
+                }]
+            );
+        }
+
+        let mut saw_connections_changed = false;
+        for _ in 0..4 {
+            let event = tokio::time::timeout(std::time::Duration::from_millis(100), ui_rx.recv())
+                .await
+                .expect("disconnect forwarder should emit UI events")
+                .expect("UI event channel should stay open");
+            if matches!(event, ReceiverUiEvent::ConnectionsChanged) {
+                saw_connections_changed = true;
+                break;
+            }
+        }
+        assert!(
+            saw_connections_changed,
+            "disconnect_forwarder should emit ConnectionsChanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_forwarder_sets_intent_true_and_wakes_reconcile() {
+        let db = Db::open_in_memory().unwrap();
+        db.set_forwarder_intent("endpoint-1", false).unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        let mut connect_rx = state.connect_attempt_rx();
+
+        connect_forwarder(&state, "endpoint-1".to_owned())
+            .await
+            .unwrap();
+
+        {
+            let db = state.db.lock().await;
+            assert!(db.forwarder_should_connect("endpoint-1").unwrap());
+        }
+        connect_rx.changed().await.unwrap();
+        assert_eq!(connect_rx.borrow().version, 1);
+        assert_eq!(connect_rx.borrow().endpoint_id, None);
+        assert!(!connect_rx.borrow().restart);
+    }
+
+    #[tokio::test]
+    async fn reconnect_forwarder_sets_intent_true_and_triggers_targeted_reconnect() {
+        let db = Db::open_in_memory().unwrap();
+        db.set_forwarder_intent("endpoint-1", false).unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        let mut connect_rx = state.connect_attempt_rx();
+
+        reconnect_forwarder(&state, "endpoint-1".to_owned())
+            .await
+            .unwrap();
+
+        {
+            let db = state.db.lock().await;
+            assert!(db.forwarder_should_connect("endpoint-1").unwrap());
+        }
+        connect_rx.changed().await.unwrap();
+        assert_eq!(connect_rx.borrow().version, 1);
+        assert_eq!(
+            connect_rx.borrow().endpoint_id.as_deref(),
+            Some("endpoint-1")
+        );
+        assert!(connect_rx.borrow().restart);
     }
 
     #[tokio::test]

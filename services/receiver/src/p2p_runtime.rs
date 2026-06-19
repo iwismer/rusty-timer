@@ -379,7 +379,10 @@ async fn run_reconcile_loop(
             }
             changed = connect_attempt_rx.changed() => {
                 if changed.is_ok() {
-                    force_reconnect = Some(connect_attempt_rx.borrow().endpoint_id.clone());
+                    let attempt = connect_attempt_rx.borrow().clone();
+                    if attempt.restart {
+                        force_reconnect = Some(attempt.endpoint_id);
+                    }
                 }
             }
             () = tokio::time::sleep(config.reconcile_interval) => {}
