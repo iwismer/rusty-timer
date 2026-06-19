@@ -89,7 +89,7 @@ pub struct ForwarderPeerConfig {
 ///
 /// `Debug` is implemented by hand (not derived) so the bearer token is never
 /// leaked through debug logs; it is rendered as `<redacted>`.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ServerClientConfig {
     /// Base URL, e.g. `http://127.0.0.1:8080`.
     pub url: String,
@@ -372,7 +372,7 @@ impl StreamWorker {
 
 async fn run_reconcile_loop(
     state: Arc<AppState>,
-    config: P2pReceiverConfig,
+    mut config: P2pReceiverConfig,
     endpoint: Endpoint,
     reporter: Arc<SessionStatusReporter>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -381,29 +381,46 @@ async fn run_reconcile_loop(
     let mut workers: HashMap<String, ForwarderConnection> = HashMap::new();
     let mut stream_workers: HashMap<String, StreamWorker> = HashMap::new();
     let mut connect_attempt_rx = state.connect_attempt_rx();
+    let mut server_config_rx = state.server_config_rx();
     let mut force_reconnect: Option<Option<String>> = None;
 
     // When a server is configured, periodically refresh the discovered
     // forwarders map from its `GET /forwarders` feed. The task observes the
-    // same shutdown signal and is awaited/aborted below.
-    let discovery_task = config.server.clone().map(|thin| {
+    // same shutdown signal and is awaited/aborted below. Re-spawned when the
+    // server config changes (see the reconfigure branch below). The closure
+    // captures local clones (not `config`) so the reconfigure branch can still
+    // mutate `config.server`.
+    let discovery_seed = config.forwarder.clone();
+    let discovery_interval = config.reconcile_interval;
+    let spawn_discovery = |thin: ServerClientConfig, shutdown: watch::Receiver<bool>| {
         tokio::spawn(run_discovery_loop(
             Arc::clone(&state),
             thin,
-            config.forwarder.clone(),
-            config.reconcile_interval,
-            shutdown_rx.clone(),
+            discovery_seed.clone(),
+            discovery_interval,
+            shutdown,
             state.connect_attempt_rx(),
         ))
-    });
-    let approval_watch_task = config.server.as_ref().map(|thin| {
+    };
+    let mut discovery_task = config
+        .server
+        .clone()
+        .map(|thin| spawn_discovery(thin, shutdown_rx.clone()));
+    // The approval-watch task is also server-bound, so build it from a closure
+    // and keep it rebindable (`let mut`) the same way as discovery, so the
+    // reconfigure branch can restart it against a new server.
+    let spawn_approval_watch = |thin: ServerClientConfig, shutdown: watch::Receiver<bool>| {
         tokio::spawn(run_approval_watch_loop(
             Arc::clone(&state),
             thin.url.clone(),
-            config.reconcile_interval,
-            shutdown_rx.clone(),
+            discovery_interval,
+            shutdown,
         ))
-    });
+    };
+    let mut approval_watch_task = config
+        .server
+        .clone()
+        .map(|thin| spawn_approval_watch(thin, shutdown_rx.clone()));
 
     // Server announcer generation, acquired by registering this endpoint and
     // taking over the announcer generation. When the server is unavailable
@@ -476,6 +493,50 @@ async fn run_reconcile_loop(
                     let attempt = connect_attempt_rx.borrow().clone();
                     if attempt.restart {
                         force_reconnect = Some(attempt.endpoint_id);
+                    }
+                }
+            }
+            changed = server_config_rx.changed() => {
+                if changed.is_ok() {
+                    // Re-resolve the effective server config (profile is the
+                    // source of truth; env vars override). On a real change,
+                    // rebind every server-bound task: restart discovery, re-run
+                    // register/takeover, and rebuild stream workers so their
+                    // announcer clients pick up the new server. This causes a
+                    // brief session reconnect, which is acceptable and bounded.
+                    let profile = state.db.lock().await.load_profile().ok().flatten();
+                    let new_server = crate::runtime::resolve_server_config(
+                        profile.as_ref(),
+                        (
+                            std::env::var(ENV_P2P_SERVER_URL).ok(),
+                            std::env::var(ENV_P2P_SERVER_TOKEN).ok(),
+                        ),
+                    );
+                    if new_server != config.server {
+                        info!("receiver server config changed; rebinding server-bound tasks");
+                        config.server = new_server;
+                        if let Some(task) = discovery_task.take() {
+                            task.abort();
+                            let _ = task.await;
+                        }
+                        discovery_task = config
+                            .server
+                            .clone()
+                            .map(|thin| spawn_discovery(thin, shutdown_rx.clone()));
+                        // The approval-watch task is also server-bound; rebind
+                        // it against the new server too.
+                        if let Some(task) = approval_watch_task.take() {
+                            task.abort();
+                            let _ = task.await;
+                        }
+                        approval_watch_task = config
+                            .server
+                            .clone()
+                            .map(|thin| spawn_approval_watch(thin, shutdown_rx.clone()));
+                        // Force re-running register/takeover and rebuilding all
+                        // forwarder + stream workers against the new server.
+                        announcer_generation = None;
+                        force_reconnect = Some(None);
                     }
                 }
             }

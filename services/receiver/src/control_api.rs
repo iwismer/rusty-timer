@@ -247,6 +247,13 @@ pub struct AppState {
     /// Keepalive receiver to prevent the watch channel from being dropped
     /// when no external subscribers exist.
     _dbf_config_keepalive: watch::Receiver<u64>,
+    /// Monotonic counter incremented when the server URL+token changes (e.g. a
+    /// profile save); the P2P reconcile loop uses this to rebind server-bound
+    /// tasks. Use `notify_server_config_changed()` and `server_config_rx()`.
+    server_config_version: watch::Sender<u64>,
+    /// Keepalive receiver so the watch channel is not dropped when the P2P
+    /// runtime (the only subscriber) is not yet started.
+    _server_config_keepalive: watch::Receiver<u64>,
 }
 
 impl AppState {
@@ -269,6 +276,7 @@ impl AppState {
                 restart: false,
             });
         let (dbf_config_version, _dbf_config_keepalive) = watch::channel(0u64);
+        let (server_config_version, _server_config_keepalive) = watch::channel(0u64);
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3))
             .build()
@@ -302,6 +310,8 @@ impl AppState {
             retry_streak: AtomicU64::new(0),
             dbf_config_version,
             _dbf_config_keepalive,
+            server_config_version,
+            _server_config_keepalive,
         });
         (state, shutdown_rx)
     }
@@ -317,6 +327,16 @@ impl AppState {
 
     pub fn dbf_config_rx(&self) -> watch::Receiver<u64> {
         self.dbf_config_version.subscribe()
+    }
+
+    /// Signal that the server URL+token configuration changed so the P2P
+    /// reconcile loop rebinds its server-bound tasks.
+    pub fn notify_server_config_changed(&self) {
+        self.server_config_version.send_modify(|v| *v += 1);
+    }
+
+    pub fn server_config_rx(&self) -> watch::Receiver<u64> {
+        self.server_config_version.subscribe()
     }
 
     pub fn connect_attempt_rx(&self) -> watch::Receiver<ConnectAttempt> {
@@ -1286,6 +1306,10 @@ pub async fn put_profile(state: &AppState, body: ProfileRequest) -> Result<(), R
             if let Some(id) = new_receiver_id {
                 *state.receiver_id.write().await = id;
             }
+            // The server URL+token may have changed; signal the P2P reconcile
+            // loop to rebind its server-bound tasks (register/takeover,
+            // discovery, announcer).
+            state.notify_server_config_changed();
             Ok(())
         }
         Err(e) => Err(ReceiverError::Internal(e.to_string())),
@@ -2267,6 +2291,31 @@ mod tests {
             snapshot.pending,
             "a freshly started grace clock must keep pending=true"
         );
+    }
+
+    #[tokio::test]
+    async fn server_config_version_signal_is_observable() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let mut rx = state.server_config_rx();
+        state.notify_server_config_changed();
+        assert!(rx.changed().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn put_profile_signals_server_config_change() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let mut rx = state.server_config_rx();
+        put_profile(
+            &state,
+            ProfileRequest {
+                server_url: "http://127.0.0.1:8080".to_owned(),
+                token: "tok".to_owned(),
+                receiver_id: None,
+            },
+        )
+        .await
+        .expect("put_profile ok");
+        assert!(rx.changed().await.is_ok());
     }
 
     #[test]

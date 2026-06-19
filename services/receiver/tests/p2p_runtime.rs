@@ -1290,3 +1290,65 @@ async fn one_connection_multiplexes_multiple_data_streams() {
     .await
     .expect("one_connection_multiplexes_multiple_data_streams timed out");
 }
+
+/// Phase 4 / Task 4.3: a runtime started with no server must rebind its
+/// server-bound tasks (register -> takeover -> discovery) when the stored
+/// profile gains a server and the `server_config_version` signal fires.
+#[tokio::test]
+async fn reconfigure_on_signal_rebinds_to_profile_server() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let (server_url, server_state) = start_mock_server().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_state(dir.path()).await;
+
+        // Start a bare runtime with NO server configured.
+        let config = P2pReceiverConfig {
+            identity: ReceiverIdentity::Seed([71u8; 32]),
+            relay_disabled: true,
+            discovery_disabled: true,
+            bind_addr_v4: Some("127.0.0.1:0".parse().unwrap()),
+            forwarder: None,
+            server: None,
+            reconcile_interval: Duration::from_millis(50),
+        };
+        let runtime = start_receiver_p2p(Arc::clone(&state), config)
+            .await
+            .unwrap();
+
+        // No server configured yet, so takeover must not have run.
+        assert_eq!(*server_state.generation.lock().unwrap(), 0);
+
+        // Save a profile pointing at the mock server.
+        {
+            let mut db = state.db.lock().await;
+            db.save_profile(&server_url, "tok", "check-and-download", None)
+                .unwrap();
+        }
+
+        // The reconcile loop must rebind and run register + takeover against the
+        // newly-configured server. Re-signal on each poll so the test does not
+        // race the spawned loop's watch subscription (production calls
+        // notify_server_config_changed long after the loop subscribes, so the
+        // edge-triggered signal is never missed there). Re-resolving to the
+        // same server is idempotent (no extra rebind/takeover).
+        poll_until(
+            || {
+                let server_state = server_state.clone();
+                let state = Arc::clone(&state);
+                async move {
+                    state.notify_server_config_changed();
+                    *server_state.generation.lock().unwrap() >= 1
+                }
+            },
+            Duration::from_secs(10),
+        )
+        .await;
+
+        tokio::time::timeout(Duration::from_secs(3), runtime.shutdown())
+            .await
+            .expect("runtime shutdown must complete promptly");
+    })
+    .await
+    .expect("reconfigure_on_signal_rebinds_to_profile_server timed out");
+}
