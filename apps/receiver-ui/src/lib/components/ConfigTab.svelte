@@ -3,8 +3,6 @@
   import {
     store,
     getConfigDirty,
-    getConnectionState,
-    getConnectionBadgeState,
     saveProfile,
     reconnectServer,
     saveDbfConfig,
@@ -15,42 +13,11 @@
   } from "$lib/store.svelte";
   import { inputClass, btnPrimary, btnSecondary } from "$lib/ui-classes";
 
-  const dotClass: Record<"ok" | "warn" | "err", string> = {
-    ok: "bg-status-ok",
-    warn: "bg-status-warn",
-    err: "bg-status-err",
-  };
-
   function getDbfDirty(): boolean {
     return (
       store.editDbfEnabled !== store.dbfEnabled ||
       store.editDbfPath !== store.dbfPath
     );
-  }
-
-  function approvalLabel(): string | null {
-    const thin = store.status?.server;
-    if (!thin?.configured) return null;
-    if (thin.waiting_for_approval)
-      return thin.message ?? "Waiting for server approval";
-    if (thin.reachable === false) return thin.message ?? "Server unreachable";
-    if (thin.approval_state === "active") return "Server approved";
-    return thin.message;
-  }
-
-  function connectionLabel(state: string): string {
-    switch (state) {
-      case "connected":
-        return "Connected";
-      case "disconnected":
-        return "Disconnected";
-      case "connecting":
-        return "Connecting...";
-      case "disconnecting":
-        return "Disconnecting...";
-      default:
-        return "Unknown";
-    }
   }
 </script>
 
@@ -110,44 +77,21 @@
       <div>
         <p class="text-xs font-medium text-text-muted">Connection</p>
         <p class="mt-1 text-xs text-text-muted">
-          Connects automatically to the forwarder over the peer-to-peer link.
+          Connection status is shown in the Connections tab.
         </p>
-        {#if approvalLabel()}
-          <p
-            data-testid="server-approval-state"
-            class="mt-2 text-xs {store.status?.server?.waiting_for_approval
-              ? 'text-status-warn'
-              : store.status?.server?.reachable === false
-                ? 'text-status-err'
-                : 'text-text-muted'}"
-          >
-            {approvalLabel()}
-          </p>
-        {/if}
       </div>
 
-      <div class="flex shrink-0 items-center gap-2">
-        <span
-          data-testid="config-connection-state"
-          class="flex items-center gap-2 text-sm text-text-primary"
-        >
-          <span
-            class="h-2 w-2 rounded-full {dotClass[getConnectionBadgeState()]}"
-          ></span>
-          {connectionLabel(getConnectionState())}
-        </span>
-        <button
-          data-testid="reconnect-server-btn"
-          class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
-          onclick={() => void reconnectServer()}
-          disabled={getConfigDirty() || store.saving}
-          title={getConfigDirty()
-            ? "Save server configuration before reconnecting"
-            : "Retry server discovery and P2P subscriptions"}
-        >
-          Reconnect
-        </button>
-      </div>
+      <button
+        data-testid="reconnect-server-btn"
+        class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
+        onclick={() => void reconnectServer()}
+        disabled={getConfigDirty() || store.saving}
+        title={getConfigDirty()
+          ? "Save server configuration before reconnecting"
+          : "Retry server discovery and P2P subscriptions"}
+      >
+        Reconnect
+      </button>
     </div>
   </section>
 

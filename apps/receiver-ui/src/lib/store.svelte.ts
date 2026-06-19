@@ -141,16 +141,7 @@ export function getConfigDirty(): boolean {
   );
 }
 
-export function getConnectionState(): string {
-  return store.status?.connection_state ?? "unknown";
-}
-
 export type OverallHealth = "ok" | "warn" | "err";
-
-export function getConnectionBadgeState(): "ok" | "warn" | "err" {
-  const cs = getConnectionState();
-  return cs === "connected" ? "ok" : cs === "disconnected" ? "err" : "warn";
-}
 
 export function getOverallHealth(): OverallHealth {
   const connections = store.connections;
