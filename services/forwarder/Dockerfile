@@ -34,7 +34,7 @@ COPY rust-toolchain.toml ./
 COPY crates/ crates/
 COPY services/forwarder/ services/forwarder/
 COPY services/receiver/ services/receiver/
-COPY services/thin-node/ services/thin-node/
+COPY services/server/ services/server/
 COPY services/streamer/ services/streamer/
 COPY services/emulator/ services/emulator/
 COPY src/ src/

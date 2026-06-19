@@ -12,7 +12,7 @@ Usage:
     uv run scripts/release.py forwarder --patch
     uv run scripts/release.py forwarder emulator --minor
     uv run scripts/release.py receiver --version 2.0.0
-    uv run scripts/release.py thin-node --patch
+    uv run scripts/release.py server --patch
     uv run scripts/release.py forwarder --patch --dry-run
 
 For `receiver`, also bumps `apps/receiver-ui/src-tauri/tauri.conf.json` to the
@@ -31,7 +31,7 @@ import traceback
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-VALID_SERVICES = ("forwarder", "receiver", "streamer", "emulator", "thin-node")
+VALID_SERVICES = ("forwarder", "receiver", "streamer", "emulator", "server")
 EMBED_UI_SERVICES = ("forwarder",)
 UI_WORKSPACES = {
     "forwarder": "apps/forwarder-ui",

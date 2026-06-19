@@ -131,4 +131,4 @@ jobs:
           cargo test -p receiver --test local_proxy
           cargo test -p receiver --features test-bridge --lib control_bridge
           cargo test -p receiver --features test-bridge --test headless
-          cargo test -p thin-node --lib
+          cargo test -p server --lib

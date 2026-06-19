@@ -20,7 +20,7 @@ The forwarder:
 1. Confirm the reader is reachable from the SBC LAN.
 2. Confirm `forwarder.toml` points at the local reader address and the intended
    data directory.
-3. Confirm the thin-node URL and M2M token are configured for registration and
+3. Confirm the server URL and M2M token are configured for registration and
    allow-list polling.
 4. Start or restart the service:
 
@@ -36,7 +36,7 @@ The forwarder:
    curl -fsS http://127.0.0.1:8080/readyz
    ```
 
-6. Verify the thin-node status board shows the endpoint online.
+6. Verify the server status board shows the endpoint online.
 
 ## Recovery
 
@@ -49,7 +49,7 @@ The forwarder:
 
 ### Receiver cannot subscribe
 
-1. Check the thin-node allow-list for the receiver endpoint ID.
+1. Check the server allow-list for the receiver endpoint ID.
 2. Confirm the forwarder has fetched the latest allow-list generation.
 3. If a receiver was revoked, confirm any existing connection was force-closed.
 4. Reconnect the receiver so it fetches the current endpoint address.

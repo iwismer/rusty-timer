@@ -11,37 +11,35 @@ async fn main() {
         .with_env_filter(EnvFilter::new(log_level))
         .init();
 
-    let db_path = env::var("THIN_NODE_DB_PATH").unwrap_or_else(|_| "thin-node.sqlite3".to_owned());
-    let conn = thin_node::db::open(&db_path).expect("failed to open thin-node SQLite database");
+    let db_path = env::var("SERVER_DB_PATH").unwrap_or_else(|_| "server.sqlite3".to_owned());
+    let conn = server::db::open(&db_path).expect("failed to open server SQLite database");
 
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_owned());
     // Fail-closed admin guard: only trust the upstream-injected Remote-User
     // header when the operator explicitly asserts a header-stripping reverse
     // proxy (Caddy/Authelia) sits in front of the node. Without this, any
     // direct client could forge the header and self-authorize admin routes.
-    let admin_proxy_trusted = env_flag("THIN_NODE_TRUSTED_PROXY");
+    let admin_proxy_trusted = env_flag("SERVER_TRUSTED_PROXY");
     if !admin_proxy_trusted {
         warn!(
-            "THIN_NODE_TRUSTED_PROXY not set; /admin/* routes are disabled (fail-closed). \
-             Set THIN_NODE_TRUSTED_PROXY=1 only when behind a trusted, header-stripping proxy."
+            "SERVER_TRUSTED_PROXY not set; /admin/* routes are disabled (fail-closed). \
+             Set SERVER_TRUSTED_PROXY=1 only when behind a trusted, header-stripping proxy."
         );
     }
 
     let mut router = Router::new().route("/healthz", get(healthz));
-    if let Ok(provisioning_token) = env::var("THIN_NODE_PROVISIONING_TOKEN") {
-        let state = thin_node::http::AppState::new(conn, &provisioning_token, admin_proxy_trusted);
-        router = router.merge(thin_node::http::router(state));
+    if let Ok(provisioning_token) = env::var("SERVER_PROVISIONING_TOKEN") {
+        let state = server::http::AppState::new(conn, &provisioning_token, admin_proxy_trusted);
+        router = router.merge(server::http::router(state));
     } else {
-        warn!("THIN_NODE_PROVISIONING_TOKEN not set; /register disabled");
+        warn!("SERVER_PROVISIONING_TOKEN not set; /register disabled");
     }
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
         .expect("failed to bind");
 
-    info!(%bind_addr, %db_path, "thin-node listening");
-    axum::serve(listener, router)
-        .await
-        .expect("thin-node server error");
+    info!(%bind_addr, %db_path, "server listening");
+    axum::serve(listener, router).await.expect("server error");
 }
 
 async fn healthz() -> &'static str {

@@ -5,7 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export interface Profile {
-  thin_node_url: string;
+  server_url: string;
   token: string;
   receiver_id: string;
 }
@@ -98,7 +98,7 @@ export type ConnectionState =
   | "connected"
   | "disconnecting";
 
-export interface ThinNodeDeviceStatus {
+export interface ServerDeviceStatus {
   configured: boolean;
   endpoint_id: string | null;
   reachable: boolean | null;
@@ -112,7 +112,7 @@ export interface StatusResponse {
   local_ok: boolean;
   streams_count: number;
   receiver_id: string;
-  thin_node: ThinNodeDeviceStatus;
+  server: ServerDeviceStatus;
 }
 
 export interface LogsResponse {
@@ -229,8 +229,8 @@ export async function getStatus(): Promise<StatusResponse> {
   return invoke<StatusResponse>("get_status");
 }
 
-export async function reconnectThinNode(): Promise<void> {
-  await invoke("reconnect_thin_node");
+export async function reconnectServer(): Promise<void> {
+  await invoke("reconnect_server");
 }
 
 export async function getLogs(): Promise<LogsResponse> {

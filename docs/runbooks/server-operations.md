@@ -1,20 +1,20 @@
-# Thin-node Operations Runbook
+# Server Operations Runbook
 
-This runbook covers startup, recovery, and operator checks for the `thin-node`
-service in the P2P architecture. The thin node stores device registry state,
+This runbook covers startup, recovery, and operator checks for the `server`
+service in the P2P architecture. The server stores device registry state,
 distributes the receiver allow-list to forwarders, and hosts the announcer row
 status board.
 
 ## Service Overview
 
-The thin node is a small Axum service backed by SQLite. It provides:
+The server is a small Axum service backed by SQLite. It provides:
 
 - `GET /healthz` and `GET /status` public read endpoints.
 - TOFU device registration via `POST /register`.
 - Receiver allow-list distribution via `GET /allowlist/receivers`.
 - Fenced announcer push via `POST /announcer/takeover` and `POST /announcer/rows`.
-- Admin approval via `POST /admin/devices/approve`, expected to sit behind
-  Caddy + Authelia.
+- Admin approval via `POST /admin/devices/approve` and device rename via `POST
+  /admin/devices/rename`, expected to sit behind Caddy + Authelia.
 
 The service does not use `EndpointId` over plain HTTP as an authenticator. Device
 routes use a provisioning bearer token; admin identity is delegated to the
@@ -22,31 +22,31 @@ reverse proxy.
 
 ## Startup and Installation
 
-Install an arm64 release artifact on the thin-node host:
+Install an arm64 release artifact on the server host:
 
 ```bash
-sudo install -m 0755 thin-node /usr/local/bin/thin-node
-sudo useradd -r -s /bin/false -m -d /var/lib/rusty-timer-thin-node rt-thin-node || true
-sudo install -d -o rt-thin-node -g rt-thin-node -m 0750 /var/lib/rusty-timer-thin-node
+sudo install -m 0755 server /usr/local/bin/server
+sudo useradd -r -s /bin/false -m -d /var/lib/rusty-timer-server rt-server || true
+sudo install -d -o rt-server -g rt-server -m 0750 /var/lib/rusty-timer-server
 ```
 
 Set the required environment variables in the systemd unit or environment file:
 
 ```bash
 BIND_ADDR=127.0.0.1:8080
-THIN_NODE_DB_PATH=/var/lib/rusty-timer-thin-node/thin-node.sqlite3
-THIN_NODE_PROVISIONING_TOKEN=<long random provisioning token>
+SERVER_DB_PATH=/var/lib/rusty-timer-server/server.sqlite3
+SERVER_PROVISIONING_TOKEN=<long random provisioning token>
 LOG_LEVEL=info
 ```
 
 Start manually for a smoke test:
 
 ```bash
-sudo -u rt-thin-node \
+sudo -u rt-server \
   BIND_ADDR=127.0.0.1:8080 \
-  THIN_NODE_DB_PATH=/var/lib/rusty-timer-thin-node/thin-node.sqlite3 \
-  THIN_NODE_PROVISIONING_TOKEN="$THIN_NODE_PROVISIONING_TOKEN" \
-  /usr/local/bin/thin-node
+  SERVER_DB_PATH=/var/lib/rusty-timer-server/server.sqlite3 \
+  SERVER_PROVISIONING_TOKEN="$SERVER_PROVISIONING_TOKEN" \
+  /usr/local/bin/server
 ```
 
 Verify startup:
@@ -64,12 +64,13 @@ Use Caddy + Authelia in front of the service for public deployments:
 | --- | --- |
 | `GET /healthz`, `GET /status` | Public read; no secrets returned. |
 | `POST /admin/devices/approve` | Admin only; Authelia must inject `Remote-User`. |
-| `POST /register` | M2M/device `Authorization: Bearer <THIN_NODE_PROVISIONING_TOKEN>`. |
+| `POST /admin/devices/rename` | Admin only; Authelia must inject `Remote-User`. |
+| `POST /register` | M2M/device `Authorization: Bearer <SERVER_PROVISIONING_TOKEN>`. |
 | `GET /allowlist/receivers` | M2M/device bearer token. |
 | `POST /announcer/takeover`, `POST /announcer/rows` | M2M/device bearer token. |
 
 Caddy must strip any inbound client-supplied `Remote-User` header before proxying
-to the thin node. Only the trusted proxy may set that header after Authelia
+to the server. Only the trusted proxy may set that header after Authelia
 admin authentication.
 
 ## Provisioning and Device Approval
@@ -78,7 +79,7 @@ Forwarders and receivers self-register with the provisioning token:
 
 ```bash
 curl -fsS -X POST http://127.0.0.1:8080/register \
-  -H "Authorization: Bearer ${THIN_NODE_PROVISIONING_TOKEN}" \
+  -H "Authorization: Bearer ${SERVER_PROVISIONING_TOKEN}" \
   -H 'Content-Type: application/json' \
   -d '{
     "endpoint_id": "receiver-finish-line",
@@ -97,6 +98,17 @@ curl -fsS -X POST http://127.0.0.1:8080/admin/devices/approve \
   -d '{"endpoint_id":"receiver-finish-line","display_name":"Finish Line"}'
 ```
 
+An already-approved device can be renamed at any time through the protected admin
+route. The endpoint accepts the same body, leaves the approval state unchanged,
+and rejects a blank display name with `400`:
+
+```bash
+curl -fsS -X POST http://127.0.0.1:8080/admin/devices/rename \
+  -H 'Remote-User: admin@example.com' \
+  -H 'Content-Type: application/json' \
+  -d '{"endpoint_id":"receiver-finish-line","display_name":"Finish Tent"}'
+```
+
 ## Allow-list Distribution
 
 Forwarders fetch the active receiver allow-list with the provisioning bearer
@@ -104,7 +116,7 @@ token:
 
 ```bash
 curl -fsS http://127.0.0.1:8080/allowlist/receivers \
-  -H "Authorization: Bearer ${THIN_NODE_PROVISIONING_TOKEN}"
+  -H "Authorization: Bearer ${SERVER_PROVISIONING_TOKEN}"
 ```
 
 Only active receivers appear in the response. Pending devices and forwarders are
@@ -118,11 +130,11 @@ Receivers take over a fenced announcer source generation before pushing rows:
 
 ```bash
 curl -fsS -X POST http://127.0.0.1:8080/announcer/takeover \
-  -H "Authorization: Bearer ${THIN_NODE_PROVISIONING_TOKEN}"
+  -H "Authorization: Bearer ${SERVER_PROVISIONING_TOKEN}"
 ```
 
 Each `POST /announcer/rows` request includes the returned
-`announcer_source_generation`, `stream_id`, and monotonic `seq`. The thin node
+`announcer_source_generation`, `stream_id`, and monotonic `seq`. The server
 rejects stale generations with `409 Conflict`, which prevents an older receiver
 process from overwriting a newer source after restart or failover.
 
@@ -130,11 +142,11 @@ process from overwriting a newer source after restart or failover.
 
 ### Service restart
 
-The thin node stores registry, allow-list, and announcer state in SQLite. On
-restart, point `THIN_NODE_DB_PATH` at the same file and start the service again:
+The server stores registry, allow-list, and announcer state in SQLite. On
+restart, point `SERVER_DB_PATH` at the same file and start the service again:
 
 ```bash
-sudo systemctl restart rt-thin-node
+sudo systemctl restart rt-server
 curl -fsS http://127.0.0.1:8080/healthz
 ```
 
@@ -146,9 +158,9 @@ pushes. No manual cursor migration is required.
 Stop the service before copying the SQLite file:
 
 ```bash
-sudo systemctl stop rt-thin-node
-sudo cp /var/lib/rusty-timer-thin-node/thin-node.sqlite3 /tmp/thin-node.sqlite3.bak
-sudo systemctl start rt-thin-node
+sudo systemctl stop rt-server
+sudo cp /var/lib/rusty-timer-server/server.sqlite3 /tmp/server.sqlite3.bak
+sudo systemctl start rt-server
 ```
 
 To restore, stop the service, replace the SQLite file with the backup, then
@@ -157,7 +169,7 @@ their registration.
 
 ### Lost provisioning token
 
-Rotate the token by changing `THIN_NODE_PROVISIONING_TOKEN` and restarting the
+Rotate the token by changing `SERVER_PROVISIONING_TOKEN` and restarting the
 service. Existing device registry records remain in SQLite, but devices must be
 configured with the new bearer token for future registration, allow-list fetch,
 and announcer push requests.
@@ -166,7 +178,7 @@ and announcer push requests.
 
 - `401 Unauthorized` on `/register`, `/allowlist/receivers`, or `/announcer/*`:
   check the `Authorization: Bearer` token exactly matches
-  `THIN_NODE_PROVISIONING_TOKEN`.
+  `SERVER_PROVISIONING_TOKEN`.
 - Empty allow-list: confirm the receiver registered and an admin approved it as
   active; pending receivers are intentionally excluded.
 - `409 Conflict` on announcer row push: the receiver has a stale generation;

@@ -15,7 +15,7 @@ It is compatible with timing software that accepts IPICO TCP streams
 
 ```
              ┌─── Field ───┐        ┌── Coordination ─┐        ┌── Timing Tent ──┐
-IPICO Reader ──TCP──► Forwarder ──iroh/P2P──► Thin node ◄──HTTP── Receiver ──TCP──► Timing Software
+IPICO Reader ──TCP──► Forwarder ──iroh/P2P──► Server ◄──HTTP── Receiver ──TCP──► Timing Software
                          │                 (registry,
                    SQLite journal       allow-list,
                   + replay cursor       status board)
@@ -26,7 +26,7 @@ It journals every read to local SQLite, exposes a typed P2P control/data
 plane over iroh, and keeps per-stream sequence numbers monotonic across
 epoch changes.
 
-The **[Thin node](services/thin-node/)** is the lightweight coordination
+The **[Server](services/server/)** is the lightweight coordination
 service. It stores endpoint registrations, distributes allow-lists,
 receives announcer/status updates, and exposes the status board. It does
 not carry chip-read data.
@@ -69,7 +69,7 @@ uv run scripts/e2e/run_stack.py
 ```
 
 The loopback stack starts the emulator, forwarder, receiver-headless,
-and thin-node with relay/discovery disabled and injected local addresses.
+and server with relay/discovery disabled and injected local addresses.
 See [scripts/README.md](scripts/README.md) for local development commands.
 
 ## Deploying for Real
@@ -80,7 +80,7 @@ See [scripts/README.md](scripts/README.md) for local development commands.
 | Race-day operations | [docs/runbooks/race-day-operator-guide.md](docs/runbooks/race-day-operator-guide.md) |
 | Forwarder operations | [docs/runbooks/forwarder-operations.md](docs/runbooks/forwarder-operations.md) |
 | Receiver operations | [docs/runbooks/receiver-operations.md](docs/runbooks/receiver-operations.md) |
-| Thin-node operations | [docs/runbooks/thin-node-operations.md](docs/runbooks/thin-node-operations.md) |
+| Server operations | [docs/runbooks/server-operations.md](docs/runbooks/server-operations.md) |
 
 Pre-built binaries are available on the [Releases](https://github.com/iwismer/rusty-timer/releases) page.
 

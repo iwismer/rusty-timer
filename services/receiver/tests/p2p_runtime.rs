@@ -3,7 +3,7 @@
 //! These exercise the *real* loopback P2P lane end-to-end: a deterministic iroh
 //! receiver endpoint dials a scripted [`MockForwarderPeer`], runs the real
 //! reconnecting `p2p_session`, and drives the durable local proxy, durable DBF
-//! feed, and thin-node announcer push off the post-commit durable hints.
+//! feed, and server announcer push off the post-commit durable hints.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -15,7 +15,7 @@ use axum::routing::post;
 use receiver::control_api::{ConnectionState, DiscoveredForwarder, DiscoveredStream};
 use receiver::db::{DbfConfig, EventType, StreamSubscription};
 use receiver::p2p_runtime::{
-    ForwarderPeerConfig, P2pReceiverConfig, ThinNodeClientConfig, start_receiver_p2p,
+    ForwarderPeerConfig, P2pReceiverConfig, ServerClientConfig, start_receiver_p2p,
 };
 use receiver::ui_events::ReceiverUiEvent;
 use rt_p2p_protocol::{
@@ -135,7 +135,7 @@ fn base_config(
             node_id,
             direct_addr: direct,
         }),
-        thin_node: None,
+        server: None,
         reconcile_interval: Duration::from_millis(50),
     };
     (config, sub)
@@ -384,10 +384,10 @@ async fn dbf_feed_delivers_from_received_events_without_duplicates() {
     .expect("dbf_feed_delivers_from_received_events_without_duplicates timed out");
 }
 
-// --- Mock thin-node for announcer push -------------------------------------
+// --- Mock server for announcer push -------------------------------------
 
 #[derive(Clone, Default)]
-struct ThinNodeState {
+struct ServerState {
     rows: Arc<Mutex<Vec<(String, u64, u64)>>>, // (stream_id, seq, generation)
     generation: Arc<Mutex<u64>>,
 }
@@ -400,14 +400,14 @@ async fn register_handler() -> Json<serde_json::Value> {
     }))
 }
 
-async fn takeover_handler(State(state): State<ThinNodeState>) -> Json<serde_json::Value> {
+async fn takeover_handler(State(state): State<ServerState>) -> Json<serde_json::Value> {
     let mut current = state.generation.lock().unwrap();
     *current += 1;
     Json(serde_json::json!({ "announcer_source_generation": *current }))
 }
 
 async fn rows_handler(
-    State(state): State<ThinNodeState>,
+    State(state): State<ServerState>,
     Json(body): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
     let stream_id = body["stream_id"].as_str().unwrap_or_default().to_owned();
@@ -423,24 +423,24 @@ async fn rows_handler(
     Json(serde_json::json!({ "announcer_source_generation": generation, "finisher_count": 1 }))
 }
 
-async fn start_mock_thin_node() -> (String, ThinNodeState) {
+async fn start_mock_server() -> (String, ServerState) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let state = serve_mock_thin_node(listener);
+    let state = serve_mock_server(listener);
     (format!("http://{addr}"), state)
 }
 
-/// Bind and serve a mock thin-node on a specific (already-reserved) port. Used
-/// to prove the receiver recovers when the thin-node appears *after* startup.
-async fn start_mock_thin_node_on_port(port: u16) -> ThinNodeState {
+/// Bind and serve a mock server on a specific (already-reserved) port. Used
+/// to prove the receiver recovers when the server appears *after* startup.
+async fn start_mock_server_on_port(port: u16) -> ServerState {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .unwrap();
-    serve_mock_thin_node(listener)
+    serve_mock_server(listener)
 }
 
-fn serve_mock_thin_node(listener: tokio::net::TcpListener) -> ThinNodeState {
-    let state = ThinNodeState::default();
+fn serve_mock_server(listener: tokio::net::TcpListener) -> ServerState {
+    let state = ServerState::default();
     let app = axum::Router::new()
         .route("/register", post(register_handler))
         .route("/announcer/takeover", post(takeover_handler))
@@ -459,7 +459,7 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
             .await
             .unwrap();
         let (node_id, direct) = forwarder_config(&forwarder);
-        let (thin_url, thin_state) = start_mock_thin_node().await;
+        let (thin_url, thin_state) = start_mock_server().await;
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
@@ -471,7 +471,7 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
             .unwrap();
 
         let (mut config, _sub) = base_config(node_id, direct, 77, None);
-        config.thin_node = Some(ThinNodeClientConfig {
+        config.server = Some(ServerClientConfig {
             url: thin_url,
             token: "secret-token".to_owned(),
         });
@@ -693,20 +693,20 @@ async fn dead_session_worker_is_recreated_on_next_reconcile() {
     .expect("dead_session_worker_is_recreated_on_next_reconcile timed out");
 }
 
-/// The thin-node is unavailable when the receiver starts, so register/takeover
+/// The server is unavailable when the receiver starts, so register/takeover
 /// fails and the announcer generation cannot be acquired. The reconcile loop
-/// must keep retrying startup; once the thin-node appears, a generation is
+/// must keep retrying startup; once the server appears, a generation is
 /// acquired, the stream worker is rebuilt with an announcer push worker, and the
 /// pending durable rows are pushed — all without any new durable hint required.
 #[tokio::test]
-async fn announcer_push_recovers_when_thin_node_starts_late() {
+async fn announcer_push_recovers_when_server_starts_late() {
     tokio::time::timeout(TEST_TIMEOUT, async {
         let forwarder = MockForwarderPeer::start([84; 32], script_two(VALID_FRAME))
             .await
             .unwrap();
         let (node_id, direct) = forwarder_config(&forwarder);
 
-        // Reserve a port for the thin-node but do NOT start it yet, so initial
+        // Reserve a port for the server but do NOT start it yet, so initial
         // register/takeover fails with connection-refused.
         let thin_port = reserve_port().await;
         let thin_url = format!("http://127.0.0.1:{thin_port}");
@@ -721,7 +721,7 @@ async fn announcer_push_recovers_when_thin_node_starts_late() {
             .unwrap();
 
         let (mut config, _sub) = base_config(node_id, direct, 85, None);
-        config.thin_node = Some(ThinNodeClientConfig {
+        config.server = Some(ServerClientConfig {
             url: thin_url,
             token: "secret-token".to_owned(),
         });
@@ -730,7 +730,7 @@ async fn announcer_push_recovers_when_thin_node_starts_late() {
             .await
             .unwrap();
 
-        // Events become durable even while the thin-node is unreachable.
+        // Events become durable even while the server is unreachable.
         poll_until(
             || {
                 let state = Arc::clone(&state);
@@ -745,8 +745,8 @@ async fn announcer_push_recovers_when_thin_node_starts_late() {
         )
         .await;
 
-        // Now bring the thin-node up on the reserved port.
-        let thin_state = start_mock_thin_node_on_port(thin_port).await;
+        // Now bring the server up on the reserved port.
+        let thin_state = start_mock_server_on_port(thin_port).await;
 
         // The reconcile loop retries startup, acquires a generation, rebuilds
         // the worker, and pushes the pending rows.
@@ -762,7 +762,7 @@ async fn announcer_push_recovers_when_thin_node_starts_late() {
         let generation = *thin_state.generation.lock().unwrap();
         assert!(
             generation >= 1,
-            "a generation must be taken over after the thin-node recovers"
+            "a generation must be taken over after the server recovers"
         );
         let mut keys: Vec<(String, u64)> = thin_state
             .rows
@@ -776,14 +776,14 @@ async fn announcer_push_recovers_when_thin_node_starts_late() {
         assert_eq!(
             keys,
             vec![(STREAM_ID.to_owned(), 1), (STREAM_ID.to_owned(), 2)],
-            "both pending rows pushed after thin-node recovery"
+            "both pending rows pushed after server recovery"
         );
 
         runtime.shutdown().await;
         forwarder.shutdown().await;
     })
     .await
-    .expect("announcer_push_recovers_when_thin_node_starts_late timed out");
+    .expect("announcer_push_recovers_when_server_starts_late timed out");
 }
 
 /// A reconcile interval below the minimum must be rejected by
@@ -936,7 +936,7 @@ async fn discovered_streams_appear_as_unsubscribed_then_subscribed_dedup() {
 }
 
 /// With no explicit forwarder config, a forwarder learned only from discovery
-/// (injected into `discovered_forwarders`, as the thin-node feed would) must be
+/// (injected into `discovered_forwarders`, as the server feed would) must be
 /// dialed and its events persisted once a subscription names it.
 #[tokio::test]
 async fn discovered_forwarder_is_dialed_and_persists_events() {
@@ -973,7 +973,7 @@ async fn discovered_forwarder_is_dialed_and_persists_events() {
         let config = P2pReceiverConfig {
             secret_key_seed: [93; 32],
             forwarder: None,
-            thin_node: None,
+            server: None,
             reconcile_interval: Duration::from_millis(50),
         };
         let runtime = start_receiver_p2p(Arc::clone(&state), config)

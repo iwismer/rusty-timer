@@ -10,7 +10,7 @@
 //! boots real OS processes and `SIGKILL`s the live forwarder *and* receiver
 //! binaries mid-stream, restarts them, and asserts lossless end-to-end resume
 //! (exact received rows/raw frames/seqs, exact DBF rows/chips with no
-//! duplicates, local TCP proxy replay, and thin-node announcer state). Treat
+//! duplicates, local TCP proxy replay, and server announcer state). Treat
 //! these unit tests only as fast, focused coverage of the journal invariants
 //! that the real-process suite depends on.
 //!

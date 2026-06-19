@@ -1,6 +1,6 @@
 # Receiver
 
-The receiver discovers allowed forwarders through the thin node, connects
+The receiver discovers allowed forwarders through the server, connects
 directly over iroh, durably stores received events/cursors/gaps in SQLite, and
 re-exposes subscribed streams as local TCP ports for timing software.
 

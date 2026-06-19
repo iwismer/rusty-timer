@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 pub type ChipLookup = HashMap<String, HashMap<String, (String, String)>>;
 
-/// One stream a discovered forwarder exposes, learned from the thin-node
+/// One stream a discovered forwarder exposes, learned from the server
 /// `GET /forwarders` discovery feed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredStream {
@@ -24,7 +24,7 @@ pub struct DiscoveredStream {
     pub next_seq: i64,
 }
 
-/// An approved forwarder discovered from the thin-node (or seeded from an
+/// An approved forwarder discovered from the server (or seeded from an
 /// explicit local forwarder config). `direct_addrs` are the addresses the
 /// receiver dials; `streams` is the forwarder's advertised stream catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,7 +77,7 @@ pub struct AppState {
     pub db_integrity_ok: bool,
     pub http_client: reqwest::Client,
     pub chip_lookup: Arc<tokio::sync::RwLock<ChipLookup>>,
-    /// Approved forwarders discovered from the thin-node (or seeded from an
+    /// Approved forwarders discovered from the server (or seeded from an
     /// explicit local forwarder config), keyed by endpoint id. Drives both the
     /// available-but-unsubscribed entries in the streams response and the
     /// per-subscription dial address resolution in the P2P runtime.
@@ -424,7 +424,7 @@ impl AppState {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProfileRequest {
-    pub thin_node_url: String,
+    pub server_url: String,
     pub token: String,
     #[serde(default)]
     pub receiver_id: Option<String>,
@@ -451,7 +451,7 @@ fn is_uuid_format(value: &str) -> bool {
 
 #[derive(Debug, Serialize)]
 pub struct ProfileResponse {
-    pub thin_node_url: String,
+    pub server_url: String,
     pub token: String,
     pub receiver_id: String,
 }
@@ -525,7 +525,7 @@ pub struct StreamsResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ThinNodeDeviceStatus {
+pub struct ServerDeviceStatus {
     pub configured: bool,
     pub endpoint_id: Option<String>,
     pub reachable: Option<bool>,
@@ -534,7 +534,7 @@ pub struct ThinNodeDeviceStatus {
     pub message: Option<String>,
 }
 
-impl ThinNodeDeviceStatus {
+impl ServerDeviceStatus {
     fn not_configured() -> Self {
         Self {
             configured: false,
@@ -553,7 +553,7 @@ pub struct StatusResponse {
     pub connection_state: ConnectionState,
     pub local_ok: bool,
     pub streams_count: usize,
-    pub thin_node: ThinNodeDeviceStatus,
+    pub server: ServerDeviceStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -595,7 +595,7 @@ pub async fn get_profile(state: &AppState) -> Result<ProfileResponse, ReceiverEr
     let db = state.db.lock().await;
     match db.load_profile() {
         Ok(Some(p)) => Ok(ProfileResponse {
-            thin_node_url: p.thin_node_url,
+            server_url: p.server_url,
             token: p.token,
             receiver_id,
         }),
@@ -614,7 +614,7 @@ pub async fn get_mode(state: &AppState) -> Result<ReceiverMode, ReceiverError> {
 }
 
 pub async fn put_profile(state: &AppState, body: ProfileRequest) -> Result<(), ReceiverError> {
-    let url = body.thin_node_url.trim().trim_end_matches('/').to_owned();
+    let url = body.server_url.trim().trim_end_matches('/').to_owned();
 
     let new_receiver_id = body
         .receiver_id
@@ -822,40 +822,40 @@ pub async fn get_status(state: &AppState) -> StatusResponse {
     let streams_count = db.load_stream_subscriptions().map(|s| s.len()).unwrap_or(0);
     let local_ok = state.db_integrity_ok;
     drop(db);
-    let thin_node = thin_node_device_status(state).await;
+    let server = server_device_status(state).await;
     StatusResponse {
         receiver_id,
         connection_state: conn,
         local_ok,
         streams_count,
-        thin_node,
+        server,
     }
 }
 
 #[derive(Debug, Deserialize)]
-struct ThinNodeStatusBoard {
+struct ServerStatusBoard {
     #[serde(default)]
-    devices: Vec<ThinNodeStatusDevice>,
+    devices: Vec<ServerStatusDevice>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ThinNodeStatusDevice {
+struct ServerStatusDevice {
     endpoint_id: String,
     approval_state: String,
 }
 
-async fn thin_node_device_status(state: &AppState) -> ThinNodeDeviceStatus {
-    let thin_node_url = {
+async fn server_device_status(state: &AppState) -> ServerDeviceStatus {
+    let server_url = {
         let db = state.db.lock().await;
         match db.load_profile() {
-            Ok(Some(profile)) if !profile.thin_node_url.trim().is_empty() => profile.thin_node_url,
-            _ => return ThinNodeDeviceStatus::not_configured(),
+            Ok(Some(profile)) if !profile.server_url.trim().is_empty() => profile.server_url,
+            _ => return ServerDeviceStatus::not_configured(),
         }
     };
     let endpoint_id = state.p2p_endpoint_id.read().await.clone();
 
     let Some(endpoint_id) = endpoint_id else {
-        return ThinNodeDeviceStatus {
+        return ServerDeviceStatus {
             configured: true,
             endpoint_id: None,
             reachable: None,
@@ -865,42 +865,42 @@ async fn thin_node_device_status(state: &AppState) -> ThinNodeDeviceStatus {
         };
     };
 
-    let status_url = format!("{}/status", thin_node_url.trim_end_matches('/'));
+    let status_url = format!("{}/status", server_url.trim_end_matches('/'));
     let response = match state.http_client.get(status_url).send().await {
         Ok(response) => response,
         Err(error) => {
-            return ThinNodeDeviceStatus {
+            return ServerDeviceStatus {
                 configured: true,
                 endpoint_id: Some(endpoint_id),
                 reachable: Some(false),
                 approval_state: None,
                 waiting_for_approval: false,
-                message: Some(format!("Thin node status unavailable: {error}")),
+                message: Some(format!("Server status unavailable: {error}")),
             };
         }
     };
     let board = match response.error_for_status() {
-        Ok(response) => match response.json::<ThinNodeStatusBoard>().await {
+        Ok(response) => match response.json::<ServerStatusBoard>().await {
             Ok(board) => board,
             Err(error) => {
-                return ThinNodeDeviceStatus {
+                return ServerDeviceStatus {
                     configured: true,
                     endpoint_id: Some(endpoint_id),
                     reachable: Some(false),
                     approval_state: None,
                     waiting_for_approval: false,
-                    message: Some(format!("Thin node status response was invalid: {error}")),
+                    message: Some(format!("Server status response was invalid: {error}")),
                 };
             }
         },
         Err(error) => {
-            return ThinNodeDeviceStatus {
+            return ServerDeviceStatus {
                 configured: true,
                 endpoint_id: Some(endpoint_id),
                 reachable: Some(false),
                 approval_state: None,
                 waiting_for_approval: false,
-                message: Some(format!("Thin node status returned an error: {error}")),
+                message: Some(format!("Server status returned an error: {error}")),
             };
         }
     };
@@ -912,28 +912,28 @@ async fn thin_node_device_status(state: &AppState) -> ThinNodeDeviceStatus {
     {
         Some(device) => {
             let waiting_for_approval = device.approval_state == "pending";
-            ThinNodeDeviceStatus {
+            ServerDeviceStatus {
                 configured: true,
                 endpoint_id: Some(endpoint_id),
                 reachable: Some(true),
                 approval_state: Some(device.approval_state),
                 waiting_for_approval,
                 message: waiting_for_approval
-                    .then(|| "Waiting for thin-node admin approval".to_owned()),
+                    .then(|| "Waiting for server admin approval".to_owned()),
             }
         }
-        None => ThinNodeDeviceStatus {
+        None => ServerDeviceStatus {
             configured: true,
             endpoint_id: Some(endpoint_id),
             reachable: Some(true),
             approval_state: None,
             waiting_for_approval: true,
-            message: Some("Waiting for this receiver to register with the thin node".to_owned()),
+            message: Some("Waiting for this receiver to register with the server".to_owned()),
         },
     }
 }
 
-pub async fn reconnect_thin_node(state: &AppState) -> Result<(), ReceiverError> {
+pub async fn reconnect_server(state: &AppState) -> Result<(), ReceiverError> {
     state.request_connect().await;
     state.emit_resync();
     Ok(())
@@ -1267,7 +1267,7 @@ macro_rules! receiver_command_list {
             get_subscriptions() -> "SubscriptionsBody",
             put_subscriptions(body: "SubscriptionsBody") -> "()",
             get_status() -> "StatusResponse",
-            reconnect_thin_node() -> "()",
+            reconnect_server() -> "()",
             get_version() -> "String",
             get_logs() -> "LogsResponse",
             admin_reset_cursor(body: "CursorResetRequest") -> "()",
@@ -1527,12 +1527,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconnect_thin_node_notifies_connect_watchers() {
+    async fn reconnect_server_notifies_connect_watchers() {
         let db = Db::open_in_memory().unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
         let mut connect_rx = state.connect_attempt_rx();
 
-        reconnect_thin_node(&state).await.unwrap();
+        reconnect_server(&state).await.unwrap();
 
         connect_rx.changed().await.unwrap();
         assert_eq!(*connect_rx.borrow(), 1);
@@ -1720,7 +1720,7 @@ mod tests {
     async fn admin_clear_data_notifies_dbf_watchers_and_requests_ui_resync() {
         let mut db = Db::open_in_memory().unwrap();
         db.save_profile(
-            "https://thin-node.example.com",
+            "https://server.example.com",
             "tok",
             DEFAULT_UPDATE_MODE,
             Some("recv-1"),

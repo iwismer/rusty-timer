@@ -132,7 +132,7 @@ class RenderTests(unittest.TestCase):
             gateway_ipv4="192.168.1.1",
             dns_servers=("8.8.8.8",),
             auto_first_boot=True,
-            thin_node_url="https://thin-node.example.com",
+            server_url="https://server.example.com",
             auth_token="secret-token",
             reader_targets=("192.168.1.101:10000", "192.168.1.102:10000"),
             status_bind="0.0.0.0:80",
@@ -145,7 +145,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("RT_SETUP_NONINTERACTIVE=1", text)
         self.assertIn("RT_SETUP_ALLOW_POWER_ACTIONS=1", text)
         self.assertIn("RT_SETUP_DISPLAY_NAME=rt-fwd-90", text)
-        self.assertIn("RT_SETUP_THIN_NODE_URL=https://thin-node.example.com", text)
+        self.assertIn("RT_SETUP_SERVER_URL=https://server.example.com", text)
         self.assertIn("RT_SETUP_AUTH_TOKEN=secret-token", text)
         self.assertIn("RT_SETUP_READER_TARGETS=192.168.1.101:10000,192.168.1.102:10000", text)
         self.assertIn("curl -fsSL", text)

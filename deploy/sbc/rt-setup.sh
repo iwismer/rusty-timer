@@ -605,28 +605,28 @@ configure() {
     fi
   fi
 
-  # Thin-node URL (required)
-  local thin_node_url="${RT_SETUP_THIN_NODE_URL:-}"
+  # Server URL (required)
+  local server_url="${RT_SETUP_SERVER_URL:-}"
   if is_noninteractive_mode; then
-    if [[ -z "${thin_node_url}" ]]; then
-      echo "Error: RT_SETUP_THIN_NODE_URL is required in non-interactive mode." >&2
+    if [[ -z "${server_url}" ]]; then
+      echo "Error: RT_SETUP_SERVER_URL is required in non-interactive mode." >&2
       exit 1
     fi
-    if [[ ! "${thin_node_url}" =~ ^https?:// ]]; then
-      echo "Error: RT_SETUP_THIN_NODE_URL must start with http:// or https://." >&2
+    if [[ ! "${server_url}" =~ ^https?:// ]]; then
+      echo "Error: RT_SETUP_SERVER_URL must start with http:// or https://." >&2
       exit 1
     fi
   else
-    thin_node_url=""
-    while [[ -z "${thin_node_url}" ]]; do
-      read -rp "Thin-node URL: " thin_node_url
-      if [[ -z "${thin_node_url}" ]]; then
-        echo "Thin-node URL is required."
+    server_url=""
+    while [[ -z "${server_url}" ]]; do
+      read -rp "Server URL: " server_url
+      if [[ -z "${server_url}" ]]; then
+        echo "Server URL is required."
         continue
       fi
-      if [[ ! "${thin_node_url}" =~ ^https?:// ]]; then
-        echo "Thin-node URL must start with http:// or https://"
-        thin_node_url=""
+      if [[ ! "${server_url}" =~ ^https?:// ]]; then
+        echo "Server URL must start with http:// or https://"
+        server_url=""
         continue
       fi
     done
@@ -729,8 +729,8 @@ token_file = "/etc/rusty-timer/forwarder.token"
 [p2p]
 enabled = true
 secret_key_path = "/var/lib/rusty-timer/forwarder-endpoint.key"
-thin_node_url = "${thin_node_url}"
-thin_node_token_file = "/etc/rusty-timer/forwarder.token"
+server_url = "${server_url}"
+server_token_file = "/etc/rusty-timer/forwarder.token"
 
 [journal]
 sqlite_path = "/var/lib/rusty-timer/forwarder.sqlite3"

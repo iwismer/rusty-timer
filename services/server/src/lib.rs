@@ -68,7 +68,7 @@ mod tests {
     #[test]
     fn db_migrates() {
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("thin-node.sqlite3");
+        let db_path = dir.path().join("server.sqlite3");
 
         let conn = crate::db::open(&db_path).unwrap();
 

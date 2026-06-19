@@ -1,10 +1,10 @@
 //! Receiver-side announcer push plumbing.
 //!
 //! Reads durable `received_events` from the local store and pushes "announcer
-//! rows" to a downstream announcer sink (in production, a thin-node
+//! rows" to a downstream announcer sink (in production, a server
 //! `/announcer/rows` endpoint). The transport is abstracted behind
 //! [`AnnouncerPushClient`] and participant identity behind
-//! [`ParticipantResolver`] so this module never depends on thin-node code being
+//! [`ParticipantResolver`] so this module never depends on server code being
 //! present in this worktree, and so tests can prove behavior with mocks.
 //!
 //! Contract:
@@ -27,8 +27,8 @@ use std::sync::{Arc, LazyLock, Mutex as StdMutex, MutexGuard as StdMutexGuard, P
 use std::time::Duration;
 use thiserror::Error;
 
-/// Connect/request timeout for all blocking thin-node HTTP calls. Bounds each
-/// call so a hung thin-node cannot wedge the runtime (including shutdown).
+/// Connect/request timeout for all blocking server HTTP calls. Bounds each
+/// call so a hung server cannot wedge the runtime (including shutdown).
 const HTTP_TIMEOUT: Duration = Duration::from_secs(3);
 
 use crate::db::{AnnouncerGenerationAcceptance, Db, DbError};
@@ -82,9 +82,9 @@ pub trait AnnouncerPushClient {
     fn push(&self, rows: &[AnnouncerRow]) -> Result<(), AnnouncerPushError>;
 }
 
-/// Real HTTP transport for the thin-node `/announcer/rows` endpoint.
+/// Real HTTP transport for the server `/announcer/rows` endpoint.
 ///
-/// Thin-node accepts **one row per POST** with bearer auth, so [`push`] posts
+/// Server accepts **one row per POST** with bearer auth, so [`push`] posts
 /// each row individually. A blocking reqwest client is built lazily inside
 /// [`push`] (never held across calls) because [`push_announcer_rows`] is
 /// synchronous and is driven from a blocking task in the headless P2P runtime;
@@ -93,12 +93,12 @@ pub trait AnnouncerPushClient {
 /// held privately and never logged.
 ///
 /// [`push`]: AnnouncerPushClient::push
-pub struct ThinNodeAnnouncerClient {
+pub struct ServerAnnouncerClient {
     rows_url: String,
     token: String,
 }
 
-impl ThinNodeAnnouncerClient {
+impl ServerAnnouncerClient {
     /// Build a client targeting `base_url` (e.g. `http://127.0.0.1:8080`).
     pub fn new(base_url: &str, token: impl Into<String>) -> Result<Self, AnnouncerPushError> {
         Ok(Self {
@@ -108,7 +108,7 @@ impl ThinNodeAnnouncerClient {
     }
 }
 
-impl AnnouncerPushClient for ThinNodeAnnouncerClient {
+impl AnnouncerPushClient for ServerAnnouncerClient {
     fn push(&self, rows: &[AnnouncerRow]) -> Result<(), AnnouncerPushError> {
         if rows.is_empty() {
             return Ok(());
@@ -119,7 +119,7 @@ impl AnnouncerPushClient for ThinNodeAnnouncerClient {
             .build()
             .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
         for row in rows {
-            // Thin-node `bib` is an optional integer; a non-numeric bib is sent
+            // Server `bib` is an optional integer; a non-numeric bib is sent
             // as null rather than failing the whole push.
             let bib = row.bib.as_deref().and_then(|b| b.parse::<i32>().ok());
             let body = serde_json::json!({
@@ -140,7 +140,7 @@ impl AnnouncerPushClient for ThinNodeAnnouncerClient {
                 .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
             if !response.status().is_success() {
                 return Err(AnnouncerPushError::Transport(format!(
-                    "thin-node /announcer/rows returned {}",
+                    "server /announcer/rows returned {}",
                     response.status()
                 )));
             }
@@ -149,10 +149,10 @@ impl AnnouncerPushClient for ThinNodeAnnouncerClient {
     }
 }
 
-/// Register this receiver endpoint with thin-node under the TOFU `/register`
+/// Register this receiver endpoint with server under the TOFU `/register`
 /// model (`device_kind = "receiver"`). Already-registered / active endpoints are
 /// tolerated: any `2xx` response is success. The bearer token is never logged.
-pub fn register_receiver_with_thin_node(
+pub fn register_receiver_with_server(
     base_url: &str,
     token: &str,
     endpoint_id: &str,
@@ -177,13 +177,13 @@ pub fn register_receiver_with_thin_node(
         Ok(())
     } else {
         Err(AnnouncerPushError::Transport(format!(
-            "thin-node /register returned {}",
+            "server /register returned {}",
             response.status()
         )))
     }
 }
 
-/// Take over the announcer source generation via thin-node `/announcer/takeover`
+/// Take over the announcer source generation via server `/announcer/takeover`
 /// and return the freshly-fenced generation.
 pub fn takeover_announcer_generation(
     base_url: &str,
@@ -205,7 +205,7 @@ pub fn takeover_announcer_generation(
         .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
     if !response.status().is_success() {
         return Err(AnnouncerPushError::Transport(format!(
-            "thin-node /announcer/takeover returned {}",
+            "server /announcer/takeover returned {}",
             response.status()
         )));
     }
@@ -217,14 +217,14 @@ pub fn takeover_announcer_generation(
         .and_then(serde_json::Value::as_i64)
         .ok_or_else(|| {
             AnnouncerPushError::Transport(
-                "thin-node /announcer/takeover response missing announcer_source_generation"
+                "server /announcer/takeover response missing announcer_source_generation"
                     .to_owned(),
             )
         })?;
     Ok(generation)
 }
 
-/// One stream entry from the thin-node `GET /forwarders` discovery feed.
+/// One stream entry from the server `GET /forwarders` discovery feed.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ForwarderDiscoveryStream {
     pub stream_id: String,
@@ -232,7 +232,7 @@ pub struct ForwarderDiscoveryStream {
     pub next_seq: i64,
 }
 
-/// One forwarder entry from the thin-node `GET /forwarders` discovery feed.
+/// One forwarder entry from the server `GET /forwarders` discovery feed.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ForwarderDiscoveryEntry {
     pub endpoint_id: String,
@@ -250,7 +250,7 @@ struct ForwardersResponse {
     forwarders: Vec<ForwarderDiscoveryEntry>,
 }
 
-/// Fetch the approved-forwarder discovery feed from the thin-node
+/// Fetch the approved-forwarder discovery feed from the server
 /// `GET /forwarders` endpoint (bearer auth). Blocking; intended to run inside a
 /// blocking task. The bearer token is never logged.
 pub fn fetch_approved_forwarders(
@@ -269,7 +269,7 @@ pub fn fetch_approved_forwarders(
         .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
     if !response.status().is_success() {
         return Err(AnnouncerPushError::Transport(format!(
-            "thin-node /forwarders returned {}",
+            "server /forwarders returned {}",
             response.status()
         )));
     }

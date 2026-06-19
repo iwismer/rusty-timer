@@ -59,10 +59,10 @@ export const store = $state({
   logEntries: [] as string[],
 
   // Config (edit + saved for dirty detection)
-  editThinNodeUrl: "",
+  editServerUrl: "",
   editToken: "",
   editReceiverId: "",
-  savedThinNodeUrl: "",
+  savedServerUrl: "",
   savedToken: "",
   savedReceiverId: "",
   saving: false,
@@ -127,7 +127,7 @@ let tauriUnlistenFns: (() => void)[] = [];
 
 export function getConfigDirty(): boolean {
   return (
-    store.editThinNodeUrl !== store.savedThinNodeUrl ||
+    store.editServerUrl !== store.savedServerUrl ||
     store.editToken !== store.savedToken ||
     store.editReceiverId !== store.savedReceiverId
   );
@@ -178,8 +178,8 @@ function setUpdateState(
   };
 }
 
-export function setEditThinNodeUrl(value: string): void {
-  store.editThinNodeUrl = value;
+export function setEditServerUrl(value: string): void {
+  store.editServerUrl = value;
 }
 
 export function setEditToken(value: string): void {
@@ -520,7 +520,7 @@ export async function prefetchEarliestEpochOptions(
       return;
 
     // Replay-target epochs are a legacy (forwarder_id, reader_ip)-keyed lookup.
-    // For thin-node-discovered canonical streams, fall back to the advertised
+    // For server-discovered canonical streams, fall back to the advertised
     // current epoch so the controls do not show "No epochs available" before
     // data-plane metrics arrive.
     const { forwarder_id, reader_ip } = stream;
@@ -729,12 +729,12 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
     const p = await api.getProfile().catch(() => null);
     if (p) {
       const configWasDirty = getConfigDirty();
-      store.savedThinNodeUrl = p.thin_node_url;
+      store.savedServerUrl = p.server_url;
       store.savedToken = p.token;
       store.savedReceiverId = p.receiver_id;
       // Only overwrite edit fields if the user hasn't made unsaved changes.
       if (!configWasDirty) {
-        store.editThinNodeUrl = p.thin_node_url;
+        store.editServerUrl = p.server_url;
         store.editToken = p.token;
         store.editReceiverId = p.receiver_id;
       }
@@ -946,26 +946,26 @@ export async function replayAll(): Promise<void> {
   }
 }
 
-export async function reconnectThinNode(): Promise<void> {
+export async function reconnectServer(): Promise<void> {
   try {
     store.error = null;
-    await api.reconnectThinNode();
+    await api.reconnectServer();
     await loadAll();
   } catch (e) {
-    store.error = `Failed to reconnect thin node: ${e}`;
+    store.error = `Failed to reconnect server: ${e}`;
   }
 }
 
 export async function saveProfile(): Promise<void> {
   store.saving = true;
   const payload = {
-    thin_node_url: store.editThinNodeUrl,
+    server_url: store.editServerUrl,
     token: store.editToken,
     receiver_id: store.editReceiverId,
   };
   try {
     await api.putProfile(payload);
-    store.savedThinNodeUrl = payload.thin_node_url;
+    store.savedServerUrl = payload.server_url;
     store.savedToken = payload.token;
     store.savedReceiverId = payload.receiver_id;
   } catch (e) {
@@ -1149,7 +1149,7 @@ export function initStore(): void {
 
   initSSE({
     onStatusChanged: (s) => {
-      const thinNode = store.status?.thin_node ?? {
+      const serverStatus = store.status?.server ?? {
         configured: false,
         endpoint_id: null,
         reachable: null,
@@ -1157,7 +1157,7 @@ export function initStore(): void {
         waiting_for_approval: false,
         message: null,
       };
-      store.status = { ...s, thin_node: thinNode };
+      store.status = { ...s, server: serverStatus };
       if (s.connection_state === "disconnected") {
         store.streamMetrics = new Map();
       }

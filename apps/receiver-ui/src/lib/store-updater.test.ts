@@ -6,7 +6,7 @@ const apiMocks = vi.hoisted(() => ({
     local_ok: true,
     streams_count: 0,
     receiver_id: "recv-test",
-    thin_node: {
+    server: {
       configured: false,
       endpoint_id: null,
       reachable: null,
@@ -37,7 +37,7 @@ const apiMocks = vi.hoisted(() => ({
   clearDbf: vi.fn().mockResolvedValue(undefined),
   updateSubscriptionEventType: vi.fn().mockResolvedValue(undefined),
   getStreamMetrics: vi.fn().mockResolvedValue([]),
-  reconnectThinNode: vi.fn().mockResolvedValue(undefined),
+  reconnectServer: vi.fn().mockResolvedValue(undefined),
 }));
 
 const desktopUpdaterMocks = vi.hoisted(() => ({
@@ -172,7 +172,7 @@ describe("receiver updater store", () => {
 
   it("hydrates config edit fields from the saved profile on initial load", async () => {
     apiMocks.getProfile.mockResolvedValueOnce({
-      thin_node_url: "https://receiver.example",
+      server_url: "https://receiver.example",
       token: "secret-token",
       receiver_id: "recv-live",
     });
@@ -182,10 +182,10 @@ describe("receiver updater store", () => {
     initStore();
     await flushAsyncWork();
 
-    expect(store.editThinNodeUrl).toBe("https://receiver.example");
+    expect(store.editServerUrl).toBe("https://receiver.example");
     expect(store.editToken).toBe("secret-token");
     expect(store.editReceiverId).toBe("recv-live");
-    expect(store.savedThinNodeUrl).toBe("https://receiver.example");
+    expect(store.savedServerUrl).toBe("https://receiver.example");
     expect(store.savedToken).toBe("secret-token");
     expect(store.savedReceiverId).toBe("recv-live");
   });
@@ -246,7 +246,7 @@ describe("receiver updater store", () => {
     );
   });
 
-  it("preserves thin-node status across incremental status events", async () => {
+  it("preserves server status across incremental status events", async () => {
     const sseState = mockSseInitWithCallbacks();
     const { initStore, store } = await import("./store.svelte");
 
@@ -255,13 +255,13 @@ describe("receiver updater store", () => {
       local_ok: true,
       streams_count: 0,
       receiver_id: "recv-test",
-      thin_node: {
+      server: {
         configured: true,
         endpoint_id: "node-1",
         reachable: true,
         approval_state: "pending",
         waiting_for_approval: true,
-        message: "Waiting for thin-node admin approval",
+        message: "Waiting for server admin approval",
       },
     });
 
@@ -276,7 +276,7 @@ describe("receiver updater store", () => {
     });
 
     expect(store.status?.connection_state).toBe("connected");
-    expect(store.status?.thin_node.waiting_for_approval).toBe(true);
+    expect(store.status?.server.waiting_for_approval).toBe(true);
   });
 
   it("clears cached metrics for a stream when a snapshot reports a newer epoch", async () => {

@@ -14,7 +14,7 @@ members = [
     "crates/rt-ui-log",
     "services/forwarder",
     "services/receiver",
-    "services/thin-node",
+    "services/server",
     "services/streamer",
     "services/emulator",
     "apps/receiver-ui/src-tauri",

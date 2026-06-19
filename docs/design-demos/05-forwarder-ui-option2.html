@@ -238,7 +238,7 @@ tailwind.config = {
   </section>
 
   <div style="border-top: 3px dashed var(--border); margin: 2.5rem 0 1rem; padding-top: 1rem;">
-    <p class="text-xs font-medium mb-2" style="color: var(--text-muted);">Below: Config view with the same card rhythm as Receiver and thin-node pages</p>
+    <p class="text-xs font-medium mb-2" style="color: var(--text-muted);">Below: Config view with the same card rhythm as Receiver and server pages</p>
   </div>
 
   <div class="rounded-md px-4 py-3 mb-4 flex items-center justify-between text-sm"
@@ -268,16 +268,16 @@ tailwind.config = {
     </section>
 
     <section class="rounded-lg p-4" style="background: var(--surface-1); border: 1px solid var(--border);">
-      <h2 class="text-sm font-semibold mb-3" style="color: var(--text-primary);">P2P / Thin-node</h2>
+      <h2 class="text-sm font-semibold mb-3" style="color: var(--text-primary);">P2P / Server</h2>
       <div class="grid gap-3">
         <div>
-          <label class="block text-xs font-medium mb-1" style="color: var(--text-muted);">Thin-node URL</label>
-          <input type="text" value="https://thin-node.example.com" class="w-full px-3 py-1.5 text-sm rounded-md font-mono"
+          <label class="block text-xs font-medium mb-1" style="color: var(--text-muted);">Server URL</label>
+          <input type="text" value="https://server.example.com" class="w-full px-3 py-1.5 text-sm rounded-md font-mono"
             style="background: var(--surface-0); border: 1px solid var(--border); color: var(--text-primary);">
         </div>
         <div>
           <label class="block text-xs font-medium mb-1" style="color: var(--text-muted);">Token File</label>
-          <input type="text" value="/etc/rusty-timer/thin-node-token.txt" class="w-full px-3 py-1.5 text-sm rounded-md font-mono"
+          <input type="text" value="/etc/rusty-timer/server-token.txt" class="w-full px-3 py-1.5 text-sm rounded-md font-mono"
             style="background: var(--surface-0); border: 1px solid var(--border); color: var(--text-primary);">
         </div>
       </div>

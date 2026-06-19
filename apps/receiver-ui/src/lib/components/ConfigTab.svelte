@@ -6,10 +6,10 @@
     getConnectionState,
     getConnectionBadgeState,
     saveProfile,
-    reconnectThinNode,
+    reconnectServer,
     saveDbfConfig,
     clearDbfFile,
-    setEditThinNodeUrl,
+    setEditServerUrl,
     setEditToken,
     setEditReceiverId,
   } from "$lib/store.svelte";
@@ -29,13 +29,12 @@
   }
 
   function approvalLabel(): string | null {
-    const thin = store.status?.thin_node;
+    const thin = store.status?.server;
     if (!thin?.configured) return null;
     if (thin.waiting_for_approval)
-      return thin.message ?? "Waiting for thin-node approval";
-    if (thin.reachable === false)
-      return thin.message ?? "Thin node unreachable";
-    if (thin.approval_state === "active") return "Thin node approved";
+      return thin.message ?? "Waiting for server approval";
+    if (thin.reachable === false) return thin.message ?? "Server unreachable";
+    if (thin.approval_state === "active") return "Server approved";
     return thin.message;
   }
 
@@ -70,18 +69,14 @@
     </label>
 
     <label class="block text-xs font-medium text-text-muted">
-      Thin-node URL
-      <HelpTip
-        fieldKey="thin_node_url"
-        sectionKey="config"
-        context="receiver"
-      />
+      Server URL
+      <HelpTip fieldKey="server_url" sectionKey="config" context="receiver" />
       <input
-        data-testid="thin-node-url-input"
+        data-testid="server-url-input"
         class="{inputClass} mt-1"
-        value={store.editThinNodeUrl}
-        oninput={(e) => setEditThinNodeUrl(e.currentTarget.value)}
-        placeholder="https://thin-node.example.com"
+        value={store.editServerUrl}
+        oninput={(e) => setEditServerUrl(e.currentTarget.value)}
+        placeholder="https://server.example.com"
       />
     </label>
 
@@ -119,10 +114,10 @@
         </p>
         {#if approvalLabel()}
           <p
-            data-testid="thin-node-approval-state"
-            class="mt-2 text-xs {store.status?.thin_node?.waiting_for_approval
+            data-testid="server-approval-state"
+            class="mt-2 text-xs {store.status?.server?.waiting_for_approval
               ? 'text-status-warn'
-              : store.status?.thin_node?.reachable === false
+              : store.status?.server?.reachable === false
                 ? 'text-status-err'
                 : 'text-text-muted'}"
           >
@@ -142,13 +137,13 @@
           {connectionLabel(getConnectionState())}
         </span>
         <button
-          data-testid="reconnect-thin-node-btn"
+          data-testid="reconnect-server-btn"
           class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
-          onclick={() => void reconnectThinNode()}
+          onclick={() => void reconnectServer()}
           disabled={getConfigDirty() || store.saving}
           title={getConfigDirty()
-            ? "Save thin-node configuration before reconnecting"
-            : "Retry thin-node discovery and P2P subscriptions"}
+            ? "Save server configuration before reconnecting"
+            : "Retry server discovery and P2P subscriptions"}
         >
           Reconnect
         </button>

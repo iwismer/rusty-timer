@@ -15,12 +15,12 @@
 </script>
 
 <svelte:head>
-  <title>Thin Node · Rusty Timer</title>
+  <title>Server · Rusty Timer</title>
 </svelte:head>
 
 <div class="flex flex-col min-h-screen min-h-[100dvh]">
   <NavBar
-    appName="Thin Node"
+    appName="Server"
     links={[
       { href: "/", label: "Status", active: currentPath === "/" },
       {
@@ -38,7 +38,7 @@
 
   <footer class="border-t border-border py-3 px-6 text-center">
     <p class="text-xs text-text-muted m-0">
-      Rusty Timer &middot; Thin Node &middot; Built {__BUILD_DATE__}
+      Rusty Timer &middot; Server &middot; Built {__BUILD_DATE__}
     </p>
   </footer>
 </div>

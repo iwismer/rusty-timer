@@ -1,4 +1,4 @@
-//! SQLite-backed device registry for the thin node.
+//! SQLite-backed device registry for the server.
 //!
 //! Tracks forwarder/receiver endpoints, their approval state, hashed
 //! per-device bearer tokens, and a backup of the forwarder stream catalog.
@@ -363,6 +363,30 @@ pub fn approve_device(
     get_device(conn, endpoint_id)
 }
 
+/// Rename a registered device by setting its admin-assigned display name.
+///
+/// Works for devices in any approval state and leaves the approval state
+/// unchanged. Returns `None` if no device with the given endpoint id exists.
+pub fn rename_device(
+    conn: &Connection,
+    endpoint_id: &str,
+    display_name: &str,
+) -> rusqlite::Result<Option<DeviceRecord>> {
+    let now = Utc::now().timestamp_millis();
+    let changed = conn.execute(
+        "UPDATE devices
+         SET display_name = ?2, updated_unix_ms = ?3
+         WHERE endpoint_id = ?1",
+        params![endpoint_id, display_name, now],
+    )?;
+
+    if changed == 0 {
+        return Ok(None);
+    }
+
+    get_device(conn, endpoint_id)
+}
+
 /// Upsert one forwarder's pushed identity and replace its stream catalog.
 ///
 /// Forwarders are expected to pre-register via `POST /register`. For robustness,
@@ -427,8 +451,8 @@ pub fn upsert_forwarder_catalog(
 /// List all registered forwarder identities, ordered by endpoint id.
 pub fn list_forwarders(conn: &Connection) -> rusqlite::Result<Vec<ForwarderRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT f.endpoint_id, f.display_name, f.direct_addrs, f.last_seen_unix_ms,
-                d.approval_state
+        "SELECT f.endpoint_id, COALESCE(d.display_name, f.display_name), f.direct_addrs,
+                f.last_seen_unix_ms, d.approval_state
          FROM forwarders f
          JOIN devices d ON d.endpoint_id = f.endpoint_id
          ORDER BY f.endpoint_id",
@@ -468,7 +492,7 @@ pub fn list_approved_forwarders_with_streams(
     conn: &Connection,
 ) -> rusqlite::Result<Vec<ApprovedForwarderWithStreams>> {
     let mut stmt = conn.prepare(
-        "SELECT f.endpoint_id, f.display_name, f.direct_addrs
+        "SELECT f.endpoint_id, COALESCE(d.display_name, f.display_name), f.direct_addrs
          FROM forwarders f
          JOIN devices d ON d.endpoint_id = f.endpoint_id
          WHERE d.device_kind = 'forwarder' AND d.approval_state = 'active'
@@ -772,6 +796,64 @@ mod tests {
     fn approve_missing_device_returns_none() {
         let conn = test_conn();
         assert!(approve_device(&conn, "missing", "name").unwrap().is_none());
+    }
+
+    #[test]
+    fn rename_active_device_updates_name_and_preserves_state() {
+        let conn = test_conn();
+        register_device(&conn, "ep-1", DeviceKind::Forwarder, "tok").unwrap();
+        approve_device(&conn, "ep-1", "Start Line").unwrap();
+
+        let renamed = rename_device(&conn, "ep-1", "Finish Line")
+            .unwrap()
+            .expect("device exists");
+        assert_eq!(renamed.display_name.as_deref(), Some("Finish Line"));
+        assert_eq!(renamed.approval_state, ApprovalState::Active);
+    }
+
+    #[test]
+    fn rename_pending_device_keeps_pending_state() {
+        let conn = test_conn();
+        register_device(&conn, "ep-2", DeviceKind::Receiver, "tok").unwrap();
+
+        let renamed = rename_device(&conn, "ep-2", "Tablet")
+            .unwrap()
+            .expect("device exists");
+        assert_eq!(renamed.display_name.as_deref(), Some("Tablet"));
+        assert_eq!(renamed.approval_state, ApprovalState::Pending);
+    }
+
+    #[test]
+    fn rename_missing_device_returns_none() {
+        let conn = test_conn();
+        assert!(rename_device(&conn, "missing", "name").unwrap().is_none());
+    }
+
+    #[test]
+    fn rename_forwarder_overrides_pushed_name_in_listings() {
+        let conn = test_conn();
+        let token_hash = hash_token("prov-secret");
+        upsert_forwarder_catalog(
+            &conn,
+            "ep-fwd",
+            Some("Pushed Name"),
+            &["127.0.0.1:5000".to_owned()],
+            &[ForwarderCatalogStreamRecord {
+                stream_id: "reader-a".to_owned(),
+                epoch: 1,
+                next_seq: 10,
+            }],
+            &token_hash,
+        )
+        .unwrap();
+        approve_device(&conn, "ep-fwd", "Approved Name").unwrap();
+        rename_device(&conn, "ep-fwd", "Renamed Name").unwrap();
+
+        let forwarders = list_forwarders(&conn).unwrap();
+        assert_eq!(forwarders[0].display_name.as_deref(), Some("Renamed Name"));
+
+        let approved = list_approved_forwarders_with_streams(&conn).unwrap();
+        assert_eq!(approved[0].display_name.as_deref(), Some("Renamed Name"));
     }
 
     #[test]

@@ -154,12 +154,12 @@ fn integrity_check_passes_on_fresh_db() {
 fn profile_insert_and_read() {
     let conn = open_memory_db();
     conn.execute(
-        "INSERT INTO profile (thin_node_url, token) VALUES (?1,?2)",
+        "INSERT INTO profile (server_url, token) VALUES (?1,?2)",
         rusqlite::params!["https://example.com", "tok"],
     )
     .unwrap();
     let url: String = conn
-        .query_row("SELECT thin_node_url FROM profile", [], |r| r.get(0))
+        .query_row("SELECT server_url FROM profile", [], |r| r.get(0))
         .unwrap();
     assert_eq!(url, "https://example.com");
 }
@@ -171,14 +171,14 @@ fn profile_write_survives_reopen() {
     {
         let c = open_file_db(&p);
         c.execute(
-            "INSERT INTO profile (thin_node_url,token) VALUES(?1,?2)",
+            "INSERT INTO profile (server_url,token) VALUES(?1,?2)",
             rusqlite::params!["https://p.com", "t"],
         )
         .unwrap();
     }
     let c = reopen_file_db(&p);
     let url: String = c
-        .query_row("SELECT thin_node_url FROM profile", [], |r| r.get(0))
+        .query_row("SELECT server_url FROM profile", [], |r| r.get(0))
         .unwrap();
     assert_eq!(url, "https://p.com");
 }

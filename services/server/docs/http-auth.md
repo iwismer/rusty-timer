@@ -1,10 +1,10 @@
-# Thin-node HTTP routes & auth matrix
+# Server HTTP routes & auth matrix
 
-The thin node assumes a **Caddy + Authelia** reverse proxy terminates user
+The server assumes a **Caddy + Authelia** reverse proxy terminates user
 authentication in front of it. This document is the authoritative list of which
 routes the proxy must protect. The in-code source of truth is the module doc on
-`services/thin-node/src/http/status.rs` and the `router` doc in
-`services/thin-node/src/http/mod.rs`.
+`services/server/src/http/status.rs` and the `router` doc in
+`services/server/src/http/mod.rs`.
 
 | Route                        | Method | Auth posture        | Enforced by                  |
 | ---------------------------- | ------ | ------------------- | ---------------------------- |

@@ -2,7 +2,7 @@
 
 ## Getting Started
 
-- **[P2P local testing guide](local-testing.md)** — Run emulator, forwarder, receiver-headless, and thin-node on loopback.
+- **[P2P local testing guide](local-testing.md)** — Run emulator, forwarder, receiver-headless, and server on loopback.
 - **[Receiver quickstart (Windows)](receiver-quickstart.md)** — Configure the receiver UI against forwarder endpoint IDs and stream IDs.
 - **[Contributing](../CONTRIBUTING.md)** — Building from source, running tests, code quality.
 
@@ -10,21 +10,21 @@
 
 - **[Forwarder on Raspberry Pi](../deploy/sbc/)** — SD card flashing, cloud-init, and setup script.
 - **[Systemd services](../deploy/systemd/)** — Unit files for forwarder services.
-- **[Network architecture](network-architecture.md)** — P2P iroh, thin-node HTTP, firewall, and auth layout.
+- **[Network architecture](network-architecture.md)** — P2P iroh, server HTTP, firewall, and auth layout.
 
 ## Operations Runbooks
 
 - **[Race-day operator guide](runbooks/race-day-operator-guide.md)** — Start-to-finish flow for race day.
-- **[Thin-node operations](runbooks/thin-node-operations.md)** — Provisioning tokens, allow-list distribution, announcer status, and auth posture.
+- **[Server operations](runbooks/server-operations.md)** — Provisioning tokens, allow-list distribution, announcer status, and auth posture.
 - **[Forwarder operations](runbooks/forwarder-operations.md)** — TOML config, reader health, journal retention, and P2P endpoint checks.
 - **[Receiver operations](runbooks/receiver-operations.md)** — Subscriptions, cursors, local proxy replay, and DBF delivery.
-- **[Announcer](announcer.md)** — Live public finisher display from thin-node announcer rows.
+- **[Announcer](announcer.md)** — Live public finisher display from server announcer rows.
 
 ## Service Reference
 
 - **[Forwarder](../services/forwarder/)** — IPICO reader ingestion, SQLite journal, status/control HTTP, and P2P iroh endpoint.
 - **[Receiver](../services/receiver/)** — Durable received-events store, `receiver-headless`, local TCP proxy, DBF writer, and receiver UI IPC.
-- **[Thin-node](../services/thin-node/)** — SQLite registry, receiver allow-list distribution, announcer push, and status board.
+- **[Server](../services/server/)** — SQLite registry, receiver allow-list distribution, announcer push, and status board.
 - **[Streamer](../services/streamer/)** — TCP fanout utility for IPICO readers.
 - **[Emulator](../services/emulator/)** — Synthetic IPICO reader for local and E2E tests.
 

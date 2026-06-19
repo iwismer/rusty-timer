@@ -8,44 +8,44 @@ export const FORWARDER_HELP = {
       display_name: {
         label: "Display Name",
         summary: "Optional friendly name to identify this forwarder in the UI.",
-        detailHtml: "An optional human-readable name for this forwarder. When set, it appears instead of the forwarder ID in receiver stream lists and thin-node status views. Useful when managing multiple forwarders at a race venue.",
+        detailHtml: "An optional human-readable name for this forwarder. When set, it appears instead of the forwarder ID in receiver stream lists and server status views. Useful when managing multiple forwarders at a race venue.",
         default: "None (optional)",
       },
     },
     tips: [
       "Give each forwarder a descriptive name like 'Start Line' or 'Finish Line A' to make it easy to identify on race day.",
     ],
-    seeAlso: [{ sectionKey: "p2p", label: "P2P / Thin-node" }],
+    seeAlso: [{ sectionKey: "p2p", label: "P2P / Server" }],
   },
   p2p: {
-    title: "P2P / Thin-node",
-    overview: "Configure iroh P2P identity and thin-node coordination for this forwarder.",
+    title: "P2P / Server",
+    overview: "Configure iroh P2P identity and server coordination for this forwarder.",
     fields: {
       enabled: {
         label: "Enable P2P",
         summary: "Starts the forwarder's iroh endpoint and receiver data-plane service.",
-        detailHtml: "When enabled, receivers connect directly to this forwarder over iroh. Thin-node HTTP is used only for registration, allow-list distribution, and status coordination.",
+        detailHtml: "When enabled, receivers connect directly to this forwarder over iroh. Server HTTP is used only for registration, allow-list distribution, and status coordination.",
         default: "Disabled for local-only tests",
         recommended: "Enable for production forwarders.",
       },
-      thin_node_url: {
-        label: "Thin-node URL",
-        summary: "HTTPS URL of the thin-node coordination service.",
-        detailHtml: "The forwarder registers its endpoint and fetches receiver allow-lists from this thin-node URL. Timing reads do not flow through this service; they move directly over iroh between forwarder and receiver.",
+      server_url: {
+        label: "Server URL",
+        summary: "HTTPS URL of the server coordination service.",
+        detailHtml: "The forwarder registers its endpoint and fetches receiver allow-lists from this server URL. Timing reads do not flow through this service; they move directly over iroh between forwarder and receiver.",
         default: "None",
         recommended: "Use HTTPS for deployed systems.",
       },
-      thin_node_token_file: {
-        label: "Thin-node Token File",
-        summary: "Path to the bearer token used for thin-node API calls.",
-        detailHtml: "The forwarder reads this file on startup and uses it to authenticate registration and allow-list requests to the thin-node.",
+      server_token_file: {
+        label: "Server Token File",
+        summary: "Path to the bearer token used for server API calls.",
+        detailHtml: "The forwarder reads this file on startup and uses it to authenticate registration and allow-list requests to the server.",
         default: "Uses the auth token file when configured that way",
         recommended: "Store the token in a root-readable file outside the TOML config.",
       },
     },
     tips: [
       "P2P can be disabled for local-only tests, but deployed forwarders should enable it.",
-      "If receivers cannot connect, verify the endpoint is registered in thin-node and the receiver EndpointId is allow-listed.",
+      "If receivers cannot connect, verify the endpoint is registered in server and the receiver EndpointId is allow-listed.",
     ],
     seeAlso: [{ sectionKey: "auth", label: "Authentication" }],
   },
@@ -176,16 +176,16 @@ export const FORWARDER_HELP = {
       token_file: {
         label: "Token File Path",
         summary: "Path to a file containing the authentication token.",
-        detailHtml: "The file path to the authentication token. The forwarder reads this file on startup and uses it for local control authorization and, when reused by <code>p2p.thin_node_token_file</code>, thin-node API authentication.",
+        detailHtml: "The file path to the authentication token. The forwarder reads this file on startup and uses it for local control authorization and, when reused by <code>p2p.server_token_file</code>, server API authentication.",
         default: "None (required for authenticated control APIs)",
         recommended: "Use a dedicated token file rather than embedding the token in the config file.",
       },
     },
     tips: [
       "If authentication fails, verify the token file exists at the specified path and contains the correct token.",
-      "The token must match what the thin-node expects if this file is also used for thin-node API calls.",
+      "The token must match what the server expects if this file is also used for server API calls.",
     ],
-    seeAlso: [{ sectionKey: "p2p", label: "P2P / Thin-node" }],
+    seeAlso: [{ sectionKey: "p2p", label: "P2P / Server" }],
   },
   journal: {
     title: "Journal",
@@ -212,7 +212,7 @@ export const FORWARDER_HELP = {
       "If the journal file grows very large, it means reads are accumulating faster than receivers can acknowledge them. Check receiver connectivity and allow-list state.",
       "The journal provides at-least-once delivery: reads may be sent more than once but are never lost.",
     ],
-    seeAlso: [{ sectionKey: "p2p", label: "P2P / Thin-node" }],
+    seeAlso: [{ sectionKey: "p2p", label: "P2P / Server" }],
   },
   status_http: {
     title: "Status HTTP",
@@ -228,7 +228,7 @@ export const FORWARDER_HELP = {
       },
     },
     tips: [
-      "The status endpoint is useful for monitoring forwarder health from a local browser, thin-node dashboard, or separate monitoring tool.",
+      "The status endpoint is useful for monitoring forwarder health from a local browser, server dashboard, or separate monitoring tool.",
       "If the status port conflicts with another service, change it to an unused port.",
     ],
   },
@@ -259,7 +259,7 @@ export const FORWARDER_HELP = {
       forwarder_id: {
         label: "Forwarder ID",
         summary: "Stable identifier for this forwarder, derived from its authentication token.",
-        detailHtml: "A unique identifier automatically derived from the forwarder's authentication token (e.g. <code>fwd-3a9f1c2b8e4d07f1</code>). The ID is stable across restarts as long as the token doesn't change. Thin-node and receivers use this ID to identify the forwarder in status and stream lists.",
+        detailHtml: "A unique identifier automatically derived from the forwarder's authentication token (e.g. <code>fwd-3a9f1c2b8e4d07f1</code>). The ID is stable across restarts as long as the token doesn't change. Server and receivers use this ID to identify the forwarder in status and stream lists.",
       },
       version: {
         label: "Version",
@@ -278,14 +278,14 @@ export const FORWARDER_HELP = {
       },
     },
     tips: [
-      "The Forwarder ID is tied to the authentication token. If you rotate the token, thin-node and receivers will treat this as a new forwarder.",
+      "The Forwarder ID is tied to the authentication token. If you rotate the token, server and receivers will treat this as a new forwarder.",
       "'Not ready' is expected for a few seconds after the service starts or restarts. If it persists, check the Logs section for errors.",
       "Readiness does not depend on receiver connectivity. A forwarder can be ready and collecting reads even while no receiver is connected — reads accumulate in the journal and are replayed when receivers reconnect.",
     ],
     seeAlso: [
       { sectionKey: "auth", label: "Authentication" },
       { sectionKey: "journal", label: "Journal" },
-      { sectionKey: "p2p", label: "P2P / Thin-node" },
+      { sectionKey: "p2p", label: "P2P / Server" },
     ],
   },
   service_overview: {
@@ -305,12 +305,12 @@ export const FORWARDER_HELP = {
     },
     tips: [
       "Disconnected receivers do not lose reads. The journal stores all reads and replays them from each durable cursor once receivers reconnect.",
-      "If receivers stay disconnected, verify thin-node registration, receiver allow-list state, and local network reachability.",
+      "If receivers stay disconnected, verify server registration, receiver allow-list state, and local network reachability.",
       "'Restart Now' restarts the forwarder service, not the physical device. Readers will briefly disconnect and reconnect. No reads are lost.",
       "On race day, apply any config changes and restart before the first race so the forwarder is stable during timing.",
     ],
     seeAlso: [
-      { sectionKey: "p2p", label: "P2P / Thin-node" },
+      { sectionKey: "p2p", label: "P2P / Server" },
       { sectionKey: "journal", label: "Journal" },
       { sectionKey: "dangerous_actions", label: "Dangerous Actions" },
     ],

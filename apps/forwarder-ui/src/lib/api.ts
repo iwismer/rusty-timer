@@ -43,7 +43,7 @@ export interface ReaderStatus {
   reader_info?: ReaderInfo | null;
 }
 
-export interface ThinNodeDeviceStatus {
+export interface ServerDeviceStatus {
   configured: boolean;
   endpoint_id: string | null;
   reachable: boolean | null;
@@ -59,7 +59,7 @@ export interface ForwarderStatus {
   ready_reason: string | null;
   p2p_connected: boolean;
   restart_needed: boolean;
-  thin_node: ThinNodeDeviceStatus;
+  server: ServerDeviceStatus;
   ups_status?: {
     available: boolean;
     status: {
@@ -79,8 +79,8 @@ export interface ForwarderConfig {
   display_name?: string;
   p2p?: {
     enabled?: boolean;
-    thin_node_url?: string;
-    thin_node_token_file?: string;
+    server_url?: string;
+    server_token_file?: string;
   };
   auth?: {
     token_file?: string;

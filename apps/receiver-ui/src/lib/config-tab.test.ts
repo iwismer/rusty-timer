@@ -6,7 +6,7 @@ import ConfigTab from "./components/ConfigTab.svelte";
 const mockState = vi.hoisted(() => {
   const defaultStatus = () => ({
     connection_state: "disconnected",
-    thin_node: {
+    server: {
       configured: true,
       endpoint_id: "node-1",
       reachable: true,
@@ -20,10 +20,10 @@ const mockState = vi.hoisted(() => {
     defaultStatus,
     store: {
       editReceiverId: "recv-test",
-      editThinNodeUrl: "https://thin-node.example.com",
+      editServerUrl: "https://server.example.com",
       editToken: "secret",
       savedReceiverId: "recv-test",
-      savedThinNodeUrl: "https://thin-node.example.com",
+      savedServerUrl: "https://server.example.com",
       savedToken: "secret",
       saving: false,
       status: defaultStatus(),
@@ -32,9 +32,9 @@ const mockState = vi.hoisted(() => {
     getConnectionState: vi.fn(() => "disconnected"),
     getConnectionBadgeState: vi.fn(() => "err"),
     saveProfile: vi.fn(),
-    reconnectThinNode: vi.fn(),
+    reconnectServer: vi.fn(),
     setEditReceiverId: vi.fn(),
-    setEditThinNodeUrl: vi.fn(),
+    setEditServerUrl: vi.fn(),
     setEditToken: vi.fn(),
   };
 });
@@ -45,9 +45,9 @@ vi.mock("$lib/store.svelte", () => ({
   getConnectionState: mockState.getConnectionState,
   getConnectionBadgeState: mockState.getConnectionBadgeState,
   saveProfile: mockState.saveProfile,
-  reconnectThinNode: mockState.reconnectThinNode,
+  reconnectServer: mockState.reconnectServer,
   setEditReceiverId: mockState.setEditReceiverId,
-  setEditThinNodeUrl: mockState.setEditThinNodeUrl,
+  setEditServerUrl: mockState.setEditServerUrl,
   setEditToken: mockState.setEditToken,
 }));
 
@@ -59,10 +59,10 @@ describe("ConfigTab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockState.store.editReceiverId = "recv-test";
-    mockState.store.editThinNodeUrl = "https://thin-node.example.com";
+    mockState.store.editServerUrl = "https://server.example.com";
     mockState.store.editToken = "secret";
     mockState.store.savedReceiverId = "recv-test";
-    mockState.store.savedThinNodeUrl = "https://thin-node.example.com";
+    mockState.store.savedServerUrl = "https://server.example.com";
     mockState.store.savedToken = "secret";
     mockState.store.saving = false;
     mockState.store.status = mockState.defaultStatus();
@@ -75,8 +75,8 @@ describe("ConfigTab", () => {
     render(ConfigTab);
 
     expect(screen.getByTestId("receiver-id-input")).toHaveValue("recv-test");
-    expect(screen.getByTestId("thin-node-url-input")).toHaveValue(
-      "https://thin-node.example.com",
+    expect(screen.getByTestId("server-url-input")).toHaveValue(
+      "https://server.example.com",
     );
     expect(screen.getByTestId("token-input")).toHaveValue("secret");
     expect(screen.getByTestId("save-config-btn")).toBeDisabled();
@@ -85,29 +85,29 @@ describe("ConfigTab", () => {
     );
   });
 
-  it("shows when the receiver is waiting for thin-node approval", () => {
-    mockState.store.status.thin_node = {
+  it("shows when the receiver is waiting for server approval", () => {
+    mockState.store.status.server = {
       configured: true,
       endpoint_id: "node-1",
       reachable: true,
       approval_state: "pending",
       waiting_for_approval: true,
-      message: "Waiting for thin-node admin approval",
+      message: "Waiting for server admin approval",
     };
 
     render(ConfigTab);
 
-    expect(screen.getByTestId("thin-node-approval-state")).toHaveTextContent(
-      "Waiting for thin-node admin approval",
+    expect(screen.getByTestId("server-approval-state")).toHaveTextContent(
+      "Waiting for server admin approval",
     );
   });
 
-  it("offers a manual thin-node reconnect action", async () => {
+  it("offers a manual server reconnect action", async () => {
     render(ConfigTab);
 
-    await fireEvent.click(screen.getByTestId("reconnect-thin-node-btn"));
+    await fireEvent.click(screen.getByTestId("reconnect-server-btn"));
 
-    expect(mockState.reconnectThinNode).toHaveBeenCalledOnce();
+    expect(mockState.reconnectServer).toHaveBeenCalledOnce();
   });
 
   it("reflects the connected state driven by the backend", () => {

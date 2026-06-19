@@ -14,7 +14,7 @@ Run the installer. It installs the app and downloads WebView2 if needed. Launch
 
 ## Configure
 
-1. Enter the thin-node URL and receiver token provided by your event operator.
+1. Enter the server URL and receiver token provided by your event operator.
 2. Click **Save**, then **Connect**.
 3. Once connected, the receiver discovers allowed forwarders and streams.
 4. Subscribe to the streams you need by `forwarder_endpoint_id` and `stream_id`.
@@ -53,8 +53,8 @@ forgets durable cursors and received-event replay state.
 
 | Problem | Solution |
 |---------|----------|
-| Cannot connect | Check the thin-node URL, token, and allow-list entry for this receiver endpoint. |
-| No reads appearing | Verify the stream is subscribed and the forwarder endpoint is online on the thin-node status board. |
+| Cannot connect | Check the server URL, token, and allow-list entry for this receiver endpoint. |
+| No reads appearing | Verify the stream is subscribed and the forwarder endpoint is online on the server status board. |
 | Gap marker appears | The requested cursor was pruned on the forwarder. Note the gap and resume from the supplied cursor. |
 | Port collision warning | Two streams have the same default port. Set a manual port override for one of them. |
 

@@ -162,7 +162,7 @@ async fn p2p_startup_failure_does_not_leak_control_server() {
                 node_id: "not-a-valid-node-id".to_owned(),
                 direct_addr: "127.0.0.1:5000".parse().expect("parse addr"),
             }),
-            thin_node: None,
+            server: None,
             reconcile_interval: Duration::from_millis(100),
         }),
     };

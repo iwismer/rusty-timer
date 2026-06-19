@@ -308,8 +308,8 @@ async fn get_status(state: State<'_, Arc<AppState>>) -> CmdResult<control_api::S
 }
 
 #[tauri::command]
-async fn reconnect_thin_node(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
-    control_api::reconnect_thin_node(&state)
+async fn reconnect_server(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
+    control_api::reconnect_server(&state)
         .await
         .map_err(|e| e.to_string())
 }

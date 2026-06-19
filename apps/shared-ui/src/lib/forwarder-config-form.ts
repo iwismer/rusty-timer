@@ -72,8 +72,8 @@ export function buildTarget(reader: ReaderEntry): string {
 export interface ForwarderConfigFormState {
   generalDisplayName: string;
   p2pEnabled: boolean;
-  p2pThinNodeUrl: string;
-  p2pThinNodeTokenFile: string;
+  p2pServerUrl: string;
+  p2pServerTokenFile: string;
   authTokenFile: string;
   journalSqlitePath: string;
   journalPruneWatermarkPct: string;
@@ -134,8 +134,8 @@ export function fromConfig(cfg: Record<string, unknown>): ForwarderConfigFormSta
   return {
     generalDisplayName: asString(cfg.display_name),
     p2pEnabled: p2p.enabled === true,
-    p2pThinNodeUrl: asString(p2p.thin_node_url),
-    p2pThinNodeTokenFile: asString(p2p.thin_node_token_file),
+    p2pServerUrl: asString(p2p.server_url),
+    p2pServerTokenFile: asString(p2p.server_token_file),
     authTokenFile: asString(auth.token_file),
     journalSqlitePath: asString(journal.sqlite_path),
     journalPruneWatermarkPct:
@@ -168,8 +168,8 @@ export function toP2pPayload(
 ): Record<string, unknown> {
   return {
     enabled: form.p2pEnabled,
-    thin_node_url: form.p2pThinNodeUrl.trim() || null,
-    thin_node_token_file: form.p2pThinNodeTokenFile.trim() || null,
+    server_url: form.p2pServerUrl.trim() || null,
+    server_token_file: form.p2pServerTokenFile.trim() || null,
   };
 }
 
@@ -256,13 +256,13 @@ export function validateGeneral(form: ForwarderConfigFormState): string | null {
 }
 
 export function validateP2p(form: ForwarderConfigFormState): string | null {
-  const url = form.p2pThinNodeUrl.trim();
+  const url = form.p2pServerUrl.trim();
   if (url && !/^https?:\/\/.+/.test(url)) {
-    return "Thin-node URL must start with http:// or https://.";
+    return "Server URL must start with http:// or https://.";
   }
-  const tokenFile = form.p2pThinNodeTokenFile.trim();
+  const tokenFile = form.p2pServerTokenFile.trim();
   if (tokenFile.includes("\n") || tokenFile.includes("\r")) {
-    return "Thin-node token file path must be a single-line path.";
+    return "Server token file path must be a single-line path.";
   }
   return null;
 }

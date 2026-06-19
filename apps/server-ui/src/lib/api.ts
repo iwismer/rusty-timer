@@ -17,6 +17,14 @@ export interface ForwarderStreamRecord {
   next_seq: number;
 }
 
+export interface ForwarderRecord {
+  endpoint_id: string;
+  display_name: string | null;
+  direct_addrs: string[];
+  last_seen_unix_ms: number;
+  approval_state: ApprovalState;
+}
+
 export interface AnnouncerRow {
   stream_id: string;
   seq: number;
@@ -32,6 +40,7 @@ export interface StatusResponse {
   finisher_count: number;
   announcer_rows: AnnouncerRow[];
   devices: DeviceRecord[];
+  forwarders: ForwarderRecord[];
   forwarder_streams: ForwarderStreamRecord[];
 }
 
@@ -50,6 +59,26 @@ export async function approveDevice(
   }
 
   return apiFetch<DeviceRecord>("/admin/devices/approve", {
+    method: "POST",
+    headers: { "Remote-User": adminUser.trim() || "dev-admin" },
+    body: JSON.stringify({
+      endpoint_id: endpointId,
+      display_name: trimmedName,
+    }),
+  });
+}
+
+export async function renameDevice(
+  endpointId: string,
+  displayName: string,
+  adminUser = "dev-admin",
+): Promise<DeviceRecord> {
+  const trimmedName = displayName.trim();
+  if (!trimmedName) {
+    throw new Error("Display name is required");
+  }
+
+  return apiFetch<DeviceRecord>("/admin/devices/rename", {
     method: "POST",
     headers: { "Remote-User": adminUser.trim() || "dev-admin" },
     body: JSON.stringify({

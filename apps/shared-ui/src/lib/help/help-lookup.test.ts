@@ -9,7 +9,7 @@ describe("getSection", () => {
   it("returns the p2p section for forwarder context", () => {
     const section = getSection("forwarder", "p2p");
     expect(section).toBeDefined();
-    expect(section!.title).toBe("P2P / Thin-node");
+    expect(section!.title).toBe("P2P / Server");
   });
 
   it("returns undefined for a nonexistent section", () => {
@@ -18,10 +18,10 @@ describe("getSection", () => {
 });
 
 describe("getField", () => {
-  it("returns the thin_node_url field from forwarder p2p section", () => {
-    const field = getField("forwarder", "p2p", "thin_node_url");
+  it("returns the server_url field from forwarder p2p section", () => {
+    const field = getField("forwarder", "p2p", "server_url");
     expect(field).toBeDefined();
-    expect(field!.label).toBe("Thin-node URL");
+    expect(field!.label).toBe("Server URL");
   });
 
   it("returns undefined for a nonexistent field", () => {
@@ -29,7 +29,7 @@ describe("getField", () => {
   });
 
   it("returns undefined for a nonexistent section", () => {
-    expect(getField("forwarder", "nonexistent", "thin_node_url")).toBeUndefined();
+    expect(getField("forwarder", "nonexistent", "server_url")).toBeUndefined();
   });
 });
 
@@ -46,18 +46,18 @@ describe("searchHelp", () => {
     expect(searchHelp("zzz-no-match-xyz")).toEqual([]);
   });
 
-  it("finds forwarder p2p section when searching for thin-node content", () => {
-    const results = searchHelp("Thin-node URL");
+  it("finds forwarder p2p section when searching for server content", () => {
+    const results = searchHelp("Server URL");
     expect(results.length).toBeGreaterThan(0);
     const match = results.find(
       (r) => r.context === "forwarder" && r.sectionKey === "p2p",
     );
     expect(match).toBeDefined();
-    expect(match!.matchedFields.some((f) => f.fieldKey === "thin_node_url")).toBe(true);
+    expect(match!.matchedFields.some((f) => f.fieldKey === "server_url")).toBe(true);
   });
 
   it("matches section title", () => {
-    const results = searchHelp("P2P / Thin-node");
+    const results = searchHelp("P2P / Server");
     const match = results.find(
       (r) => r.context === "forwarder" && r.sectionKey === "p2p",
     );
@@ -65,7 +65,7 @@ describe("searchHelp", () => {
   });
 
   it("matches case-insensitively", () => {
-    const results = searchHelp("THIN-NODE URL");
+    const results = searchHelp("SERVER URL");
     expect(results.length).toBeGreaterThan(0);
   });
 
@@ -80,14 +80,14 @@ describe("searchHelp", () => {
   });
 
   it("returns all fields when only section title matches", () => {
-    const results = searchHelp("P2P / Thin-node");
+    const results = searchHelp("P2P / Server");
     const match = results.find(
       (r) => r.context === "forwarder" && r.sectionKey === "p2p",
     );
     expect(match).toBeDefined();
     const sectionFieldCount = Object.keys(FORWARDER_HELP.p2p.fields).length;
     expect(match!.matchedFields).toHaveLength(sectionFieldCount);
-    expect(match!.matchedFields.some((f) => f.fieldKey === "thin_node_url")).toBe(true);
+    expect(match!.matchedFields.some((f) => f.fieldKey === "server_url")).toBe(true);
   });
 
   it("matches section overview text", () => {
@@ -116,8 +116,8 @@ describe("template wiring validation", () => {
     // ForwarderConfig.svelte
     { context: "forwarder", section: "general", field: "display_name" },
     { context: "forwarder", section: "p2p", field: "enabled" },
-    { context: "forwarder", section: "p2p", field: "thin_node_url" },
-    { context: "forwarder", section: "p2p", field: "thin_node_token_file" },
+    { context: "forwarder", section: "p2p", field: "server_url" },
+    { context: "forwarder", section: "p2p", field: "server_token_file" },
     { context: "forwarder", section: "readers", field: "reader_ip" },
     { context: "forwarder", section: "readers", field: "reader_port" },
     { context: "forwarder", section: "readers", field: "enabled" },
@@ -134,7 +134,7 @@ describe("template wiring validation", () => {
     { context: "forwarder", section: "read_mode", field: "timeout" },
     // receiver-ui +page.svelte
     { context: "receiver", section: "config", field: "receiver_id" },
-    { context: "receiver", section: "config", field: "thin_node_url" },
+    { context: "receiver", section: "config", field: "server_url" },
     { context: "receiver", section: "config", field: "token" },
     { context: "receiver", section: "receiver_mode", field: "mode" },
     // receiver-ui admin/+page.svelte

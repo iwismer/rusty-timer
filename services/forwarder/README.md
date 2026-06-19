@@ -33,7 +33,7 @@ are supported for config fields.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `token_file` | `String` | Yes | File containing the bearer token used for thin-node registration and allow-list fetches. |
+| `token_file` | `String` | Yes | File containing the bearer token used for server registration and allow-list fetches. |
 
 ### `[journal]`
 
@@ -48,8 +48,8 @@ are supported for config fields.
 |-------|------|----------|-------------|
 | `secret_key_path` | `String` | No | Stable iroh endpoint key path. Mutually exclusive with `secret_key_seed_hex`. |
 | `secret_key_seed_hex` | `String` | No | Deterministic test seed for loopback E2E. |
-| `thin_node_url` | `String` | Yes | Coordination endpoint for registry and allow-list fetches. |
-| `thin_node_token_file` | `String` | Yes | File containing the thin-node bearer token. |
+| `server_url` | `String` | Yes | Coordination endpoint for registry and allow-list fetches. |
+| `server_token_file` | `String` | Yes | File containing the server bearer token. |
 
 ### `[status_http]`
 
@@ -90,8 +90,8 @@ prune_watermark_pct = 80
 
 [p2p]
 secret_key_path = "/var/lib/rusty-timer/forwarder-endpoint.key"
-thin_node_url = "https://thin-node.example.com"
-thin_node_token_file = "/etc/rusty-timer/thin-node-token.txt"
+server_url = "https://server.example.com"
+server_token_file = "/etc/rusty-timer/server-token.txt"
 
 [status_http]
 bind = "127.0.0.1:8080"

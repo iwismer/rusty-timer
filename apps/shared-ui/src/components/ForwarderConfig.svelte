@@ -58,8 +58,8 @@
   // Form fields
   let generalDisplayName = $state("");
   let p2pEnabled = $state(false);
-  let p2pThinNodeUrl = $state("");
-  let p2pThinNodeTokenFile = $state("");
+  let p2pServerUrl = $state("");
+  let p2pServerTokenFile = $state("");
   let authTokenFile = $state("");
   let journalSqlitePath = $state("");
   let journalPruneWatermarkPct = $state("");
@@ -177,8 +177,8 @@
   function applyFormState(form: ForwarderConfigFormState): void {
     generalDisplayName = form.generalDisplayName;
     p2pEnabled = form.p2pEnabled;
-    p2pThinNodeUrl = form.p2pThinNodeUrl;
-    p2pThinNodeTokenFile = form.p2pThinNodeTokenFile;
+    p2pServerUrl = form.p2pServerUrl;
+    p2pServerTokenFile = form.p2pServerTokenFile;
     authTokenFile = form.authTokenFile;
     journalSqlitePath = form.journalSqlitePath;
     journalPruneWatermarkPct = form.journalPruneWatermarkPct;
@@ -197,8 +197,8 @@
     return {
       generalDisplayName,
       p2pEnabled,
-      p2pThinNodeUrl,
-      p2pThinNodeTokenFile,
+      p2pServerUrl,
+      p2pServerTokenFile,
       authTokenFile,
       journalSqlitePath,
       journalPruneWatermarkPct,
@@ -477,8 +477,8 @@
           {/if}
         </Card>
 
-        <!-- P2P / Thin-node -->
-        <Card title="P2P / Thin-node" helpSection="p2p" helpContext="forwarder">
+        <!-- P2P / Server -->
+        <Card title="P2P / Server" helpSection="p2p" helpContext="forwarder">
           <div class="space-y-3">
             <label class="block text-sm font-medium text-text-secondary">
               <span class="inline-flex items-center gap-2">
@@ -487,14 +487,14 @@
               </span>
             </label>
             <label class="block text-sm font-medium text-text-secondary">
-              Thin-node URL <HelpTip fieldKey="thin_node_url" sectionKey="p2p" context="forwarder" />
-              <input type="text" bind:value={p2pThinNodeUrl} class="mt-1 {inputClass}" />
+              Server URL <HelpTip fieldKey="server_url" sectionKey="p2p" context="forwarder" />
+              <input type="text" bind:value={p2pServerUrl} class="mt-1 {inputClass}" />
               <p class={hintClass}>HTTPS URL used for registration and allow-list distribution. Reads still flow directly over iroh.</p>
             </label>
             <label class="block text-sm font-medium text-text-secondary">
-              Thin-node Token File <HelpTip fieldKey="thin_node_token_file" sectionKey="p2p" context="forwarder" />
-              <input type="text" bind:value={p2pThinNodeTokenFile} class="mt-1 {inputClass}" />
-              <p class={hintClass}>Path to file containing the thin-node bearer token.</p>
+              Server Token File <HelpTip fieldKey="server_token_file" sectionKey="p2p" context="forwarder" />
+              <input type="text" bind:value={p2pServerTokenFile} class="mt-1 {inputClass}" />
+              <p class={hintClass}>Path to file containing the server bearer token.</p>
             </label>
           </div>
           <button

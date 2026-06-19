@@ -81,12 +81,12 @@ export const RECEIVER_ADMIN_HELP = {
   },
   reset_profile: {
     title: "Reset Profile",
-    overview: "Clear the receiver's connection profile (thin-node URL, token, and receiver ID) back to defaults. Subscriptions and cursors are preserved.",
+    overview: "Clear the receiver's connection profile (server URL, token, and receiver ID) back to defaults. Subscriptions and cursors are preserved.",
     fields: {},
     tips: [
-      "Use this when you need to point the receiver at a different thin-node.",
+      "Use this when you need to point the receiver at a different server.",
       "Subscriptions and cursor positions are preserved. Only connection settings are cleared.",
-      "After resetting, you must reconfigure the thin-node URL, token, and receiver ID before connecting.",
+      "After resetting, you must reconfigure the server URL, token, and receiver ID before connecting.",
       "The receiver will disconnect automatically when the profile is reset.",
     ],
     seeAlso: [
@@ -98,8 +98,8 @@ export const RECEIVER_ADMIN_HELP = {
     overview: "Erase ALL local data and return the receiver to a fresh state. This is irreversible.",
     fields: {},
     tips: [
-      "Before factory reset, try these less destructive alternatives first:<ul><li><strong>Cursor Reset</strong> — if you just need to replay data from the beginning.</li><li><strong>Purge Subscriptions</strong> — if streams are in a bad state and you want a clean start.</li><li><strong>Reset Profile</strong> — if you just need to change the thin-node connection.</li></ul>",
-      "Factory reset deletes: profile (thin-node URL, token, ID), all subscriptions, all cursors, all epoch overrides, and all port overrides.",
+      "Before factory reset, try these less destructive alternatives first:<ul><li><strong>Cursor Reset</strong> — if you just need to replay data from the beginning.</li><li><strong>Purge Subscriptions</strong> — if streams are in a bad state and you want a clean start.</li><li><strong>Reset Profile</strong> — if you just need to change the server connection.</li></ul>",
+      "Factory reset deletes: profile (server URL, token, ID), all subscriptions, all cursors, all epoch overrides, and all port overrides.",
       "After factory reset, the receiver must be fully reconfigured from scratch.",
       "This action <strong>cannot be undone</strong>. All local state is permanently deleted.",
       "The receiver will disconnect immediately and return to the initial setup state.",

@@ -82,7 +82,7 @@
 <div class="mx-auto px-4 py-6 space-y-6" style="max-width: 1100px;">
   <div class="flex flex-wrap items-center justify-between gap-3">
     <div>
-      <h1 class="text-2xl font-bold text-text-primary m-0">Thin-node status</h1>
+      <h1 class="text-2xl font-bold text-text-primary m-0">Server status</h1>
       <p class="text-sm text-text-muted mt-1 mb-0">
         Registered devices, forwarder stream catalogs, and announcer health.
       </p>

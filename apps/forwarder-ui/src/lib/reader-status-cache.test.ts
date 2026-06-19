@@ -23,7 +23,7 @@ function makeStatus(readers: ForwarderStatus["readers"]): ForwarderStatus {
     ready_reason: null,
     p2p_connected: true,
     restart_needed: false,
-    thin_node: {
+    server: {
       configured: false,
       endpoint_id: null,
       reachable: null,

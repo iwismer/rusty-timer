@@ -256,8 +256,8 @@ discovery_disabled = true
 max_concurrent_bidi_streams = 64
 static_allowed_receivers = ["receiver-node-id"]
 allowlist_cache_path = "/tmp/forwarder-p2p-allowlist.cache"
-thin_node_url = "http://127.0.0.1:9999"
-thin_node_token_file = "/tmp/thin-token"
+server_url = "http://127.0.0.1:9999"
+server_token_file = "/tmp/thin-token"
 allowlist_poll_interval_secs = 5
 "#,
     );

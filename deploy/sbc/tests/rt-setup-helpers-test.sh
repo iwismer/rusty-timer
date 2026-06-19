@@ -39,7 +39,7 @@ assert_contains() {
 }
 
 # --- release selection across pages ---
-page1='[{"tag_name":"thin-node-v1.0.0","published_at":"2026-02-01T00:00:00Z","draft":false,"prerelease":false,"assets":[]}]'
+page1='[{"tag_name":"server-v1.0.0","published_at":"2026-02-01T00:00:00Z","draft":false,"prerelease":false,"assets":[]}]'
 page2='[{"tag_name":"forwarder-v1.2.3","published_at":"2026-02-10T00:00:00Z","draft":false,"prerelease":false,"assets":[{"name":"forwarder-v1.2.3-aarch64-unknown-linux-gnu.tar.gz","browser_download_url":"https://example.com/fwd.tar.gz"}]}]'
 
 url="$(select_latest_forwarder_asset_from_pages "aarch64-unknown-linux-gnu" "${page1}" "${page2}")"
@@ -173,7 +173,7 @@ assert_eq "0" "$(config_allows_power_actions "${tmp_cfg}")" "config should disab
 
 cat > "${tmp_cfg}" <<'EOF'
 [p2p]
-thin_node_url = "https://example.com"
+server_url = "https://example.com"
 EOF
 assert_eq "0" "$(config_allows_power_actions "${tmp_cfg}")" "config should default power actions to disabled when key is missing"
 
@@ -190,7 +190,7 @@ assert_eq "1" "$(expected_allow_power_actions_for_install "${tmp_cfg}")" "instal
 
 cat > "${tmp_cfg}" <<'EOF'
 [p2p]
-thin_node_url = "https://example.com"
+server_url = "https://example.com"
 EOF
 assert_eq "0" "$(expected_allow_power_actions_for_install "${tmp_cfg}")" "install expectation should disable power actions when key is missing"
 rm -f "${tmp_cfg}"

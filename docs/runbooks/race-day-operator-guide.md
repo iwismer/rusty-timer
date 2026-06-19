@@ -2,12 +2,12 @@
 
 This guide is for race-day operations using:
 - Forwarder SBCs connected to IPICO readers
-- Thin-node coordination for endpoint registration and allow-list distribution
+- Server coordination for endpoint registration and allow-list distribution
 - Receiver UI for subscriptions, local TCP outputs, and IPICO Connect feed
 
 Assumptions:
-- Thin-node, forwarders, and receiver are already installed.
-- Each forwarder has a unique P2P identity and a thin-node bearer token.
+- Server, forwarders, and receiver are already installed.
+- Each forwarder has a unique P2P identity and a server bearer token.
 - Operator is trained on timing operations.
 
 ---
@@ -19,7 +19,7 @@ Assumptions:
    - Connect the reader to the network and turn it on.
    - Power on the SBC forwarder.
    - Open the forwarder's local status page and confirm the reader is connected.
-   - Confirm the forwarder registers with thin-node and is allowed for the expected receiver endpoint.
+   - Confirm the forwarder registers with server and is allowed for the expected receiver endpoint.
    - If needed, edit reader targets in the forwarder's local config page.
    - Repeat this full step for every forwarder you plan to use.
 
@@ -35,7 +35,7 @@ Assumptions:
 
 4. Start receiver and verify P2P connection.
    - Open Receiver UI.
-   - Confirm the thin-node URL and token are configured.
+   - Confirm the server URL and token are configured.
    - Click `Connect`.
    - Receiver selection mode defaults to `manual`.
    - Subscribe to required streams and note the local port for each subscribed stream.
@@ -70,7 +70,7 @@ Assumptions:
 - Stream offline or stale:
   - Check reader power/network.
   - Check the forwarder's local status page.
-  - Confirm the forwarder is registered and authorized in thin-node.
+  - Confirm the forwarder is registered and authorized in server.
   - Verify reader target config in the forwarder's local config page.
 
 - Wrong or mixed race data:

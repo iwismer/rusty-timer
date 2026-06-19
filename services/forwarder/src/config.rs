@@ -98,8 +98,8 @@ pub struct P2pConfig {
     pub max_concurrent_bidi_streams: Option<u32>,
     pub static_allowed_receivers: Vec<String>,
     pub allowlist_cache_path: Option<String>,
-    pub thin_node_url: Option<String>,
-    pub thin_node_token_file: Option<String>,
+    pub server_url: Option<String>,
+    pub server_token_file: Option<String>,
     pub allowlist_poll_interval_secs: u64,
     pub allowlist_request_timeout_secs: u64,
 }
@@ -188,8 +188,8 @@ pub struct RawP2pConfig {
     pub max_concurrent_bidi_streams: Option<u32>,
     pub static_allowed_receivers: Option<Vec<String>>,
     pub allowlist_cache_path: Option<String>,
-    pub thin_node_url: Option<String>,
-    pub thin_node_token_file: Option<String>,
+    pub server_url: Option<String>,
+    pub server_token_file: Option<String>,
     pub allowlist_poll_interval_secs: Option<u64>,
     pub allowlist_request_timeout_secs: Option<u64>,
 }
@@ -421,8 +421,8 @@ pub fn load_config_from_str(
                 max_concurrent_bidi_streams: p.max_concurrent_bidi_streams,
                 static_allowed_receivers: p.static_allowed_receivers.unwrap_or_default(),
                 allowlist_cache_path: p.allowlist_cache_path,
-                thin_node_url: p.thin_node_url,
-                thin_node_token_file: p.thin_node_token_file,
+                server_url: p.server_url,
+                server_token_file: p.server_token_file,
                 allowlist_poll_interval_secs,
                 allowlist_request_timeout_secs,
             }
@@ -437,8 +437,8 @@ pub fn load_config_from_str(
             max_concurrent_bidi_streams: None,
             static_allowed_receivers: Vec::new(),
             allowlist_cache_path: None,
-            thin_node_url: None,
-            thin_node_token_file: None,
+            server_url: None,
+            server_token_file: None,
             allowlist_poll_interval_secs: 60,
             allowlist_request_timeout_secs: 10,
         },
@@ -709,8 +709,8 @@ discovery_disabled = true
 max_concurrent_bidi_streams = 64
 static_allowed_receivers = ["receiver-node-id"]
 allowlist_cache_path = "/tmp/forwarder-p2p-allowlist.cache"
-thin_node_url = "http://127.0.0.1:9999"
-thin_node_token_file = "/tmp/thin-token"
+server_url = "http://127.0.0.1:9999"
+server_token_file = "/tmp/thin-token"
 allowlist_poll_interval_secs = 5
 "#,
         );
@@ -729,12 +729,9 @@ allowlist_poll_interval_secs = 5
             cfg.p2p.allowlist_cache_path.as_deref(),
             Some("/tmp/forwarder-p2p-allowlist.cache")
         );
+        assert_eq!(cfg.p2p.server_url.as_deref(), Some("http://127.0.0.1:9999"));
         assert_eq!(
-            cfg.p2p.thin_node_url.as_deref(),
-            Some("http://127.0.0.1:9999")
-        );
-        assert_eq!(
-            cfg.p2p.thin_node_token_file.as_deref(),
+            cfg.p2p.server_token_file.as_deref(),
             Some("/tmp/thin-token")
         );
         assert_eq!(cfg.p2p.allowlist_poll_interval_secs, 5);

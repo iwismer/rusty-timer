@@ -95,14 +95,13 @@
       : { connected: 0, configured: 0, label: "0 connected / 0 configured" },
   );
 
-  function thinNodeApprovalLabel(): string | null {
-    const thin = status?.thin_node;
+  function serverApprovalLabel(): string | null {
+    const thin = status?.server;
     if (!thin?.configured) return null;
     if (thin.waiting_for_approval)
-      return thin.message ?? "Waiting for thin-node approval";
-    if (thin.reachable === false)
-      return thin.message ?? "Thin node unreachable";
-    if (thin.approval_state === "active") return "Approved by thin node";
+      return thin.message ?? "Waiting for server approval";
+    if (thin.reachable === false) return thin.message ?? "Server unreachable";
+    if (thin.approval_state === "active") return "Approved by server";
     return thin.message;
   }
 
@@ -814,18 +813,18 @@
               state={status.p2p_connected ? "ok" : "err"}
             />
           </dd>
-          {#if thinNodeApprovalLabel()}
-            <dt class="text-text-muted">Thin Node</dt>
+          {#if serverApprovalLabel()}
+            <dt class="text-text-muted">Server</dt>
             <dd>
               <span
-                data-testid="thin-node-approval-state"
-                class="text-xs {status.thin_node.waiting_for_approval
+                data-testid="server-approval-state"
+                class="text-xs {status.server.waiting_for_approval
                   ? 'text-status-warn'
-                  : status.thin_node.reachable === false
+                  : status.server.reachable === false
                     ? 'text-status-err'
                     : 'text-text-muted'}"
               >
-                {thinNodeApprovalLabel()}
+                {serverApprovalLabel()}
               </span>
             </dd>
           {/if}

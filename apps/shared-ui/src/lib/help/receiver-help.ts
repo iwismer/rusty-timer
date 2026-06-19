@@ -3,7 +3,7 @@ import type { HelpContext } from "./help-types";
 export const RECEIVER_HELP = {
   config: {
     title: "Receiver Configuration",
-    overview: "Core connection settings for the receiver. These determine how the receiver identifies itself and reaches the thin-node coordinator.",
+    overview: "Core connection settings for the receiver. These determine how the receiver identifies itself and reaches the server coordinator.",
     fields: {
       receiver_id: {
         label: "Receiver ID",
@@ -12,23 +12,23 @@ export const RECEIVER_HELP = {
         default: "None (required)",
         recommended: "Use a short, descriptive name that identifies the physical location or purpose of this receiver.",
       },
-      thin_node_url: {
-        label: "Thin-node URL",
-        summary: "URL of the thin-node coordinator.",
-        detailHtml: "The full URL of the thin node to connect to (e.g. <code>https://thin-node.example.com</code>). The receiver uses it for endpoint discovery, allow-list state, and status updates; chip reads flow directly over P2P sessions.",
+      server_url: {
+        label: "Server URL",
+        summary: "URL of the server coordinator.",
+        detailHtml: "The full URL of the server to connect to (e.g. <code>https://server.example.com</code>). The receiver uses it for endpoint discovery, allow-list state, and status updates; chip reads flow directly over P2P sessions.",
         default: "None (required)",
         recommended: "Use HTTPS in production.",
       },
       token: {
         label: "Token",
-        summary: "Authentication token for thin-node M2M calls.",
-        detailHtml: "The authentication token used by this receiver when it calls thin-node registration, status, and announcer endpoints.",
+        summary: "Authentication token for server M2M calls.",
+        detailHtml: "The authentication token used by this receiver when it calls server registration, status, and announcer endpoints.",
         default: "None (required)",
       },
     },
     tips: [
       "Save your config before connecting for the first time.",
-      "If the receiver can't connect, verify the thin-node URL, token, and allow-list entry for this endpoint.",
+      "If the receiver can't connect, verify the server URL, token, and allow-list entry for this endpoint.",
     ],
     seeAlso: [{ sectionKey: "receiver_mode", label: "Receiver Mode" }],
   },
