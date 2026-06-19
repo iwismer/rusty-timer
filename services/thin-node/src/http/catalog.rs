@@ -33,11 +33,24 @@ pub struct ForwarderCatalogResponse {
 }
 
 /// `POST /forwarder/catalog` — M2M forwarder identity and stream catalog push.
+///
+/// SECURITY (known limitation): this is authorized by the *shared* provisioning
+/// bearer token, so any holder of that token can push a catalog for an
+/// arbitrary `endpoint_id` — there is currently no cryptographic binding
+/// between the caller and the `endpoint_id` it claims. When per-device auth
+/// lands (each device registers its own token under TOFU; see
+/// [`crate::registry::register_device`]), this handler MUST be changed to
+/// authenticate against the per-device token for `req.endpoint_id` and reject
+/// pushes signed by the provisioning token or any other device's token.
+/// Tracked as a post-review follow-up.
 pub async fn push_catalog(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<ForwarderCatalogRequest>,
 ) -> Response {
+    // TODO(per-device-auth): bind this to the per-device token for
+    // `req.endpoint_id` instead of the shared provisioning token (see the
+    // SECURITY note above).
     if !register::authorized(&headers, &state.provisioning_token_hash) {
         return StatusCode::UNAUTHORIZED.into_response();
     }

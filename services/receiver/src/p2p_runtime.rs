@@ -394,39 +394,7 @@ async fn run_discovery_loop(
     loop {
         match fetch_forwarders(&thin).await {
             Ok(entries) => {
-                let mut map = DiscoveredForwarders::new();
-                for entry in entries {
-                    let direct_addrs = entry
-                        .direct_addrs
-                        .iter()
-                        .filter_map(|addr| addr.parse::<SocketAddr>().ok())
-                        .collect::<Vec<_>>();
-                    let streams = entry
-                        .streams
-                        .into_iter()
-                        .map(|stream| DiscoveredStream {
-                            stream_id: stream.stream_id,
-                            epoch: stream.epoch,
-                            next_seq: stream.next_seq,
-                        })
-                        .collect::<Vec<_>>();
-                    map.insert(
-                        entry.endpoint_id,
-                        DiscoveredForwarder {
-                            display_name: entry.display_name,
-                            direct_addrs,
-                            streams,
-                        },
-                    );
-                }
-                if let Some(forwarder) = &seed {
-                    map.entry(forwarder.node_id.clone())
-                        .or_insert_with(|| DiscoveredForwarder {
-                            display_name: None,
-                            direct_addrs: vec![forwarder.direct_addr],
-                            streams: Vec::new(),
-                        });
-                }
+                let map = build_discovered_forwarders(entries, seed.as_ref());
                 *state.discovered_forwarders.write().await = map;
             }
             Err(e) => {
@@ -444,6 +412,63 @@ async fn run_discovery_loop(
     }
 }
 
+/// Build the discovered-forwarders snapshot from a thin-node discovery feed.
+///
+/// Each entry's endpoint id is validated as a dialable node id exactly once
+/// here, at discovery cadence, so a malformed id is dropped (with a single
+/// warning) before it can reach the map. That keeps `resolve_forwarder_addr` —
+/// which runs over every subscription on each reconcile pass — free of
+/// per-reconcile log spam. The optional `seed` (a pre-validated explicit
+/// forwarder for the loopback/dev path) is added only if the feed did not
+/// already advertise the same endpoint id.
+fn build_discovered_forwarders(
+    entries: Vec<announcer_push::ForwarderDiscoveryEntry>,
+    seed: Option<&ForwarderPeerConfig>,
+) -> DiscoveredForwarders {
+    let mut map = DiscoveredForwarders::new();
+    for entry in entries {
+        if let Err(e) = entry.endpoint_id.parse::<NodeId>() {
+            warn!(
+                endpoint_id = %entry.endpoint_id,
+                error = %e,
+                "discovered forwarder has invalid node id; skipping"
+            );
+            continue;
+        }
+        let direct_addrs = entry
+            .direct_addrs
+            .iter()
+            .filter_map(|addr| addr.parse::<SocketAddr>().ok())
+            .collect::<Vec<_>>();
+        let streams = entry
+            .streams
+            .into_iter()
+            .map(|stream| DiscoveredStream {
+                stream_id: stream.stream_id,
+                epoch: stream.epoch,
+                next_seq: stream.next_seq,
+            })
+            .collect::<Vec<_>>();
+        map.insert(
+            entry.endpoint_id,
+            DiscoveredForwarder {
+                display_name: entry.display_name,
+                direct_addrs,
+                streams,
+            },
+        );
+    }
+    if let Some(forwarder) = seed {
+        map.entry(forwarder.node_id.clone())
+            .or_insert_with(|| DiscoveredForwarder {
+                display_name: None,
+                direct_addrs: vec![forwarder.direct_addr],
+                streams: Vec::new(),
+            });
+    }
+    map
+}
+
 async fn fetch_forwarders(
     thin: &ThinNodeClientConfig,
 ) -> Result<Vec<announcer_push::ForwarderDiscoveryEntry>, String> {
@@ -459,18 +484,16 @@ async fn fetch_forwarders(
 /// Resolve a forwarder endpoint id to a dialable [`NodeAddr`] from the
 /// discovered-forwarders snapshot. Returns `None` when the forwarder is not yet
 /// discovered or its endpoint id is not a valid node id.
+///
+/// Endpoint ids are validated once when they enter the map (the discovery loop
+/// and the startup seed both reject invalid node ids), so the parse here is a
+/// cheap, non-logging fallback that cannot spam at reconcile cadence.
 fn resolve_forwarder_addr(
     endpoint_id: &str,
     discovered: &DiscoveredForwarders,
 ) -> Option<NodeAddr> {
     let forwarder = discovered.get(endpoint_id)?;
-    let node_id = match endpoint_id.parse::<NodeId>() {
-        Ok(node_id) => node_id,
-        Err(e) => {
-            warn!(%endpoint_id, error = %e, "discovered forwarder has invalid node id; skipping");
-            return None;
-        }
-    };
+    let node_id = endpoint_id.parse::<NodeId>().ok()?;
     Some(NodeAddr::new(node_id).with_direct_addresses(forwarder.direct_addrs.iter().copied()))
 }
 
@@ -1498,5 +1521,80 @@ mod tests {
         let _ = shutdown_tx.send(true);
         let _ = handle.await;
         drop(hint_tx);
+    }
+
+    #[test]
+    fn build_discovered_forwarders_skips_invalid_node_ids() {
+        use crate::announcer_push::{ForwarderDiscoveryEntry, ForwarderDiscoveryStream};
+
+        let valid = node_id_for_seed([7u8; 32]);
+        let entries = vec![
+            ForwarderDiscoveryEntry {
+                endpoint_id: valid.clone(),
+                display_name: Some("Start".to_owned()),
+                direct_addrs: vec!["127.0.0.1:5000".to_owned(), "bad-addr".to_owned()],
+                streams: vec![ForwarderDiscoveryStream {
+                    stream_id: "reader-a".to_owned(),
+                    epoch: 2,
+                    next_seq: 9,
+                }],
+            },
+            ForwarderDiscoveryEntry {
+                endpoint_id: "not-a-node-id".to_owned(),
+                display_name: None,
+                direct_addrs: vec!["127.0.0.1:6000".to_owned()],
+                streams: vec![],
+            },
+        ];
+
+        let map = build_discovered_forwarders(entries, None);
+
+        // Only the valid entry survives; the malformed id is dropped here, once.
+        assert_eq!(map.len(), 1);
+        let fwd = map.get(&valid).expect("valid forwarder present");
+        assert_eq!(fwd.display_name.as_deref(), Some("Start"));
+        // Unparseable direct addr is filtered out, the valid one kept.
+        assert_eq!(fwd.direct_addrs, vec!["127.0.0.1:5000".parse().unwrap()]);
+        assert_eq!(fwd.streams.len(), 1);
+        assert_eq!(fwd.streams[0].stream_id, "reader-a");
+        assert_eq!(fwd.streams[0].epoch, 2);
+        assert_eq!(fwd.streams[0].next_seq, 9);
+
+        // The dropped id never reaches the map, so resolve_forwarder_addr is
+        // never asked to parse (and warn about) it at reconcile cadence.
+        assert!(resolve_forwarder_addr("not-a-node-id", &map).is_none());
+        assert!(resolve_forwarder_addr(&valid, &map).is_some());
+    }
+
+    #[test]
+    fn build_discovered_forwarders_seed_added_only_when_absent() {
+        use crate::announcer_push::ForwarderDiscoveryEntry;
+
+        let seed_id = node_id_for_seed([3u8; 32]);
+        let seed = ForwarderPeerConfig {
+            node_id: seed_id.clone(),
+            direct_addr: "127.0.0.1:7000".parse().unwrap(),
+        };
+
+        // Seed is inserted when the feed does not advertise it.
+        let map = build_discovered_forwarders(vec![], Some(&seed));
+        assert_eq!(map.len(), 1);
+        assert_eq!(
+            map.get(&seed_id).unwrap().direct_addrs,
+            vec!["127.0.0.1:7000".parse().unwrap()]
+        );
+
+        // Seed does NOT override a discovered entry for the same endpoint id.
+        let entries = vec![ForwarderDiscoveryEntry {
+            endpoint_id: seed_id.clone(),
+            display_name: Some("Discovered".to_owned()),
+            direct_addrs: vec!["10.0.0.1:8000".to_owned()],
+            streams: vec![],
+        }];
+        let map = build_discovered_forwarders(entries, Some(&seed));
+        assert_eq!(map.len(), 1);
+        let fwd = map.get(&seed_id).unwrap();
+        assert_eq!(fwd.display_name.as_deref(), Some("Discovered"));
+        assert_eq!(fwd.direct_addrs, vec!["10.0.0.1:8000".parse().unwrap()]);
     }
 }

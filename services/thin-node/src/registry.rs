@@ -7,10 +7,12 @@
 //! approves and names it to mark it `active`.
 
 use chrono::Utc;
+use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::num::TryFromIntError;
+use subtle::ConstantTimeEq;
 
 /// Kind of device that can register with the node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -146,11 +148,89 @@ impl From<rusqlite::Error> for AnnouncerStorageError {
     }
 }
 
+/// Length in bytes of the random per-token salt.
+const TOKEN_SALT_LEN: usize = 16;
+
 /// Hash a raw bearer token for storage/comparison. Tokens are never persisted
 /// in plaintext.
+///
+/// Each call generates a fresh random salt and returns the UTF-8 bytes of
+/// `"<salt_hex>$<sha256(salt || token)_hex>"`. Salting means identical tokens
+/// produce distinct stored hashes and defeats precomputed (rainbow-table)
+/// attacks against a leaked registry. Use [`verify_token`] to check a candidate
+/// token against a stored hash — never compare hashes with `==`, which is not
+/// constant-time.
 #[must_use]
 pub fn hash_token(raw_token: &str) -> Vec<u8> {
-    Sha256::digest(raw_token.as_bytes()).to_vec()
+    let mut salt = [0u8; TOKEN_SALT_LEN];
+    rand::rng().fill_bytes(&mut salt);
+    encode_salted_hash(&salt, raw_token).into_bytes()
+}
+
+/// Verify a candidate raw token against a salted hash produced by [`hash_token`].
+///
+/// Returns `false` for any malformed stored hash. The final digest comparison
+/// is constant-time to avoid leaking how many leading bytes matched.
+#[must_use]
+pub fn verify_token(raw_token: &str, stored_hash: &[u8]) -> bool {
+    let Ok(stored) = std::str::from_utf8(stored_hash) else {
+        return false;
+    };
+    let Some((salt_hex, expected_digest_hex)) = stored.split_once('$') else {
+        return false;
+    };
+    let Some(salt) = decode_hex(salt_hex) else {
+        return false;
+    };
+    let Some(expected_digest) = decode_hex(expected_digest_hex) else {
+        return false;
+    };
+    let actual_digest = Sha256::digest(salted_input(&salt, raw_token));
+    actual_digest.as_slice().ct_eq(&expected_digest).into()
+}
+
+fn salted_input(salt: &[u8], raw_token: &str) -> Vec<u8> {
+    let mut input = Vec::with_capacity(salt.len() + raw_token.len());
+    input.extend_from_slice(salt);
+    input.extend_from_slice(raw_token.as_bytes());
+    input
+}
+
+fn encode_salted_hash(salt: &[u8], raw_token: &str) -> String {
+    let digest = Sha256::digest(salted_input(salt, raw_token));
+    format!("{}${}", encode_hex(salt), encode_hex(&digest))
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    // Decode byte-wise (never slice the `str`, which would panic on a
+    // multi-byte UTF-8 boundary). A malformed stored hash must fail closed by
+    // returning `None`, never by panicking.
+    let bytes = hex.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    bytes
+        .chunks_exact(2)
+        .map(|pair| Some((hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?))
+        .collect()
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Create the registry tables. Idempotent and safe to call on every open.
@@ -183,23 +263,50 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     )?;
 
     if forwarder_streams_needs_composite_pk(conn)? {
-        conn.execute_batch(
-            "ALTER TABLE forwarder_streams RENAME TO forwarder_streams_old;
-             CREATE TABLE forwarder_streams (
-                 endpoint_id TEXT NOT NULL,
-                 stream_id TEXT NOT NULL,
-                 epoch INTEGER NOT NULL,
-                 next_seq INTEGER NOT NULL,
-                 PRIMARY KEY(endpoint_id, stream_id),
-                 FOREIGN KEY(endpoint_id) REFERENCES devices(endpoint_id)
-             );
-             INSERT OR REPLACE INTO forwarder_streams (endpoint_id, stream_id, epoch, next_seq)
-             SELECT endpoint_id, stream_id, epoch, next_seq FROM forwarder_streams_old;
-             DROP TABLE forwarder_streams_old;",
-        )?;
+        reshape_forwarder_streams_pk(conn)?;
     }
 
     Ok(())
+}
+
+/// Rebuild `forwarder_streams` with the composite `(endpoint_id, stream_id)`
+/// primary key.
+///
+/// The reshape runs inside a `SAVEPOINT` so it is atomic: on any error the
+/// partial work is explicitly rolled back to the savepoint and the savepoint
+/// released, leaving the connection clean (and the original table intact)
+/// rather than aborting mid-batch with a half-renamed/dropped table.
+fn reshape_forwarder_streams_pk(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("SAVEPOINT reshape_forwarder_streams")?;
+
+    let reshape = conn.execute_batch(
+        "ALTER TABLE forwarder_streams RENAME TO forwarder_streams_old;
+         CREATE TABLE forwarder_streams (
+             endpoint_id TEXT NOT NULL,
+             stream_id TEXT NOT NULL,
+             epoch INTEGER NOT NULL,
+             next_seq INTEGER NOT NULL,
+             PRIMARY KEY(endpoint_id, stream_id),
+             FOREIGN KEY(endpoint_id) REFERENCES devices(endpoint_id)
+         );
+         INSERT OR REPLACE INTO forwarder_streams (endpoint_id, stream_id, epoch, next_seq)
+         SELECT endpoint_id, stream_id, epoch, next_seq FROM forwarder_streams_old;
+         DROP TABLE forwarder_streams_old;",
+    );
+
+    match reshape {
+        Ok(()) => conn.execute_batch("RELEASE reshape_forwarder_streams"),
+        Err(reshape_err) => {
+            // Roll the partial reshape back and release the savepoint so the
+            // connection is left usable; surface the original error (a cleanup
+            // failure takes precedence via `?` since the connection state is
+            // then unknown).
+            conn.execute_batch(
+                "ROLLBACK TO reshape_forwarder_streams; RELEASE reshape_forwarder_streams;",
+            )?;
+            Err(reshape_err)
+        }
+    }
 }
 
 /// Register (or re-register) a device under the TOFU model.
@@ -841,7 +948,86 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(stored, hash_token("super-secret"));
+        assert!(verify_token("super-secret", &stored));
+        assert!(!verify_token("wrong-secret", &stored));
         assert_ne!(stored, b"super-secret".to_vec());
+    }
+
+    #[test]
+    fn hash_token_is_salted_and_verifiable() {
+        // Two hashes of the same token differ (random salt) but both verify.
+        let a = hash_token("same-token");
+        let b = hash_token("same-token");
+        assert_ne!(a, b, "salted hashes of the same token must differ");
+        assert!(verify_token("same-token", &a));
+        assert!(verify_token("same-token", &b));
+        assert!(!verify_token("same-token ", &a));
+    }
+
+    #[test]
+    fn verify_token_rejects_malformed_stored_hash() {
+        assert!(!verify_token("x", b"not-hex"));
+        assert!(!verify_token("x", b"deadbeef"));
+        assert!(!verify_token("x", b"zz$zz"));
+        assert!(!verify_token("x", &[0xff, 0xfe]));
+        // Valid UTF-8 but multi-byte hex parts must fail closed, not panic
+        // (would have panicked when slicing the str by byte index).
+        assert!(!verify_token("x", "é$é".as_bytes()));
+        assert!(!verify_token("x", "00$é".as_bytes()));
+        assert!(!verify_token("x", "abcd€xyz$0011".as_bytes()));
+    }
+
+    #[test]
+    fn forwarder_streams_reshape_rolls_back_on_failure() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Legacy single-column-PK shape (triggers the composite-PK reshape),
+        // plus the `devices` FK target. The row references an `endpoint_id`
+        // that does NOT exist in `devices`.
+        conn.execute_batch(
+            "CREATE TABLE devices (endpoint_id TEXT PRIMARY KEY);
+             CREATE TABLE forwarder_streams (
+                 endpoint_id TEXT PRIMARY KEY,
+                 stream_id TEXT NOT NULL,
+                 epoch INTEGER NOT NULL,
+                 next_seq INTEGER NOT NULL
+             );
+             INSERT INTO forwarder_streams (endpoint_id, stream_id, epoch, next_seq)
+             VALUES ('orphan', 'reader-a', 1, 5);",
+        )
+        .unwrap();
+
+        // Enforce FKs (must be set outside a transaction) so the reshape's
+        // INSERT...SELECT fails *after* the RENAME and CREATE have already been
+        // applied inside the savepoint — the exact mid-batch failure the
+        // explicit rollback must recover from.
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        assert!(forwarder_streams_needs_composite_pk(&conn).unwrap());
+
+        let err = reshape_forwarder_streams_pk(&conn).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("foreign key"),
+            "expected a foreign-key failure, got: {err}"
+        );
+
+        // Rollback restored the original table and row; the temp *_old table is
+        // gone; the legacy PK shape is intact (reshape did not partially apply).
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM forwarder_streams", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let old_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'table' AND name = 'forwarder_streams_old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_exists, 0);
+        assert!(forwarder_streams_needs_composite_pk(&conn).unwrap());
+
+        // No dangling savepoint/transaction: the connection is still usable.
+        conn.execute_batch("CREATE TABLE probe (x); DROP TABLE probe;")
+            .unwrap();
     }
 }

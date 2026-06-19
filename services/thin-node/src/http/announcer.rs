@@ -166,7 +166,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrate(&conn).unwrap();
         crate::registry::migrate(&conn).unwrap();
-        AppState::new(conn, PROV_TOKEN)
+        AppState::new(conn, PROV_TOKEN, true)
     }
 
     fn json_request(uri: &str, body: &serde_json::Value) -> Request<Body> {

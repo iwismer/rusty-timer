@@ -63,7 +63,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrate(&conn).unwrap();
         crate::registry::migrate(&conn).unwrap();
-        AppState::new(conn, PROV_TOKEN)
+        AppState::new(conn, PROV_TOKEN, true)
     }
 
     fn allowlist_request(token: &str) -> Request<Body> {

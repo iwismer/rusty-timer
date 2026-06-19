@@ -81,7 +81,7 @@ pub(super) fn authorized(headers: &HeaderMap, expected_hash: &[u8]) -> bool {
     if token.is_empty() {
         return false;
     }
-    registry::hash_token(token) == expected_hash
+    registry::verify_token(token, expected_hash)
 }
 
 #[cfg(test)]
@@ -98,7 +98,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrate(&conn).unwrap();
         crate::registry::migrate(&conn).unwrap();
-        AppState::new(conn, PROV_TOKEN)
+        AppState::new(conn, PROV_TOKEN, true)
     }
 
     fn register_request(token: &str, body: &serde_json::Value) -> Request<Body> {
