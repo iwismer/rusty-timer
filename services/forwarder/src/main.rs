@@ -256,6 +256,7 @@ async fn main() {
             .map(|(addr, _)| addr.clone())
             .collect::<Vec<_>>(),
         cfg.display_name.clone(),
+        status_server.status_feed(),
     )
     .await
     {

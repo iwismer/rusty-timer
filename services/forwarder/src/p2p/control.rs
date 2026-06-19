@@ -25,10 +25,10 @@ use prost::Message;
 use rt_iroh::Connection;
 use rt_iroh::{RecvStream, SendStream};
 use rt_p2p_protocol::{
-    ControlC2F, ControlF2C, DownloadProgress, Hello, MAX_FRAME_BYTES, Ping, Pong, ProtocolError,
-    ProtocolErrorCode, ReaderControlRequest, ReaderControlResponse, ReaderInfo, ReaderStatus,
-    StreamCatalog, SyncClock, UpsStatus, WireProtocolError, control_c2f, control_f2c, encode_frame,
-    negotiate,
+    CAP_CONTROL_EVENTS, ControlC2F, ControlF2C, DownloadProgress, Hello, MAX_FRAME_BYTES, Ping,
+    Pong, ProtocolError, ProtocolErrorCode, ReaderControlRequest, ReaderControlResponse,
+    ReaderInfo, ReaderStatus, StreamCatalog, SyncClock, UpsStatus, WireProtocolError, control_c2f,
+    control_f2c, encode_frame, negotiate,
 };
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
@@ -233,7 +233,7 @@ pub(crate) fn forwarder_hello() -> Hello {
     Hello {
         min_minor: PROTOCOL_MINOR,
         max_minor: PROTOCOL_MINOR,
-        capabilities: Vec::new(),
+        capabilities: vec![CAP_CONTROL_EVENTS.to_owned()],
         max_frame_bytes: u32::try_from(MAX_FRAME_BYTES).unwrap_or(u32::MAX),
         catalog_generation: 0,
     }
@@ -281,7 +281,7 @@ pub(crate) async fn negotiate_control_stream(
     catalog: &dyn CatalogProvider,
     handshake_timeout: Duration,
     heartbeat: HeartbeatConfig,
-) -> Result<(SendStream, RecvStream), BoxError> {
+) -> Result<(SendStream, RecvStream, Vec<String>), BoxError> {
     match tokio::time::timeout(
         handshake_timeout,
         negotiate_and_serve_catalog_stream(send, recv, catalog, heartbeat),
@@ -301,13 +301,14 @@ pub(crate) async fn run_control_stream_loop(
     send: SendStream,
     recv: RecvStream,
     heartbeat: HeartbeatConfig,
+    outbound_events: Option<ControlEventReceiver>,
 ) -> Result<(), BoxError> {
     run_control_loop(
         send,
         recv,
         heartbeat,
         Arc::new(NoopReaderControlHandler),
-        None,
+        outbound_events,
     )
     .await
 }
@@ -346,7 +347,7 @@ pub(crate) async fn serve_control_stream_with_typed_control(
     reader_control: Arc<dyn ReaderControlHandler>,
     outbound_events: Option<ControlEventReceiver>,
 ) -> Result<(), BoxError> {
-    let (send, recv) =
+    let (send, recv, _capabilities) =
         negotiate_control_stream(send, recv, catalog, handshake_timeout, heartbeat).await?;
 
     run_control_loop(send, recv, heartbeat, reader_control, outbound_events).await
@@ -364,7 +365,7 @@ async fn negotiate_and_serve_catalog_stream(
     mut recv: RecvStream,
     catalog: &dyn CatalogProvider,
     heartbeat: HeartbeatConfig,
-) -> Result<(SendStream, RecvStream), BoxError> {
+) -> Result<(SendStream, RecvStream, Vec<String>), BoxError> {
     let control = read_frame::<ControlC2F>(&mut recv).await?;
     let client_hello = match control.msg {
         Some(control_c2f::Msg::Hello(hello)) => hello,
@@ -402,6 +403,7 @@ async fn negotiate_and_serve_catalog_stream(
         }
     };
 
+    let capabilities = hello_ok.capabilities.clone();
     write_frame(
         &mut send,
         &ControlF2C {
@@ -417,7 +419,7 @@ async fn negotiate_and_serve_catalog_stream(
     )
     .await?;
 
-    Ok((send, recv))
+    Ok((send, recv, capabilities))
 }
 
 /// Runs the typed control loop until the peer misses `max_missed` consecutive

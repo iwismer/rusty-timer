@@ -8,11 +8,12 @@
 //! on disk (fail-to-last-known on refresh failures) and force-closes a peer's
 //! open connections when an update revokes it.
 //!
-//! Scope: production startup currently wires the endpoint, accept loop, and
-//! allow-listed control-plane handshake. The data-stream subscriber handler and
-//! the server allow-list distribution components ([`ServerAllowListClient`]
-//! and [`run_allowlist_distribution`]) are available for P2P wiring, while the
-//! reader control/status mapping remains a later task.
+//! Scope: production startup wires the endpoint, accept loop, allow-listed
+//! control-plane handshake, data-stream subscriber handler, server allow-list
+//! distribution components ([`ServerAllowListClient`] and
+//! [`run_allowlist_distribution`]), and forwarder status events. Reader control
+//! actions are still handled by the no-op adapter until a production adapter is
+//! installed.
 
 mod allowlist;
 mod control;
@@ -27,6 +28,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::P2pConfig;
+use crate::status_http::ForwarderStatusFeed;
 use crate::storage::journal::Journal;
 use rt_iroh::{EndpointBuilder, NodeAddr, NodeId, RelayMode, SecretKey};
 use rt_p2p_protocol::{StreamCatalog, StreamEntry};
@@ -92,6 +94,7 @@ pub async fn start_forwarder_p2p(
     journal: Arc<Mutex<Journal>>,
     reader_streams: &[String],
     display_name: Option<String>,
+    status_feed: ForwarderStatusFeed,
 ) -> Result<Option<P2pRuntime>, P2pStartError> {
     if !config.enabled {
         return Ok(None);
@@ -119,7 +122,8 @@ pub async fn start_forwarder_p2p(
         Arc::clone(&journal),
         DataConfig::default(),
     )
-    .await?;
+    .await?
+    .with_status_feed(status_feed);
 
     let run_endpoint = endpoint.clone();
     let mut tasks = vec![tokio::spawn(async move { run_endpoint.run().await })];
@@ -409,6 +413,7 @@ mod tests {
     use super::*;
 
     use crate::config::P2pConfig;
+    use crate::status_http::{StatusConfig, StatusServer, SubsystemStatus};
     use crate::storage::journal::Journal;
     use rt_iroh::EndpointBuilder;
     use rt_p2p_protocol::{
@@ -420,6 +425,18 @@ mod tests {
 
     type BoxError = Box<dyn std::error::Error + Send + Sync>;
     type TestResult = Result<(), BoxError>;
+
+    async fn status_feed() -> Result<ForwarderStatusFeed, BoxError> {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await?;
+        Ok(server.status_feed())
+    }
 
     fn p2p_config(receiver_id: String) -> P2pConfig {
         P2pConfig {
@@ -457,6 +474,7 @@ mod tests {
             Arc::clone(&journal),
             &[stream_key.to_owned()],
             None,
+            status_feed().await?,
         )
         .await?
         .expect("p2p enabled");
@@ -554,6 +572,7 @@ mod tests {
             Arc::clone(&journal),
             &[stream_key.to_owned()],
             None,
+            status_feed().await?,
         )
         .await?
         .expect("p2p enabled");

@@ -66,7 +66,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, broadcast};
 use tracing::Instrument;
 
 // ---------------------------------------------------------------------------
@@ -128,6 +128,52 @@ pub struct ReaderStatus {
 pub struct UpsStatusState {
     pub available: bool,
     pub status: Option<rt_domain::UpsStatus>,
+}
+
+/// Forwarder-local status updates consumed by P2P control sessions.
+#[derive(Debug, Clone)]
+pub enum ForwarderStatusEvent {
+    ReaderStatus {
+        stream_id: String,
+        status: ReaderStatus,
+    },
+    ReaderInfo {
+        stream_id: String,
+        info: crate::reader_control::ReaderInfo,
+    },
+    UpsStatus(UpsStatusState),
+}
+
+/// Current forwarder status snapshot consumed by a newly connected P2P peer.
+#[derive(Debug, Clone, Default)]
+pub struct ForwarderStatusSnapshot {
+    pub readers: Vec<(String, ReaderStatus)>,
+    pub ups_status: Option<UpsStatusState>,
+}
+
+/// Read-only status feed for P2P control sessions.
+#[derive(Clone)]
+pub struct ForwarderStatusFeed {
+    subsystem: Arc<Mutex<SubsystemStatus>>,
+    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
+}
+
+impl ForwarderStatusFeed {
+    pub fn subscribe(&self) -> broadcast::Receiver<ForwarderStatusEvent> {
+        self.status_event_tx.subscribe()
+    }
+
+    pub async fn snapshot(&self) -> ForwarderStatusSnapshot {
+        let ss = self.subsystem.lock().await;
+        ForwarderStatusSnapshot {
+            readers: ss
+                .readers()
+                .iter()
+                .map(|(stream_id, status)| (stream_id.clone(), status.clone()))
+                .collect(),
+            ups_status: ss.ups_status().cloned(),
+        }
+    }
 }
 
 /// Tracks local subsystem readiness for the `/readyz` endpoint.
@@ -306,6 +352,7 @@ pub struct StatusServer {
     local_addr: SocketAddr,
     subsystem: Arc<Mutex<SubsystemStatus>>,
     ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
+    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
     logger: Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
     control_clients:
         Arc<std::sync::RwLock<HashMap<String, Arc<crate::reader_control::ControlClient>>>>,
@@ -345,6 +392,7 @@ struct AppState<J: JournalAccess + Send + 'static> {
     config_state: Option<Arc<ConfigState>>,
     restart_signal: Option<Arc<Notify>>,
     ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
+    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
     logger: Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
     control_clients:
         Arc<std::sync::RwLock<HashMap<String, Arc<crate::reader_control::ControlClient>>>>,
@@ -369,6 +417,7 @@ impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
             config_state: self.config_state.clone(),
             restart_signal: self.restart_signal.clone(),
             ui_tx: self.ui_tx.clone(),
+            status_event_tx: self.status_event_tx.clone(),
             logger: self.logger.clone(),
             control_clients: self.control_clients.clone(),
             download_trackers: self.download_trackers.clone(),
@@ -395,6 +444,14 @@ impl StatusServer {
     /// Return a clone of the UI event broadcast sender.
     pub fn ui_sender(&self) -> tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent> {
         self.ui_tx.clone()
+    }
+
+    /// Return a read-only status feed for P2P control sessions.
+    pub fn status_feed(&self) -> ForwarderStatusFeed {
+        ForwarderStatusFeed {
+            subsystem: self.subsystem.clone(),
+            status_event_tx: self.status_event_tx.clone(),
+        }
     }
 
     /// Return a clone of the shared UI logger Arc.
@@ -484,7 +541,10 @@ impl StatusServer {
 
     /// Update the UPS status snapshot in the subsystem state.
     pub async fn set_ups_status(&self, state: UpsStatusState) {
-        self.subsystem.lock().await.set_ups_status(state);
+        self.subsystem.lock().await.set_ups_status(state.clone());
+        let _ = self
+            .status_event_tx
+            .send(ForwarderStatusEvent::UpsStatus(state));
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
     }
@@ -603,9 +663,13 @@ impl StatusServer {
                 .ui_tx
                 .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
                     ip: reader_ip.to_owned(),
-                    info,
+                    info: info.clone(),
                 });
         }
+        let _ = self.status_event_tx.send(ForwarderStatusEvent::ReaderInfo {
+            stream_id: reader_ip.to_owned(),
+            info,
+        });
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
     }
@@ -641,9 +705,13 @@ impl StatusServer {
                 .ui_tx
                 .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
                     ip: reader_ip.to_owned(),
-                    info,
+                    info: info.clone(),
                 });
         }
+        let _ = self.status_event_tx.send(ForwarderStatusEvent::ReaderInfo {
+            stream_id: reader_ip.to_owned(),
+            info,
+        });
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
     }
@@ -726,7 +794,7 @@ impl StatusServer {
 
     /// Update a reader's connection state.
     pub async fn update_reader_state(&self, reader_ip: &str, state: ReaderConnectionState) {
-        {
+        let status_event = {
             let mut ss = self.subsystem.lock().await;
             if let Some(r) = ss.readers.get_mut(reader_ip) {
                 if state == ReaderConnectionState::Disconnected {
@@ -744,7 +812,16 @@ impl StatusServer {
                         local_port: r.local_port,
                         current_epoch_name: r.current_epoch_name.clone(),
                     });
+                Some(ForwarderStatusEvent::ReaderStatus {
+                    stream_id: reader_ip.to_owned(),
+                    status: r.clone(),
+                })
+            } else {
+                None
             }
+        };
+        if let Some(event) = status_event {
+            let _ = self.status_event_tx.send(event);
         }
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
@@ -793,6 +870,7 @@ impl StatusServer {
         let local_addr = listener.local_addr()?;
 
         let (ui_tx, _) = tokio::sync::broadcast::channel(256);
+        let (status_event_tx, _) = broadcast::channel(256);
         let logger = Arc::new(rt_ui_log::UiLogger::with_buffer(
             ui_tx.clone(),
             |entry| crate::ui_events::ForwarderUiEvent::LogEntry { entry },
@@ -813,6 +891,7 @@ impl StatusServer {
             config_state: None,
             restart_signal: None,
             ui_tx: ui_tx.clone(),
+            status_event_tx: status_event_tx.clone(),
             logger: logger.clone(),
             control_clients: control_clients.clone(),
             download_trackers: download_trackers.clone(),
@@ -834,6 +913,7 @@ impl StatusServer {
             local_addr,
             subsystem,
             ui_tx,
+            status_event_tx,
             logger,
             control_clients,
             download_trackers,
@@ -859,6 +939,7 @@ impl StatusServer {
         let local_addr = listener.local_addr()?;
 
         let (ui_tx, _) = tokio::sync::broadcast::channel(256);
+        let (status_event_tx, _) = broadcast::channel(256);
         let logger = Arc::new(rt_ui_log::UiLogger::with_buffer(
             ui_tx.clone(),
             |entry| crate::ui_events::ForwarderUiEvent::LogEntry { entry },
@@ -879,6 +960,7 @@ impl StatusServer {
             config_state: Some(config_state),
             restart_signal: Some(restart_signal),
             ui_tx: ui_tx.clone(),
+            status_event_tx: status_event_tx.clone(),
             logger: logger.clone(),
             control_clients: control_clients.clone(),
             download_trackers: download_trackers.clone(),
@@ -900,6 +982,7 @@ impl StatusServer {
             local_addr,
             subsystem,
             ui_tx,
+            status_event_tx,
             logger,
             control_clients,
             download_trackers,
@@ -2600,6 +2683,12 @@ async fn update_cached_reader_info<J: JournalAccess + Send + 'static>(
         .ui_tx
         .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
             ip: ip.to_owned(),
+            info: info.clone(),
+        });
+    let _ = state
+        .status_event_tx
+        .send(ForwarderStatusEvent::ReaderInfo {
+            stream_id: ip.to_owned(),
             info,
         });
 }
@@ -4159,6 +4248,7 @@ mod tests {
             restart_signal: None,
             logger: server.logger.clone(),
             ui_tx: server.ui_tx.clone(),
+            status_event_tx: server.status_event_tx.clone(),
             control_clients: server.control_clients.clone(),
             download_trackers: server.download_trackers.clone(),
             reconnect_notifies: server.reconnect_notifies.clone(),
