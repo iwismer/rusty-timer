@@ -320,13 +320,16 @@ fn now_unix_ms() -> i64 {
     .unwrap_or(i64::MAX)
 }
 
-async fn write_frame(send: &mut SendStream, message: &impl Message) -> Result<(), P2pSessionError> {
+pub(crate) async fn write_frame(
+    send: &mut SendStream,
+    message: &impl Message,
+) -> Result<(), P2pSessionError> {
     send.write_all(&encode_frame(message))
         .await
         .map_err(|e| P2pSessionError::Write(e.to_string()))
 }
 
-async fn read_frame<M>(recv: &mut RecvStream) -> Result<M, P2pSessionError>
+pub(crate) async fn read_frame<M>(recv: &mut RecvStream) -> Result<M, P2pSessionError>
 where
     M: Message + Default,
 {

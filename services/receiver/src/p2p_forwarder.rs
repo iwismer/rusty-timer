@@ -4,16 +4,18 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rt_iroh::{Endpoint, NodeAddr};
-use rt_p2p_protocol::{Hello, SubscribeMode};
+use rt_iroh::{Endpoint, NodeAddr, RecvStream, SendStream};
+use rt_p2p_protocol::{
+    ControlC2F, ControlF2C, Hello, Pong, SubscribeMode, control_c2f, control_f2c,
+};
 use tokio::sync::{Mutex, broadcast, watch};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
 use crate::db::Db;
 use crate::p2p_session::{
-    BackoffConfig, P2pSessionError, SessionStatusReporter, connect_and_hello,
-    run_data_subscription_with_hint, wait_control_stream_closed,
+    BackoffConfig, P2pSessionError, SessionStatusReporter, connect_and_hello, read_frame,
+    run_data_subscription_with_hint, write_frame,
 };
 
 #[derive(Clone, Debug)]
@@ -187,12 +189,14 @@ async fn run_connected_forwarder(
             biased;
             changed = shutdown_rx.changed() => {
                 if changed.is_err() || *shutdown_rx.borrow() {
+                    reporter.app_state().clear_forwarder_live_status(endpoint_id).await;
                     stop_data_tasks(data_tasks).await;
                     return;
                 }
             }
             changed = desired_rx.changed() => {
                 if changed.is_err() {
+                    reporter.app_state().clear_forwarder_live_status(endpoint_id).await;
                     stop_data_tasks(data_tasks).await;
                     return;
                 }
@@ -206,15 +210,96 @@ async fn run_connected_forwarder(
                     &mut data_tasks,
                 ).await;
             }
-            result = wait_control_stream_closed(&mut session.control_recv) => {
-                if let Err(error) = result {
-                    warn!(%endpoint_id, %error, "forwarder control stream ended with error");
+            result = read_next_control_frame(&mut session.control_recv) => {
+                match result {
+                    Ok(Some(frame)) => {
+                        if let Err(error) = handle_control_frame(
+                            endpoint_id,
+                            frame,
+                            &mut session.control_send,
+                            reporter,
+                        ).await {
+                            warn!(%endpoint_id, %error, "failed to handle forwarder control frame");
+                            reporter.app_state().clear_forwarder_live_status(endpoint_id).await;
+                            stop_data_tasks(data_tasks).await;
+                            return;
+                        }
+                    }
+                    Ok(None) => {
+                        reporter.app_state().clear_forwarder_live_status(endpoint_id).await;
+                        stop_data_tasks(data_tasks).await;
+                        return;
+                    }
+                    Err(error) => {
+                        warn!(%endpoint_id, %error, "forwarder control stream ended with error");
+                        reporter.app_state().clear_forwarder_live_status(endpoint_id).await;
+                        stop_data_tasks(data_tasks).await;
+                        return;
+                    }
                 }
-                stop_data_tasks(data_tasks).await;
-                return;
             }
         }
     }
+}
+
+async fn read_next_control_frame(
+    recv: &mut RecvStream,
+) -> Result<Option<ControlF2C>, P2pSessionError> {
+    match read_frame::<ControlF2C>(recv).await {
+        Ok(frame) => Ok(Some(frame)),
+        Err(P2pSessionError::Read(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+async fn handle_control_frame(
+    endpoint_id: &str,
+    frame: ControlF2C,
+    send: &mut SendStream,
+    reporter: &Arc<SessionStatusReporter>,
+) -> Result<(), P2pSessionError> {
+    match frame.msg {
+        Some(control_f2c::Msg::ReaderStatus(status)) => {
+            reporter
+                .app_state()
+                .record_forwarder_reader_status(endpoint_id, status)
+                .await;
+        }
+        Some(control_f2c::Msg::ReaderInfo(info)) => {
+            reporter
+                .app_state()
+                .record_forwarder_reader_info(endpoint_id, info)
+                .await;
+        }
+        Some(control_f2c::Msg::UpsStatus(status)) => {
+            reporter
+                .app_state()
+                .record_forwarder_ups_status(endpoint_id, status)
+                .await;
+        }
+        Some(control_f2c::Msg::Ping(ping)) => {
+            write_frame(
+                send,
+                &ControlC2F {
+                    msg: Some(control_c2f::Msg::Pong(Pong { nonce: ping.nonce })),
+                },
+            )
+            .await?;
+        }
+        Some(control_f2c::Msg::ProtocolError(error)) => {
+            warn!(%endpoint_id, code = error.code, message = %error.message, "forwarder sent protocol error");
+        }
+        Some(
+            control_f2c::Msg::Pong(_)
+            | control_f2c::Msg::DownloadProgress(_)
+            | control_f2c::Msg::SyncClock(_)
+            | control_f2c::Msg::ReaderControlResponse(_)
+            | control_f2c::Msg::HelloOk(_)
+            | control_f2c::Msg::StreamCatalog(_),
+        )
+        | None => {}
+    }
+    Ok(())
 }
 
 async fn sync_data_tasks(

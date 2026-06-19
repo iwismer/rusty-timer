@@ -8,6 +8,7 @@ use crate::db::{DEFAULT_UPDATE_MODE, Db, StreamSubscription};
 use crate::error::ReceiverError;
 use crate::ui_events::ReceiverUiEvent;
 use rt_domain::ReceiverMode;
+use rt_p2p_protocol::{ReaderInfo, ReaderStatus, UpsStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
@@ -111,6 +112,14 @@ struct ForwarderConnectionsFingerprint {
     display_name: Option<String>,
     subscribed_count: usize,
     available_count: usize,
+    readers: Vec<ReaderLiveStatus>,
+    ups: Option<UpsStatusPayload>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ForwarderLiveStatus {
+    readers: HashMap<String, ReaderLiveStatus>,
+    ups: Option<UpsStatusPayload>,
 }
 
 const FORWARDER_PENDING_GRACE: Duration = Duration::from_secs(5);
@@ -143,6 +152,21 @@ fn derive_forwarder_state(runtime: ForwarderRuntimeStatus, intent: bool) -> Forw
     }
 }
 
+fn decode_stream_id(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes)
+        .unwrap_or_else(|error| String::from_utf8_lossy(&error.into_bytes()).into_owned())
+}
+
+fn optional_non_empty(value: String) -> Option<String> {
+    (!value.is_empty()).then_some(value)
+}
+
+fn sorted_reader_statuses(live_status: &ForwarderLiveStatus) -> Vec<ReaderLiveStatus> {
+    let mut readers = live_status.readers.values().cloned().collect::<Vec<_>>();
+    readers.sort_by(|a, b| a.stream_id.cmp(&b.stream_id));
+    readers
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShutdownSignal {
     None,
@@ -173,6 +197,7 @@ pub struct AppState {
     pub discovered_forwarders: Arc<tokio::sync::RwLock<DiscoveredForwarders>>,
     pub p2p_endpoint_id: Arc<RwLock<Option<String>>>,
     forwarder_runtime: Arc<StdMutex<HashMap<String, ForwarderRuntimeStatus>>>,
+    forwarder_live_status: Arc<StdMutex<HashMap<String, ForwarderLiveStatus>>>,
     last_connections_fingerprint: StdMutex<Option<ConnectionsFingerprint>>,
     connect_attempt: AtomicU64,
     connect_attempt_version: watch::Sender<ConnectAttempt>,
@@ -233,6 +258,7 @@ impl AppState {
             discovered_forwarders: Arc::new(tokio::sync::RwLock::new(DiscoveredForwarders::new())),
             p2p_endpoint_id: Arc::new(RwLock::new(None)),
             forwarder_runtime: Arc::new(StdMutex::new(HashMap::new())),
+            forwarder_live_status: Arc::new(StdMutex::new(HashMap::new())),
             last_connections_fingerprint: StdMutex::new(None),
             connect_attempt: AtomicU64::new(0),
             connect_attempt_version,
@@ -383,6 +409,91 @@ impl AppState {
         derive_forwarder_state(runtime, intent)
     }
 
+    pub(crate) async fn record_forwarder_reader_status(
+        &self,
+        endpoint_id: &str,
+        status: ReaderStatus,
+    ) {
+        let stream_id = decode_stream_id(status.stream_id);
+        let reader = ReaderLiveStatus {
+            stream_id: stream_id.clone(),
+            connected: status.connected,
+            state: status.state,
+            last_read_unix_ms: (status.last_read_unix_ms != 0).then_some(status.last_read_unix_ms),
+            hardware_reader_id: None,
+            firmware_version: None,
+            model: None,
+        };
+        {
+            let mut live_statuses = self.forwarder_live_status.lock().unwrap();
+            let live_status = live_statuses.entry(endpoint_id.to_owned()).or_default();
+            live_status
+                .readers
+                .entry(stream_id)
+                .and_modify(|existing| {
+                    let hardware_reader_id = existing.hardware_reader_id.clone();
+                    let firmware_version = existing.firmware_version.clone();
+                    let model = existing.model.clone();
+                    *existing = ReaderLiveStatus {
+                        hardware_reader_id,
+                        firmware_version,
+                        model,
+                        ..reader.clone()
+                    };
+                })
+                .or_insert(reader);
+        }
+        self.recompute_aggregate_connection_state().await;
+    }
+
+    pub(crate) async fn record_forwarder_reader_info(&self, endpoint_id: &str, info: ReaderInfo) {
+        let stream_id = decode_stream_id(info.stream_id);
+        {
+            let mut live_statuses = self.forwarder_live_status.lock().unwrap();
+            let live_status = live_statuses.entry(endpoint_id.to_owned()).or_default();
+            live_status
+                .readers
+                .entry(stream_id.clone())
+                .and_modify(|reader| {
+                    reader.hardware_reader_id = optional_non_empty(info.hardware_reader_id.clone());
+                    reader.firmware_version = optional_non_empty(info.firmware_version.clone());
+                    reader.model = optional_non_empty(info.model.clone());
+                })
+                .or_insert_with(|| ReaderLiveStatus {
+                    stream_id,
+                    connected: false,
+                    state: "unknown".to_owned(),
+                    last_read_unix_ms: None,
+                    hardware_reader_id: optional_non_empty(info.hardware_reader_id),
+                    firmware_version: optional_non_empty(info.firmware_version),
+                    model: optional_non_empty(info.model),
+                });
+        }
+        self.recompute_aggregate_connection_state().await;
+    }
+
+    pub(crate) async fn record_forwarder_ups_status(&self, endpoint_id: &str, status: UpsStatus) {
+        {
+            let mut live_statuses = self.forwarder_live_status.lock().unwrap();
+            live_statuses.entry(endpoint_id.to_owned()).or_default().ups = Some(UpsStatusPayload {
+                on_battery: status.on_battery,
+                battery_percent: status.battery_percent,
+                runtime_seconds: status.runtime_seconds,
+            });
+        }
+        self.recompute_aggregate_connection_state().await;
+    }
+
+    pub(crate) async fn clear_forwarder_live_status(&self, endpoint_id: &str) {
+        {
+            self.forwarder_live_status
+                .lock()
+                .unwrap()
+                .remove(endpoint_id);
+        }
+        self.recompute_aggregate_connection_state().await;
+    }
+
     pub(crate) fn recompute_aggregate_connection_state_sync_default_trying(&self) {
         let statuses = self.forwarder_runtime.lock().unwrap().clone();
         let any_connected = statuses
@@ -438,12 +549,14 @@ impl AppState {
             ConnectionState::Disconnected
         };
         let discovered = self.discovered_forwarders.read().await.clone();
+        let live_statuses = self.forwarder_live_status.lock().unwrap().clone();
         let fingerprint = Self::connections_fingerprint(
             next.clone(),
             &statuses,
             &intents,
             &discovered,
             &subscriptions,
+            &live_statuses,
         );
         let connections_changed = {
             let mut last = self.last_connections_fingerprint.lock().unwrap();
@@ -466,10 +579,12 @@ impl AppState {
         intents: &HashMap<String, bool>,
         discovered: &DiscoveredForwarders,
         subscriptions: &[StreamSubscription],
+        live_statuses: &HashMap<String, ForwarderLiveStatus>,
     ) -> ConnectionsFingerprint {
         let mut endpoints: BTreeSet<String> = statuses.keys().cloned().collect();
         endpoints.extend(intents.keys().cloned());
         endpoints.extend(discovered.keys().cloned());
+        endpoints.extend(live_statuses.keys().cloned());
 
         let mut subscribed_counts: HashMap<String, usize> = HashMap::new();
         for subscription in subscriptions {
@@ -486,6 +601,7 @@ impl AppState {
                 let intent = *intents.get(&endpoint_id).unwrap_or(&true);
                 let snapshot = derive_forwarder_state(runtime, intent);
                 let discovered_forwarder = discovered.get(&endpoint_id);
+                let live_status = live_statuses.get(&endpoint_id).cloned().unwrap_or_default();
                 ForwarderConnectionsFingerprint {
                     endpoint_id: endpoint_id.clone(),
                     state: snapshot.state,
@@ -497,6 +613,8 @@ impl AppState {
                     subscribed_count: subscribed_counts.get(&endpoint_id).copied().unwrap_or(0),
                     available_count: discovered_forwarder
                         .map_or(0, |forwarder| forwarder.streams.len()),
+                    readers: sorted_reader_statuses(&live_status),
+                    ups: live_status.ups,
                 }
             })
             .collect();
@@ -863,11 +981,23 @@ pub struct StatusResponse {
     pub server: ServerDeviceStatus,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ReaderLiveStatus {}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReaderLiveStatus {
+    pub stream_id: String,
+    pub connected: bool,
+    pub state: String,
+    pub last_read_unix_ms: Option<i64>,
+    pub hardware_reader_id: Option<String>,
+    pub firmware_version: Option<String>,
+    pub model: Option<String>,
+}
 
-#[derive(Debug, Clone, Serialize)]
-pub struct UpsStatusPayload {}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UpsStatusPayload {
+    pub on_battery: bool,
+    pub battery_percent: u32,
+    pub runtime_seconds: i32,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ForwarderConnectionStatus {
@@ -1178,7 +1308,9 @@ pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
         }
     };
 
+    let live_statuses = state.forwarder_live_status.lock().unwrap().clone();
     let mut endpoints: BTreeSet<String> = discovered.keys().cloned().collect();
+    endpoints.extend(live_statuses.keys().cloned());
     let mut subscribed_counts: HashMap<String, usize> = HashMap::new();
     for subscription in &subscriptions {
         endpoints.insert(subscription.forwarder_endpoint_id.clone());
@@ -1191,6 +1323,7 @@ pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
     for endpoint_id in endpoints {
         let discovered_forwarder = discovered.get(&endpoint_id);
         let snapshot = state.forwarder_state(&endpoint_id).await;
+        let live_status = live_statuses.get(&endpoint_id).cloned().unwrap_or_default();
         forwarders.push(ForwarderConnectionStatus {
             endpoint_id: endpoint_id.clone(),
             display_name: discovered_forwarder.and_then(|forwarder| forwarder.display_name.clone()),
@@ -1198,8 +1331,8 @@ pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
             pending: snapshot.pending,
             subscribed_count: subscribed_counts.get(&endpoint_id).copied().unwrap_or(0),
             available_count: discovered_forwarder.map_or(0, |forwarder| forwarder.streams.len()),
-            readers: Vec::new(),
-            ups: None,
+            readers: sorted_reader_statuses(&live_status),
+            ups: live_status.ups,
             restart_needed: None,
         });
     }
@@ -1975,6 +2108,175 @@ mod tests {
         assert_eq!(
             event_name(&ReceiverUiEvent::ConnectionsChanged),
             "connections_changed"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_connections_reports_forwarder_reader_and_ups_live_status() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        state.discovered_forwarders.write().await.insert(
+            "endpoint-a".to_owned(),
+            DiscoveredForwarder {
+                display_name: Some("Finish Line".to_owned()),
+                direct_addrs: Vec::new(),
+                streams: Vec::new(),
+            },
+        );
+
+        state
+            .record_forwarder_reader_status(
+                "endpoint-a",
+                rt_p2p_protocol::ReaderStatus {
+                    stream_id: b"stream-b".to_vec(),
+                    connected: true,
+                    state: "online".to_owned(),
+                    last_read_unix_ms: 1234,
+                },
+            )
+            .await;
+        state
+            .record_forwarder_reader_status(
+                "endpoint-a",
+                rt_p2p_protocol::ReaderStatus {
+                    stream_id: b"stream-a".to_vec(),
+                    connected: false,
+                    state: "offline".to_owned(),
+                    last_read_unix_ms: 0,
+                },
+            )
+            .await;
+        state
+            .record_forwarder_reader_info(
+                "endpoint-a",
+                rt_p2p_protocol::ReaderInfo {
+                    stream_id: b"stream-a".to_vec(),
+                    hardware_reader_id: "reader-42".to_owned(),
+                    firmware_version: "1.2.3".to_owned(),
+                    model: "IPICO".to_owned(),
+                },
+            )
+            .await;
+        state
+            .record_forwarder_ups_status(
+                "endpoint-a",
+                rt_p2p_protocol::UpsStatus {
+                    on_battery: true,
+                    battery_percent: 87,
+                    runtime_seconds: 1200,
+                },
+            )
+            .await;
+
+        let response = get_connections(&state).await;
+
+        let forwarder = response
+            .forwarders
+            .iter()
+            .find(|forwarder| forwarder.endpoint_id == "endpoint-a")
+            .expect("forwarder should be present");
+        assert_eq!(forwarder.readers.len(), 2);
+        assert_eq!(forwarder.readers[0].stream_id, "stream-a");
+        assert!(!forwarder.readers[0].connected);
+        assert_eq!(forwarder.readers[0].state, "offline");
+        assert_eq!(forwarder.readers[0].last_read_unix_ms, None);
+        assert_eq!(
+            forwarder.readers[0].hardware_reader_id.as_deref(),
+            Some("reader-42")
+        );
+        assert_eq!(
+            forwarder.readers[0].firmware_version.as_deref(),
+            Some("1.2.3")
+        );
+        assert_eq!(forwarder.readers[0].model.as_deref(), Some("IPICO"));
+        assert_eq!(forwarder.readers[1].stream_id, "stream-b");
+        assert!(forwarder.readers[1].connected);
+        assert_eq!(forwarder.readers[1].last_read_unix_ms, Some(1234));
+        let ups = forwarder
+            .ups
+            .as_ref()
+            .expect("UPS status should be present");
+        assert!(ups.on_battery);
+        assert_eq!(ups.battery_percent, 87);
+        assert_eq!(ups.runtime_seconds, 1200);
+    }
+
+    #[tokio::test]
+    async fn clearing_forwarder_live_status_removes_stale_reader_status() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        state.discovered_forwarders.write().await.insert(
+            "endpoint-a".to_owned(),
+            DiscoveredForwarder {
+                display_name: Some("Finish Line".to_owned()),
+                direct_addrs: Vec::new(),
+                streams: Vec::new(),
+            },
+        );
+        state
+            .record_forwarder_reader_status(
+                "endpoint-a",
+                rt_p2p_protocol::ReaderStatus {
+                    stream_id: b"stream-a".to_vec(),
+                    connected: true,
+                    state: "online".to_owned(),
+                    last_read_unix_ms: 10,
+                },
+            )
+            .await;
+
+        state.clear_forwarder_live_status("endpoint-a").await;
+
+        let response = get_connections(&state).await;
+        let forwarder = response
+            .forwarders
+            .iter()
+            .find(|forwarder| forwarder.endpoint_id == "endpoint-a")
+            .expect("forwarder should be present");
+        assert!(forwarder.readers.is_empty());
+        assert!(forwarder.ups.is_none());
+    }
+
+    #[tokio::test]
+    async fn live_status_updates_emit_connections_changed_only_on_actual_change() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        state.discovered_forwarders.write().await.insert(
+            "endpoint-a".to_owned(),
+            DiscoveredForwarder {
+                display_name: Some("Finish Line".to_owned()),
+                direct_addrs: Vec::new(),
+                streams: Vec::new(),
+            },
+        );
+        state.recompute_aggregate_connection_state().await;
+        let mut ui_rx = state.ui_tx.subscribe();
+
+        state
+            .record_forwarder_ups_status(
+                "endpoint-a",
+                rt_p2p_protocol::UpsStatus {
+                    on_battery: false,
+                    battery_percent: 95,
+                    runtime_seconds: 3600,
+                },
+            )
+            .await;
+        state
+            .record_forwarder_ups_status(
+                "endpoint-a",
+                rt_p2p_protocol::UpsStatus {
+                    on_battery: false,
+                    battery_percent: 95,
+                    runtime_seconds: 3600,
+                },
+            )
+            .await;
+
+        let connections_changed_count = count_connections_changed_events(&mut ui_rx).await;
+        assert_eq!(
+            connections_changed_count, 1,
+            "unchanged live status should not keep emitting connections_changed"
         );
     }
 

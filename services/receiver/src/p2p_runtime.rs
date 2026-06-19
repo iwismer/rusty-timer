@@ -40,7 +40,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rt_iroh::{Endpoint, EndpointBuilder, NodeAddr, NodeId, SecretKey};
-use rt_p2p_protocol::{Hello, MAX_FRAME_BYTES, SubscribeMode};
+use rt_p2p_protocol::{CAP_CONTROL_EVENTS, Hello, MAX_FRAME_BYTES, SubscribeMode};
 use tokio::sync::{Mutex, broadcast, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
@@ -126,7 +126,7 @@ fn client_hello() -> Hello {
     Hello {
         min_minor: 1,
         max_minor: 1,
-        capabilities: vec!["data".to_owned()],
+        capabilities: vec!["data".to_owned(), CAP_CONTROL_EVENTS.to_owned()],
         max_frame_bytes: u32::try_from(MAX_FRAME_BYTES).unwrap_or(u32::MAX),
         catalog_generation: 0,
     }
@@ -1413,6 +1413,16 @@ mod tests {
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
         move |key: &str| map.get(key).cloned()
+    }
+
+    #[test]
+    fn client_hello_advertises_control_events_capability() {
+        let hello = client_hello();
+
+        assert!(rt_p2p_protocol::has_capability(
+            &hello.capabilities,
+            rt_p2p_protocol::CAP_CONTROL_EVENTS
+        ));
     }
 
     #[test]
