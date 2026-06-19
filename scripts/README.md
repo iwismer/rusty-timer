@@ -57,6 +57,26 @@ all the URLs. The desktop app reads its server config from the `RT_P2P_*` /
 `RT_RECEIVER_*` environment variables the script sets. Press Ctrl-C to tear the
 stack down.
 
+## SBC First-Boot Setup
+
+Use the Server UI `SBC Setup` tab to provision Raspberry Pi forwarders without
+hand-writing cloud-init files:
+
+1. Open the Server UI and go to `SBC Setup`.
+2. Generate a forwarder token, or add a manual token if you need a pre-shared
+   value.
+3. Copy the one-time token into the setup form. Generated token secrets are
+   shown once; the token list only shows metadata.
+4. Fill SSH identity, static Ethernet, optional Wi-Fi, server URL, reader
+   target, and display-name fields.
+5. Download `user-data` and `network-config`.
+6. Copy both files to the Raspberry Pi boot partition and boot the SBC.
+7. After the forwarder registers, approve it in the Server UI `Admin` tab.
+
+Revoking an unused token prevents first registration. Revoking a used token also
+blocks future per-device forwarder requests that authenticate with that token.
+Revocation does not delete existing forwarder status or approval records.
+
 ## Agent UI Harness
 
 `scripts/e2e/agent_ui/run_bridge_goal.py` drives the receiver-headless

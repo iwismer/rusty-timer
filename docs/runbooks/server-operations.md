@@ -15,10 +15,11 @@ The server is a small Axum service backed by SQLite. It provides:
 - Fenced announcer push via `POST /announcer/takeover` and `POST /announcer/rows`.
 - Admin approval via `POST /admin/devices/approve` and device rename via `POST
   /admin/devices/rename`, expected to sit behind Caddy + Authelia.
+- Admin forwarder enrollment-token management via `/admin/enrollment-tokens`.
 
 The service does not use `EndpointId` over plain HTTP as an authenticator. Device
-routes use a provisioning bearer token; admin identity is delegated to the
-reverse proxy.
+routes use a provisioning bearer token or registered forwarder enrollment token;
+admin identity is delegated to the reverse proxy.
 
 ## Startup and Installation
 
@@ -65,9 +66,11 @@ Use Caddy + Authelia in front of the service for public deployments:
 | `GET /healthz`, `GET /status` | Public read; no secrets returned. |
 | `POST /admin/devices/approve` | Admin only; Authelia must inject `Remote-User`. |
 | `POST /admin/devices/rename` | Admin only; Authelia must inject `Remote-User`. |
-| `POST /register` | M2M/device `Authorization: Bearer <SERVER_PROVISIONING_TOKEN>`. |
-| `GET /allowlist/receivers` | M2M/device bearer token. |
-| `POST /announcer/takeover`, `POST /announcer/rows` | M2M/device bearer token. |
+| `/admin/enrollment-tokens*` | Admin only; Authelia must inject `Remote-User`. |
+| `POST /register` | M2M/device `Authorization: Bearer <SERVER_PROVISIONING_TOKEN>`, or non-revoked forwarder enrollment token for forwarders. |
+| `POST /forwarder/catalog` | M2M/device bearer token; accepts provisioning token or registered forwarder token. |
+| `GET /allowlist/receivers` | M2M/device bearer token; accepts provisioning token or registered forwarder token. |
+| `POST /announcer/takeover`, `POST /announcer/rows` | M2M/device bearer token; provisioning token only. |
 
 Caddy must strip any inbound client-supplied `Remote-User` header before proxying
 to the server. Only the trusted proxy may set that header after Authelia
@@ -75,7 +78,12 @@ admin authentication.
 
 ## Provisioning and Device Approval
 
-Forwarders and receivers self-register with the provisioning token:
+Forwarders may be provisioned from the Server UI `SBC Setup` tab. Generate or
+add a forwarder enrollment token, copy the one-time secret into the setup form,
+download `user-data` and `network-config`, then boot the SBC. Generated token
+secrets are shown only once; the token list exposes metadata only.
+
+Forwarders and receivers may also self-register with the provisioning token:
 
 ```bash
 curl -fsS -X POST http://127.0.0.1:8080/register \
@@ -109,10 +117,19 @@ curl -fsS -X POST http://127.0.0.1:8080/admin/devices/rename \
   -d '{"endpoint_id":"receiver-finish-line","display_name":"Finish Tent"}'
 ```
 
+## Enrollment Token Revocation
+
+Revoking an unused enrollment token prevents first registration. Revoking a used
+forwarder token blocks future per-device forwarder registration, catalog push,
+and receiver allow-list requests that use that token. Revocation does not delete
+the approved device row or remove the latest pushed forwarder catalog/status
+snapshot; use separate device cleanup controls if the forwarder should be hidden
+or decommissioned.
+
 ## Allow-list Distribution
 
 Forwarders fetch the active receiver allow-list with the provisioning bearer
-token:
+token or a registered non-revoked forwarder token:
 
 ```bash
 curl -fsS http://127.0.0.1:8080/allowlist/receivers \
@@ -176,9 +193,12 @@ and announcer push requests.
 
 ## Troubleshooting
 
-- `401 Unauthorized` on `/register`, `/allowlist/receivers`, or `/announcer/*`:
-  check the `Authorization: Bearer` token exactly matches
-  `SERVER_PROVISIONING_TOKEN`.
+- `401 Unauthorized` on `/register`, `/forwarder/catalog`, or
+  `/allowlist/receivers`: check whether the request uses the provisioning token
+  or a registered non-revoked forwarder token. Receiver tokens do not authorize
+  forwarder routes.
+- `401 Unauthorized` on `/announcer/*`: check the `Authorization: Bearer` token
+  exactly matches `SERVER_PROVISIONING_TOKEN`.
 - Empty allow-list: confirm the receiver registered and an admin approved it as
   active; pending receivers are intentionally excluded.
 - `409 Conflict` on announcer row push: the receiver has a stale generation;

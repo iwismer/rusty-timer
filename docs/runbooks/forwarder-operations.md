@@ -15,6 +15,23 @@ The forwarder:
 - Applies retention rules and emits explicit gap notices when a receiver asks
   for pruned data.
 
+## Provisioning a new SBC
+
+1. Open the Server UI and go to `SBC Setup`.
+2. Generate a forwarder enrollment token, or add a manual token if operations
+   require a pre-shared value. Token secrets are shown only once; existing token
+   rows expose metadata only.
+3. Fill the SBC identity, SSH key, Ethernet, optional Wi-Fi, server URL, reader
+   target, display name, and advanced fields.
+4. Download `user-data` and `network-config`.
+5. Copy both files to the Raspberry Pi boot partition and boot the SBC.
+6. Approve the newly registered forwarder in the Server UI `Admin` tab.
+
+Revoking an unused token prevents first registration. Revoking a used token
+blocks future per-device forwarder catalog and allow-list requests made with
+that token. Revocation does not delete existing forwarder status or approval
+records.
+
 ## Startup
 
 1. Confirm the reader is reachable from the SBC LAN.
