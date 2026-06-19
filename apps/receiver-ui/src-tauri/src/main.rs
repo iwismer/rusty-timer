@@ -308,6 +308,13 @@ async fn get_status(state: State<'_, Arc<AppState>>) -> CmdResult<control_api::S
 }
 
 #[tauri::command]
+async fn get_connections(
+    state: State<'_, Arc<AppState>>,
+) -> CmdResult<control_api::ConnectionsResponse> {
+    Ok(control_api::get_connections(&state).await)
+}
+
+#[tauri::command]
 async fn reconnect_server(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
     control_api::reconnect_server(&state)
         .await
@@ -821,6 +828,7 @@ mod tests {
                 streams_count: 0,
                 receiver_id: "recv".to_owned(),
             },
+            ReceiverUiEvent::ConnectionsChanged,
             ReceiverUiEvent::StreamsSnapshot {
                 streams: vec![],
                 degraded: false,

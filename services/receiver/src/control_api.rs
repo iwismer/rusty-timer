@@ -9,7 +9,7 @@ use crate::error::ReceiverError;
 use crate::ui_events::ReceiverUiEvent;
 use rt_domain::ReceiverMode;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -404,6 +404,7 @@ impl AppState {
         } else {
             ConnectionState::Disconnected
         };
+        let _ = self.ui_tx.send(ReceiverUiEvent::ConnectionsChanged);
         self.set_connection_state_if_changed(next).await;
     }
 
@@ -763,6 +764,31 @@ pub struct StatusResponse {
     pub server: ServerDeviceStatus,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ReaderLiveStatus {}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UpsStatusPayload {}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ForwarderConnectionStatus {
+    pub endpoint_id: String,
+    pub display_name: Option<String>,
+    pub state: ForwarderConnState,
+    pub pending: bool,
+    pub subscribed_count: usize,
+    pub available_count: usize,
+    pub readers: Vec<ReaderLiveStatus>,
+    pub ups: Option<UpsStatusPayload>,
+    pub restart_needed: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConnectionsResponse {
+    pub server: ServerDeviceStatus,
+    pub forwarders: Vec<ForwarderConnectionStatus>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct LogsResponse {
     pub entries: Vec<String>,
@@ -1037,6 +1063,49 @@ pub async fn get_status(state: &AppState) -> StatusResponse {
         streams_count,
         server,
     }
+}
+
+pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
+    let server = server_device_status(state).await;
+    let discovered = state.discovered_forwarders.read().await.clone();
+    let subscriptions = {
+        let db = state.db.lock().await;
+        match db.load_stream_subscriptions() {
+            Ok(subscriptions) => subscriptions,
+            Err(error) => {
+                warn!(error = %error, "failed to load subscriptions for connections response");
+                Vec::new()
+            }
+        }
+    };
+
+    let mut endpoints: BTreeSet<String> = discovered.keys().cloned().collect();
+    let mut subscribed_counts: HashMap<String, usize> = HashMap::new();
+    for subscription in &subscriptions {
+        endpoints.insert(subscription.forwarder_endpoint_id.clone());
+        *subscribed_counts
+            .entry(subscription.forwarder_endpoint_id.clone())
+            .or_default() += 1;
+    }
+
+    let mut forwarders = Vec::with_capacity(endpoints.len());
+    for endpoint_id in endpoints {
+        let discovered_forwarder = discovered.get(&endpoint_id);
+        let snapshot = state.forwarder_state(&endpoint_id).await;
+        forwarders.push(ForwarderConnectionStatus {
+            endpoint_id: endpoint_id.clone(),
+            display_name: discovered_forwarder.and_then(|forwarder| forwarder.display_name.clone()),
+            state: snapshot.state,
+            pending: snapshot.pending,
+            subscribed_count: subscribed_counts.get(&endpoint_id).copied().unwrap_or(0),
+            available_count: discovered_forwarder.map_or(0, |forwarder| forwarder.streams.len()),
+            readers: Vec::new(),
+            ups: None,
+            restart_needed: None,
+        });
+    }
+
+    ConnectionsResponse { server, forwarders }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1482,6 +1551,7 @@ macro_rules! receiver_command_list {
             get_subscriptions() -> "SubscriptionsBody",
             put_subscriptions(body: "SubscriptionsBody") -> "()",
             get_status() -> "StatusResponse",
+            get_connections() -> "ConnectionsResponse",
             reconnect_server() -> "()",
             get_version() -> "String",
             get_logs() -> "LogsResponse",
@@ -1555,6 +1625,7 @@ pub fn command_spec(name: &str) -> Option<&'static CommandSpec> {
 pub const EVENT_NAMES: &[&str] = &[
     "resync",
     "status_changed",
+    "connections_changed",
     "streams_snapshot",
     "log_entry",
     "stream_counts_updated",
@@ -1574,6 +1645,7 @@ pub fn event_name(event: &ReceiverUiEvent) -> &'static str {
     match event {
         ReceiverUiEvent::Resync => "resync",
         ReceiverUiEvent::StatusChanged { .. } => "status_changed",
+        ReceiverUiEvent::ConnectionsChanged => "connections_changed",
         ReceiverUiEvent::StreamsSnapshot { .. } => "streams_snapshot",
         ReceiverUiEvent::LogEntry { .. } => "log_entry",
         ReceiverUiEvent::StreamCountsUpdated { .. } => "stream_counts_updated",
@@ -1738,6 +1810,117 @@ mod tests {
                 "event name {name:?} is not snake_case"
             );
         }
+    }
+
+    #[test]
+    fn connections_changed_maps_to_expected_event_name() {
+        assert_eq!(
+            event_name(&ReceiverUiEvent::ConnectionsChanged),
+            "connections_changed"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_connections_returns_sorted_discovered_forwarder_statuses() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[crate::db::StreamSubscription {
+            forwarder_endpoint_id: "endpoint-a".to_owned(),
+            stream_id: "stream-a".to_owned(),
+            local_port_override: None,
+            event_type: crate::db::EventType::Finish,
+            forwarder_id: None,
+            reader_ip: None,
+        }])
+        .unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        state.discovered_forwarders.write().await.extend([
+            (
+                "endpoint-b".to_owned(),
+                DiscoveredForwarder {
+                    display_name: Some("Finish Line".to_owned()),
+                    direct_addrs: Vec::new(),
+                    streams: Vec::new(),
+                },
+            ),
+            (
+                "endpoint-a".to_owned(),
+                DiscoveredForwarder {
+                    display_name: Some("Start Line".to_owned()),
+                    direct_addrs: Vec::new(),
+                    streams: vec![
+                        DiscoveredStream {
+                            stream_id: "stream-a".to_owned(),
+                            epoch: 1,
+                            next_seq: 10,
+                        },
+                        DiscoveredStream {
+                            stream_id: "stream-b".to_owned(),
+                            epoch: 2,
+                            next_seq: 20,
+                        },
+                    ],
+                },
+            ),
+        ]);
+        state
+            .mark_forwarder_runtime("endpoint-a", |status| status.data_sessions = 1)
+            .await;
+
+        let response = get_connections(&state).await;
+
+        assert!(!response.server.configured);
+        assert_eq!(response.forwarders.len(), 2);
+        assert_eq!(response.forwarders[0].endpoint_id, "endpoint-a");
+        assert_eq!(
+            response.forwarders[0].display_name.as_deref(),
+            Some("Start Line")
+        );
+        assert_eq!(response.forwarders[0].state, ForwarderConnState::Subscribed);
+        assert!(!response.forwarders[0].pending);
+        assert_eq!(response.forwarders[0].subscribed_count, 1);
+        assert_eq!(response.forwarders[0].available_count, 2);
+        assert!(response.forwarders[0].readers.is_empty());
+        assert!(response.forwarders[0].ups.is_none());
+        assert_eq!(response.forwarders[0].restart_needed, None);
+        assert_eq!(response.forwarders[1].endpoint_id, "endpoint-b");
+        assert_eq!(
+            response.forwarders[1].display_name.as_deref(),
+            Some("Finish Line")
+        );
+        assert_eq!(
+            response.forwarders[1].state,
+            ForwarderConnState::Unavailable
+        );
+        assert!(!response.forwarders[1].pending);
+        assert_eq!(response.forwarders[1].subscribed_count, 0);
+        assert_eq!(response.forwarders[1].available_count, 0);
+    }
+
+    #[tokio::test]
+    async fn recompute_emits_connections_changed_when_forwarder_state_changes() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        let mut ui_rx = state.ui_tx.subscribe();
+
+        state
+            .mark_forwarder_runtime("endpoint-a", |status| status.control_up = true)
+            .await;
+
+        let mut saw_connections_changed = false;
+        for _ in 0..4 {
+            let event = tokio::time::timeout(std::time::Duration::from_millis(100), ui_rx.recv())
+                .await
+                .expect("forwarder state recompute should emit UI events")
+                .expect("UI event channel should stay open");
+            if matches!(event, ReceiverUiEvent::ConnectionsChanged) {
+                saw_connections_changed = true;
+                break;
+            }
+        }
+        assert!(
+            saw_connections_changed,
+            "forwarder state change should emit ConnectionsChanged"
+        );
     }
 
     #[tokio::test]
