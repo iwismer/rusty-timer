@@ -86,3 +86,11 @@ CREATE TABLE IF NOT EXISTS earliest_epochs (
     forwarder_id          TEXT,
     reader_ip             TEXT
 );
+
+-- Per-forwarder connect intent. Absence of a row means the default contract
+-- (connect = true). A row with connect = 0 records an explicit disconnect
+-- intent that must survive restarts but is cleared by a factory reset.
+CREATE TABLE IF NOT EXISTS forwarder_intent (
+    endpoint_id TEXT PRIMARY KEY,
+    connect     INTEGER NOT NULL
+);
