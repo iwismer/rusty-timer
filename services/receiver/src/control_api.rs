@@ -70,6 +70,12 @@ pub struct ForwarderStateSnapshot {
     pub pending: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectAttempt {
+    pub version: u64,
+    pub endpoint_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ForwarderRuntimeStatus {
     pub control_up: bool,
@@ -138,10 +144,10 @@ pub struct AppState {
     pub p2p_endpoint_id: Arc<RwLock<Option<String>>>,
     forwarder_runtime: Arc<StdMutex<HashMap<String, ForwarderRuntimeStatus>>>,
     connect_attempt: AtomicU64,
-    connect_attempt_version: watch::Sender<u64>,
+    connect_attempt_version: watch::Sender<ConnectAttempt>,
     /// Keepalive receiver to prevent the connect-attempt watch channel from being dropped
     /// when no runtime subscriber is active.
-    _connect_attempt_keepalive: watch::Receiver<u64>,
+    _connect_attempt_keepalive: watch::Receiver<ConnectAttempt>,
     retry_streak: AtomicU64,
     /// Monotonic counter incremented when DBF config changes; subscribers
     /// (runtime.rs) use this to restart the DBF writer. Use
@@ -165,7 +171,11 @@ impl AppState {
         let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownSignal::None);
         let (ui_tx, _) = broadcast::channel(256);
         let (conn_tx, conn_keepalive_rx) = watch::channel(ConnectionState::Disconnected);
-        let (connect_attempt_version, _connect_attempt_keepalive) = watch::channel(0u64);
+        let (connect_attempt_version, _connect_attempt_keepalive) =
+            watch::channel(ConnectAttempt {
+                version: 0,
+                endpoint_id: None,
+            });
         let (dbf_config_version, _dbf_config_keepalive) = watch::channel(0u64);
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3))
@@ -214,13 +224,16 @@ impl AppState {
         self.dbf_config_version.subscribe()
     }
 
-    pub fn connect_attempt_rx(&self) -> watch::Receiver<u64> {
+    pub fn connect_attempt_rx(&self) -> watch::Receiver<ConnectAttempt> {
         self.connect_attempt_version.subscribe()
     }
 
-    fn bump_connect_attempt(&self) -> u64 {
+    fn bump_connect_attempt(&self, endpoint_id: Option<String>) -> u64 {
         let next = self.connect_attempt.fetch_add(1, Ordering::SeqCst) + 1;
-        let _ = self.connect_attempt_version.send(next);
+        let _ = self.connect_attempt_version.send(ConnectAttempt {
+            version: next,
+            endpoint_id,
+        });
         next
     }
 
@@ -271,7 +284,13 @@ impl AppState {
 
     pub async fn request_connect(&self) {
         self.reset_retry_streak();
-        self.bump_connect_attempt();
+        self.bump_connect_attempt(None);
+        self.set_connection_state(ConnectionState::Connecting).await;
+    }
+
+    pub async fn request_forwarder_reconnect(&self, endpoint_id: String) {
+        self.reset_retry_streak();
+        self.bump_connect_attempt(Some(endpoint_id));
         self.set_connection_state(ConnectionState::Connecting).await;
     }
 
@@ -383,7 +402,7 @@ impl AppState {
 
     pub async fn request_retry_connect(&self) {
         self.retry_streak.fetch_add(1, Ordering::SeqCst);
-        self.bump_connect_attempt();
+        self.bump_connect_attempt(None);
         self.set_connection_state(ConnectionState::Connecting).await;
     }
 
@@ -400,7 +419,7 @@ impl AppState {
             return false;
         }
         self.retry_streak.fetch_add(1, Ordering::SeqCst);
-        self.bump_connect_attempt();
+        self.bump_connect_attempt(None);
         self.emit_connection_state_side_effects(ConnectionState::Connecting)
             .await;
         true
@@ -1704,12 +1723,27 @@ mod tests {
         reconnect_server(&state).await.unwrap();
 
         connect_rx.changed().await.unwrap();
-        assert_eq!(*connect_rx.borrow(), 1);
+        assert_eq!(connect_rx.borrow().version, 1);
+        assert_eq!(connect_rx.borrow().endpoint_id, None);
         assert_eq!(state.current_connect_attempt(), 1);
         assert_eq!(
             state.connection_state.borrow().clone(),
             ConnectionState::Connecting
         );
+    }
+
+    #[tokio::test]
+    async fn targeted_forwarder_reconnect_notifies_connect_watchers() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        let mut connect_rx = state.connect_attempt_rx();
+
+        state.request_forwarder_reconnect("fwd-1".to_owned()).await;
+
+        connect_rx.changed().await.unwrap();
+        assert_eq!(connect_rx.borrow().version, 1);
+        assert_eq!(connect_rx.borrow().endpoint_id.as_deref(), Some("fwd-1"));
+        assert_eq!(state.current_connect_attempt(), 1);
     }
 
     #[tokio::test]

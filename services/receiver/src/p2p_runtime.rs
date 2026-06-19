@@ -54,9 +54,8 @@ use crate::control_api::ConnectionState;
 use crate::control_api::{DiscoveredForwarder, DiscoveredForwarders, DiscoveredStream};
 use crate::db::{Db, ReceivedEvent, StreamSubscription};
 use crate::local_proxy::LocalProxy;
-use crate::p2p_session::{
-    BackoffConfig, SessionParams, SessionStatusReporter, run_session_with_reconnect,
-};
+use crate::p2p_forwarder::{ForwarderConnection, ForwarderDataStream};
+use crate::p2p_session::{BackoffConfig, SessionStatusReporter};
 use crate::ports::{default_port, reader_addr_if_port_mappable};
 use crate::ui_events::ReceiverUiEvent;
 
@@ -228,7 +227,7 @@ pub async fn start_receiver_p2p(
     Ok(P2pReceiverRuntime { shutdown_tx, task })
 }
 
-/// Per-stream worker bundle.
+/// Per-stream auxiliary worker bundle (local proxy, UI projection, DBF, announcer).
 struct StreamWorker {
     /// The canonical subscription this worker was built from. Reconciliation
     /// compares the desired subscription against this snapshot and rebuilds the
@@ -236,12 +235,11 @@ struct StreamWorker {
     sub: StreamSubscription,
     /// Cancels the session task and DBF/announcer workers.
     shutdown_tx: watch::Sender<bool>,
+    /// Durable hint channel shared with the forwarder data subscription.
+    hint_tx: broadcast::Sender<i64>,
     /// The durable local proxy, if a local port could be resolved.
     proxy: Option<LocalProxy>,
-    /// The reconnecting session task. Tracked separately so reconciliation can
-    /// detect a non-retryable session exit and rebuild the worker.
-    session_task: JoinHandle<()>,
-    /// DBF + announcer task handles.
+    /// UI projection, DBF, and announcer task handles.
     tasks: Vec<JoinHandle<()>>,
     /// Whether an announcer push worker was spawned for this worker. When the
     /// server was unavailable at worker-build time (no fenced generation
@@ -251,20 +249,12 @@ struct StreamWorker {
 }
 
 impl StreamWorker {
-    /// Whether the reconnecting session task has exited. A non-retryable session
-    /// error completes this task; reconciliation treats a finished session as a
-    /// dead worker to be rebuilt.
-    fn session_finished(&self) -> bool {
-        self.session_task.is_finished()
-    }
-
     async fn stop(self) {
         let _ = self.shutdown_tx.send(true);
         if let Some(proxy) = self.proxy {
             proxy.shutdown();
         }
-        let mut tasks = self.tasks;
-        tasks.push(self.session_task);
+        let tasks = self.tasks;
         for mut task in tasks {
             // Give each task a bounded window to observe the shutdown signal,
             // then abort and drain so a wedged task cannot delay shutdown.
@@ -287,9 +277,10 @@ async fn run_reconcile_loop(
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let endpoint = Arc::new(endpoint);
-    let mut workers: HashMap<String, StreamWorker> = HashMap::new();
+    let mut workers: HashMap<String, ForwarderConnection> = HashMap::new();
+    let mut stream_workers: HashMap<String, StreamWorker> = HashMap::new();
     let mut connect_attempt_rx = state.connect_attempt_rx();
-    let mut force_reconnect = false;
+    let mut force_reconnect: Option<Option<String>> = None;
 
     // When a server is configured, periodically refresh the discovered
     // forwarders map from its `GET /forwarders` feed. The task observes the
@@ -315,14 +306,23 @@ async fn run_reconcile_loop(
     let mut announcer_generation: Option<i64> = None;
 
     loop {
-        if force_reconnect {
-            info!("receiver p2p reconnect requested; restarting stream workers");
-            for (_stream_id, worker) in workers.drain() {
-                worker.stop().await;
+        if let Some(target) = force_reconnect.take() {
+            match target {
+                Some(endpoint_id) => {
+                    info!(%endpoint_id, "receiver p2p reconnect requested; restarting forwarder worker");
+                    if let Some(worker) = workers.remove(&endpoint_id) {
+                        worker.stop().await;
+                    }
+                }
+                None => {
+                    info!("receiver p2p reconnect requested; restarting forwarder workers");
+                    for (_endpoint_id, worker) in workers.drain() {
+                        worker.stop().await;
+                    }
+                    state.clear_stream_metrics_cache().await;
+                    state.emit_streams_snapshot().await;
+                }
             }
-            state.clear_stream_metrics_cache().await;
-            state.emit_streams_snapshot().await;
-            force_reconnect = false;
         }
 
         if announcer_generation.is_none()
@@ -353,6 +353,7 @@ async fn run_reconcile_loop(
             &reporter,
             announcer_generation,
             &mut workers,
+            &mut stream_workers,
         )
         .await;
 
@@ -363,14 +364,17 @@ async fn run_reconcile_loop(
             }
             changed = connect_attempt_rx.changed() => {
                 if changed.is_ok() {
-                    force_reconnect = true;
+                    force_reconnect = Some(connect_attempt_rx.borrow().endpoint_id.clone());
                 }
             }
             () = tokio::time::sleep(config.reconcile_interval) => {}
         }
     }
 
-    for (_stream_id, worker) in workers.drain() {
+    for (_endpoint_id, worker) in workers.drain() {
+        worker.stop().await;
+    }
+    for (_stream_id, worker) in stream_workers.drain() {
         worker.stop().await;
     }
     if let Some(task) = discovery_task {
@@ -413,7 +417,7 @@ async fn run_discovery_loop(
     seed: Option<ForwarderPeerConfig>,
     interval: Duration,
     mut shutdown_rx: watch::Receiver<bool>,
-    mut connect_attempt_rx: watch::Receiver<u64>,
+    mut connect_attempt_rx: watch::Receiver<crate::control_api::ConnectAttempt>,
 ) {
     loop {
         match fetch_forwarders(&thin).await {
@@ -544,103 +548,154 @@ fn resolve_forwarder_addr(
     Some(NodeAddr::new(node_id).with_direct_addresses(forwarder.direct_addrs.iter().copied()))
 }
 
+fn desired_forwarder_subscriptions(
+    discovered: &DiscoveredForwarders,
+    subs: &[StreamSubscription],
+    intents: &HashMap<String, bool>,
+) -> HashMap<String, Vec<StreamSubscription>> {
+    let mut desired = HashMap::new();
+    for endpoint_id in discovered.keys() {
+        if *intents.get(endpoint_id).unwrap_or(&true) {
+            desired.insert(endpoint_id.clone(), Vec::new());
+        }
+    }
+    for sub in subs {
+        if !*intents.get(&sub.forwarder_endpoint_id).unwrap_or(&true) {
+            continue;
+        }
+        desired
+            .entry(sub.forwarder_endpoint_id.clone())
+            .or_insert_with(Vec::new)
+            .push(sub.clone());
+    }
+    desired
+}
+
 async fn reconcile_once(
     state: &Arc<AppState>,
     config: &P2pReceiverConfig,
     endpoint: &Arc<Endpoint>,
     reporter: &Arc<SessionStatusReporter>,
     announcer_generation: Option<i64>,
-    workers: &mut HashMap<String, StreamWorker>,
+    workers: &mut HashMap<String, ForwarderConnection>,
+    stream_workers: &mut HashMap<String, StreamWorker>,
 ) {
-    let subs: Vec<StreamSubscription> = {
+    let (subs, intents) = {
         let db = state.db.lock().await;
-        match db.load_stream_subscriptions() {
+        let subs = match db.load_stream_subscriptions() {
             Ok(subs) => subs,
             Err(e) => {
                 warn!(error = %e, "failed to load stream subscriptions; skipping reconcile pass");
                 return;
             }
-        }
+        };
+        let intents = match db.load_forwarder_intents() {
+            Ok(intents) => intents,
+            Err(e) => {
+                warn!(error = %e, "failed to load forwarder intents; using default connect intent");
+                HashMap::new()
+            }
+        };
+        (subs, intents)
     };
 
-    // All subscriptions are desired, keyed by stream id (globally unique in the
-    // receiver's durable model). The forwarder that serves each stream is
-    // resolved per-subscription from the discovered-forwarders map below.
-    let mut desired: HashMap<String, StreamSubscription> = HashMap::new();
-    for sub in subs {
-        desired.insert(sub.stream_id.clone(), sub);
+    let discovered = state.discovered_forwarders.read().await.clone();
+    let desired_forwarders = desired_forwarder_subscriptions(&discovered, &subs, &intents);
+
+    let stale_forwarders = workers
+        .keys()
+        .filter(|endpoint_id| !desired_forwarders.contains_key(*endpoint_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    for endpoint_id in stale_forwarders {
+        if let Some(worker) = workers.remove(&endpoint_id) {
+            info!(%endpoint_id, "stopping p2p forwarder worker");
+            worker.stop().await;
+        }
     }
 
-    // Stop workers whose subscription disappeared.
-    let stale: Vec<String> = workers
+    for endpoint_id in desired_forwarders.keys() {
+        state.mark_forwarder_dial_started(endpoint_id).await;
+        if workers.contains_key(endpoint_id) {
+            continue;
+        }
+        let Some(forwarder_addr) = resolve_forwarder_addr(endpoint_id, &discovered) else {
+            continue;
+        };
+        info!(%endpoint_id, "starting p2p forwarder worker");
+        let worker = ForwarderConnection::start(
+            endpoint_id.clone(),
+            Arc::clone(endpoint),
+            forwarder_addr,
+            Arc::clone(&state.db),
+            client_hello(),
+            Arc::clone(reporter),
+            BackoffConfig::default(),
+        );
+        workers.insert(endpoint_id.clone(), worker);
+    }
+
+    let mut desired_streams: HashMap<String, StreamSubscription> = HashMap::new();
+    for sub in subs {
+        desired_streams.insert(sub.stream_id.clone(), sub);
+    }
+
+    let stale_streams = stream_workers
         .keys()
-        .filter(|stream_id| !desired.contains_key(*stream_id))
+        .filter(|stream_id| !desired_streams.contains_key(*stream_id))
         .cloned()
-        .collect();
-    for stream_id in stale {
-        if let Some(worker) = workers.remove(&stream_id) {
+        .collect::<Vec<_>>();
+    for stream_id in stale_streams {
+        if let Some(worker) = stream_workers.remove(&stream_id) {
             info!(%stream_id, "stopping p2p stream worker (subscription removed)");
             worker.stop().await;
         }
     }
 
-    // Whether announcer push should be running: a server is configured and a
-    // fenced generation has been acquired.
     let announcer_desired = config.server.is_some() && announcer_generation.is_some();
-
-    // Snapshot discovered forwarders for per-subscription address resolution.
-    let discovered = state.discovered_forwarders.read().await.clone();
-
-    // Start workers for newly-seen subscriptions, and rebuild workers whose
-    // effective config changed, whose session task has exited non-retryably, or
-    // that need an announcer push worker now that a generation is available.
-    for (stream_id, sub) in desired {
-        // Resolve the forwarder that serves this subscription. If it isn't
-        // discovered yet, skip this pass (no worker started); an existing worker
-        // is left running so it keeps reconnecting. The worker starts once
-        // discovery learns the forwarder.
-        let Some(forwarder_addr) = resolve_forwarder_addr(&sub.forwarder_endpoint_id, &discovered)
-        else {
-            continue;
-        };
-        if let Some(existing) = workers.get(&stream_id) {
+    for (stream_id, sub) in desired_streams {
+        if let Some(existing) = stream_workers.get(&stream_id) {
             let config_changed = existing.sub != sub;
-            let session_dead = existing.session_finished();
             let announcer_missing = announcer_desired && !existing.announcer_active;
-            if !config_changed && !session_dead && !announcer_missing {
+            if !config_changed && !announcer_missing {
                 continue;
             }
-            if let Some(worker) = workers.remove(&stream_id) {
+            if let Some(worker) = stream_workers.remove(&stream_id) {
                 if config_changed {
                     info!(%stream_id, "rebuilding p2p stream worker (subscription config changed)");
-                } else if session_dead {
-                    info!(%stream_id, "rebuilding p2p stream worker (session exited)");
                 } else {
                     info!(%stream_id, "rebuilding p2p stream worker (announcer now available)");
                 }
                 worker.stop().await;
             }
         }
-        let worker = start_stream_worker(
-            state,
-            config,
-            endpoint,
-            &forwarder_addr,
-            reporter,
-            announcer_generation,
-            &sub,
-        )
-        .await;
-        workers.insert(stream_id, worker);
+        let worker = start_stream_worker(state, config, announcer_generation, &sub).await;
+        stream_workers.insert(stream_id, worker);
     }
+
+    for (endpoint_id, worker) in workers.iter() {
+        let streams = desired_forwarders
+            .get(endpoint_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|sub| {
+                stream_workers
+                    .get(&sub.stream_id)
+                    .map(|stream_worker| ForwarderDataStream {
+                        stream_id: sub.stream_id.clone(),
+                        mode: SubscribeMode::Replay,
+                        durable_hint_tx: Some(stream_worker.hint_tx.clone()),
+                    })
+            })
+            .collect::<Vec<_>>();
+        worker.set_desired_streams(streams);
+    }
+    state.recompute_aggregate_connection_state().await;
 }
 
 async fn start_stream_worker(
     state: &Arc<AppState>,
     config: &P2pReceiverConfig,
-    endpoint: &Arc<Endpoint>,
-    forwarder_addr: &NodeAddr,
-    reporter: &Arc<SessionStatusReporter>,
     announcer_generation: Option<i64>,
     sub: &StreamSubscription,
 ) -> StreamWorker {
@@ -651,36 +706,6 @@ async fn start_stream_worker(
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let mut tasks: Vec<JoinHandle<()>> = Vec::new();
-
-    // Reconnecting session.
-    let session_task = {
-        let endpoint = Arc::clone(endpoint);
-        let forwarder_addr = forwarder_addr.clone();
-        let db = Arc::clone(&state.db);
-        let params = SessionParams {
-            stream_id: stream_id.clone(),
-            client_hello: client_hello(),
-            mode: SubscribeMode::Replay,
-            backoff: BackoffConfig::default(),
-            durable_hint_tx: Some(hint_tx.clone()),
-            reporter: Some(Arc::clone(reporter)),
-        };
-        let session_shutdown = shutdown_rx.clone();
-        let session_stream_id = stream_id.clone();
-        tokio::spawn(async move {
-            if let Err(e) = run_session_with_reconnect(
-                &endpoint,
-                forwarder_addr,
-                &db,
-                &params,
-                session_shutdown,
-            )
-            .await
-            {
-                warn!(error = %e, stream_id = %session_stream_id, "p2p session ended with error");
-            }
-        })
-    };
 
     // Durable local proxy (only when a port can be resolved).
     let port = resolve_local_port(sub);
@@ -776,8 +801,8 @@ async fn start_stream_worker(
     StreamWorker {
         sub: sub.clone(),
         shutdown_tx,
+        hint_tx,
         proxy,
-        session_task,
         tasks,
         announcer_active,
     }
@@ -1748,6 +1773,55 @@ mod tests {
         let _ = shutdown_tx.send(true);
         let _ = handle.await;
         drop(hint_tx);
+    }
+
+    #[test]
+    fn desired_forwarders_include_discovered_and_subscribed_unless_disconnected() {
+        let discovered_only = node_id_for_seed([21u8; 32]);
+        let subscribed = node_id_for_seed([22u8; 32]);
+        let disconnected = node_id_for_seed([23u8; 32]);
+        let mut discovered = DiscoveredForwarders::new();
+        discovered.insert(
+            discovered_only.clone(),
+            DiscoveredForwarder {
+                display_name: None,
+                direct_addrs: vec!["127.0.0.1:7001".parse().unwrap()],
+                streams: Vec::new(),
+            },
+        );
+        discovered.insert(
+            disconnected.clone(),
+            DiscoveredForwarder {
+                display_name: None,
+                direct_addrs: vec!["127.0.0.1:7003".parse().unwrap()],
+                streams: Vec::new(),
+            },
+        );
+        let subs = vec![
+            StreamSubscription {
+                forwarder_endpoint_id: subscribed.clone(),
+                stream_id: "stream-a".to_owned(),
+                local_port_override: None,
+                event_type: EventType::Finish,
+                forwarder_id: None,
+                reader_ip: None,
+            },
+            StreamSubscription {
+                forwarder_endpoint_id: disconnected.clone(),
+                stream_id: "stream-b".to_owned(),
+                local_port_override: None,
+                event_type: EventType::Finish,
+                forwarder_id: None,
+                reader_ip: None,
+            },
+        ];
+        let intents = HashMap::from([(disconnected.clone(), false)]);
+
+        let desired = desired_forwarder_subscriptions(&discovered, &subs, &intents);
+
+        assert!(desired.contains_key(&discovered_only));
+        assert_eq!(desired.get(&subscribed).unwrap().len(), 1);
+        assert!(!desired.contains_key(&disconnected));
     }
 
     #[test]

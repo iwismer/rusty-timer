@@ -2,8 +2,9 @@
 //!
 //! These exercise the *real* loopback P2P lane end-to-end: a deterministic iroh
 //! receiver endpoint dials a scripted [`MockForwarderPeer`], runs the real
-//! reconnecting `p2p_session`, and drives the durable local proxy, durable DBF
-//! feed, and server announcer push off the post-commit durable hints.
+//! per-forwarder P2P connection with data subscriptions, and drives the durable
+//! local proxy, durable DBF feed, and server announcer push off post-commit
+//! durable hints.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -594,10 +595,10 @@ fn record_with_sid(stream_id: &[u8], seq: u64, raw: &[u8]) -> ReadRecord {
 }
 
 /// A script whose `SubscribeOk` is for the subscribed stream but whose batch
-/// records carry a *different* `stream_id`. The receiver session validates the
-/// record stream id and fails with a non-retryable `StreamIdMismatch`, so its
-/// session task exits (no self-retry) — exactly the condition that would leave a
-/// dead worker in the reconcile map without a rebuild-on-finish pass.
+/// records carry a *different* `stream_id`. The receiver data subscription
+/// validates the record stream id and fails with a non-retryable
+/// `StreamIdMismatch`, so the forwarder connection must resubscribe the desired
+/// stream instead of leaving a finished data task in its task map.
 fn script_stream_mismatch() -> ForwarderScript {
     let other = b"127.0.0.1:10001".to_vec();
     ForwarderScript {
@@ -711,10 +712,9 @@ async fn changing_local_port_rebinds_proxy_to_new_port() {
     .expect("changing_local_port_rebinds_proxy_to_new_port timed out");
 }
 
-/// A non-retryable session failure exits the session task. Reconciliation must
-/// notice the finished session and rebuild the worker, which redials and
-/// re-subscribes; without that, the dead worker would linger and the forwarder
-/// would see exactly one subscribe forever.
+/// A non-retryable data subscription failure exits that stream's data task.
+/// Reconciliation must keep the stream desired on the per-forwarder connection,
+/// which resubscribes instead of leaving the finished task in place forever.
 #[tokio::test]
 async fn dead_session_worker_is_recreated_on_next_reconcile() {
     tokio::time::timeout(TEST_TIMEOUT, async {
@@ -737,9 +737,8 @@ async fn dead_session_worker_is_recreated_on_next_reconcile() {
             .await
             .unwrap();
 
-        // Each rebuilt worker redials and re-subscribes. A lingering dead worker
-        // would never re-subscribe, so seeing multiple subscribes proves the
-        // finished session was detected and the worker recreated.
+        // A lingering finished data task would never re-subscribe, so seeing
+        // multiple subscribes proves the desired stream is resubscribed.
         poll_until(
             || async { forwarder.subscribes().len() >= 3 },
             Duration::from_secs(10),
@@ -747,7 +746,7 @@ async fn dead_session_worker_is_recreated_on_next_reconcile() {
         .await;
         assert!(
             forwarder.subscribes().len() >= 3,
-            "dead worker must be recreated, producing repeated subscribes"
+            "finished data task must be replaced, producing repeated subscribes"
         );
 
         runtime.shutdown().await;

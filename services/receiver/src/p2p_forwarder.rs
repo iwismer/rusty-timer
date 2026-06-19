@@ -216,6 +216,17 @@ async fn sync_data_tasks(
     desired: &HashMap<String, ForwarderDataStream>,
     tasks: &mut HashMap<String, JoinHandle<()>>,
 ) {
+    let finished = tasks
+        .iter()
+        .filter(|(_, task)| task.is_finished())
+        .map(|(stream_id, _)| stream_id.clone())
+        .collect::<Vec<_>>();
+    for stream_id in finished {
+        if let Some(task) = tasks.remove(&stream_id) {
+            let _ = task.await;
+        }
+    }
+
     let desired_ids = desired.keys().cloned().collect::<HashSet<_>>();
     let stale = tasks
         .keys()
