@@ -27,6 +27,7 @@ export type TabId =
   | "streams"
   | "mode"
   | "config"
+  | "announcer"
   | "logs"
   | "admin";
 
@@ -77,6 +78,12 @@ export const store = $state({
   // When "env", the server URL/token are overridden by environment variables
   // and the Config tab shows them read-only.
   serverSource: "none" as "env" | "profile" | "none",
+  // Announcer publishing controls.
+  announcerEnabled: false,
+  announcerBusy: false,
+  importBusy: false,
+  importMessage: null as string | null,
+  importError: null as string | null,
   saving: false,
   checkingUpdate: false,
   checkMessage: null as string | null,
@@ -801,6 +808,7 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
       store.savedToken = p.token;
       store.savedReceiverId = p.receiver_id;
       store.serverSource = p.server_source ?? "none";
+      store.announcerEnabled = p.announcer_enabled ?? false;
       // Only overwrite edit fields if the user hasn't made unsaved changes.
       if (!configWasDirty) {
         store.editServerUrl = p.server_url;
@@ -1041,6 +1049,62 @@ export async function saveProfile(): Promise<void> {
     store.error = String(e);
   } finally {
     store.saving = false;
+  }
+}
+
+export async function setAnnouncerEnabled(enabled: boolean): Promise<void> {
+  store.announcerBusy = true;
+  try {
+    store.error = null;
+    await api.setAnnouncerEnabled(enabled);
+    store.announcerEnabled = enabled;
+  } catch (e) {
+    store.error = `Failed to update announcer setting: ${e}`;
+  } finally {
+    store.announcerBusy = false;
+  }
+}
+
+export async function setStreamAnnouncerPublish(
+  stream: api.StreamEntry,
+  publish: boolean,
+): Promise<void> {
+  try {
+    store.error = null;
+    await api.setStreamAnnouncerPublish(stream.stream_id, publish);
+    // Refresh streams so the toggle reflects persisted state.
+    const latest = await api.getStreams();
+    store.streams = latest;
+  } catch (e) {
+    store.error = `Failed to update stream announcer setting: ${e}`;
+  }
+}
+
+export async function importParticipantsText(contents: string): Promise<void> {
+  store.importBusy = true;
+  store.importMessage = null;
+  store.importError = null;
+  try {
+    const summary = await api.importParticipants(contents);
+    store.importMessage = `Imported ${summary.imported} participant(s); ${summary.resolvable_chips} chip(s) now resolve.`;
+  } catch (e) {
+    store.importError = `Participant import failed: ${e}`;
+  } finally {
+    store.importBusy = false;
+  }
+}
+
+export async function importChipsText(contents: string): Promise<void> {
+  store.importBusy = true;
+  store.importMessage = null;
+  store.importError = null;
+  try {
+    const summary = await api.importChips(contents);
+    store.importMessage = `Imported ${summary.imported} chip assignment(s); ${summary.resolvable_chips} chip(s) now resolve.`;
+  } catch (e) {
+    store.importError = `Chip import failed: ${e}`;
+  } finally {
+    store.importBusy = false;
   }
 }
 

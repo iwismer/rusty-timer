@@ -7,6 +7,7 @@
     { id: "streams", label: "Streams" },
     { id: "mode", label: "Mode" },
     { id: "config", label: "Config" },
+    { id: "announcer", label: "Announcer" },
     { id: "logs", label: "Logs" },
     { id: "admin", label: "Admin" },
   ];

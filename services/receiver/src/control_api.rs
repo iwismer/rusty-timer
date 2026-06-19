@@ -862,6 +862,7 @@ impl AppState {
                 (vec![], true)
             }
         };
+        let announcer_publish_streams = db.load_announcer_publish_streams().unwrap_or_default();
         drop(db);
 
         let cursor_map: HashMap<&str, &crate::db::StreamCursorRecord> =
@@ -914,6 +915,7 @@ impl AppState {
                 reader_ip: display_reader_ip,
                 subscribed: true,
                 local_port: port,
+                announcer_publish: announcer_publish_streams.contains(&sub.stream_id),
                 event_type: Some(sub.event_type),
                 online: None,
                 reader_connected: None,
@@ -949,6 +951,7 @@ impl AppState {
                     reader_ip: None,
                     subscribed: false,
                     local_port: None,
+                    announcer_publish: false,
                     event_type: None,
                     online: None,
                     reader_connected: None,
@@ -1055,6 +1058,8 @@ pub struct ProfileResponse {
     /// override active), `"profile"` (stored profile), or `"none"`. The UI
     /// renders the URL/token read-only when this is `"env"`.
     pub server_source: String,
+    /// Global announcer publish toggle state.
+    pub announcer_enabled: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1096,6 +1101,8 @@ pub struct StreamEntry {
     pub reader_ip: Option<String>,
     pub subscribed: bool,
     pub local_port: Option<u16>,
+    /// Whether this stream is opted in to announcer publishing.
+    pub announcer_publish: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_type: Option<crate::db::EventType>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1367,11 +1374,16 @@ pub async fn get_profile(state: &AppState) -> Result<ProfileResponse, ReceiverEr
     .to_owned();
     let (server_url, token) =
         resolved.map_or_else(|| (String::new(), String::new()), |s| (s.url, s.token));
+    let announcer_enabled = {
+        let db = state.db.lock().await;
+        db.load_announcer_enabled().unwrap_or(false)
+    };
     Ok(ProfileResponse {
         server_url,
         token,
         receiver_id,
         server_source,
+        announcer_enabled,
     })
 }
 

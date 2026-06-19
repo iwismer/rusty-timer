@@ -169,6 +169,7 @@ async fn local_streams_snapshot(state: &AppState) -> control_api::StreamsRespons
         Ok(cursors) => (cursors, None),
         Err(e) => (vec![], Some(format!("failed to load cursors: {e}"))),
     };
+    let announcer_publish_streams = db.load_announcer_publish_streams().unwrap_or_default();
     drop(db);
 
     let cursor_map: HashMap<&str, &crate::db::StreamCursorRecord> =
@@ -197,6 +198,7 @@ async fn local_streams_snapshot(state: &AppState) -> control_api::StreamsRespons
                         .as_deref()
                         .and_then(crate::ports::default_port)
                 }),
+                announcer_publish: announcer_publish_streams.contains(&sub.stream_id),
                 event_type: Some(sub.event_type),
                 online: None,
                 reader_connected: None,
