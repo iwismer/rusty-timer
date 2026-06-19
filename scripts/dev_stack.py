@@ -440,6 +440,9 @@ def main() -> int:
                 "SERVER_DB_PATH": str(thin_db_path),
                 "BIND_ADDR": f"127.0.0.1:{server_port}",
                 "SERVER_PROVISIONING_TOKEN": PROVISIONING_TOKEN,
+                # Trust the browser-supplied Remote-User header in dev so the
+                # admin /admin/* routes (device approve/rename) work without a
+                # Caddy/Authelia proxy in front. Never set this in production.
                 "SERVER_TRUSTED_PROXY": "1",
                 "LOG_LEVEL": "info",
             },
