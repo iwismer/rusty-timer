@@ -17,7 +17,8 @@ use rt_p2p_protocol::{CAP_CONTROL_EVENTS, has_capability};
 use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::status_http::{
-    ForwarderStatusEvent, ForwarderStatusFeed, ReaderConnectionState, ReaderStatus, UpsStatusState,
+    ForwarderStatusEvent, ForwarderStatusFeed, ForwarderStatusSnapshot, ReaderConnectionState,
+    ReaderStatus, UpsStatusState,
 };
 use crate::storage::journal::Journal;
 
@@ -296,8 +297,13 @@ async fn handle_connection(
 }
 
 async fn bridge_status_feed_to_control(feed: ForwarderStatusFeed, tx: ControlEventSender) {
-    let mut status_rx = feed.subscribe();
-    publish_status_snapshot(&feed, &tx).await;
+    // Subscribe and snapshot atomically so the initial snapshot and the delta
+    // stream cannot overlap: deltas are strictly those emitted after the
+    // snapshot was taken.
+    let (mut status_rx, snapshot) = feed.subscribe_and_snapshot().await;
+    if !publish_status_snapshot(&snapshot, &tx) {
+        return;
+    }
 
     loop {
         match status_rx.recv().await {
@@ -317,23 +323,21 @@ async fn bridge_status_feed_to_control(feed: ForwarderStatusFeed, tx: ControlEve
     }
 }
 
-async fn publish_status_snapshot(feed: &ForwarderStatusFeed, tx: &ControlEventSender) -> bool {
-    let snapshot = feed.snapshot().await;
-    for (stream_id, status) in snapshot.readers {
-        if !try_send_control_event(tx, reader_status_event(&stream_id, &status)) {
+fn publish_status_snapshot(snapshot: &ForwarderStatusSnapshot, tx: &ControlEventSender) -> bool {
+    for (stream_id, status) in &snapshot.readers {
+        if !try_send_control_event(tx, reader_status_event(stream_id, status)) {
             return false;
         }
-        if let Some(info) = status.reader_info {
-            let keep_open = try_send_control_event(tx, reader_info_event(&stream_id, &info));
-            if !keep_open {
-                return false;
-            }
+        if let Some(info) = &status.reader_info
+            && !try_send_control_event(tx, reader_info_event(stream_id, info))
+        {
+            return false;
         }
     }
-    let Some(ups_status) = snapshot.ups_status else {
+    let Some(ups_status) = &snapshot.ups_status else {
         return true;
     };
-    ups_status_event(&ups_status).is_none_or(|event| try_send_control_event(tx, event))
+    ups_status_event(ups_status).is_none_or(|event| try_send_control_event(tx, event))
 }
 
 fn publish_status_event(tx: &ControlEventSender, event: ForwarderStatusEvent) -> bool {
@@ -561,6 +565,28 @@ mod tests {
         match frame.msg {
             Some(control_f2c::Msg::ReaderStatus(status)) => Ok(status),
             other => Err(format!("expected ReaderStatus, got {other:?}").into()),
+        }
+    }
+
+    async fn next_reader_info(
+        recv: &mut rt_iroh::RecvStream,
+    ) -> Result<rt_p2p_protocol::ReaderInfo, BoxError> {
+        let frame =
+            tokio::time::timeout(Duration::from_secs(5), read_frame::<ControlF2C>(recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::ReaderInfo(info)) => Ok(info),
+            other => Err(format!("expected ReaderInfo, got {other:?}").into()),
+        }
+    }
+
+    async fn next_ups_status(
+        recv: &mut rt_iroh::RecvStream,
+    ) -> Result<rt_p2p_protocol::UpsStatus, BoxError> {
+        let frame =
+            tokio::time::timeout(Duration::from_secs(5), read_frame::<ControlF2C>(recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::UpsStatus(status)) => Ok(status),
+            other => Err(format!("expected UpsStatus, got {other:?}").into()),
         }
     }
 
@@ -812,6 +838,108 @@ mod tests {
             "reader disconnect delta should be delivered"
         );
         assert_eq!(delta.state, "disconnected");
+
+        accept.abort();
+        receiver.close().await;
+        forwarder.endpoint().close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn control_events_capability_sends_reader_info_frame() -> TestResult {
+        let receiver = EndpointBuilder::test([60; 32]).bind().await?;
+        let allow_list = AllowList::new([receiver.node_id()]);
+        let status = status_server_with_reader(ReaderConnectionState::Connected).await?;
+        status
+            .update_reader_info(
+                DATA_STREAM_KEY,
+                crate::reader_control::ReaderInfo {
+                    hardware: Some(crate::reader_control::HardwareInfo {
+                        fw_version: "1.2.3".to_owned(),
+                        hw_code: 42,
+                        reader_id: 7,
+                        config3: 0,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let forwarder = P2pEndpoint::bind_test([61; 32], allow_list)
+            .await?
+            .with_status_feed(status.status_feed());
+        let forwarder_addr = forwarder.node_addr().await;
+
+        let accept = {
+            let forwarder = forwarder.clone();
+            tokio::spawn(async move { forwarder.run().await })
+        };
+
+        let (_connection, hello_ok, _control_send, mut control_recv) = tokio::time::timeout(
+            Duration::from_secs(5),
+            dial_hello_connection(&receiver, forwarder_addr),
+        )
+        .await??;
+        assert!(has_capability(&hello_ok.capabilities, CAP_CONTROL_EVENTS));
+
+        // The snapshot publishes the ReaderStatus first, then the ReaderInfo.
+        let _reader_status = next_reader_status(&mut control_recv).await?;
+        let info = next_reader_info(&mut control_recv).await?;
+        assert_eq!(info.stream_id, DATA_STREAM_KEY.as_bytes());
+        assert_eq!(info.hardware_reader_id, "7");
+        assert_eq!(info.firmware_version, "1.2.3");
+        assert_eq!(info.model, "42");
+
+        accept.abort();
+        receiver.close().await;
+        forwarder.endpoint().close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn control_events_capability_sends_ups_status_frame() -> TestResult {
+        let receiver = EndpointBuilder::test([62; 32]).bind().await?;
+        let allow_list = AllowList::new([receiver.node_id()]);
+        let status = status_server_with_reader(ReaderConnectionState::Connected).await?;
+        status
+            .set_ups_status(UpsStatusState {
+                available: true,
+                status: Some(rt_domain::UpsStatus {
+                    battery_percent: 88,
+                    battery_voltage_mv: 4100,
+                    charging: false,
+                    power_plugged: false,
+                    temperature_cdeg: 2500,
+                    sampled_at: 1_700_000_000,
+                }),
+            })
+            .await;
+        let forwarder = P2pEndpoint::bind_test([63; 32], allow_list)
+            .await?
+            .with_status_feed(status.status_feed());
+        let forwarder_addr = forwarder.node_addr().await;
+
+        let accept = {
+            let forwarder = forwarder.clone();
+            tokio::spawn(async move { forwarder.run().await })
+        };
+
+        let (_connection, hello_ok, _control_send, mut control_recv) = tokio::time::timeout(
+            Duration::from_secs(5),
+            dial_hello_connection(&receiver, forwarder_addr),
+        )
+        .await??;
+        assert!(has_capability(&hello_ok.capabilities, CAP_CONTROL_EVENTS));
+
+        // The snapshot publishes the ReaderStatus (no ReaderInfo set) first,
+        // then the UpsStatus.
+        let _reader_status = next_reader_status(&mut control_recv).await?;
+        let ups = next_ups_status(&mut control_recv).await?;
+        assert!(
+            ups.on_battery,
+            "power_plugged=false maps to on_battery=true"
+        );
+        assert_eq!(ups.battery_percent, 88);
+        assert_eq!(ups.runtime_seconds, 0);
 
         accept.abort();
         receiver.close().await;

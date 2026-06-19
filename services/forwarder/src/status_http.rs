@@ -124,7 +124,7 @@ pub struct ReaderStatus {
 }
 
 /// UPS daemon availability + latest readings snapshot.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UpsStatusState {
     pub available: bool,
     pub status: Option<rt_domain::UpsStatus>,
@@ -159,20 +159,32 @@ pub struct ForwarderStatusFeed {
 }
 
 impl ForwarderStatusFeed {
-    pub fn subscribe(&self) -> broadcast::Receiver<ForwarderStatusEvent> {
-        self.status_event_tx.subscribe()
-    }
-
-    pub async fn snapshot(&self) -> ForwarderStatusSnapshot {
+    /// Atomically subscribe to the status broadcast and capture the current
+    /// snapshot under the same `SubsystemStatus` lock.
+    ///
+    /// Holding the lock across both operations guarantees the returned snapshot
+    /// and the delta stream do not overlap: every status update either landed in
+    /// the snapshot (and was broadcast before this subscription existed) or is
+    /// delivered as a post-snapshot delta on the returned receiver. This relies
+    /// on all `ForwarderStatusEvent` broadcasts being emitted while holding the
+    /// same lock. No `.await` is held across the lock.
+    pub async fn subscribe_and_snapshot(
+        &self,
+    ) -> (
+        broadcast::Receiver<ForwarderStatusEvent>,
+        ForwarderStatusSnapshot,
+    ) {
         let ss = self.subsystem.lock().await;
-        ForwarderStatusSnapshot {
+        let receiver = self.status_event_tx.subscribe();
+        let snapshot = ForwarderStatusSnapshot {
             readers: ss
                 .readers()
                 .iter()
                 .map(|(stream_id, status)| (stream_id.clone(), status.clone()))
                 .collect(),
             ups_status: ss.ups_status().cloned(),
-        }
+        };
+        (receiver, snapshot)
     }
 }
 
@@ -540,11 +552,24 @@ impl StatusServer {
     }
 
     /// Update the UPS status snapshot in the subsystem state.
+    ///
+    /// The local HTTP/UI snapshot is always updated, but the P2P control-event
+    /// broadcast only fires when the UPS status actually changed from the stored
+    /// previous value. The UPS poller calls this every interval, so gating the
+    /// broadcast on a real change avoids spamming connected receivers with
+    /// identical `UpsStatus` frames. The send happens under the subsystem lock so
+    /// it is ordered against `subscribe_and_snapshot`.
     pub async fn set_ups_status(&self, state: UpsStatusState) {
-        self.subsystem.lock().await.set_ups_status(state.clone());
-        let _ = self
-            .status_event_tx
-            .send(ForwarderStatusEvent::UpsStatus(state));
+        {
+            let mut ss = self.subsystem.lock().await;
+            let changed = ss.ups_status() != Some(&state);
+            ss.set_ups_status(state.clone());
+            if changed {
+                let _ = self
+                    .status_event_tx
+                    .send(ForwarderStatusEvent::UpsStatus(state));
+            }
+        }
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
     }
@@ -665,11 +690,13 @@ impl StatusServer {
                     ip: reader_ip.to_owned(),
                     info: info.clone(),
                 });
+            // Broadcast under the lock so it is ordered against
+            // `subscribe_and_snapshot`.
+            let _ = self.status_event_tx.send(ForwarderStatusEvent::ReaderInfo {
+                stream_id: reader_ip.to_owned(),
+                info,
+            });
         }
-        let _ = self.status_event_tx.send(ForwarderStatusEvent::ReaderInfo {
-            stream_id: reader_ip.to_owned(),
-            info,
-        });
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
     }
@@ -707,11 +734,13 @@ impl StatusServer {
                     ip: reader_ip.to_owned(),
                     info: info.clone(),
                 });
+            // Broadcast under the lock so it is ordered against
+            // `subscribe_and_snapshot`.
+            let _ = self.status_event_tx.send(ForwarderStatusEvent::ReaderInfo {
+                stream_id: reader_ip.to_owned(),
+                info,
+            });
         }
-        let _ = self.status_event_tx.send(ForwarderStatusEvent::ReaderInfo {
-            stream_id: reader_ip.to_owned(),
-            info,
-        });
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
     }
@@ -794,9 +823,10 @@ impl StatusServer {
 
     /// Update a reader's connection state.
     pub async fn update_reader_state(&self, reader_ip: &str, state: ReaderConnectionState) {
-        let status_event = {
+        {
             let mut ss = self.subsystem.lock().await;
             if let Some(r) = ss.readers.get_mut(reader_ip) {
+                let changed = r.state != state;
                 if state == ReaderConnectionState::Disconnected {
                     r.reader_info = None;
                 }
@@ -812,16 +842,19 @@ impl StatusServer {
                         local_port: r.local_port,
                         current_epoch_name: r.current_epoch_name.clone(),
                     });
-                Some(ForwarderStatusEvent::ReaderStatus {
-                    stream_id: reader_ip.to_owned(),
-                    status: r.clone(),
-                })
-            } else {
-                None
+                // Only broadcast a P2P control delta on an actual state
+                // transition, and do so under the lock so it is ordered against
+                // `subscribe_and_snapshot`. The local UI event above is always
+                // emitted.
+                if changed {
+                    let _ = self
+                        .status_event_tx
+                        .send(ForwarderStatusEvent::ReaderStatus {
+                            stream_id: reader_ip.to_owned(),
+                            status: r.clone(),
+                        });
+                }
             }
-        };
-        if let Some(event) = status_event {
-            let _ = self.status_event_tx.send(event);
         }
         #[cfg(feature = "eink")]
         self.publish_display_state().await;

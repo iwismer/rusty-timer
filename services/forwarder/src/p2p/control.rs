@@ -295,8 +295,8 @@ pub(crate) async fn negotiate_control_stream(
 
 /// Runs the post-negotiation heartbeat/control loop on an already-negotiated
 /// control stream until the peer disconnects cleanly (`Ok`) or is declared dead
-/// (`Err`). Uses the default no-op reader-control handler and no outbound event
-/// channel.
+/// (`Err`). Uses the default no-op reader-control handler and forwards status
+/// updates from the optional `outbound_events` channel to the peer.
 pub(crate) async fn run_control_stream_loop(
     send: SendStream,
     recv: RecvStream,
