@@ -107,6 +107,20 @@
     }
   }
 
+  // Build the document to send. Preserves the full parsed config (so untouched
+  // and unknown fields survive the round-trip) but drops the synthesized empty
+  // `update.mode` produced by the "Default" select option — the forwarder
+  // rejects an empty mode string, and an absent mode means "use the default".
+  function buildConfigPayload(
+    source: Record<string, any>,
+  ): Record<string, any> {
+    const payload = JSON.parse(JSON.stringify(source)) as Record<string, any>;
+    if (isRecord(payload.update) && payload.update.mode === "") {
+      delete payload.update.mode;
+    }
+    return payload;
+  }
+
   async function saveConfig(): Promise<void> {
     if (!endpointId || !config) return;
 
@@ -117,7 +131,7 @@
     try {
       const result = await setForwarderConfig(
         endpointId,
-        JSON.stringify(config),
+        JSON.stringify(buildConfigPayload(config)),
       );
       if (!result.ok) {
         actionError = result.error || "Failed to save forwarder config";

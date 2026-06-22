@@ -96,6 +96,40 @@ describe("ForwarderConfigModal", () => {
     expect(submitted.readers[0].untouched_reader_field).toBe(
       "keep-reader-field",
     );
+    // A real update mode is preserved (not stripped).
+    expect(submitted.update.mode).toBe("check-only");
+  });
+
+  it("omits an empty (Default) update.mode so the forwarder keeps its default", async () => {
+    // Config without an [update] section: the modal synthesizes an empty one and
+    // the "Default" select option binds mode to "". Saving must NOT send
+    // update.mode === "" (the forwarder rejects an empty mode).
+    const noUpdate = sampleConfig() as Record<string, any>;
+    delete noUpdate.update;
+    mockApi.getForwarderConfig.mockResolvedValue({
+      config_json: JSON.stringify(noUpdate),
+      restart_needed: false,
+    });
+
+    render(ForwarderConfigModal, {
+      open: true,
+      endpointId: "endpoint-1",
+      displayName: "Timing Forwarder",
+      onClose: vi.fn(),
+    });
+
+    await screen.findByLabelText("Display name");
+    await fireEvent.click(screen.getByTestId("forwarder-config-save"));
+
+    await waitFor(() => {
+      expect(mockApi.setForwarderConfig).toHaveBeenCalled();
+    });
+
+    const submitted = JSON.parse(mockApi.setForwarderConfig.mock.calls[0][1]);
+    // Other fields still preserved (full-document round-trip).
+    expect(submitted.untouched_top_level).toEqual({ nested: "keep-me" });
+    // The empty mode must be omitted entirely, not sent as "".
+    expect(submitted.update?.mode).toBeUndefined();
   });
 
   it("shows a restart banner after a save that requires restart and restarts on demand", async () => {
