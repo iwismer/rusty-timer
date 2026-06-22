@@ -75,8 +75,8 @@ impl AppState {
 ///
 /// - Public (unauthenticated): `GET /status`.
 /// - Admin (upstream [`status::ADMIN_HEADER`] required): `POST
-///   /admin/devices/approve`, `POST /admin/devices/rename`, and enrollment
-///   token management under `/admin/enrollment-tokens`.
+///   /admin/devices/approve` and enrollment token management under
+///   `/admin/enrollment-tokens`.
 /// - M2M/device: `POST /register`, `POST /forwarder/catalog`, and `GET
 ///   /allowlist/receivers` accept the provisioning token or an enrolled
 ///   forwarder's non-revoked token. Announcer push/takeover routes use the
@@ -87,7 +87,6 @@ pub fn router(state: AppState) -> Router {
         .route("/status", get(status::status))
         // Admin endpoints — must be protected by Caddy/Authelia.
         .route("/admin/devices/approve", post(status::approve_device))
-        .route("/admin/devices/rename", post(status::rename_device))
         .route(
             "/admin/enrollment-tokens",
             get(enrollment_tokens::list_tokens).post(enrollment_tokens::create_token),

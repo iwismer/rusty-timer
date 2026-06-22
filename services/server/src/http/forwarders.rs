@@ -97,7 +97,7 @@ mod tests {
                 &token_hash,
             )
             .unwrap();
-            crate::registry::approve_device(&conn, "fwd-approved", "Start Line")
+            crate::registry::approve_device(&conn, "fwd-approved")
                 .unwrap()
                 .unwrap();
 

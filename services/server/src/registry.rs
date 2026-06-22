@@ -73,7 +73,6 @@ impl ApprovalState {
 pub struct DeviceRecord {
     pub endpoint_id: String,
     pub device_kind: DeviceKind,
-    pub display_name: Option<String>,
     pub approval_state: ApprovalState,
 }
 
@@ -259,7 +258,6 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         "CREATE TABLE IF NOT EXISTS devices (
              endpoint_id TEXT PRIMARY KEY,
              device_kind TEXT NOT NULL,
-             display_name TEXT,
              approval_state TEXT NOT NULL,
              token_hash BLOB NOT NULL,
              created_unix_ms INTEGER NOT NULL,
@@ -497,7 +495,7 @@ pub fn register_device_with_enrollment_token(
     let mut token = None;
     {
         let mut stmt = tx.prepare(
-            "SELECT token_id, token_hash, display_name
+            "SELECT token_id, token_hash
              FROM enrollment_tokens
              WHERE device_kind = ?1
                AND used_unix_ms IS NULL
@@ -505,22 +503,18 @@ pub fn register_device_with_enrollment_token(
              ORDER BY created_unix_ms, token_id",
         )?;
         let rows = stmt.query_map([device_kind.as_str()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
         })?;
         for row in rows {
-            let (candidate_id, token_hash, display_name) = row?;
+            let (candidate_id, token_hash) = row?;
             if verify_token(raw_token, &token_hash) {
-                token = Some((candidate_id, display_name));
+                token = Some(candidate_id);
                 break;
             }
         }
     }
 
-    let Some((token_id, display_name)) = token else {
+    let Some(token_id) = token else {
         return Ok(None);
     };
 
@@ -534,10 +528,10 @@ pub fn register_device_with_enrollment_token(
     )?;
     tx.execute(
         "INSERT INTO devices (
-             endpoint_id, device_kind, display_name, approval_state,
+             endpoint_id, device_kind, approval_state,
              token_hash, created_unix_ms, updated_unix_ms
          )
-         VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?5)
+         VALUES (?1, ?2, 'pending', ?3, ?4, ?4)
          ON CONFLICT(endpoint_id) DO UPDATE SET
              device_kind = excluded.device_kind,
              token_hash = excluded.token_hash,
@@ -545,7 +539,6 @@ pub fn register_device_with_enrollment_token(
         params![
             endpoint_id,
             device_kind.as_str(),
-            display_name,
             hash_token(raw_token),
             now
         ],
@@ -635,8 +628,7 @@ pub fn any_device_token_authorized(
 ///
 /// A brand-new endpoint is recorded as `pending`. Re-registration of an
 /// existing endpoint refreshes its kind and hashed token while preserving any
-/// existing approval state and admin-assigned display name (idempotent for an
-/// already-approved device).
+/// existing approval state (idempotent for an already-approved device).
 pub fn register_device(
     conn: &Connection,
     endpoint_id: &str,
@@ -648,10 +640,10 @@ pub fn register_device(
 
     conn.execute(
         "INSERT INTO devices (
-             endpoint_id, device_kind, display_name, approval_state,
+             endpoint_id, device_kind, approval_state,
              token_hash, created_unix_ms, updated_unix_ms
          )
-         VALUES (?1, ?2, NULL, 'pending', ?3, ?4, ?4)
+         VALUES (?1, ?2, 'pending', ?3, ?4, ?4)
          ON CONFLICT(endpoint_id) DO UPDATE SET
              device_kind = excluded.device_kind,
              token_hash = excluded.token_hash,
@@ -662,44 +654,19 @@ pub fn register_device(
     get_device(conn, endpoint_id)?.ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
 }
 
-/// Approve a device and assign its display name, marking it `active`.
+/// Approve a device, marking it `active`.
 ///
 /// Returns `None` if no device with the given endpoint id exists.
 pub fn approve_device(
     conn: &Connection,
     endpoint_id: &str,
-    display_name: &str,
 ) -> rusqlite::Result<Option<DeviceRecord>> {
     let now = Utc::now().timestamp_millis();
     let changed = conn.execute(
         "UPDATE devices
-         SET approval_state = 'active', display_name = ?2, updated_unix_ms = ?3
+         SET approval_state = 'active', updated_unix_ms = ?2
          WHERE endpoint_id = ?1",
-        params![endpoint_id, display_name, now],
-    )?;
-
-    if changed == 0 {
-        return Ok(None);
-    }
-
-    get_device(conn, endpoint_id)
-}
-
-/// Rename a registered device by setting its admin-assigned display name.
-///
-/// Works for devices in any approval state and leaves the approval state
-/// unchanged. Returns `None` if no device with the given endpoint id exists.
-pub fn rename_device(
-    conn: &Connection,
-    endpoint_id: &str,
-    display_name: &str,
-) -> rusqlite::Result<Option<DeviceRecord>> {
-    let now = Utc::now().timestamp_millis();
-    let changed = conn.execute(
-        "UPDATE devices
-         SET display_name = ?2, updated_unix_ms = ?3
-         WHERE endpoint_id = ?1",
-        params![endpoint_id, display_name, now],
+        params![endpoint_id, now],
     )?;
 
     if changed == 0 {
@@ -730,10 +697,10 @@ pub fn upsert_forwarder_catalog(
 
     tx.execute(
         "INSERT INTO devices (
-             endpoint_id, device_kind, display_name, approval_state,
+             endpoint_id, device_kind, approval_state,
              token_hash, created_unix_ms, updated_unix_ms
          )
-         VALUES (?1, 'forwarder', NULL, 'pending', ?2, ?3, ?3)
+         VALUES (?1, 'forwarder', 'pending', ?2, ?3, ?3)
          ON CONFLICT(endpoint_id) DO UPDATE SET
              device_kind = 'forwarder',
              updated_unix_ms = excluded.updated_unix_ms",
@@ -773,7 +740,7 @@ pub fn upsert_forwarder_catalog(
 /// List all registered forwarder identities, ordered by endpoint id.
 pub fn list_forwarders(conn: &Connection) -> rusqlite::Result<Vec<ForwarderRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT f.endpoint_id, COALESCE(d.display_name, f.display_name), f.direct_addrs,
+        "SELECT f.endpoint_id, f.display_name, f.direct_addrs,
                 f.last_seen_unix_ms, d.approval_state
          FROM forwarders f
          JOIN devices d ON d.endpoint_id = f.endpoint_id
@@ -814,7 +781,7 @@ pub fn list_approved_forwarders_with_streams(
     conn: &Connection,
 ) -> rusqlite::Result<Vec<ApprovedForwarderWithStreams>> {
     let mut stmt = conn.prepare(
-        "SELECT f.endpoint_id, COALESCE(d.display_name, f.display_name), f.direct_addrs
+        "SELECT f.endpoint_id, f.display_name, f.direct_addrs
          FROM forwarders f
          JOIN devices d ON d.endpoint_id = f.endpoint_id
          WHERE d.device_kind = 'forwarder' AND d.approval_state = 'active'
@@ -868,13 +835,13 @@ pub fn list_approved_forwarders_with_streams(
 /// List all registered devices, ordered by endpoint id.
 pub fn list_devices(conn: &Connection) -> rusqlite::Result<Vec<DeviceRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT endpoint_id, device_kind, display_name, approval_state
+        "SELECT endpoint_id, device_kind, approval_state
          FROM devices
          ORDER BY endpoint_id",
     )?;
     let rows = stmt.query_map([], |row| {
         let kind_str: String = row.get(1)?;
-        let approval_str: String = row.get(3)?;
+        let approval_str: String = row.get(2)?;
         let device_kind = DeviceKind::parse(&kind_str).ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
                 1,
@@ -884,7 +851,7 @@ pub fn list_devices(conn: &Connection) -> rusqlite::Result<Vec<DeviceRecord>> {
         })?;
         let approval_state = ApprovalState::parse(&approval_str).ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
-                3,
+                2,
                 rusqlite::types::Type::Text,
                 format!("invalid approval_state: {approval_str}").into(),
             )
@@ -892,7 +859,6 @@ pub fn list_devices(conn: &Connection) -> rusqlite::Result<Vec<DeviceRecord>> {
         Ok(DeviceRecord {
             endpoint_id: row.get(0)?,
             device_kind,
-            display_name: row.get(2)?,
             approval_state,
         })
     })?;
@@ -922,13 +888,13 @@ pub fn list_forwarder_streams(conn: &Connection) -> rusqlite::Result<Vec<Forward
 /// Fetch a device record by endpoint id.
 pub fn get_device(conn: &Connection, endpoint_id: &str) -> rusqlite::Result<Option<DeviceRecord>> {
     conn.query_row(
-        "SELECT endpoint_id, device_kind, display_name, approval_state
+        "SELECT endpoint_id, device_kind, approval_state
          FROM devices
          WHERE endpoint_id = ?1",
         [endpoint_id],
         |row| {
             let kind_str: String = row.get(1)?;
-            let approval_str: String = row.get(3)?;
+            let approval_str: String = row.get(2)?;
             let device_kind = DeviceKind::parse(&kind_str).ok_or_else(|| {
                 rusqlite::Error::FromSqlConversionFailure(
                     1,
@@ -938,7 +904,7 @@ pub fn get_device(conn: &Connection, endpoint_id: &str) -> rusqlite::Result<Opti
             })?;
             let approval_state = ApprovalState::parse(&approval_str).ok_or_else(|| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    3,
+                    2,
                     rusqlite::types::Type::Text,
                     format!("invalid approval_state: {approval_str}").into(),
                 )
@@ -946,7 +912,6 @@ pub fn get_device(conn: &Connection, endpoint_id: &str) -> rusqlite::Result<Opti
             Ok(DeviceRecord {
                 endpoint_id: row.get(0)?,
                 device_kind,
-                display_name: row.get(2)?,
                 approval_state,
             })
         },
@@ -1093,66 +1058,32 @@ mod tests {
         let pending = register_device(&conn, "ep-1", DeviceKind::Forwarder, "tok").unwrap();
         assert_eq!(pending.approval_state, ApprovalState::Pending);
         assert_eq!(pending.device_kind, DeviceKind::Forwarder);
-        assert!(pending.display_name.is_none());
 
-        let active = approve_device(&conn, "ep-1", "Start Line")
+        let active = approve_device(&conn, "ep-1")
             .unwrap()
             .expect("device exists");
         assert_eq!(active.approval_state, ApprovalState::Active);
-        assert_eq!(active.display_name.as_deref(), Some("Start Line"));
     }
 
     #[test]
-    fn reregistration_preserves_approval_and_name() {
+    fn reregistration_preserves_approval() {
         let conn = test_conn();
 
         register_device(&conn, "ep-2", DeviceKind::Receiver, "tok-a").unwrap();
-        approve_device(&conn, "ep-2", "Finish").unwrap();
+        approve_device(&conn, "ep-2").unwrap();
 
         let reregistered = register_device(&conn, "ep-2", DeviceKind::Receiver, "tok-b").unwrap();
         assert_eq!(reregistered.approval_state, ApprovalState::Active);
-        assert_eq!(reregistered.display_name.as_deref(), Some("Finish"));
     }
 
     #[test]
     fn approve_missing_device_returns_none() {
         let conn = test_conn();
-        assert!(approve_device(&conn, "missing", "name").unwrap().is_none());
+        assert!(approve_device(&conn, "missing").unwrap().is_none());
     }
 
     #[test]
-    fn rename_active_device_updates_name_and_preserves_state() {
-        let conn = test_conn();
-        register_device(&conn, "ep-1", DeviceKind::Forwarder, "tok").unwrap();
-        approve_device(&conn, "ep-1", "Start Line").unwrap();
-
-        let renamed = rename_device(&conn, "ep-1", "Finish Line")
-            .unwrap()
-            .expect("device exists");
-        assert_eq!(renamed.display_name.as_deref(), Some("Finish Line"));
-        assert_eq!(renamed.approval_state, ApprovalState::Active);
-    }
-
-    #[test]
-    fn rename_pending_device_keeps_pending_state() {
-        let conn = test_conn();
-        register_device(&conn, "ep-2", DeviceKind::Receiver, "tok").unwrap();
-
-        let renamed = rename_device(&conn, "ep-2", "Tablet")
-            .unwrap()
-            .expect("device exists");
-        assert_eq!(renamed.display_name.as_deref(), Some("Tablet"));
-        assert_eq!(renamed.approval_state, ApprovalState::Pending);
-    }
-
-    #[test]
-    fn rename_missing_device_returns_none() {
-        let conn = test_conn();
-        assert!(rename_device(&conn, "missing", "name").unwrap().is_none());
-    }
-
-    #[test]
-    fn rename_forwarder_overrides_pushed_name_in_listings() {
+    fn forwarder_listings_use_pushed_catalog_name() {
         let conn = test_conn();
         let token_hash = hash_token("prov-secret");
         upsert_forwarder_catalog(
@@ -1168,14 +1099,13 @@ mod tests {
             &token_hash,
         )
         .unwrap();
-        approve_device(&conn, "ep-fwd", "Approved Name").unwrap();
-        rename_device(&conn, "ep-fwd", "Renamed Name").unwrap();
+        approve_device(&conn, "ep-fwd").unwrap();
 
         let forwarders = list_forwarders(&conn).unwrap();
-        assert_eq!(forwarders[0].display_name.as_deref(), Some("Renamed Name"));
+        assert_eq!(forwarders[0].display_name.as_deref(), Some("Pushed Name"));
 
         let approved = list_approved_forwarders_with_streams(&conn).unwrap();
-        assert_eq!(approved[0].display_name.as_deref(), Some("Renamed Name"));
+        assert_eq!(approved[0].display_name.as_deref(), Some("Pushed Name"));
     }
 
     #[test]
@@ -1183,7 +1113,7 @@ mod tests {
         let conn = test_conn();
         register_device(&conn, "ep-b", DeviceKind::Receiver, "tok-b").unwrap();
         register_device(&conn, "ep-a", DeviceKind::Forwarder, "tok-a").unwrap();
-        approve_device(&conn, "ep-a", "Start").unwrap();
+        approve_device(&conn, "ep-a").unwrap();
 
         let devices = list_devices(&conn).unwrap();
         assert_eq!(devices.len(), 2);
@@ -1302,9 +1232,7 @@ mod tests {
             &token_hash,
         )
         .unwrap();
-        approve_device(&conn, "ep-approved", "Start Line")
-            .unwrap()
-            .unwrap();
+        approve_device(&conn, "ep-approved").unwrap().unwrap();
 
         // Pending (unapproved) forwarder — must be excluded.
         upsert_forwarder_catalog(
@@ -1323,7 +1251,7 @@ mod tests {
 
         // Approved receiver — must be excluded (wrong device kind).
         register_device(&conn, "ep-receiver", DeviceKind::Receiver, "tok").unwrap();
-        approve_device(&conn, "ep-receiver", "Finish").unwrap();
+        approve_device(&conn, "ep-receiver").unwrap();
 
         let forwarders = list_approved_forwarders_with_streams(&conn).unwrap();
         assert_eq!(forwarders.len(), 1);
@@ -1449,7 +1377,7 @@ mod tests {
 
         assert_eq!(registered.endpoint_id, "ep-fwd");
         assert_eq!(registered.device_kind, DeviceKind::Forwarder);
-        assert_eq!(registered.display_name.as_deref(), Some("Start Line"));
+        assert_eq!(registered.approval_state, ApprovalState::Pending);
         assert_eq!(
             list_enrollment_tokens(&conn).unwrap()[0]
                 .used_endpoint_id
@@ -1462,9 +1390,7 @@ mod tests {
     fn register_device_with_enrollment_token_rejects_existing_endpoint() {
         let conn = test_conn();
         register_device(&conn, "ep-fwd", DeviceKind::Forwarder, "existing-secret").unwrap();
-        approve_device(&conn, "ep-fwd", "Start Line")
-            .unwrap()
-            .unwrap();
+        approve_device(&conn, "ep-fwd").unwrap().unwrap();
         create_enrollment_token(&conn, "tok-1", DeviceKind::Forwarder, None, "enroll-secret")
             .unwrap();
 
@@ -1512,9 +1438,7 @@ mod tests {
         register_device_with_enrollment_token(&conn, "ep-fwd", DeviceKind::Forwarder, "secret")
             .unwrap()
             .unwrap();
-        approve_device(&conn, "ep-fwd", "Start Line")
-            .unwrap()
-            .unwrap();
+        approve_device(&conn, "ep-fwd").unwrap().unwrap();
         upsert_forwarder_catalog(
             &conn,
             "ep-fwd",

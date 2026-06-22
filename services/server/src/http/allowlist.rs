@@ -153,7 +153,7 @@ mod tests {
                 "tok-receiver-active",
             )
             .unwrap();
-            crate::registry::approve_device(&conn, "receiver-active", "Finish")
+            crate::registry::approve_device(&conn, "receiver-active")
                 .unwrap()
                 .unwrap();
             crate::registry::register_device(
@@ -170,7 +170,7 @@ mod tests {
                 "tok-forwarder-active",
             )
             .unwrap();
-            crate::registry::approve_device(&conn, "forwarder-active", "Start")
+            crate::registry::approve_device(&conn, "forwarder-active")
                 .unwrap()
                 .unwrap();
         }
@@ -354,7 +354,7 @@ mod tests {
         assert!(!held.is_finished(), "handler must hold while up to date");
         {
             let conn = state.conn.lock().unwrap();
-            crate::registry::approve_device(&conn, "receiver-late", "Finish")
+            crate::registry::approve_device(&conn, "receiver-late")
                 .unwrap()
                 .unwrap();
         }

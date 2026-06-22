@@ -28,7 +28,6 @@ describe("server api client", () => {
           {
             endpoint_id: "fwd-1",
             device_kind: "forwarder",
-            display_name: "Start Line",
             approval_state: "active",
           },
         ],
@@ -50,12 +49,11 @@ describe("server api client", () => {
       makeResponse(200, {
         endpoint_id: "receiver-1",
         device_kind: "receiver",
-        display_name: "Finish Tablet",
         approval_state: "active",
       }),
     );
 
-    const device = await approveDevice("receiver-1", "Finish Tablet", "alice");
+    const device = await approveDevice("receiver-1", "alice");
 
     expect(device.approval_state).toBe("active");
     expect(mockFetch).toHaveBeenCalledWith(
@@ -68,7 +66,6 @@ describe("server api client", () => {
         }),
         body: JSON.stringify({
           endpoint_id: "receiver-1",
-          display_name: "Finish Tablet",
         }),
       }),
     );
@@ -80,12 +77,11 @@ describe("server api client", () => {
       makeResponse(200, {
         endpoint_id: "receiver-1",
         device_kind: "receiver",
-        display_name: "Finish Tablet",
         approval_state: "active",
       }),
     );
 
-    await approveDevice("receiver-1", "Finish Tablet");
+    await approveDevice("receiver-1");
 
     expect(mockFetch).toHaveBeenCalledWith(
       "/admin/devices/approve",
@@ -93,54 +89,6 @@ describe("server api client", () => {
         headers: expect.objectContaining({ "Remote-User": "dev-admin" }),
       }),
     );
-  });
-
-  it("approveDevice rejects blank display names before posting", async () => {
-    const { approveDevice } = await import("./api");
-
-    await expect(approveDevice("receiver-1", "   ")).rejects.toThrow(
-      "Display name is required",
-    );
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  it("renameDevice posts JSON to the rename endpoint with the admin header", async () => {
-    const { renameDevice } = await import("./api");
-    mockFetch.mockResolvedValue(
-      makeResponse(200, {
-        endpoint_id: "receiver-1",
-        device_kind: "receiver",
-        display_name: "Finish Line",
-        approval_state: "active",
-      }),
-    );
-
-    const device = await renameDevice("receiver-1", "Finish Line", "alice");
-
-    expect(device.display_name).toBe("Finish Line");
-    expect(mockFetch).toHaveBeenCalledWith(
-      "/admin/devices/rename",
-      expect.objectContaining({
-        method: "POST",
-        headers: expect.objectContaining({
-          "Content-Type": "application/json",
-          "Remote-User": "alice",
-        }),
-        body: JSON.stringify({
-          endpoint_id: "receiver-1",
-          display_name: "Finish Line",
-        }),
-      }),
-    );
-  });
-
-  it("renameDevice rejects blank display names before posting", async () => {
-    const { renameDevice } = await import("./api");
-
-    await expect(renameDevice("receiver-1", "   ")).rejects.toThrow(
-      "Display name is required",
-    );
-    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it("listEnrollmentTokens fetches token metadata with the admin header", async () => {

@@ -19,16 +19,11 @@
   let loading = $state(true);
   let poll: ReturnType<typeof setInterval> | undefined;
 
-  let forwarderDevices = $derived(
-    status?.devices.filter((device) => device.device_kind === "forwarder") ??
-      [],
-  );
   let streamForwarderNames = $derived.by(() => {
     const names: Record<string, string> = {};
-    for (const device of status?.devices ?? []) {
-      if (device.device_kind === "forwarder") {
-        names[device.endpoint_id] = device.display_name ?? device.endpoint_id;
-      }
+    for (const forwarder of status?.forwarders ?? []) {
+      names[forwarder.endpoint_id] =
+        forwarder.display_name ?? forwarder.endpoint_id;
     }
     return names;
   });
@@ -45,8 +40,8 @@
     const streamEndpoints = new Set(
       status.forwarder_streams.map((stream) => stream.endpoint_id),
     );
-    return forwarderDevices.filter(
-      (device) => !streamEndpoints.has(device.endpoint_id),
+    return status.forwarders.filter(
+      (forwarder) => !streamEndpoints.has(forwarder.endpoint_id),
     );
   });
 
@@ -121,7 +116,7 @@
   <Card title="Connected forwarders and stream catalogs">
     {#if !status}
       <p class="text-sm text-text-muted m-0">Loading forwarders…</p>
-    {:else if forwarderDevices.length === 0 && status.forwarder_streams.length === 0}
+    {:else if status.forwarders.length === 0 && status.forwarder_streams.length === 0}
       <p class="text-sm text-text-muted m-0">
         No forwarders or streams registered.
       </p>
@@ -170,12 +165,12 @@
                 </td>
               </tr>
             {/each}
-            {#each forwardersWithoutStreams as device (device.endpoint_id)}
+            {#each forwardersWithoutStreams as forwarder (forwarder.endpoint_id)}
               <tr class="border-b border-border last:border-0">
                 <td class="py-2 pr-4 text-text-primary">
-                  {device.display_name ?? device.endpoint_id}
+                  {forwarder.display_name ?? forwarder.endpoint_id}
                   <span class="block text-xs text-text-muted font-mono">
-                    {device.endpoint_id}
+                    {forwarder.endpoint_id}
                   </span>
                 </td>
                 <td class="py-2 pr-4 text-text-muted" colspan="3"
@@ -183,8 +178,8 @@
                 >
                 <td class="py-2 pr-4">
                   <StatusBadge
-                    label={device.approval_state}
-                    state={badgeState(device.approval_state)}
+                    label={forwarder.approval_state}
+                    state={badgeState(forwarder.approval_state)}
                   />
                 </td>
               </tr>
@@ -207,7 +202,6 @@
             <tr class="text-left text-text-muted border-b border-border">
               <th class="py-2 pr-4 font-medium">Endpoint</th>
               <th class="py-2 pr-4 font-medium">Kind</th>
-              <th class="py-2 pr-4 font-medium">Display name</th>
               <th class="py-2 pr-4 font-medium">Approval</th>
             </tr>
           </thead>
@@ -220,9 +214,6 @@
                 <td class="py-2 pr-4 text-text-primary"
                   >{kindLabel(device.device_kind)}</td
                 >
-                <td class="py-2 pr-4 text-text-primary">
-                  {device.display_name ?? "—"}
-                </td>
                 <td class="py-2 pr-4">
                   <StatusBadge
                     label={device.approval_state}

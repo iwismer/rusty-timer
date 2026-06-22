@@ -9,7 +9,6 @@
   let success = $state<string | null>(null);
   let loading = $state(true);
   let busyEndpoint = $state<string | null>(null);
-  let nameDrafts = $state<Record<string, string>>({});
   let poll: ReturnType<typeof setInterval> | undefined;
 
   let pendingDevices = $derived(
@@ -26,29 +25,9 @@
     return device.device_kind === "forwarder" ? "Forwarder" : "Receiver";
   }
 
-  function updateDraft(endpointId: string, value: string) {
-    nameDrafts = { ...nameDrafts, [endpointId]: value };
-  }
-
-  function handleNameInput(endpointId: string, event: Event) {
-    updateDraft(endpointId, (event.currentTarget as HTMLInputElement).value);
-  }
-
-  function ensureDrafts(devices: DeviceRecord[]) {
-    const next = { ...nameDrafts };
-    for (const device of devices) {
-      if (next[device.endpoint_id] == null) {
-        next[device.endpoint_id] = device.display_name ?? "";
-      }
-    }
-    nameDrafts = next;
-  }
-
   async function loadStatus() {
     try {
-      const nextStatus = await api.getStatus();
-      status = nextStatus;
-      ensureDrafts(nextStatus.devices);
+      status = await api.getStatus();
       error = null;
     } catch (err) {
       error = String(err);
@@ -62,42 +41,14 @@
     error = null;
     success = null;
     try {
-      const approved = await api.approveDevice(
-        device.endpoint_id,
-        nameDrafts[device.endpoint_id] ?? "",
-      );
-      success = `Approved ${approved.display_name ?? approved.endpoint_id}.`;
+      const approved = await api.approveDevice(device.endpoint_id);
+      success = `Approved ${approved.endpoint_id}.`;
       await loadStatus();
     } catch (err) {
       error = String(err);
     } finally {
       busyEndpoint = null;
     }
-  }
-
-  async function rename(device: DeviceRecord) {
-    busyEndpoint = device.endpoint_id;
-    error = null;
-    success = null;
-    try {
-      const renamed = await api.renameDevice(
-        device.endpoint_id,
-        nameDrafts[device.endpoint_id] ?? "",
-      );
-      success = `Renamed to ${renamed.display_name ?? renamed.endpoint_id}.`;
-      await loadStatus();
-    } catch (err) {
-      error = String(err);
-    } finally {
-      busyEndpoint = null;
-    }
-  }
-
-  function isUnchanged(device: DeviceRecord) {
-    return (
-      (nameDrafts[device.endpoint_id] ?? "").trim() ===
-      (device.display_name ?? "")
-    );
   }
 
   onMount(() => {
@@ -115,8 +66,8 @@
     <div>
       <h1 class="text-2xl font-bold text-text-primary m-0">Device approval</h1>
       <p class="text-sm text-text-muted mt-1 mb-0">
-        Name and approve pending forwarders and receivers, and rename approved
-        devices.
+        Approve pending forwarders and receivers. Forwarders provide their own
+        display names; receivers are shown by endpoint ID.
       </p>
     </div>
     {#if loading}
@@ -153,7 +104,7 @@
       <div class="space-y-4">
         {#each pendingDevices as device (device.endpoint_id)}
           <form
-            class="grid gap-3 rounded-md border border-border bg-surface-2 p-4 md:grid-cols-[1fr_220px_auto] md:items-end"
+            class="grid gap-3 rounded-md border border-border bg-surface-2 p-4 md:grid-cols-[1fr_auto] md:items-center"
             onsubmit={(event) => {
               event.preventDefault();
               void approve(device);
@@ -167,18 +118,6 @@
                 {device.endpoint_id}
               </p>
             </div>
-            <label class="block">
-              <span class="block text-xs font-medium text-text-muted mb-1">
-                Display name
-              </span>
-              <input
-                class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
-                value={nameDrafts[device.endpoint_id] ?? ""}
-                oninput={(event) => handleNameInput(device.endpoint_id, event)}
-                placeholder="Finish Line"
-                disabled={busyEndpoint === device.endpoint_id}
-              />
-            </label>
             <button
               type="submit"
               class="rounded-md border-none bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
@@ -192,50 +131,22 @@
     {/if}
   </Card>
 
-  <Card title="Registered devices">
+  <Card title="Approved devices">
     {#if !status}
       <p class="text-sm text-text-muted m-0">Loading devices…</p>
     {:else if activeDevices.length === 0}
       <p class="text-sm text-text-muted m-0">No approved devices yet.</p>
     {:else}
-      <div class="space-y-4">
+      <div class="space-y-3">
         {#each activeDevices as device (device.endpoint_id)}
-          <form
-            class="grid gap-3 rounded-md border border-border bg-surface-2 p-4 md:grid-cols-[1fr_220px_auto] md:items-end"
-            onsubmit={(event) => {
-              event.preventDefault();
-              void rename(device);
-            }}
-          >
-            <div>
-              <p class="text-sm font-semibold text-text-primary m-0">
-                {displayKind(device)}
-              </p>
-              <p class="text-xs text-text-muted font-mono mt-1 mb-0">
-                {device.endpoint_id}
-              </p>
-            </div>
-            <label class="block">
-              <span class="block text-xs font-medium text-text-muted mb-1">
-                Display name
-              </span>
-              <input
-                class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
-                value={nameDrafts[device.endpoint_id] ?? ""}
-                oninput={(event) => handleNameInput(device.endpoint_id, event)}
-                placeholder="Finish Line"
-                disabled={busyEndpoint === device.endpoint_id}
-              />
-            </label>
-            <button
-              type="submit"
-              class="rounded-md border-none bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={busyEndpoint === device.endpoint_id ||
-                isUnchanged(device)}
-            >
-              {busyEndpoint === device.endpoint_id ? "Saving…" : "Rename"}
-            </button>
-          </form>
+          <div class="rounded-md border border-border bg-surface-2 p-4">
+            <p class="text-sm font-semibold text-text-primary m-0">
+              {displayKind(device)}
+            </p>
+            <p class="text-xs text-text-muted font-mono mt-1 mb-0">
+              {device.endpoint_id}
+            </p>
+          </div>
         {/each}
       </div>
     {/if}

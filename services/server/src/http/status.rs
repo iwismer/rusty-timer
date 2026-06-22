@@ -65,13 +65,6 @@ pub struct StatusResponse {
 #[derive(Debug, Deserialize)]
 pub struct ApproveRequest {
     pub endpoint_id: String,
-    pub display_name: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RenameRequest {
-    pub endpoint_id: String,
-    pub display_name: String,
 }
 
 /// `GET /status` — public, unauthenticated status board.
@@ -149,7 +142,7 @@ pub async fn approve_device(
 
     let result = {
         let conn = state.conn.lock().expect("registry mutex poisoned");
-        registry::approve_device(&conn, &req.endpoint_id, &req.display_name)
+        registry::approve_device(&conn, &req.endpoint_id)
     };
 
     match result {
@@ -163,40 +156,6 @@ pub async fn approve_device(
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(err) => {
             tracing::error!(error = %err, "device approval failed");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-/// `POST /admin/devices/rename` — admin-only device rename.
-///
-/// Requires the upstream-injected [`ADMIN_HEADER`]; otherwise responds `401`.
-/// Renames a device of any approval state. A blank display name responds `400`,
-/// and an unknown endpoint id responds `404`.
-pub async fn rename_device(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<RenameRequest>,
-) -> Response {
-    if !admin_authorized(&headers, state.admin_proxy_trusted) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    let display_name = req.display_name.trim();
-    if display_name.is_empty() {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-
-    let result = {
-        let conn = state.conn.lock().expect("registry mutex poisoned");
-        registry::rename_device(&conn, &req.endpoint_id, display_name)
-    };
-
-    match result {
-        Ok(Some(record)) => (StatusCode::OK, Json(record)).into_response(),
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(err) => {
-            tracing::error!(error = %err, "device rename failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
@@ -252,19 +211,6 @@ mod tests {
         let mut builder = Request::builder()
             .method("POST")
             .uri("/admin/devices/approve")
-            .header("Content-Type", "application/json");
-        if let Some(value) = admin_header {
-            builder = builder.header(ADMIN_HEADER, value);
-        }
-        builder
-            .body(Body::from(serde_json::to_vec(body).unwrap()))
-            .unwrap()
-    }
-
-    fn rename_request(admin_header: Option<&str>, body: &serde_json::Value) -> Request<Body> {
-        let mut builder = Request::builder()
-            .method("POST")
-            .uri("/admin/devices/rename")
             .header("Content-Type", "application/json");
         if let Some(value) = admin_header {
             builder = builder.header(ADMIN_HEADER, value);
@@ -425,8 +371,7 @@ mod tests {
         let app = router(state.clone());
 
         let body = serde_json::json!({
-            "endpoint_id": "ep-1",
-            "display_name": "Finish"
+            "endpoint_id": "ep-1"
         });
 
         let denied = app
@@ -458,98 +403,6 @@ mod tests {
             device.approval_state,
             crate::registry::ApprovalState::Active
         );
-        assert_eq!(device.display_name.as_deref(), Some("Finish"));
-    }
-
-    #[tokio::test]
-    async fn admin_rename_requires_header_and_updates_active_device() {
-        let state = test_state();
-        {
-            let conn = state.conn.lock().unwrap();
-            crate::registry::register_device(
-                &conn,
-                "ep-1",
-                crate::registry::DeviceKind::Receiver,
-                "tok",
-            )
-            .unwrap();
-            crate::registry::approve_device(&conn, "ep-1", "Finish")
-                .unwrap()
-                .unwrap();
-        }
-        let app = router(state.clone());
-
-        let body = serde_json::json!({
-            "endpoint_id": "ep-1",
-            "display_name": "Finish Line"
-        });
-
-        let denied = app
-            .clone()
-            .oneshot(rename_request(None, &body))
-            .await
-            .unwrap();
-        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
-
-        let renamed = app
-            .oneshot(rename_request(Some("alice"), &body))
-            .await
-            .unwrap();
-        assert_eq!(renamed.status(), StatusCode::OK);
-
-        let conn = state.conn.lock().unwrap();
-        let device = crate::registry::get_device(&conn, "ep-1").unwrap().unwrap();
-        assert_eq!(device.display_name.as_deref(), Some("Finish Line"));
-        assert_eq!(
-            device.approval_state,
-            crate::registry::ApprovalState::Active
-        );
-    }
-
-    #[tokio::test]
-    async fn admin_rename_blank_name_400() {
-        let state = test_state();
-        {
-            let conn = state.conn.lock().unwrap();
-            crate::registry::register_device(
-                &conn,
-                "ep-1",
-                crate::registry::DeviceKind::Receiver,
-                "tok",
-            )
-            .unwrap();
-        }
-        let app = router(state);
-
-        let resp = app
-            .oneshot(rename_request(
-                Some("alice"),
-                &serde_json::json!({
-                    "endpoint_id": "ep-1",
-                    "display_name": "   "
-                }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn admin_rename_missing_device_404() {
-        let state = test_state();
-        let app = router(state);
-
-        let resp = app
-            .oneshot(rename_request(
-                Some("alice"),
-                &serde_json::json!({
-                    "endpoint_id": "missing",
-                    "display_name": "Nope"
-                }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -561,8 +414,7 @@ mod tests {
             .oneshot(approve_request(
                 Some("alice"),
                 &serde_json::json!({
-                    "endpoint_id": "missing",
-                    "display_name": "Nope"
+                    "endpoint_id": "missing"
                 }),
             ))
             .await
@@ -616,8 +468,7 @@ mod tests {
             .oneshot(approve_request(
                 Some("alice"),
                 &serde_json::json!({
-                    "endpoint_id": "ep-1",
-                    "display_name": "Finish"
+                    "endpoint_id": "ep-1"
                 }),
             ))
             .await

@@ -6,7 +6,6 @@ export type ApprovalState = "pending" | "active";
 export interface DeviceRecord {
   endpoint_id: string;
   device_kind: DeviceKind;
-  display_name: string | null;
   approval_state: ApprovalState;
 }
 
@@ -81,40 +80,13 @@ export async function getStatus(): Promise<StatusResponse> {
 
 export async function approveDevice(
   endpointId: string,
-  displayName: string,
   adminUser = "dev-admin",
 ): Promise<DeviceRecord> {
-  const trimmedName = displayName.trim();
-  if (!trimmedName) {
-    throw new Error("Display name is required");
-  }
-
   return apiFetch<DeviceRecord>("/admin/devices/approve", {
     method: "POST",
     headers: { "Remote-User": adminUser.trim() || "dev-admin" },
     body: JSON.stringify({
       endpoint_id: endpointId,
-      display_name: trimmedName,
-    }),
-  });
-}
-
-export async function renameDevice(
-  endpointId: string,
-  displayName: string,
-  adminUser = "dev-admin",
-): Promise<DeviceRecord> {
-  const trimmedName = displayName.trim();
-  if (!trimmedName) {
-    throw new Error("Display name is required");
-  }
-
-  return apiFetch<DeviceRecord>("/admin/devices/rename", {
-    method: "POST",
-    headers: { "Remote-User": adminUser.trim() || "dev-admin" },
-    body: JSON.stringify({
-      endpoint_id: endpointId,
-      display_name: trimmedName,
     }),
   });
 }

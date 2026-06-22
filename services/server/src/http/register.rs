@@ -165,7 +165,6 @@ mod tests {
             crate::registry::ApprovalState::Pending
         );
         assert_eq!(device.device_kind, crate::registry::DeviceKind::Forwarder);
-        assert!(device.display_name.is_none());
     }
 
     #[tokio::test]
@@ -187,14 +186,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let conn = state.conn.lock().unwrap();
-        let approved = crate::registry::approve_device(&conn, "ep-receiver-1", "Finish Line")
+        let approved = crate::registry::approve_device(&conn, "ep-receiver-1")
             .unwrap()
             .expect("device exists");
         assert_eq!(
             approved.approval_state,
             crate::registry::ApprovalState::Active
         );
-        assert_eq!(approved.display_name.as_deref(), Some("Finish Line"));
     }
 
     #[tokio::test]
@@ -357,7 +355,7 @@ mod tests {
                 "existing-secret",
             )
             .unwrap();
-            crate::registry::approve_device(&conn, "ep-forwarder-existing", "Start Line")
+            crate::registry::approve_device(&conn, "ep-forwarder-existing")
                 .unwrap()
                 .unwrap();
             crate::registry::create_enrollment_token(
