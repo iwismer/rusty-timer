@@ -25,6 +25,7 @@ const mockState = vi.hoisted(() => {
       savedReceiverId: "recv-test",
       savedServerUrl: "https://server.example.com",
       savedToken: "secret",
+      serverSource: "profile",
       saving: false,
       status: defaultStatus(),
       editDbfEnabled: false,
