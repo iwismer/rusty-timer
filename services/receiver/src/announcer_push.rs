@@ -154,19 +154,24 @@ impl AnnouncerPushClient for ServerAnnouncerClient {
     }
 }
 
-/// Register this receiver endpoint with server under the TOFU `/register`
-/// model (`device_kind = "receiver"`). Already-registered / active endpoints are
-/// tolerated: any `2xx` response is success. The bearer token is never logged.
+/// Register this receiver endpoint with the server `/register` endpoint
+/// (`device_kind = "receiver"`), using `token` as the bearer (an enrollment
+/// voucher on first boot, the provisioning token during migration, or the
+/// device's own minted token for an idempotent re-register).
 ///
 /// The configured `receiver_id` is sent as the device's self-reported
 /// `display_name` so the server's admin approval UI can show a human-friendly
 /// name instead of the opaque endpoint ID. A blank receiver ID is omitted.
+///
+/// Returns the server-minted per-device token when one is issued (first mint or
+/// rotation), or `None` for an idempotent re-register that mints nothing. The
+/// bearer token is never logged.
 pub fn register_receiver_with_server(
     base_url: &str,
     token: &str,
     endpoint_id: &str,
     receiver_id: &str,
-) -> Result<(), AnnouncerPushError> {
+) -> Result<Option<String>, AnnouncerPushError> {
     let client = reqwest::blocking::Client::builder()
         .timeout(HTTP_TIMEOUT)
         .connect_timeout(HTTP_TIMEOUT)
@@ -175,7 +180,6 @@ pub fn register_receiver_with_server(
     let mut body = serde_json::json!({
         "endpoint_id": endpoint_id,
         "device_kind": "receiver",
-        "device_token": token,
     });
     let trimmed_id = receiver_id.trim();
     if !trimmed_id.is_empty() {
@@ -187,14 +191,19 @@ pub fn register_receiver_with_server(
         .json(&body)
         .send()
         .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(AnnouncerPushError::Transport(format!(
+    if !response.status().is_success() {
+        return Err(AnnouncerPushError::Transport(format!(
             "server /register returned {}",
             response.status()
-        )))
+        )));
     }
+    let value: serde_json::Value = response
+        .json()
+        .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
+    Ok(value
+        .get("device_token")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned))
 }
 
 /// Take over the announcer source generation via server `/announcer/takeover`

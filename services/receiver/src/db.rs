@@ -1013,6 +1013,11 @@ impl Db {
         )?;
         apply_add_column_migration(
             &self.conn,
+            "ALTER TABLE profile ADD COLUMN device_token TEXT;",
+            "device_token",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
             "ALTER TABLE subscriptions ADD COLUMN event_type TEXT NOT NULL DEFAULT 'finish';",
             "event_type",
         )?;
@@ -1287,6 +1292,40 @@ impl Db {
         if changed == 0 {
             return Err(DbError::ProfileMissing);
         }
+        Ok(())
+    }
+
+    /// The server-minted per-device token, if one has been persisted. This is
+    /// the receiver's long-term server credential; the configured `token` is
+    /// only the bootstrap voucher used to mint it.
+    pub fn load_device_token(&self) -> DbResult<Option<String>> {
+        let value: Option<Option<String>> = self
+            .conn
+            .query_row("SELECT device_token FROM profile LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(value.flatten().filter(|token| !token.trim().is_empty()))
+    }
+
+    /// Persist the server-minted per-device token. Requires a profile row
+    /// (created at receiver startup).
+    pub fn set_device_token(&self, device_token: &str) -> DbResult<()> {
+        let changed = self.conn.execute(
+            "UPDATE profile SET device_token = ?1",
+            rusqlite::params![device_token],
+        )?;
+        if changed == 0 {
+            return Err(DbError::ProfileMissing);
+        }
+        Ok(())
+    }
+
+    /// Clear the persisted device token (e.g. on a server change, so the next
+    /// start re-bootstraps against the new server from the voucher).
+    pub fn clear_device_token(&self) -> DbResult<()> {
+        self.conn
+            .execute("UPDATE profile SET device_token = NULL", [])?;
         Ok(())
     }
 
@@ -2073,6 +2112,28 @@ mod tests {
             .unwrap();
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.receiver_id, None);
+    }
+
+    #[test]
+    fn device_token_load_set_clear_roundtrip() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.save_profile("https://thin.test", "voucher", "check-and-download", None)
+            .unwrap();
+        // Unset by default.
+        assert_eq!(db.load_device_token().unwrap(), None);
+        // Persisted token round-trips.
+        db.set_device_token("rtk_id_secret").unwrap();
+        assert_eq!(
+            db.load_device_token().unwrap().as_deref(),
+            Some("rtk_id_secret")
+        );
+        // Blank is treated as unset.
+        db.set_device_token("   ").unwrap();
+        assert_eq!(db.load_device_token().unwrap(), None);
+        // Clear removes it.
+        db.set_device_token("rtk_id_secret").unwrap();
+        db.clear_device_token().unwrap();
+        assert_eq!(db.load_device_token().unwrap(), None);
     }
 
     #[test]

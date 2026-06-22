@@ -414,11 +414,29 @@ async fn run_reconcile_loop(
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let endpoint = Arc::new(endpoint);
+    let endpoint_id = endpoint.node_id().to_string();
     let mut workers: HashMap<String, ForwarderConnection> = HashMap::new();
     let mut stream_workers: HashMap<String, StreamWorker> = HashMap::new();
     let mut connect_attempt_rx = state.connect_attempt_rx();
     let mut server_config_rx = state.server_config_rx();
     let mut force_reconnect: Option<Option<String>> = None;
+
+    // `server_baseline` is the voucher/provisioning config that
+    // `resolve_server_config` produces; it is the stable key for detecting a
+    // real server-config change. `config.server` instead carries the effective
+    // credential: the server-minted per-device token once one is available
+    // (loaded from the profile, or freshly bootstrapped via the voucher). All
+    // server-bound tasks use `config.server`. A pending receiver's `takeover` /
+    // discovery 401 is tolerated and retried until an admin approves it.
+    let mut server_baseline = config.server.clone();
+    if let Some(thin) = config.server.clone()
+        && let Some(minted) = resolve_receiver_device_token(&state, &thin, &endpoint_id).await
+    {
+        config.server = Some(ServerClientConfig {
+            url: thin.url,
+            token: minted,
+        });
+    }
 
     // When a server is configured, periodically refresh the discovered
     // forwarders map from its `GET /forwarders` feed. The task observes the
@@ -490,14 +508,13 @@ async fn run_reconcile_loop(
         if announcer_generation.is_none()
             && let Some(thin) = config.server.clone()
         {
-            let endpoint_id = endpoint.node_id().to_string();
             let receiver_id = state.receiver_id.read().await.clone();
             tokio::select! {
                 biased;
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() { break; }
                 }
-                result = server_startup(thin, endpoint_id, receiver_id) => match result {
+                result = server_startup(thin, endpoint_id.clone(), receiver_id) => match result {
                     Ok(generation) => {
                         info!(generation, "server announcer startup succeeded");
                         announcer_generation = Some(generation);
@@ -550,8 +567,9 @@ async fn run_reconcile_loop(
                         profile.as_ref(),
                         config.server_override.clone(),
                     );
-                    if new_server != config.server {
+                    if new_server != server_baseline {
                         info!("receiver server config changed; rebinding server-bound tasks");
+                        server_baseline = new_server.clone();
                         config.server = new_server;
                         // Stop all existing stream workers FIRST. Each holds an
                         // announcer push client bound to the previous server and
@@ -597,6 +615,20 @@ async fn run_reconcile_loop(
                             db.reset_announcer_fences()
                         } {
                             warn!(error = %e, "failed to reset announcer fences on server change");
+                        }
+                        // The persisted device token (if any) belonged to the
+                        // previous server; drop it and re-bootstrap against the
+                        // new server from the voucher before respawning tasks.
+                        if let Some(thin) = config.server.clone() {
+                            let _ = state.db.lock().await.clear_device_token();
+                            if let Some(minted) =
+                                resolve_receiver_device_token(&state, &thin, &endpoint_id).await
+                            {
+                                config.server = Some(ServerClientConfig {
+                                    url: thin.url,
+                                    token: minted,
+                                });
+                            }
                         }
                         // Respawn discovery + approval-watch against the new
                         // server, after the reseed so they repopulate the
@@ -649,6 +681,11 @@ async fn server_startup(
     receiver_id: String,
 ) -> Result<i64, String> {
     tokio::task::spawn_blocking(move || {
+        // Registration/mint already happened at runtime startup; this is an
+        // idempotent re-register (mints nothing) followed by the generation
+        // takeover, which requires the receiver to be approved (active). Before
+        // approval the takeover returns 401 and this whole call errors, so the
+        // reconcile loop simply retries until an admin approves the receiver.
         announcer_push::register_receiver_with_server(
             &thin.url,
             &thin.token,
@@ -661,6 +698,56 @@ async fn server_startup(
     })
     .await
     .map_err(|e| format!("server startup task failed: {e}"))?
+}
+
+/// Resolve the receiver's effective server credential.
+///
+/// Prefers a persisted server-minted device token; otherwise bootstraps by
+/// registering with the configured token (an enrollment voucher, or the
+/// provisioning token during migration) to mint one, persisting it for reuse.
+/// Returns `None` when no token could be obtained (transient failure, or the
+/// server minted nothing), in which case the caller keeps using the configured
+/// token. The bearer token is never logged.
+async fn resolve_receiver_device_token(
+    state: &Arc<AppState>,
+    thin: &ServerClientConfig,
+    endpoint_id: &str,
+) -> Option<String> {
+    match state.db.lock().await.load_device_token() {
+        Ok(Some(token)) => return Some(token),
+        Ok(None) => {}
+        Err(e) => warn!(error = %e, "failed to load persisted device token"),
+    }
+
+    let url = thin.url.clone();
+    let voucher = thin.token.clone();
+    let eid = endpoint_id.to_owned();
+    let receiver_id = state.receiver_id.read().await.clone();
+    let minted = tokio::task::spawn_blocking(move || {
+        announcer_push::register_receiver_with_server(&url, &voucher, &eid, &receiver_id)
+    })
+    .await;
+
+    match minted {
+        Ok(Ok(Some(token))) => {
+            if let Err(e) = state.db.lock().await.set_device_token(&token) {
+                warn!(error = %e, "failed to persist minted device token; will re-bootstrap on next start");
+            }
+            Some(token)
+        }
+        Ok(Ok(None)) => {
+            warn!("server /register minted no device token; using configured token");
+            None
+        }
+        Ok(Err(e)) => {
+            warn!(error = %e, "receiver bootstrap registration failed; using configured token");
+            None
+        }
+        Err(e) => {
+            warn!(error = %e, "receiver bootstrap task failed");
+            None
+        }
+    }
 }
 
 /// Periodically refresh [`AppState::discovered_forwarders`] from the server
