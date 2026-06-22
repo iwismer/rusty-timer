@@ -7,8 +7,9 @@ use prost::Message;
 use rt_iroh::{Connection, Endpoint, EndpointBuilder, NodeAddr, RecvStream, SendStream};
 use rt_p2p_protocol::{
     Ack, CaughtUp, ConfigGetResponse, ConfigSetRequest, ConfigSetResponse, ControlC2F, ControlF2C,
-    DataC2F, DataF2C, DataSubscribe, EventBatch, GapNotice, Hello, Ping, Pong, RestartResponse,
-    StreamCatalog, SubscribeOk, control_c2f, control_f2c, data_c2f, data_f2c, negotiate,
+    DataC2F, DataF2C, DataSubscribe, EventBatch, GapNotice, Hello, Ping, Pong,
+    ReaderControlRequest, ReaderControlResponse, RestartResponse, StreamCatalog, SubscribeOk,
+    control_c2f, control_f2c, data_c2f, data_f2c, negotiate,
 };
 use tokio::task::JoinHandle;
 
@@ -75,6 +76,12 @@ pub struct ForwarderScript {
     /// timeout/prune behavior against a forwarder that heartbeats but never
     /// answers config commands.
     pub respond_to_config_requests: bool,
+    /// Optional rich reader-info JSON echoed in successful reader-control
+    /// responses.
+    pub reader_control_info_json: Option<String>,
+    /// When false, inbound reader-control requests are recorded but left
+    /// unanswered so receiver tests can exercise timeout behavior.
+    pub respond_to_reader_control_requests: bool,
 }
 
 /// A scripted forwarder peer bound to a loopback iroh endpoint.
@@ -92,6 +99,7 @@ pub struct MockForwarderPeer {
     connections: Arc<Mutex<usize>>,
     pongs: Arc<Mutex<Vec<Pong>>>,
     config_sets: Arc<Mutex<Vec<ConfigSetRequest>>>,
+    reader_control_requests: Arc<Mutex<Vec<ReaderControlRequest>>>,
 }
 
 impl MockForwarderPeer {
@@ -105,6 +113,7 @@ impl MockForwarderPeer {
         let connections = Arc::new(Mutex::new(0usize));
         let pongs = Arc::new(Mutex::new(Vec::new()));
         let config_sets = Arc::new(Mutex::new(Vec::new()));
+        let reader_control_requests = Arc::new(Mutex::new(Vec::new()));
         let script = Arc::new(script);
 
         let accept_endpoint = endpoint.clone();
@@ -113,6 +122,7 @@ impl MockForwarderPeer {
         let accept_connections = Arc::clone(&connections);
         let accept_pongs = Arc::clone(&pongs);
         let accept_config_sets = Arc::clone(&config_sets);
+        let accept_reader_control_requests = Arc::clone(&reader_control_requests);
         let accept_task = tokio::spawn(async move {
             accept_loop(
                 accept_endpoint,
@@ -122,6 +132,7 @@ impl MockForwarderPeer {
                 accept_connections,
                 accept_pongs,
                 accept_config_sets,
+                accept_reader_control_requests,
             )
             .await;
         });
@@ -135,6 +146,7 @@ impl MockForwarderPeer {
             connections,
             pongs,
             config_sets,
+            reader_control_requests,
         })
     }
 
@@ -175,6 +187,14 @@ impl MockForwarderPeer {
             .clone()
     }
 
+    /// A snapshot of the `ReaderControlRequest`s received on the control stream.
+    pub fn reader_control_requests(&self) -> Vec<ReaderControlRequest> {
+        self.reader_control_requests
+            .lock()
+            .expect("reader_control_requests mutex poisoned")
+            .clone()
+    }
+
     /// The number of inbound QUIC connections accepted so far. A receiver that
     /// multiplexes several data streams over one control session opens exactly
     /// one connection, so this stays `1` while many streams are subscribed.
@@ -198,6 +218,7 @@ async fn accept_loop(
     connections: Arc<Mutex<usize>>,
     pongs: Arc<Mutex<Vec<Pong>>>,
     config_sets: Arc<Mutex<Vec<ConfigSetRequest>>>,
+    reader_control_requests: Arc<Mutex<Vec<ReaderControlRequest>>>,
 ) {
     while let Ok(Some(connection)) = endpoint.accept().await {
         *connections.lock().expect("connections mutex poisoned") += 1;
@@ -206,11 +227,20 @@ async fn accept_loop(
         let subscribes = Arc::clone(&subscribes);
         let pongs = Arc::clone(&pongs);
         let config_sets = Arc::clone(&config_sets);
+        let reader_control_requests = Arc::clone(&reader_control_requests);
         tokio::spawn(async move {
             // Errors here are surfaced via missing acks / failed reads on the
             // receiver side; the harness self-test asserts on those.
-            let _ =
-                handle_connection(connection, script, acks, subscribes, pongs, config_sets).await;
+            let _ = handle_connection(
+                connection,
+                script,
+                acks,
+                subscribes,
+                pongs,
+                config_sets,
+                reader_control_requests,
+            )
+            .await;
         });
     }
 }
@@ -223,6 +253,7 @@ async fn handle_connection(
     subscribes: Arc<Mutex<Vec<DataSubscribe>>>,
     pongs: Arc<Mutex<Vec<Pong>>>,
     config_sets: Arc<Mutex<Vec<ConfigSetRequest>>>,
+    reader_control_requests: Arc<Mutex<Vec<ReaderControlRequest>>>,
 ) -> HarnessResult {
     let (control_send, control_recv) = serve_control(&connection, &script).await?;
     // Drive live control-plane events (status pushes) and heartbeat pings on a
@@ -234,6 +265,7 @@ async fn handle_connection(
         Arc::clone(&script),
         pongs,
         config_sets,
+        reader_control_requests,
     ));
     serve_data_loop(&connection, &script, &acks, &subscribes).await;
     control_task.abort();
@@ -249,6 +281,7 @@ async fn serve_control_loop(
     script: Arc<ForwarderScript>,
     pongs: Arc<Mutex<Vec<Pong>>>,
     config_sets: Arc<Mutex<Vec<ConfigSetRequest>>>,
+    reader_control_requests: Arc<Mutex<Vec<ReaderControlRequest>>>,
 ) {
     for event in &script.control_events {
         if write_frame(&mut send, event).await.is_err() {
@@ -322,6 +355,29 @@ async fn serve_control_loop(
                             accepted: true,
                             error: String::new(),
                         })),
+                    };
+                    if write_frame(&mut send, &response).await.is_err() {
+                        return;
+                    }
+                }
+                Some(control_c2f::Msg::ReaderControlRequest(request)) => {
+                    reader_control_requests
+                        .lock()
+                        .expect("reader_control_requests mutex poisoned")
+                        .push(request.clone());
+                    if !script.respond_to_reader_control_requests {
+                        continue;
+                    }
+                    let response = ControlF2C {
+                        msg: Some(control_f2c::Msg::ReaderControlResponse(
+                            ReaderControlResponse {
+                                stream_id: request.stream_id,
+                                request_id: request.request_id,
+                                success: true,
+                                message: String::new(),
+                                reader_info_json: script.reader_control_info_json.clone(),
+                            },
+                        )),
                     };
                     if write_frame(&mut send, &response).await.is_err() {
                         return;

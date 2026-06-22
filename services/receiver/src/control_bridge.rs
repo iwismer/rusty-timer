@@ -301,6 +301,70 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
         "restart_forwarder" => {
             ok(control_api::restart_forwarder(state, arg(args, "endpoint_id")?).await?)
         }
+        "reader_get_info" => ok(control_api::reader_get_info(
+            state,
+            arg(args, "endpoint_id")?,
+            arg(args, "stream_id")?,
+        )
+        .await?),
+        "reader_sync_clock" => ok(control_api::reader_sync_clock(
+            state,
+            arg(args, "endpoint_id")?,
+            arg(args, "stream_id")?,
+        )
+        .await?),
+        "reader_set_read_mode" => ok(control_api::reader_set_read_mode(
+            state,
+            arg(args, "endpoint_id")?,
+            arg(args, "stream_id")?,
+            arg(args, "mode")?,
+            arg(args, "timeout")?,
+        )
+        .await?),
+        "reader_set_tto" => ok(control_api::reader_set_tto(
+            state,
+            arg(args, "endpoint_id")?,
+            arg(args, "stream_id")?,
+            arg(args, "enabled")?,
+        )
+        .await?),
+        "reader_set_recording" => ok(control_api::reader_set_recording(
+            state,
+            arg(args, "endpoint_id")?,
+            arg(args, "stream_id")?,
+            arg(args, "enabled")?,
+        )
+        .await?),
+        "reader_clear_records" => ok(control_api::reader_clear_records(
+            state,
+            arg(args, "endpoint_id")?,
+            arg(args, "stream_id")?,
+        )
+        .await?),
+        "reader_start_download" => ok(control_api::reader_start_download(
+            state,
+            arg(args, "endpoint_id")?,
+            arg(args, "stream_id")?,
+        )
+        .await?),
+        "reader_stop_download" => ok(control_api::reader_stop_download(
+            state,
+            arg(args, "endpoint_id")?,
+            arg(args, "stream_id")?,
+        )
+        .await?),
+        "reader_refresh" => ok(control_api::reader_refresh(
+            state,
+            arg(args, "endpoint_id")?,
+            arg(args, "stream_id")?,
+        )
+        .await?),
+        "reader_reconnect" => ok(control_api::reader_reconnect(
+            state,
+            arg(args, "endpoint_id")?,
+            arg(args, "stream_id")?,
+        )
+        .await?),
         "get_version" => ok(control_api::get_version()),
         "get_logs" => ok(control_api::get_logs(state).await),
         "admin_reset_cursor" => {

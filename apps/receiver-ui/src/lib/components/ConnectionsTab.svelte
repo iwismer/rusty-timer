@@ -1,7 +1,7 @@
 <script lang="ts">
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { BatteryIndicator } from "@rusty-timer/shared-ui";
-  import { store } from "$lib/store.svelte";
+  import { BatteryIndicator, ReaderControlPanel } from "@rusty-timer/shared-ui";
+  import { loadConnections, store } from "$lib/store.svelte";
   import type {
     ForwarderConnectionStatus,
     ReaderLiveStatus,
@@ -10,6 +10,15 @@
   import {
     connectForwarder,
     disconnectForwarder,
+    readerClearRecords,
+    readerReconnect,
+    readerRefresh,
+    readerSetReadMode,
+    readerSetRecording,
+    readerSetTto,
+    readerStartDownload,
+    readerStopDownload,
+    readerSyncClock,
     reconnectForwarder,
   } from "$lib/api";
   import { btnPrimary, btnSecondary } from "$lib/ui-classes";
@@ -147,6 +156,51 @@
     return reader.hardware_reader_id ?? reader.stream_id;
   }
 
+  function readerConnectionState(
+    reader: ReaderLiveStatus,
+  ): "connected" | "connecting" | "disconnected" {
+    if (reader.connected) return "connected";
+    if (reader.state === "connecting") return "connecting";
+    return "disconnected";
+  }
+
+  function readerInfoForPanel(reader: ReaderLiveStatus) {
+    if (reader.reader_info) return reader.reader_info;
+    if (
+      !reader.hardware_reader_id &&
+      !reader.firmware_version &&
+      !reader.model
+    ) {
+      return null;
+    }
+    return {
+      hardware: {
+        reader_id: reader.hardware_reader_id,
+        fw_version: reader.firmware_version,
+        hw_code: reader.model,
+      },
+    };
+  }
+
+  function downloadProgressForPanel(reader: ReaderLiveStatus) {
+    const progress = reader.download_progress;
+    if (!progress) return null;
+    return {
+      state: progress.state,
+      reads_received: progress.downloaded_reads,
+      progress: progress.downloaded_reads,
+      total: progress.stored_reads ?? 0,
+      error: progress.error ?? undefined,
+    };
+  }
+
+  async function runReaderCommand(
+    command: () => Promise<unknown>,
+  ): Promise<void> {
+    await command();
+    await loadConnections();
+  }
+
   function selectedConfigForwarder(): ForwarderConnectionStatus | null {
     if (!configEndpointId || !store.connections) return null;
     return (
@@ -263,6 +317,88 @@
                         />
                       </span>
                     {/if}
+                  </div>
+                {/if}
+
+                {#if forwarder.reader_control_available && forwarder.readers.length > 0}
+                  <div class="mt-3 space-y-3">
+                    {#each forwarder.readers as reader (reader.stream_id)}
+                      <ReaderControlPanel
+                        readerIp={readerLabel(reader)}
+                        readerInfo={readerInfoForPanel(reader)}
+                        readerState={readerConnectionState(reader)}
+                        downloadProgress={downloadProgressForPanel(reader)}
+                        disabled={busyByEndpoint[forwarder.endpoint_id]}
+                        helpContext="forwarder"
+                        onSyncClock={() =>
+                          runReaderCommand(() =>
+                            readerSyncClock(
+                              forwarder.endpoint_id,
+                              reader.stream_id,
+                            ),
+                          )}
+                        onSetReadMode={(mode, timeout) =>
+                          runReaderCommand(() =>
+                            readerSetReadMode(
+                              forwarder.endpoint_id,
+                              reader.stream_id,
+                              mode as "raw" | "event" | "fsls",
+                              timeout,
+                            ),
+                          )}
+                        onSetTto={(enabled) =>
+                          runReaderCommand(() =>
+                            readerSetTto(
+                              forwarder.endpoint_id,
+                              reader.stream_id,
+                              enabled,
+                            ),
+                          )}
+                        onSetRecording={(enabled) =>
+                          runReaderCommand(() =>
+                            readerSetRecording(
+                              forwarder.endpoint_id,
+                              reader.stream_id,
+                              enabled,
+                            ),
+                          )}
+                        onClearRecords={() =>
+                          runReaderCommand(() =>
+                            readerClearRecords(
+                              forwarder.endpoint_id,
+                              reader.stream_id,
+                            ),
+                          )}
+                        onStartDownload={() =>
+                          runReaderCommand(() =>
+                            readerStartDownload(
+                              forwarder.endpoint_id,
+                              reader.stream_id,
+                            ),
+                          )}
+                        onStopDownload={() =>
+                          runReaderCommand(() =>
+                            readerStopDownload(
+                              forwarder.endpoint_id,
+                              reader.stream_id,
+                            ),
+                          )}
+                        onRefresh={() =>
+                          runReaderCommand(() =>
+                            readerRefresh(
+                              forwarder.endpoint_id,
+                              reader.stream_id,
+                            ),
+                          )}
+                        onReconnect={() =>
+                          runReaderCommand(() =>
+                            readerReconnect(
+                              forwarder.endpoint_id,
+                              reader.stream_id,
+                            ),
+                          )}
+                      />
+                    {/each}
                   </div>
                 {/if}
               </div>

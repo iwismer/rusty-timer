@@ -67,7 +67,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, broadcast};
-use tracing::Instrument;
 
 // ---------------------------------------------------------------------------
 // Public config
@@ -140,6 +139,10 @@ pub enum ForwarderStatusEvent {
     ReaderInfo {
         stream_id: String,
         info: crate::reader_control::ReaderInfo,
+    },
+    DownloadProgress {
+        stream_id: String,
+        event: crate::reader_control::DownloadEvent,
     },
     UpsStatus(UpsStatusState),
 }
@@ -287,6 +290,35 @@ impl SubsystemStatus {
         &self.readers
     }
 
+    pub(crate) fn cached_reader_info(
+        &self,
+        reader_ip: &str,
+    ) -> Option<crate::reader_control::ReaderInfo> {
+        self.readers
+            .get(reader_ip)
+            .and_then(|r| r.reader_info.clone())
+    }
+
+    pub(crate) fn update_cached_reader_info_unless_disconnected(
+        &mut self,
+        reader_ip: &str,
+        info: crate::reader_control::ReaderInfo,
+    ) -> bool {
+        let Some(reader) = self.readers.get_mut(reader_ip) else {
+            tracing::warn!(reader_ip = %reader_ip, "update_cached_reader_info: reader not found in status map, skipping broadcast");
+            return false;
+        };
+        if reader.state == ReaderConnectionState::Disconnected {
+            tracing::debug!(
+                reader_ip,
+                "dropping cached reader info update for disconnected reader"
+            );
+            return false;
+        }
+        reader.reader_info = Some(info);
+        true
+    }
+
     /// Set the UPS status snapshot.
     pub fn set_ups_status(&mut self, state: UpsStatusState) {
         self.ups_status = Some(state);
@@ -420,6 +452,20 @@ struct AppState<J: JournalAccess + Send + 'static> {
     cpu_temp: Arc<Mutex<Option<f32>>>,
 }
 
+impl<J: JournalAccess + Send + 'static> AppState<J> {
+    fn reader_control_service(&self) -> crate::reader_control_service::ReaderControlService {
+        crate::reader_control_service::ReaderControlService::new(
+            self.subsystem.clone(),
+            self.control_clients.clone(),
+            self.download_trackers.clone(),
+            self.reconnect_notifies.clone(),
+            self.ui_tx.clone(),
+            self.status_event_tx.clone(),
+            self.logger.clone(),
+        )
+    }
+}
+
 impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
     fn clone(&self) -> Self {
         Self {
@@ -440,6 +486,48 @@ impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
             cpu_temp: self.cpu_temp.clone(),
         }
     }
+}
+
+fn bridge_download_progress_events(
+    stream_id: String,
+    tracker: Arc<tokio::sync::Mutex<crate::reader_control::DownloadTracker>>,
+    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
+) {
+    if let Ok(tracker) = tracker.try_lock() {
+        spawn_download_progress_bridge(stream_id, tracker.subscribe(), status_event_tx);
+        return;
+    }
+
+    tokio::spawn(async move {
+        let rx = {
+            let tracker = tracker.lock().await;
+            tracker.subscribe()
+        };
+        spawn_download_progress_bridge(stream_id, rx, status_event_tx);
+    });
+}
+
+fn spawn_download_progress_bridge(
+    stream_id: String,
+    mut rx: broadcast::Receiver<crate::reader_control::DownloadEvent>,
+    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
+) {
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let _ = status_event_tx.send(ForwarderStatusEvent::DownloadProgress {
+                        stream_id: stream_id.clone(),
+                        event,
+                    });
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::debug!(skipped = n, "download status bridge lagged");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
 }
 
 impl StatusServer {
@@ -464,6 +552,19 @@ impl StatusServer {
             subsystem: self.subsystem.clone(),
             status_event_tx: self.status_event_tx.clone(),
         }
+    }
+
+    /// Return the shared reader-control service used by HTTP and P2P control paths.
+    pub fn reader_control_service(&self) -> crate::reader_control_service::ReaderControlService {
+        crate::reader_control_service::ReaderControlService::new(
+            self.subsystem.clone(),
+            self.control_clients.clone(),
+            self.download_trackers.clone(),
+            self.reconnect_notifies.clone(),
+            self.ui_tx.clone(),
+            self.status_event_tx.clone(),
+            self.logger.clone(),
+        )
     }
 
     /// Return a clone of the shared UI logger Arc.
@@ -599,7 +700,12 @@ impl StatusServer {
         self.download_trackers
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(reader_ip.to_owned(), tracker);
+            .insert(reader_ip.to_owned(), tracker.clone());
+        bridge_download_progress_events(
+            reader_ip.to_owned(),
+            tracker,
+            self.status_event_tx.clone(),
+        );
     }
 
     pub fn deregister_download_tracker(&self, reader_ip: &str) {
@@ -2516,38 +2622,6 @@ async fn reader_info_handler<J: JournalAccess + Send + 'static>(
     }
 }
 
-/// Estimate one-way network latency to a reader by measuring RTT of GET_DATE_TIME probes.
-/// Returns (median one-way latency, successful probe count) from 3 probes.
-/// With an even number of successful probes, takes the upper-middle value (conservative estimate).
-async fn estimate_one_way_latency(
-    client: &crate::reader_control::ControlClient,
-) -> Result<(std::time::Duration, usize), String> {
-    const PROBES: usize = 3;
-    let mut rtts = Vec::with_capacity(PROBES);
-    for i in 0..PROBES {
-        let start = std::time::Instant::now();
-        match client.get_date_time().await {
-            Ok(_) => rtts.push(start.elapsed()),
-            Err(e) => tracing::warn!(probe = i + 1, error = %e, "RTT probe failed"),
-        }
-    }
-    if rtts.is_empty() {
-        return Err(
-            "all RTT probes failed; cannot estimate network latency for clock sync".to_string(),
-        );
-    }
-    if rtts.len() < PROBES {
-        tracing::warn!(
-            successful = rtts.len(),
-            total = PROBES,
-            "clock sync latency estimate based on fewer probes than requested"
-        );
-    }
-    rtts.sort();
-    let median_rtt = rtts[rtts.len() / 2];
-    Ok((median_rtt / 2, rtts.len()))
-}
-
 /// Compute the target second boundary and pre-SET wait duration for clock sync.
 ///
 /// Given the current wall time, one-way latency estimate, and the fixed sync delay,
@@ -2611,141 +2685,29 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
 ) -> Response {
-    /// Fixed delay (ms) from SET_DATE_TIME receipt to the new second taking
-    /// effect. The reader resets cs to ~52 and the rollover to second S.000
-    /// occurs ~480ms later; the reader's 0x4c frame reports 500ms.
-    const SYNC_DELAY_MS: u64 = 500;
-
-    let client = {
-        state
-            .control_clients
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&ip)
-            .cloned()
-    };
-    let Some(client) = client else {
-        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
-    };
-
-    use chrono::Datelike;
-    use chrono::Timelike;
-
-    // Step 1: estimate one-way latency
-    let (one_way, _probes) = match estimate_one_way_latency(&client).await {
-        Ok(pair) => pair,
-        Err(msg) => {
-            return json_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({"error": msg}).to_string(),
-            );
-        }
-    };
-
-    let wall_now = chrono::Local::now();
-    let (target_boundary, pre_set_wait) = compute_sync_timing(wall_now, one_way, SYNC_DELAY_MS);
-    if !pre_set_wait.is_zero() {
-        tokio::time::sleep(pre_set_wait).await;
-    }
-
-    let year = (target_boundary.year() % 100) as u8;
-    let month = target_boundary.month() as u8;
-    let day = target_boundary.day() as u8;
-    let dow = target_boundary.weekday().num_days_from_sunday() as u8;
-    let hour = target_boundary.hour() as u8;
-    let minute = target_boundary.minute() as u8;
-    let second = target_boundary.second() as u8;
-
-    if let Err(e) = client
-        .set_date_time(year, month, day, dow, hour, minute, second)
-        .await
-    {
-        // Clear stale clock info so UI doesn't show pre-sync value
-        {
-            let mut info = {
-                let ss = state.subsystem.lock().await;
-                ss.readers
-                    .get(&ip)
-                    .and_then(|r| r.reader_info.clone())
-                    .unwrap_or_default()
-            };
-            info.clock = None;
-            update_cached_reader_info(&state, &ip, info).await;
-        }
-        return json_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"error": e.to_string()}).to_string(),
-        );
-    }
-
-    // Wait for the sync to complete before verifying. The reader needs ~500ms
-    // after receiving SET_DATE_TIME for the new second to take effect. We add
-    // margin for the one-way latency of the SET command itself.
-    let verify_wait = std::time::Duration::from_millis(SYNC_DELAY_MS) + one_way;
-    tokio::time::sleep(verify_wait).await;
-
-    match client.get_date_time().await {
-        Ok(dt) => {
-            let reader_iso = dt.to_iso_string();
-            let verify_now = chrono::Local::now();
-            let drift_ms = match chrono::NaiveDateTime::parse_from_str(
-                &reader_iso,
-                "%Y-%m-%dT%H:%M:%S%.3f",
-            ) {
-                Ok(reader_naive) => Some(
-                    verify_now
-                        .naive_local()
-                        .signed_duration_since(reader_naive)
-                        .num_milliseconds(),
-                ),
-                Err(e) => {
-                    tracing::warn!(
-                        reader_ip = %ip,
-                        reader_clock = %reader_iso,
-                        error = %e,
-                        "clock sync verification: failed to parse reader timestamp for drift calculation"
-                    );
-                    None
-                }
-            };
-
-            // Update stored reader_info and broadcast so SSE subscribers see the new clock
-            {
-                let mut info = {
-                    let ss = state.subsystem.lock().await;
-                    ss.readers
-                        .get(&ip)
-                        .and_then(|r| r.reader_info.clone())
-                        .unwrap_or_default()
-                };
-                info.clock = drift_ms.map(|d| crate::reader_control::ClockInfo {
-                    reader_clock: reader_iso.clone(),
-                    drift_ms: d,
-                });
-                update_cached_reader_info(&state, &ip, info).await;
-            }
-
-            state.logger.log(format!(
-                "reader {} clock synced to {} (one-way latency: {:.1}ms, pre-set wait: {:.0}ms, sync delay: {}ms)",
-                ip,
-                reader_iso,
-                one_way.as_secs_f64() * 1000.0,
-                pre_set_wait.as_secs_f64() * 1000.0,
-                SYNC_DELAY_MS,
-            ));
+    match state.reader_control_service().sync_clock(&ip).await {
+        Ok(info) => {
+            let clock = info.clock.as_ref();
             json_response(
                 StatusCode::OK,
-                serde_json::json!({"reader_clock": reader_iso, "clock_drift_ms": drift_ms})
-                    .to_string(),
+                serde_json::json!({
+                    "reader_clock": clock.map(|c| c.reader_clock.clone()),
+                    "clock_drift_ms": clock.map(|c| c.drift_ms),
+                })
+                .to_string(),
             )
+        }
+        Err(e) if e == "reader not connected" => {
+            text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected")
         }
         Err(e) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"error": format!("set ok but verify failed: {}", e)}).to_string(),
+            serde_json::json!({"error": e}).to_string(),
         ),
     }
 }
 
+#[cfg(test)]
 async fn update_cached_reader_info<J: JournalAccess + Send + 'static>(
     state: &AppState<J>,
     ip: &str,
@@ -2786,25 +2748,17 @@ async fn get_read_mode_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
 ) -> Response {
-    let client = {
-        state
-            .control_clients
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&ip)
-            .cloned()
-    };
-    let Some(client) = client else {
-        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
-    };
-    match client.get_config3().await {
+    match state.reader_control_service().get_read_mode(&ip).await {
         Ok((mode, timeout)) => json_response(
             StatusCode::OK,
             serde_json::json!({"mode": mode.as_str(), "timeout": timeout}).to_string(),
         ),
+        Err(e) if e == "reader not connected" => {
+            text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected")
+        }
         Err(e) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"error": e.to_string()}).to_string(),
+            serde_json::json!({"error": e}).to_string(),
         ),
     }
 }
@@ -2835,60 +2789,30 @@ async fn set_read_mode_handler<J: JournalAccess + Send + 'static>(
     Path(ip): Path<String>,
     axum::Json(body): axum::Json<SetReadModeBody>,
 ) -> Response {
-    let client = {
-        state
-            .control_clients
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&ip)
-            .cloned()
-    };
-    let Some(client) = client else {
-        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
-    };
-    let mode = match body.mode.as_str() {
-        "raw" => ipico_core::control::ReadMode::Raw,
-        "event" => ipico_core::control::ReadMode::Event,
-        "fsls" => ipico_core::control::ReadMode::FirstLastSeen,
-        _ => {
+    let mode = match crate::reader_control_service::parse_native_read_mode(&body.mode) {
+        Ok(mode) => mode,
+        Err(e) => {
             return json_response(
                 StatusCode::BAD_REQUEST,
-                serde_json::json!({
-                    "error": format!("unknown mode: {}", body.mode)
-                })
-                .to_string(),
+                serde_json::json!({"error": e}).to_string(),
             );
         }
     };
-    match client.set_config3(mode, body.timeout).await {
-        Ok(()) => {
-            state
-                .logger
-                .log(format!("reader {} read mode set to {}", ip, mode));
-            // Refresh full status so SSE subscribers see the new read mode
-            let mut info = {
-                let ss = state.subsystem.lock().await;
-                ss.readers
-                    .get(&ip)
-                    .and_then(|r| r.reader_info.clone())
-                    .unwrap_or_default()
-            };
-            info.config = Some(crate::reader_control::Config3Info {
-                mode,
-                timeout: body.timeout,
-            });
-            // Only re-emit clock data if this follow-up poll gets a fresh sample.
-            info.clock = None;
-            crate::reader_control::run_status_poll_merge_successes(&client, &mut info).await;
-            update_cached_reader_info(&state, &ip, info).await;
-            json_response(
-                StatusCode::OK,
-                serde_json::json!({"mode": mode.as_str()}).to_string(),
-            )
+    match state
+        .reader_control_service()
+        .set_read_mode(&ip, mode, body.timeout)
+        .await
+    {
+        Ok(_) => json_response(
+            StatusCode::OK,
+            serde_json::json!({"mode": mode.as_str()}).to_string(),
+        ),
+        Err(e) if e == "reader not connected" => {
+            text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected")
         }
         Err(e) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"error": e.to_string()}).to_string(),
+            serde_json::json!({"error": e}).to_string(),
         ),
     }
 }
@@ -2898,25 +2822,17 @@ async fn get_tto_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
 ) -> Response {
-    let client = {
-        state
-            .control_clients
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&ip)
-            .cloned()
-    };
-    let Some(client) = client else {
-        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
-    };
-    match client.get_tag_message_format().await {
-        Ok(format) => json_response(
+    match state.reader_control_service().get_tto(&ip).await {
+        Ok(enabled) => json_response(
             StatusCode::OK,
-            serde_json::json!({"enabled": format.tto_enabled()}).to_string(),
+            serde_json::json!({"enabled": enabled}).to_string(),
         ),
+        Err(e) if e == "reader not connected" => {
+            text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected")
+        }
         Err(e) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"error": e.to_string()}).to_string(),
+            serde_json::json!({"error": e}).to_string(),
         ),
     }
 }
@@ -2927,59 +2843,21 @@ async fn set_tto_handler<J: JournalAccess + Send + 'static>(
     Path(ip): Path<String>,
     axum::Json(body): axum::Json<SetTtoBody>,
 ) -> Response {
-    let client = {
-        state
-            .control_clients
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&ip)
-            .cloned()
-    };
-    let Some(client) = client else {
-        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
-    };
-
-    let current = match client.get_tag_message_format().await {
-        Ok(format) => format,
-        Err(e) => {
-            return json_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({"error": e.to_string()}).to_string(),
-            );
-        }
-    };
-    let updated = current.with_tto_enabled(body.enabled);
-    if let Err(e) = client.set_tag_message_format(updated).await {
-        return json_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"error": e.to_string()}).to_string(),
-        );
-    }
-
-    match client.get_tag_message_format().await {
-        Ok(format) => {
-            let enabled = format.tto_enabled();
-            let mut info = {
-                let ss = state.subsystem.lock().await;
-                ss.readers
-                    .get(&ip)
-                    .and_then(|r| r.reader_info.clone())
-                    .unwrap_or_default()
-            };
-            info.tto_enabled = Some(enabled);
-            update_cached_reader_info(&state, &ip, info).await;
-            let label = if enabled { "enabled" } else { "disabled" };
-            state
-                .logger
-                .log(format!("reader {} TTO reporting {}", ip, label));
-            json_response(
-                StatusCode::OK,
-                serde_json::json!({"enabled": enabled}).to_string(),
-            )
+    match state
+        .reader_control_service()
+        .set_tto(&ip, body.enabled)
+        .await
+    {
+        Ok(info) => json_response(
+            StatusCode::OK,
+            serde_json::json!({"enabled": info.tto_enabled.unwrap_or(body.enabled)}).to_string(),
+        ),
+        Err(e) if e == "reader not connected" => {
+            text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected")
         }
         Err(e) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"error": format!("set ok but verify failed: {}", e)}).to_string(),
+            serde_json::json!({"error": e}).to_string(),
         ),
     }
 }
@@ -2989,35 +2867,24 @@ async fn refresh_handler_reader<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
 ) -> Response {
-    let client = {
-        state
-            .control_clients
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&ip)
-            .cloned()
-    };
-    let Some(client) = client else {
-        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
-    };
-    let mut info = {
-        let ss = state.subsystem.lock().await;
-        ss.readers
-            .get(&ip)
-            .and_then(|r| r.reader_info.clone())
-            .unwrap_or_default()
-    };
-    crate::reader_control::run_status_poll(&client, &mut info).await;
-    update_cached_reader_info(&state, &ip, info.clone()).await;
-    match serde_json::to_string(&info) {
-        Ok(json) => json_response(StatusCode::OK, json),
-        Err(e) => {
-            tracing::error!(error = %e, "failed to serialize reader info");
-            json_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                r#"{"error":"internal serialization error"}"#.to_owned(),
-            )
+    match state.reader_control_service().refresh(&ip).await {
+        Ok(info) => match serde_json::to_string(&info) {
+            Ok(json) => json_response(StatusCode::OK, json),
+            Err(e) => {
+                tracing::error!(error = %e, "failed to serialize reader info");
+                json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    r#"{"error":"internal serialization error"}"#.to_owned(),
+                )
+            }
+        },
+        Err(e) if e == "reader not connected" => {
+            text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected")
         }
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": e}).to_string(),
+        ),
     }
 }
 
@@ -3026,28 +2893,14 @@ async fn clear_records_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
 ) -> Response {
-    let client = {
-        state
-            .control_clients
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&ip)
-            .cloned()
-    };
-    let Some(client) = client else {
-        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
-    };
-    state
-        .logger
-        .log(format!("reader {} clearing onboard records...", ip));
-    match client.clear_records().await {
-        Ok(()) => {
-            state.logger.log(format!("reader {} records cleared", ip));
-            json_response(StatusCode::OK, "{\"ok\":true}".to_owned())
+    match state.reader_control_service().clear_records(&ip).await {
+        Ok(()) => json_response(StatusCode::OK, "{\"ok\":true}".to_owned()),
+        Err(e) if e == "reader not connected" => {
+            text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected")
         }
         Err(e) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"error": e.to_string()}).to_string(),
+            serde_json::json!({"error": e}).to_string(),
         ),
     }
 }
@@ -3058,47 +2911,21 @@ async fn set_recording_handler<J: JournalAccess + Send + 'static>(
     Path(ip): Path<String>,
     axum::Json(body): axum::Json<SetRecordingBody>,
 ) -> Response {
-    let client = {
-        state
-            .control_clients
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&ip)
-            .cloned()
-    };
-    let Some(client) = client else {
-        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
-    };
-    let label = if body.enabled { "on" } else { "off" };
-    state
-        .logger
-        .log(format!("reader {} setting recording {}", ip, label));
-    match client.set_recording(body.enabled).await {
-        Ok(ext) => {
-            // Refresh full status so SSE subscribers see the new recording state
-            let mut info = {
-                let ss = state.subsystem.lock().await;
-                ss.readers
-                    .get(&ip)
-                    .and_then(|r| r.reader_info.clone())
-                    .unwrap_or_default()
-            };
-            // Set recording/stored_reads from the set_recording response as a baseline.
-            // If run_status_poll's get_extended_status succeeds, it overwrites with fresher values.
-            // If it fails, these values from the confirmed set_recording response persist.
-            info.recording = Some(ext.recording_state.is_recording());
-            info.estimated_stored_reads = Some(ext.estimated_stored_reads());
-            crate::reader_control::run_status_poll(&client, &mut info).await;
-            update_cached_reader_info(&state, &ip, info.clone()).await;
-            let recording = info.recording.unwrap_or(false);
-            json_response(
-                StatusCode::OK,
-                serde_json::json!({"recording": recording}).to_string(),
-            )
+    match state
+        .reader_control_service()
+        .set_recording(&ip, body.enabled)
+        .await
+    {
+        Ok(info) => json_response(
+            StatusCode::OK,
+            serde_json::json!({"recording": info.recording.unwrap_or(false)}).to_string(),
+        ),
+        Err(e) if e == "reader not connected" => {
+            text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected")
         }
         Err(e) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"error": e.to_string()}).to_string(),
+            serde_json::json!({"error": e}).to_string(),
         ),
     }
 }
@@ -3108,20 +2935,9 @@ async fn reconnect_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
 ) -> Response {
-    let notify = {
-        state
-            .reconnect_notifies
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&ip)
-            .cloned()
-    };
-    match notify {
-        Some(n) => {
-            n.notify_one();
-            json_response(StatusCode::OK, r#"{"ok":true}"#.to_string())
-        }
-        None => json_response(
+    match state.reader_control_service().reconnect(&ip).await {
+        Ok(()) => json_response(StatusCode::OK, r#"{"ok":true}"#.to_string()),
+        Err(_) => json_response(
             StatusCode::NOT_FOUND,
             r#"{"error":"reader not found"}"#.to_string(),
         ),
@@ -3133,89 +2949,25 @@ async fn download_reads_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
 ) -> Response {
-    let client = {
-        state
-            .control_clients
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&ip)
-            .cloned()
-    };
-    let Some(client) = client else {
-        return json_response(
+    match state.reader_control_service().start_download(&ip).await {
+        Ok(estimated_reads) => json_response(
+            StatusCode::ACCEPTED,
+            serde_json::json!({"status": "started", "estimated_reads": estimated_reads})
+                .to_string(),
+        ),
+        Err(e) if e == "reader not connected" => json_response(
             StatusCode::SERVICE_UNAVAILABLE,
             r#"{"error":"reader not connected"}"#.to_string(),
-        );
-    };
-    let tracker = {
-        state
-            .download_trackers
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&ip)
-            .cloned()
-    };
-    let Some(tracker) = tracker else {
-        return json_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            r#"{"error":"reader not connected"}"#.to_string(),
-        );
-    };
-
-    // Check current state and prepare
-    {
-        let mut dt = tracker.lock().await;
-        match dt.state() {
-            crate::reader_control::DownloadState::Starting
-            | crate::reader_control::DownloadState::Downloading => {
-                return json_response(
-                    StatusCode::CONFLICT,
-                    r#"{"error":"download already in progress"}"#.to_string(),
-                );
-            }
-            crate::reader_control::DownloadState::Complete
-            | crate::reader_control::DownloadState::Error(_) => {
-                dt.reset();
-            }
-            crate::reader_control::DownloadState::Idle => {}
-        }
-        dt.begin_startup();
+        ),
+        Err(e) if e == "download already in progress" => json_response(
+            StatusCode::CONFLICT,
+            r#"{"error":"download already in progress"}"#.to_string(),
+        ),
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": e}).to_string(),
+        ),
     }
-
-    // Get estimated_stored_reads from reader_info
-    let estimated_reads = {
-        let ss = state.subsystem.lock().await;
-        ss.readers
-            .get(&ip)
-            .and_then(|r| r.reader_info.as_ref())
-            .and_then(|ri| ri.estimated_stored_reads)
-            .unwrap_or(0)
-    };
-
-    // Spawn background task to initiate the download
-    let bg_tracker = tracker.clone();
-    let bg_ip = ip.clone();
-    tokio::spawn(
-        async move {
-            match client.start_download().await {
-                Ok(ext) => {
-                    let mut dt = bg_tracker.lock().await;
-                    dt.start(ext.stored_data_extent);
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "download start failed");
-                    let mut dt = bg_tracker.lock().await;
-                    dt.fail(format!("{}", e));
-                }
-            }
-        }
-        .instrument(tracing::info_span!("download_start", reader_ip = %bg_ip)),
-    );
-
-    json_response(
-        StatusCode::ACCEPTED,
-        serde_json::json!({"status": "started", "estimated_reads": estimated_reads}).to_string(),
-    )
 }
 
 async fn download_progress_handler<J: JournalAccess + Send + 'static>(
@@ -6409,6 +6161,55 @@ target = "192.168.1.100:10000"
                 "progress stream must not terminate with idle immediately after start trigger; chunk={text:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn download_progress_broadcasts_forwarder_status_event() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        let tracker = Arc::new(tokio::sync::Mutex::new(
+            crate::reader_control::DownloadTracker::new(),
+        ));
+        server.register_download_tracker(reader_ip, Arc::clone(&tracker));
+        let mut events = server.status_feed().subscribe_and_snapshot().await.0;
+
+        {
+            let mut tracker = tracker.lock().await;
+            tracker.begin_startup();
+            tracker.start(100);
+            tracker.record_read();
+        }
+
+        let event = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match events.recv().await.expect("status event") {
+                    ForwarderStatusEvent::DownloadProgress { stream_id, event } => {
+                        break (stream_id, event);
+                    }
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("download progress status event");
+
+        assert_eq!(event.0, reader_ip);
+        assert!(matches!(
+            event.1,
+            crate::reader_control::DownloadEvent::Downloading {
+                reads_received: 1,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

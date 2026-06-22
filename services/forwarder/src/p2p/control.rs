@@ -25,11 +25,12 @@ use prost::Message;
 use rt_iroh::Connection;
 use rt_iroh::{RecvStream, SendStream};
 use rt_p2p_protocol::{
-    CAP_CONTROL_EVENTS, CAP_REMOTE_CONFIG, ConfigGetRequest, ConfigGetResponse, ConfigSetRequest,
-    ConfigSetResponse, ControlC2F, ControlF2C, DownloadProgress, Hello, MAX_FRAME_BYTES, Ping,
-    Pong, ProtocolError, ProtocolErrorCode, ReaderControlRequest, ReaderControlResponse,
-    ReaderInfo, ReaderStatus, RestartRequest, RestartResponse, StreamCatalog, SyncClock, UpsStatus,
-    WireProtocolError, control_c2f, control_f2c, encode_frame, negotiate,
+    CAP_CONTROL_EVENTS, CAP_READER_CONTROL, CAP_REMOTE_CONFIG, ConfigGetRequest, ConfigGetResponse,
+    ConfigSetRequest, ConfigSetResponse, ControlC2F, ControlF2C, DownloadProgress, Hello,
+    MAX_FRAME_BYTES, Ping, Pong, ProtocolError, ProtocolErrorCode, ReaderControlRequest,
+    ReaderControlResponse, ReaderInfo, ReaderStatus, RestartRequest, RestartResponse,
+    StreamCatalog, SyncClock, UpsStatus, WireProtocolError, control_c2f, control_f2c, encode_frame,
+    negotiate,
 };
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
@@ -80,6 +81,11 @@ pub type ReaderControlFuture<'a> = Pin<Box<dyn Future<Output = ReaderControlResp
 
 /// Handles typed reader-control requests received from the P2P control stream.
 pub trait ReaderControlHandler: std::fmt::Debug + Send + Sync + 'static {
+    /// Returns true when this handler provides real reader-control operations.
+    fn supports_reader_control(&self) -> bool {
+        false
+    }
+
     /// Performs the requested action and returns the response to send back to
     /// the receiver. Implementations must not tunnel control results through
     /// data-plane read records.
@@ -125,6 +131,10 @@ impl<C> ReaderControlHandler for SyncClockDriftHandler<C>
 where
     C: SyncClockSource,
 {
+    fn supports_reader_control(&self) -> bool {
+        true
+    }
+
     fn handle(&self, request: ReaderControlRequest) -> ReaderControlFuture<'_> {
         let clock_source = Arc::clone(&self.clock_source);
         Box::pin(async move {
@@ -134,6 +144,7 @@ where
                     request_id: request.request_id,
                     success: false,
                     message: format!("unsupported reader control command: {}", request.command),
+                    reader_info_json: None,
                 };
             }
 
@@ -143,12 +154,14 @@ where
                     request_id: request.request_id,
                     success: true,
                     message: format!("clock drift recorded: {}ms", clock.drift_ms),
+                    reader_info_json: None,
                 },
                 Err(error) => ReaderControlResponse {
                     stream_id: request.stream_id,
                     request_id: request.request_id,
                     success: false,
                     message: error,
+                    reader_info_json: None,
                 },
             }
         })
@@ -168,6 +181,7 @@ impl ReaderControlHandler for NoopReaderControlHandler {
                 request_id: request.request_id,
                 success: false,
                 message: "reader control handler not configured".to_owned(),
+                reader_info_json: None,
             }
         })
     }
@@ -385,10 +399,18 @@ pub(crate) async fn negotiate_control_stream(
     handshake_timeout: Duration,
     heartbeat: HeartbeatConfig,
     remote_config: &dyn RemoteConfigHandler,
+    reader_control: &dyn ReaderControlHandler,
 ) -> Result<(SendStream, RecvStream, Vec<String>), BoxError> {
     match tokio::time::timeout(
         handshake_timeout,
-        negotiate_and_serve_catalog_stream(send, recv, catalog, heartbeat, remote_config),
+        negotiate_and_serve_catalog_stream(
+            send,
+            recv,
+            catalog,
+            heartbeat,
+            remote_config,
+            reader_control,
+        ),
     )
     .await
     {
@@ -406,13 +428,14 @@ pub(crate) async fn run_control_stream_loop(
     recv: RecvStream,
     heartbeat: HeartbeatConfig,
     outbound_events: Option<ControlEventReceiver>,
+    reader_control: Arc<dyn ReaderControlHandler>,
     remote_config: Arc<dyn RemoteConfigHandler>,
 ) -> Result<(), BoxError> {
     run_control_loop(
         send,
         recv,
         heartbeat,
-        Arc::new(NoopReaderControlHandler),
+        reader_control,
         outbound_events,
         remote_config,
     )
@@ -464,6 +487,7 @@ pub(crate) async fn serve_control_stream_with_typed_control(
         handshake_timeout,
         heartbeat,
         remote_config.as_ref(),
+        reader_control.as_ref(),
     )
     .await?;
 
@@ -491,6 +515,7 @@ async fn negotiate_and_serve_catalog_stream(
     catalog: &dyn CatalogProvider,
     heartbeat: HeartbeatConfig,
     remote_config: &dyn RemoteConfigHandler,
+    reader_control: &dyn ReaderControlHandler,
 ) -> Result<(SendStream, RecvStream, Vec<String>), BoxError> {
     let control = read_frame::<ControlC2F>(&mut recv).await?;
     let client_hello = match control.msg {
@@ -509,6 +534,11 @@ async fn negotiate_and_serve_catalog_stream(
     // only when both peers advertise it.
     if remote_config.allow_remote_config() {
         server_hello.capabilities.push(CAP_REMOTE_CONFIG.to_owned());
+    }
+    if reader_control.supports_reader_control() {
+        server_hello
+            .capabilities
+            .push(CAP_READER_CONTROL.to_owned());
     }
 
     let hello_ok = match negotiate(&client_hello, &server_hello) {
@@ -873,6 +903,10 @@ mod tests {
     struct EchoControlHandler;
 
     impl ReaderControlHandler for EchoControlHandler {
+        fn supports_reader_control(&self) -> bool {
+            true
+        }
+
         fn handle(&self, request: ReaderControlRequest) -> ReaderControlFuture<'_> {
             Box::pin(async move {
                 rt_p2p_protocol::ReaderControlResponse {
@@ -880,6 +914,7 @@ mod tests {
                     request_id: "handler-local-id".to_owned(),
                     success: true,
                     message: format!("handled {}", request.command),
+                    reader_info_json: None,
                 }
             })
         }
@@ -892,6 +927,10 @@ mod tests {
     }
 
     impl ReaderControlHandler for SlowControlHandler {
+        fn supports_reader_control(&self) -> bool {
+            true
+        }
+
         fn handle(&self, request: ReaderControlRequest) -> ReaderControlFuture<'_> {
             let started_tx = self.started_tx.lock().unwrap().take();
             let release_rx = self.release_rx.lock().unwrap().take();
@@ -907,6 +946,7 @@ mod tests {
                     request_id: "handler-local-slow-id".to_owned(),
                     success: true,
                     message: format!("handled {}", request.command),
+                    reader_info_json: None,
                 }
             })
         }
@@ -1067,6 +1107,46 @@ mod tests {
                 assert!(
                     rt_p2p_protocol::has_capability(&ok.capabilities, CAP_REMOTE_CONFIG),
                     "remote-config capability must be advertised when enabled"
+                );
+            }
+            other => return Err(format!("expected HelloOk, got {other:?}").into()),
+        }
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reader_control_capability_advertised_when_handler_installed() -> TestResult {
+        let mut hello = forwarder_hello();
+        hello.capabilities.push(CAP_READER_CONTROL.to_owned());
+        let (forwarder, forwarder_addr, handle) = spawn_forwarder_with_control(
+            [57; 32],
+            StaticCatalog::new(sample_catalog()),
+            LONG_HANDSHAKE,
+            quiet_heartbeat(),
+            Arc::new(EchoControlHandler),
+            None,
+            Arc::new(NoopRemoteConfigHandler),
+        )
+        .await?;
+
+        let receiver = EndpointBuilder::test([58; 32]).bind().await?;
+        let (connection, _send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, hello),
+        )
+        .await??;
+
+        let hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        match hello_ok.msg {
+            Some(control_f2c::Msg::HelloOk(ok)) => {
+                assert!(
+                    rt_p2p_protocol::has_capability(&ok.capabilities, CAP_READER_CONTROL),
+                    "reader-control capability must be advertised when a handler is installed"
                 );
             }
             other => return Err(format!("expected HelloOk, got {other:?}").into()),
@@ -1486,6 +1566,9 @@ mod tests {
                         stream_id: stream_id.clone(),
                         command: "refresh".to_owned(),
                         request_id: "req-1".to_owned(),
+                        mode: None,
+                        timeout: None,
+                        enabled: None,
                     },
                 )),
             },
@@ -1549,6 +1632,9 @@ mod tests {
                         stream_id,
                         command: "refresh".to_owned(),
                         request_id: "slow-1".to_owned(),
+                        mode: None,
+                        timeout: None,
+                        enabled: None,
                     },
                 )),
             },
@@ -1656,6 +1742,9 @@ mod tests {
                         stream_id: stream_id.clone(),
                         command: "sync_clock".to_owned(),
                         request_id: "sync-1".to_owned(),
+                        mode: None,
+                        timeout: None,
+                        enabled: None,
                     },
                 )),
             },

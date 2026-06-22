@@ -725,6 +725,8 @@ mod tests {
             config_get_json: String::new(),
             config_restart_needed: false,
             respond_to_config_requests: true,
+            reader_control_info_json: None,
+            respond_to_reader_control_requests: true,
         }
     }
 

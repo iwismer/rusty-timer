@@ -63,18 +63,35 @@ const mockState = vi.hoisted(() => {
     connectForwarder: vi.fn(async () => {}),
     disconnectForwarder: vi.fn(async () => {}),
     reconnectForwarder: vi.fn(async () => {}),
+    loadConnections: vi.fn(async () => {}),
+    readerControl: vi.fn(async () => ({
+      success: true,
+      message: "",
+      reader_info: null,
+    })),
     open: vi.fn(async () => {}),
   };
 });
 
 vi.mock("$lib/store.svelte", () => ({
   store: mockState.store,
+  loadConnections: mockState.loadConnections,
 }));
 
 vi.mock("$lib/api", () => ({
   connectForwarder: mockState.connectForwarder,
   disconnectForwarder: mockState.disconnectForwarder,
   reconnectForwarder: mockState.reconnectForwarder,
+  readerClearRecords: mockState.readerControl,
+  readerGetInfo: mockState.readerControl,
+  readerReconnect: mockState.readerControl,
+  readerRefresh: mockState.readerControl,
+  readerSetReadMode: mockState.readerControl,
+  readerSetRecording: mockState.readerControl,
+  readerSetTto: mockState.readerControl,
+  readerStartDownload: mockState.readerControl,
+  readerStopDownload: mockState.readerControl,
+  readerSyncClock: mockState.readerControl,
   getForwarderConfig: vi.fn(),
   setForwarderConfig: vi.fn(),
   restartForwarder: vi.fn(),

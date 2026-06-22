@@ -44,7 +44,7 @@ pub mod proto {
     pub use crate::generated::*;
 }
 
-pub use capabilities::{CAP_CONTROL_EVENTS, CAP_REMOTE_CONFIG, has_capability};
+pub use capabilities::{CAP_CONTROL_EVENTS, CAP_READER_CONTROL, CAP_REMOTE_CONFIG, has_capability};
 pub use codec::{Frame, MAX_FRAME_BYTES, decode_frame, decode_message_frame, encode_frame};
 pub use error::{ProtocolError, ProtocolErrorCode};
 pub use generated::{

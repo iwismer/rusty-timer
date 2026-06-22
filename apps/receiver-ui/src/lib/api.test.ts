@@ -157,6 +157,79 @@ describe("api client", () => {
     });
   });
 
+  it("sends camelCase args for reader-control commands", async () => {
+    const {
+      readerGetInfo,
+      readerSyncClock,
+      readerSetReadMode,
+      readerSetTto,
+      readerSetRecording,
+      readerClearRecords,
+      readerStartDownload,
+      readerStopDownload,
+      readerRefresh,
+      readerReconnect,
+    } = await import("./api");
+    const result = { success: true, message: "", reader_info: null };
+    mockInvoke.mockResolvedValue(result);
+
+    await readerGetInfo("endpoint-1", "stream-a");
+    await readerSyncClock("endpoint-1", "stream-a");
+    await readerSetReadMode("endpoint-1", "stream-a", "event", 7);
+    await readerSetTto("endpoint-1", "stream-a", true);
+    await readerSetRecording("endpoint-1", "stream-a", false);
+    await readerClearRecords("endpoint-1", "stream-a");
+    await readerStartDownload("endpoint-1", "stream-a");
+    await readerStopDownload("endpoint-1", "stream-a");
+    await readerRefresh("endpoint-1", "stream-a");
+    await readerReconnect("endpoint-1", "stream-a");
+
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "reader_get_info", {
+      endpointId: "endpoint-1",
+      streamId: "stream-a",
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "reader_sync_clock", {
+      endpointId: "endpoint-1",
+      streamId: "stream-a",
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(3, "reader_set_read_mode", {
+      endpointId: "endpoint-1",
+      streamId: "stream-a",
+      mode: "event",
+      timeout: 7,
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(4, "reader_set_tto", {
+      endpointId: "endpoint-1",
+      streamId: "stream-a",
+      enabled: true,
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(5, "reader_set_recording", {
+      endpointId: "endpoint-1",
+      streamId: "stream-a",
+      enabled: false,
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(6, "reader_clear_records", {
+      endpointId: "endpoint-1",
+      streamId: "stream-a",
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(7, "reader_start_download", {
+      endpointId: "endpoint-1",
+      streamId: "stream-a",
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(8, "reader_stop_download", {
+      endpointId: "endpoint-1",
+      streamId: "stream-a",
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(9, "reader_refresh", {
+      endpointId: "endpoint-1",
+      streamId: "stream-a",
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(10, "reader_reconnect", {
+      endpointId: "endpoint-1",
+      streamId: "stream-a",
+    });
+  });
+
   it("putSubscriptions sends body with subscriptions", async () => {
     const { putSubscriptions } = await import("./api");
     mockInvoke.mockResolvedValue(undefined);
