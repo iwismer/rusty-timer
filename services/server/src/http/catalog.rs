@@ -8,8 +8,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::http::{AppState, register};
-use crate::registry::{self, DeviceKind, ForwarderCatalogStreamRecord};
+use crate::http::{AppState, authorize_forwarder_catalog};
+use crate::registry::{self, ForwarderCatalogStreamRecord};
 
 #[derive(Debug, Deserialize)]
 pub struct ForwarderCatalogRequest {
@@ -42,27 +42,8 @@ pub async fn push_catalog(
     headers: HeaderMap,
     Json(req): Json<ForwarderCatalogRequest>,
 ) -> Response {
-    let authorized = if register::authorized(&headers, &state.provisioning_token_hash) {
-        true
-    } else if let Some(raw_bearer) = register::bearer_token(&headers) {
-        let conn = state.conn.lock().expect("registry mutex poisoned");
-        match registry::device_token_authorized(
-            &conn,
-            &req.endpoint_id,
-            DeviceKind::Forwarder,
-            raw_bearer,
-        ) {
-            Ok(authorized) => authorized,
-            Err(err) => {
-                tracing::error!(error = %err, "catalog token authorization failed");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        }
-    } else {
-        false
-    };
-    if !authorized {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if let Err(status) = authorize_forwarder_catalog(&state, &headers, &req.endpoint_id) {
+        return status.into_response();
     }
 
     let streams = req

@@ -8,8 +8,8 @@ use axum::{
 };
 use serde::Serialize;
 
-use crate::http::{AppState, register};
-use crate::registry::{self, ApprovedForwarderWithStreams};
+use crate::http::{AppState, authorize_active_device_kind};
+use crate::registry::{self, ApprovedForwarderWithStreams, DeviceKind};
 
 #[derive(Debug, Serialize)]
 pub struct ForwardersResponse {
@@ -22,8 +22,8 @@ pub struct ForwardersResponse {
 /// `GET /allowlist/receivers`). Returns only approved (`active`) forwarder
 /// devices joined with their pushed stream catalog.
 pub async fn list_forwarders(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !register::authorized(&headers, &state.provisioning_token_hash) {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if let Err(status) = authorize_active_device_kind(&state, &headers, DeviceKind::Receiver) {
+        return status.into_response();
     }
 
     let forwarders = {
@@ -144,6 +144,65 @@ mod tests {
     async fn forwarders_requires_bearer_auth() {
         let resp = router(test_state())
             .oneshot(forwarders_request("wrong-token"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn forwarders_accepts_active_receiver_device_token() {
+        let state = test_state();
+        let token = {
+            let conn = state.conn.lock().unwrap();
+            let minted = crate::registry::register_device_minted(
+                &conn,
+                "rx-1",
+                crate::registry::DeviceKind::Receiver,
+            )
+            .unwrap();
+            crate::registry::approve_device(&conn, "rx-1")
+                .unwrap()
+                .unwrap();
+            minted.device_token
+        };
+        let resp = router(state)
+            .oneshot(forwarders_request(&token))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn forwarders_denies_pending_receiver_and_forwarder_tokens() {
+        let state = test_state();
+        let (pending_rx, active_fwd) = {
+            let conn = state.conn.lock().unwrap();
+            let rx = crate::registry::register_device_minted(
+                &conn,
+                "rx-1",
+                crate::registry::DeviceKind::Receiver,
+            )
+            .unwrap();
+            let fwd = crate::registry::register_device_minted(
+                &conn,
+                "fwd-1",
+                crate::registry::DeviceKind::Forwarder,
+            )
+            .unwrap();
+            crate::registry::approve_device(&conn, "fwd-1")
+                .unwrap()
+                .unwrap();
+            (rx.device_token, fwd.device_token)
+        };
+        // Pending receiver is denied.
+        let resp = router(state.clone())
+            .oneshot(forwarders_request(&pending_rx))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        // Active forwarder (wrong kind) is denied.
+        let resp = router(state)
+            .oneshot(forwarders_request(&active_fwd))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);

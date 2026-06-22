@@ -12,12 +12,14 @@ use std::sync::{Arc, Mutex};
 
 use axum::{
     Router,
+    http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
 use rusqlite::Connection;
 use tokio::sync::watch;
 
 use crate::announcer::AnnouncerRuntime;
+use crate::registry::{self, ApprovalState, DeviceKind};
 
 /// Shared application state for HTTP handlers.
 ///
@@ -66,6 +68,88 @@ impl AppState {
         self.allowlist_version.send_modify(|version| {
             *version = version.wrapping_add(1);
         });
+    }
+}
+
+/// Authorize an M2M request that any **active** device of `kind` may make
+/// (receiver allow-list distribution, forwarder discovery, announcer push).
+///
+/// During the migration this accepts, in order: the provisioning token; a
+/// minted device token of the right kind that is `active`; or (legacy) an
+/// enrollment-derived device token of the right kind. `Err(status)` carries the
+/// reject (`401`) or internal-error (`500`) code.
+pub(crate) fn authorize_active_device_kind(
+    state: &AppState,
+    headers: &HeaderMap,
+    kind: DeviceKind,
+) -> Result<(), StatusCode> {
+    if register::authorized(headers, &state.provisioning_token_hash) {
+        return Ok(());
+    }
+    let Some(raw) = register::bearer_token(headers) else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let conn = state.conn.lock().expect("registry mutex poisoned");
+    match registry::authenticate_device(&conn, raw) {
+        Ok(Some(record)) => {
+            if record.device_kind == kind && record.approval_state == ApprovalState::Active {
+                return Ok(());
+            }
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::error!(error = %err, "device authentication failed");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+    // Legacy fallback (removed in Phase 4): enrollment-derived device token.
+    match registry::any_device_token_authorized(&conn, kind, raw) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(StatusCode::UNAUTHORIZED),
+        Err(err) => {
+            tracing::error!(error = %err, "legacy device authorization failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// Authorize a forwarder catalog push for `endpoint_id`, regardless of approval
+/// state (a pending forwarder must publish its catalog so an admin can approve
+/// it). Accepts the provisioning token, the forwarder's own minted token, or
+/// (legacy) its enrollment-derived device token.
+pub(crate) fn authorize_forwarder_catalog(
+    state: &AppState,
+    headers: &HeaderMap,
+    endpoint_id: &str,
+) -> Result<(), StatusCode> {
+    if register::authorized(headers, &state.provisioning_token_hash) {
+        return Ok(());
+    }
+    let Some(raw) = register::bearer_token(headers) else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let conn = state.conn.lock().expect("registry mutex poisoned");
+    match registry::authenticate_device(&conn, raw) {
+        Ok(Some(record)) => {
+            if record.device_kind == DeviceKind::Forwarder && record.endpoint_id == endpoint_id {
+                return Ok(());
+            }
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::error!(error = %err, "device authentication failed");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+    match registry::device_token_authorized(&conn, endpoint_id, DeviceKind::Forwarder, raw) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(StatusCode::UNAUTHORIZED),
+        Err(err) => {
+            tracing::error!(error = %err, "legacy catalog authorization failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
 }
 

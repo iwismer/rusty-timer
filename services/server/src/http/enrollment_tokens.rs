@@ -62,9 +62,6 @@ pub async fn create_token(
     let Some(device_kind) = DeviceKind::parse(&req.device_kind) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    if device_kind != DeviceKind::Forwarder {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
 
     let token = match req.token {
         Some(raw) => {
@@ -292,12 +289,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_token_rejects_non_forwarder_device_kind() {
+    async fn create_token_allows_receiver_device_kind() {
         let resp = router(test_state())
             .oneshot(create_request(
                 Some("alice"),
                 &serde_json::json!({
                     "device_kind": "receiver"
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn create_token_rejects_invalid_device_kind() {
+        let resp = router(test_state())
+            .oneshot(create_request(
+                Some("alice"),
+                &serde_json::json!({
+                    "device_kind": "banana"
                 }),
             ))
             .await
