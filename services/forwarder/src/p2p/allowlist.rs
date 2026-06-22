@@ -376,21 +376,28 @@ impl ServerCatalogClient {
         }
     }
 
-    /// Self-registers this forwarder as a pending/known device on the server.
-    pub async fn register_forwarder(&self, endpoint_id: &str) -> Result<(), CatalogPushError> {
+    /// Bootstrap this forwarder against the server `/register` endpoint using the
+    /// configured bearer (an enrollment voucher on first boot, or the device's
+    /// own token for same-endpoint recovery), returning the server-minted
+    /// per-device token. The caller persists it and uses it for all later calls.
+    pub async fn bootstrap(&self, endpoint_id: &str) -> Result<String, CatalogPushError> {
         let url = format!("{}/register", self.base_url);
-        self.http
+        let response = self
+            .http
             .post(url)
             .bearer_auth(self.bearer_token.as_ref())
             .json(&RegisterForwarderRequest {
                 endpoint_id,
                 device_kind: "forwarder",
-                device_token: self.bearer_token.as_ref(),
             })
             .send()
             .await?
-            .error_for_status()?;
-        Ok(())
+            .error_for_status()?
+            .json::<RegisterResponse>()
+            .await?;
+        response
+            .device_token
+            .ok_or(CatalogPushError::MissingMintedToken)
     }
 
     /// Pushes this forwarder's latest identity and stream catalog.
@@ -411,7 +418,13 @@ impl ServerCatalogClient {
 struct RegisterForwarderRequest<'a> {
     endpoint_id: &'a str,
     device_kind: &'static str,
-    device_token: &'a str,
+}
+
+/// Subset of the server `/register` response the forwarder needs.
+#[derive(Debug, Deserialize)]
+struct RegisterResponse {
+    #[serde(default)]
+    device_token: Option<String>,
 }
 
 /// Wire-format forwarder catalog pushed to the server.
@@ -437,6 +450,8 @@ pub enum CatalogPushError {
     // request headers, so the bearer token cannot leak here.
     #[error("server catalog request failed: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("server /register did not return a minted device token")]
+    MissingMintedToken,
 }
 
 /// Wire-format receiver allow-list snapshot distributed by the server.
@@ -983,11 +998,28 @@ mod tests {
         StatusCode::OK.into_response()
     }
 
+    /// `/register` mock: records the request and returns a minted device token.
+    async fn test_register_handler(
+        State(state): State<TestCatalogServerState>,
+        headers: HeaderMap,
+        Json(body): Json<serde_json::Value>,
+    ) -> Response {
+        let authorized = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == format!("Bearer {}", state.bearer_token));
+        if !authorized {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        *state.received.lock().await = Some((headers.clone(), body));
+        Json(serde_json::json!({ "device_token": "rtk_minted_secret" })).into_response()
+    }
+
     #[tokio::test]
     async fn catalog_client_posts_registration_and_catalog_with_bearer() -> TestResult {
         let received = Arc::new(TokioMutex::new(None));
         let app = Router::new()
-            .route("/register", post(test_catalog_handler))
+            .route("/register", post(test_register_handler))
             .route("/forwarder/catalog", post(test_catalog_handler))
             .with_state(TestCatalogServerState {
                 bearer_token: "thin-secret",
@@ -1000,10 +1032,11 @@ mod tests {
         });
 
         let client = ServerCatalogClient::new(base_url, "thin-secret");
-        client
-            .register_forwarder("fwd-node-1")
+        let minted = client
+            .bootstrap("fwd-node-1")
             .await
-            .expect("registration request succeeds");
+            .expect("bootstrap request succeeds");
+        assert_eq!(minted, "rtk_minted_secret");
         let (headers, register_body) = received
             .lock()
             .await
@@ -1015,7 +1048,6 @@ mod tests {
         );
         assert_eq!(register_body["endpoint_id"], "fwd-node-1");
         assert_eq!(register_body["device_kind"], "forwarder");
-        assert_eq!(register_body["device_token"], "thin-secret");
 
         client
             .push_catalog(&ForwarderCatalog {
