@@ -7,6 +7,7 @@ export interface DeviceRecord {
   endpoint_id: string;
   device_kind: DeviceKind;
   approval_state: ApprovalState;
+  display_name: string | null;
 }
 
 export interface ForwarderStreamRecord {

@@ -19,6 +19,10 @@ pub struct RegisterRequest {
     pub device_kind: String,
     /// Per-device bearer token; stored hashed, never in plaintext.
     pub device_token: String,
+    /// Optional human-friendly name the device reports for itself (e.g. a
+    /// receiver's configured receiver ID). Surfaced in the admin approval UI.
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -71,6 +75,30 @@ pub async fn register(
 }
 
 fn register_authorized_device(
+    conn: &rusqlite::Connection,
+    headers: &HeaderMap,
+    provisioning_token_hash: &[u8],
+    req: &RegisterRequest,
+    device_kind: DeviceKind,
+) -> rusqlite::Result<Option<DeviceRecord>> {
+    let Some(record) = register_inner(conn, headers, provisioning_token_hash, req, device_kind)?
+    else {
+        return Ok(None);
+    };
+
+    // Persist the device's self-reported name (e.g. a receiver's receiver ID)
+    // so the admin approval UI shows something human-friendly. A blank name is
+    // ignored, and an admin-assigned enrollment-token name still takes
+    // precedence at read time. Re-fetch so the returned record reflects the
+    // resolved name.
+    if let Some(name) = req.display_name.as_deref() {
+        registry::set_device_display_name(conn, &record.endpoint_id, name)?;
+        return registry::get_device(conn, &record.endpoint_id);
+    }
+    Ok(Some(record))
+}
+
+fn register_inner(
     conn: &rusqlite::Connection,
     headers: &HeaderMap,
     provisioning_token_hash: &[u8],
@@ -165,6 +193,32 @@ mod tests {
             crate::registry::ApprovalState::Pending
         );
         assert_eq!(device.device_kind, crate::registry::DeviceKind::Forwarder);
+    }
+
+    #[tokio::test]
+    async fn register_persists_self_reported_display_name() {
+        let state = test_state();
+        let app = router(state.clone());
+
+        let resp = app
+            .oneshot(register_request(
+                PROV_TOKEN,
+                &serde_json::json!({
+                    "endpoint_id": "ep-receiver-named",
+                    "device_kind": "receiver",
+                    "device_token": "device-bearer-named",
+                    "display_name": "dev-receiver"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let conn = state.conn.lock().unwrap();
+        let device = crate::registry::get_device(&conn, "ep-receiver-named")
+            .unwrap()
+            .expect("device recorded");
+        assert_eq!(device.display_name.as_deref(), Some("dev-receiver"));
     }
 
     #[tokio::test]

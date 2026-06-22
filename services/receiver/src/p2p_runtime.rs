@@ -491,12 +491,13 @@ async fn run_reconcile_loop(
             && let Some(thin) = config.server.clone()
         {
             let endpoint_id = endpoint.node_id().to_string();
+            let receiver_id = state.receiver_id.read().await.clone();
             tokio::select! {
                 biased;
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() { break; }
                 }
-                result = server_startup(thin, endpoint_id) => match result {
+                result = server_startup(thin, endpoint_id, receiver_id) => match result {
                     Ok(generation) => {
                         info!(generation, "server announcer startup succeeded");
                         announcer_generation = Some(generation);
@@ -642,10 +643,19 @@ async fn run_reconcile_loop(
         .await;
 }
 
-async fn server_startup(thin: ServerClientConfig, endpoint_id: String) -> Result<i64, String> {
+async fn server_startup(
+    thin: ServerClientConfig,
+    endpoint_id: String,
+    receiver_id: String,
+) -> Result<i64, String> {
     tokio::task::spawn_blocking(move || {
-        announcer_push::register_receiver_with_server(&thin.url, &thin.token, &endpoint_id)
-            .map_err(|e| e.to_string())?;
+        announcer_push::register_receiver_with_server(
+            &thin.url,
+            &thin.token,
+            &endpoint_id,
+            &receiver_id,
+        )
+        .map_err(|e| e.to_string())?;
         announcer_push::takeover_announcer_generation(&thin.url, &thin.token)
             .map_err(|e| e.to_string())
     })

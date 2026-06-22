@@ -29,6 +29,7 @@ describe("server api client", () => {
             endpoint_id: "fwd-1",
             device_kind: "forwarder",
             approval_state: "active",
+            display_name: "Start Line",
           },
         ],
         forwarder_streams: [],
@@ -40,6 +41,7 @@ describe("server api client", () => {
     expect(status.announcer_source_generation).toBe(3);
     expect(status.devices[0].device_kind).toBe("forwarder");
     expect(status.devices[0].approval_state).toBe("active");
+    expect(status.devices[0].display_name).toBe("Start Line");
     expect(mockFetch).toHaveBeenCalledWith("/status", expect.any(Object));
   });
 
@@ -50,12 +52,14 @@ describe("server api client", () => {
         endpoint_id: "receiver-1",
         device_kind: "receiver",
         approval_state: "active",
+        display_name: "Finish Line",
       }),
     );
 
     const device = await approveDevice("receiver-1", "alice");
 
     expect(device.approval_state).toBe("active");
+    expect(device.display_name).toBe("Finish Line");
     expect(mockFetch).toHaveBeenCalledWith(
       "/admin/devices/approve",
       expect.objectContaining({
@@ -78,6 +82,7 @@ describe("server api client", () => {
         endpoint_id: "receiver-1",
         device_kind: "receiver",
         approval_state: "active",
+        display_name: null,
       }),
     );
 

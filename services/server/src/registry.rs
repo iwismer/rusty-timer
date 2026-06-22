@@ -74,6 +74,11 @@ pub struct DeviceRecord {
     pub endpoint_id: String,
     pub device_kind: DeviceKind,
     pub approval_state: ApprovalState,
+    /// Human-friendly name for the device, if known. Prefers the admin-assigned
+    /// name from the enrollment token used to enroll it, falling back to a
+    /// forwarder's self-pushed catalog name. `None` for legacy devices that
+    /// enrolled without an enrollment token and never pushed a name.
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -261,7 +266,8 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
              approval_state TEXT NOT NULL,
              token_hash BLOB NOT NULL,
              created_unix_ms INTEGER NOT NULL,
-             updated_unix_ms INTEGER NOT NULL
+             updated_unix_ms INTEGER NOT NULL,
+             display_name TEXT
          );
          CREATE TABLE IF NOT EXISTS forwarders (
              endpoint_id TEXT PRIMARY KEY,
@@ -294,7 +300,27 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         reshape_forwarder_streams_pk(conn)?;
     }
 
+    if !devices_has_display_name_column(conn)? {
+        conn.execute_batch("ALTER TABLE devices ADD COLUMN display_name TEXT")?;
+    }
+
     Ok(())
+}
+
+/// Whether the `devices` table already has the `display_name` column.
+///
+/// Older databases created before self-reported device names were added lack
+/// the column; [`migrate`] adds it via `ALTER TABLE` when this returns false.
+fn devices_has_display_name_column(conn: &Connection) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare("PRAGMA table_info(devices)")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == "display_name" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Rebuild `forwarder_streams` with the composite `(endpoint_id, stream_id)`
@@ -833,35 +859,77 @@ pub fn list_approved_forwarders_with_streams(
 }
 
 /// List all registered devices, ordered by endpoint id.
-pub fn list_devices(conn: &Connection) -> rusqlite::Result<Vec<DeviceRecord>> {
-    let mut stmt = conn.prepare(
-        "SELECT endpoint_id, device_kind, approval_state
-         FROM devices
-         ORDER BY endpoint_id",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        let kind_str: String = row.get(1)?;
-        let approval_str: String = row.get(2)?;
-        let device_kind = DeviceKind::parse(&kind_str).ok_or_else(|| {
-            rusqlite::Error::FromSqlConversionFailure(
-                1,
-                rusqlite::types::Type::Text,
-                format!("invalid device_kind: {kind_str}").into(),
-            )
-        })?;
-        let approval_state = ApprovalState::parse(&approval_str).ok_or_else(|| {
-            rusqlite::Error::FromSqlConversionFailure(
-                2,
-                rusqlite::types::Type::Text,
-                format!("invalid approval_state: {approval_str}").into(),
-            )
-        })?;
-        Ok(DeviceRecord {
-            endpoint_id: row.get(0)?,
-            device_kind,
-            approval_state,
-        })
+/// Map a row of `(endpoint_id, device_kind, approval_state, display_name)` into
+/// a [`DeviceRecord`]. Shared by the device list and single-device fetch so
+/// both surface the same human-friendly name resolution.
+fn device_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRecord> {
+    let kind_str: String = row.get(1)?;
+    let approval_str: String = row.get(2)?;
+    let device_kind = DeviceKind::parse(&kind_str).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Text,
+            format!("invalid device_kind: {kind_str}").into(),
+        )
     })?;
+    let approval_state = ApprovalState::parse(&approval_str).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            2,
+            rusqlite::types::Type::Text,
+            format!("invalid approval_state: {approval_str}").into(),
+        )
+    })?;
+    Ok(DeviceRecord {
+        endpoint_id: row.get(0)?,
+        device_kind,
+        approval_state,
+        display_name: row.get(3)?,
+    })
+}
+
+/// SQL selecting device columns plus a resolved human-friendly `display_name`.
+///
+/// The name prefers the admin-assigned name from the most recently used
+/// enrollment token, then the device's self-reported name (e.g. a receiver's
+/// configured receiver ID, sent at registration), then the forwarder's
+/// self-pushed catalog name.
+const DEVICE_SELECT_WITH_NAME: &str = "SELECT d.endpoint_id, d.device_kind, d.approval_state,
+            COALESCE(
+                (SELECT et.display_name FROM enrollment_tokens et
+                 WHERE et.used_endpoint_id = d.endpoint_id
+                   AND et.display_name IS NOT NULL
+                 ORDER BY et.used_unix_ms DESC LIMIT 1),
+                d.display_name,
+                f.display_name
+            ) AS display_name
+     FROM devices d
+     LEFT JOIN forwarders f ON f.endpoint_id = d.endpoint_id";
+
+/// Persist a device's self-reported display name.
+///
+/// Called from the registration path when a device sends a non-empty name
+/// (e.g. a receiver's configured receiver ID). A blank name is ignored so an
+/// unnamed re-registration never clears a previously stored name.
+pub fn set_device_display_name(
+    conn: &Connection,
+    endpoint_id: &str,
+    display_name: &str,
+) -> rusqlite::Result<()> {
+    let trimmed = display_name.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE devices SET display_name = ?2 WHERE endpoint_id = ?1",
+        params![endpoint_id, trimmed],
+    )?;
+    Ok(())
+}
+
+pub fn list_devices(conn: &Connection) -> rusqlite::Result<Vec<DeviceRecord>> {
+    let sql = format!("{DEVICE_SELECT_WITH_NAME}\n         ORDER BY d.endpoint_id");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], device_from_row)?;
 
     rows.collect()
 }
@@ -887,36 +955,9 @@ pub fn list_forwarder_streams(conn: &Connection) -> rusqlite::Result<Vec<Forward
 
 /// Fetch a device record by endpoint id.
 pub fn get_device(conn: &Connection, endpoint_id: &str) -> rusqlite::Result<Option<DeviceRecord>> {
-    conn.query_row(
-        "SELECT endpoint_id, device_kind, approval_state
-         FROM devices
-         WHERE endpoint_id = ?1",
-        [endpoint_id],
-        |row| {
-            let kind_str: String = row.get(1)?;
-            let approval_str: String = row.get(2)?;
-            let device_kind = DeviceKind::parse(&kind_str).ok_or_else(|| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    1,
-                    rusqlite::types::Type::Text,
-                    format!("invalid device_kind: {kind_str}").into(),
-                )
-            })?;
-            let approval_state = ApprovalState::parse(&approval_str).ok_or_else(|| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    2,
-                    rusqlite::types::Type::Text,
-                    format!("invalid approval_state: {approval_str}").into(),
-                )
-            })?;
-            Ok(DeviceRecord {
-                endpoint_id: row.get(0)?,
-                device_kind,
-                approval_state,
-            })
-        },
-    )
-    .optional()
+    let sql = format!("{DEVICE_SELECT_WITH_NAME}\n         WHERE d.endpoint_id = ?1");
+    conn.query_row(&sql, [endpoint_id], device_from_row)
+        .optional()
 }
 
 pub fn current_announcer_source_generation(
@@ -1121,6 +1162,91 @@ mod tests {
         assert_eq!(devices[0].approval_state, ApprovalState::Active);
         assert_eq!(devices[1].endpoint_id, "ep-b");
         assert_eq!(devices[1].approval_state, ApprovalState::Pending);
+    }
+
+    #[test]
+    fn device_display_name_prefers_enrollment_token_then_catalog() {
+        let conn = test_conn();
+
+        // Receiver enrolled via an admin-named enrollment token.
+        create_enrollment_token(
+            &conn,
+            "et-rx",
+            DeviceKind::Receiver,
+            Some("Finish Line"),
+            "rx-token",
+        )
+        .unwrap();
+        register_device_with_enrollment_token(&conn, "ep-rx", DeviceKind::Receiver, "rx-token")
+            .unwrap();
+
+        // Forwarder with an admin token name AND a self-pushed catalog name:
+        // the admin-assigned token name wins.
+        create_enrollment_token(
+            &conn,
+            "et-fwd",
+            DeviceKind::Forwarder,
+            Some("Admin Name"),
+            "fwd-token",
+        )
+        .unwrap();
+        register_device_with_enrollment_token(&conn, "ep-fwd", DeviceKind::Forwarder, "fwd-token")
+            .unwrap();
+        upsert_forwarder_catalog(
+            &conn,
+            "ep-fwd",
+            Some("Pushed Name"),
+            &["127.0.0.1:5000".to_owned()],
+            &[],
+            &hash_token("prov-secret"),
+        )
+        .unwrap();
+
+        // Receiver with a self-reported name (e.g. its receiver ID) set at
+        // registration: surfaced when there is no enrollment-token name.
+        register_device(&conn, "ep-self", DeviceKind::Receiver, "tok").unwrap();
+        set_device_display_name(&conn, "ep-self", "dev-receiver").unwrap();
+
+        // Forwarder with only a self-pushed catalog name (no enrollment token):
+        // falls back to the pushed name.
+        upsert_forwarder_catalog(
+            &conn,
+            "ep-pushed",
+            Some("Pushed Only"),
+            &["127.0.0.1:5001".to_owned()],
+            &[],
+            &hash_token("prov-secret"),
+        )
+        .unwrap();
+
+        // Legacy device with no name source at all.
+        register_device(&conn, "ep-legacy", DeviceKind::Receiver, "tok").unwrap();
+
+        let by_id: std::collections::HashMap<_, _> = list_devices(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|d| (d.endpoint_id.clone(), d))
+            .collect();
+        assert_eq!(by_id["ep-rx"].display_name.as_deref(), Some("Finish Line"));
+        assert_eq!(by_id["ep-fwd"].display_name.as_deref(), Some("Admin Name"));
+        assert_eq!(
+            by_id["ep-self"].display_name.as_deref(),
+            Some("dev-receiver")
+        );
+        assert_eq!(
+            by_id["ep-pushed"].display_name.as_deref(),
+            Some("Pushed Only")
+        );
+        assert_eq!(by_id["ep-legacy"].display_name, None);
+
+        // A blank self-reported name never clears an existing name.
+        set_device_display_name(&conn, "ep-self", "   ").unwrap();
+        let still_named = get_device(&conn, "ep-self").unwrap().unwrap();
+        assert_eq!(still_named.display_name.as_deref(), Some("dev-receiver"));
+
+        // Single-device fetch resolves the same name.
+        let fetched = get_device(&conn, "ep-rx").unwrap().unwrap();
+        assert_eq!(fetched.display_name.as_deref(), Some("Finish Line"));
     }
 
     #[test]

@@ -25,6 +25,10 @@
     return device.device_kind === "forwarder" ? "Forwarder" : "Receiver";
   }
 
+  function displayName(device: DeviceRecord) {
+    return device.display_name?.trim() || "Unnamed device";
+  }
+
   async function loadStatus() {
     try {
       status = await api.getStatus();
@@ -42,7 +46,7 @@
     success = null;
     try {
       const approved = await api.approveDevice(device.endpoint_id);
-      success = `Approved ${approved.endpoint_id}.`;
+      success = `Approved ${displayName(approved)} (${approved.endpoint_id}).`;
       await loadStatus();
     } catch (err) {
       error = String(err);
@@ -66,8 +70,8 @@
     <div>
       <h1 class="text-2xl font-bold text-text-primary m-0">Device approval</h1>
       <p class="text-sm text-text-muted mt-1 mb-0">
-        Approve pending forwarders and receivers. Forwarders provide their own
-        display names; receivers are shown by endpoint ID.
+        Approve pending forwarders and receivers. Each device shows its assigned
+        display name with the endpoint ID underneath for verification.
       </p>
     </div>
     {#if loading}
@@ -112,6 +116,9 @@
           >
             <div>
               <p class="text-sm font-semibold text-text-primary m-0">
+                {displayName(device)}
+              </p>
+              <p class="text-xs text-text-muted mt-1 mb-0">
                 {displayKind(device)}
               </p>
               <p class="text-xs text-text-muted font-mono mt-1 mb-0">
@@ -141,6 +148,9 @@
         {#each activeDevices as device (device.endpoint_id)}
           <div class="rounded-md border border-border bg-surface-2 p-4">
             <p class="text-sm font-semibold text-text-primary m-0">
+              {displayName(device)}
+            </p>
+            <p class="text-xs text-text-muted mt-1 mb-0">
               {displayKind(device)}
             </p>
             <p class="text-xs text-text-muted font-mono mt-1 mb-0">

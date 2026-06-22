@@ -157,21 +157,30 @@ impl AnnouncerPushClient for ServerAnnouncerClient {
 /// Register this receiver endpoint with server under the TOFU `/register`
 /// model (`device_kind = "receiver"`). Already-registered / active endpoints are
 /// tolerated: any `2xx` response is success. The bearer token is never logged.
+///
+/// The configured `receiver_id` is sent as the device's self-reported
+/// `display_name` so the server's admin approval UI can show a human-friendly
+/// name instead of the opaque endpoint ID. A blank receiver ID is omitted.
 pub fn register_receiver_with_server(
     base_url: &str,
     token: &str,
     endpoint_id: &str,
+    receiver_id: &str,
 ) -> Result<(), AnnouncerPushError> {
     let client = reqwest::blocking::Client::builder()
         .timeout(HTTP_TIMEOUT)
         .connect_timeout(HTTP_TIMEOUT)
         .build()
         .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "endpoint_id": endpoint_id,
         "device_kind": "receiver",
         "device_token": token,
     });
+    let trimmed_id = receiver_id.trim();
+    if !trimmed_id.is_empty() {
+        body["display_name"] = serde_json::Value::String(trimmed_id.to_owned());
+    }
     let response = client
         .post(format!("{}/register", base_url.trim_end_matches('/')))
         .bearer_auth(token)
