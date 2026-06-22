@@ -320,17 +320,13 @@ pub fn authenticate_device(
     if !verify_token(secret, &token_hash) {
         return Ok(None);
     }
-    let (Some(device_kind), Some(approval_state)) = (
-        DeviceKind::parse(&kind_raw),
-        ApprovalState::parse(&approval_raw),
-    ) else {
+    // Reject a corrupt row fail-closed (deny) rather than erroring the auth path.
+    if DeviceKind::parse(&kind_raw).is_none() || ApprovalState::parse(&approval_raw).is_none() {
         return Ok(None);
-    };
-    Ok(Some(DeviceRecord {
-        endpoint_id,
-        device_kind,
-        approval_state,
-    }))
+    }
+    // Return the canonical record so the resolved `display_name` is populated
+    // consistently with `get_device`/`list_devices`.
+    get_device(conn, &endpoint_id)
 }
 
 /// Create the registry tables. Idempotent and safe to call on every open.
@@ -961,6 +957,35 @@ pub fn register_device_with_voucher(
     }))
 }
 
+/// Test-only: insert an `active` device with a caller-chosen `token_id`/secret
+/// so tests can authenticate with a deterministic `rtk_<token_id>_<secret>`
+/// bearer instead of a randomly minted one.
+#[cfg(test)]
+pub(crate) fn seed_active_device(
+    conn: &Connection,
+    endpoint_id: &str,
+    device_kind: DeviceKind,
+    token_id: &str,
+    secret: &str,
+) {
+    let now = Utc::now().timestamp_millis();
+    conn.execute(
+        "INSERT INTO devices (
+             endpoint_id, device_kind, approval_state,
+             token_hash, token_id, created_unix_ms, updated_unix_ms
+         )
+         VALUES (?1, ?2, 'active', ?3, ?4, ?5, ?5)",
+        params![
+            endpoint_id,
+            device_kind.as_str(),
+            hash_token(secret),
+            token_id,
+            now
+        ],
+    )
+    .expect("seed_active_device insert");
+}
+
 /// Approve a device, marking it `active`.
 ///
 /// Returns `None` if no device with the given endpoint id exists.
@@ -985,23 +1010,26 @@ pub fn approve_device(
 
 /// Upsert one forwarder's pushed identity and replace its stream catalog.
 ///
-/// Forwarders are expected to pre-register via `POST /register`. For robustness,
-/// a catalog push from an unknown endpoint creates a pending forwarder device
-/// using the in-process provisioning token hash; existing approval state and
-/// admin-assigned device names are preserved.
+/// The forwarder device must already exist (it registers and mints its token
+/// via `POST /register` before pushing a catalog, and the catalog endpoint only
+/// authorizes an existing forwarder). Existing approval state and admin-assigned
+/// names are preserved; this only refreshes the pushed identity and streams.
 pub fn upsert_forwarder_catalog(
     conn: &Connection,
     endpoint_id: &str,
     display_name: Option<&str>,
     direct_addrs: &[String],
     streams: &[ForwarderCatalogStreamRecord],
-    pending_token_hash: &[u8],
 ) -> rusqlite::Result<()> {
     let now = Utc::now().timestamp_millis();
     let direct_addrs_json = serde_json::to_string(direct_addrs)
         .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
     let tx = conn.unchecked_transaction()?;
 
+    // Ensure a device row exists for the FK (it normally already does, since the
+    // catalog endpoint only authorizes an already-registered forwarder). A
+    // token-less `pending` row is a harmless backstop; it carries no `token_id`
+    // so it cannot authenticate until the forwarder mints one via `/register`.
     tx.execute(
         "INSERT INTO devices (
              endpoint_id, device_kind, approval_state,
@@ -1011,7 +1039,7 @@ pub fn upsert_forwarder_catalog(
          ON CONFLICT(endpoint_id) DO UPDATE SET
              device_kind = 'forwarder',
              updated_unix_ms = excluded.updated_unix_ms",
-        params![endpoint_id, pending_token_hash, now],
+        params![endpoint_id, Vec::<u8>::new(), now],
     )?;
 
     tx.execute(
@@ -1538,7 +1566,6 @@ mod tests {
     #[test]
     fn forwarder_listings_use_pushed_catalog_name() {
         let conn = test_conn();
-        let token_hash = hash_token("prov-secret");
         upsert_forwarder_catalog(
             &conn,
             "ep-fwd",
@@ -1549,7 +1576,6 @@ mod tests {
                 epoch: 1,
                 next_seq: 10,
             }],
-            &token_hash,
         )
         .unwrap();
         approve_device(&conn, "ep-fwd").unwrap();
@@ -1610,7 +1636,6 @@ mod tests {
             Some("Pushed Name"),
             &["127.0.0.1:5000".to_owned()],
             &[],
-            &hash_token("prov-secret"),
         )
         .unwrap();
 
@@ -1627,7 +1652,6 @@ mod tests {
             Some("Pushed Only"),
             &["127.0.0.1:5001".to_owned()],
             &[],
-            &hash_token("prov-secret"),
         )
         .unwrap();
 
@@ -1683,7 +1707,6 @@ mod tests {
     #[test]
     fn upsert_forwarder_catalog_creates_pending_device_and_replaces_streams() {
         let conn = test_conn();
-        let token_hash = hash_token("prov-secret");
 
         upsert_forwarder_catalog(
             &conn,
@@ -1702,7 +1725,6 @@ mod tests {
                     next_seq: 20,
                 },
             ],
-            &token_hash,
         )
         .unwrap();
 
@@ -1728,7 +1750,6 @@ mod tests {
                 epoch: 3,
                 next_seq: 30,
             }],
-            &token_hash,
         )
         .unwrap();
 
@@ -1747,7 +1768,6 @@ mod tests {
     #[test]
     fn list_approved_forwarders_with_streams_joins_and_filters() {
         let conn = test_conn();
-        let token_hash = hash_token("prov-secret");
 
         // Approved forwarder with two streams.
         upsert_forwarder_catalog(
@@ -1767,7 +1787,6 @@ mod tests {
                     next_seq: 20,
                 },
             ],
-            &token_hash,
         )
         .unwrap();
         approve_device(&conn, "ep-approved").unwrap().unwrap();
@@ -1783,7 +1802,6 @@ mod tests {
                 epoch: 1,
                 next_seq: 1,
             }],
-            &token_hash,
         )
         .unwrap();
 
@@ -1987,7 +2005,6 @@ mod tests {
                 epoch: 1,
                 next_seq: 2,
             }],
-            &hash_token("provisioning-secret"),
         )
         .unwrap();
 

@@ -188,13 +188,11 @@ mod tests {
     use rusqlite::Connection;
     use tower::ServiceExt;
 
-    const PROV_TOKEN: &str = "prov-secret";
-
     fn test_state() -> AppState {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrate(&conn).unwrap();
         crate::registry::migrate(&conn).unwrap();
-        AppState::new(conn, PROV_TOKEN, true)
+        AppState::new(conn, true)
     }
 
     async fn response_json(resp: axum::response::Response) -> serde_json::Value {
@@ -233,12 +231,23 @@ mod tests {
     #[tokio::test]
     async fn forwarder_catalog_push_appears_in_status() {
         let state = test_state();
+        // The forwarder mints its token via /register before pushing a catalog.
+        let token = {
+            let conn = state.conn.lock().unwrap();
+            crate::registry::register_device_minted(
+                &conn,
+                "fwd-node-1",
+                crate::registry::DeviceKind::Forwarder,
+            )
+            .unwrap()
+            .device_token
+        };
         let app = router(state.clone());
 
         let resp = app
             .clone()
             .oneshot(catalog_request(
-                PROV_TOKEN,
+                &token,
                 &serde_json::json!({
                     "endpoint_id": "fwd-node-1",
                     "display_name": "Start Line",
@@ -451,7 +460,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrate(&conn).unwrap();
         crate::registry::migrate(&conn).unwrap();
-        let state = AppState::new(conn, PROV_TOKEN, false);
+        let state = AppState::new(conn, false);
         {
             let conn = state.conn.lock().unwrap();
             crate::registry::register_device(

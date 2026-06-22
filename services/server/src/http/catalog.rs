@@ -65,7 +65,6 @@ pub async fn push_catalog(
             req.display_name.as_deref(),
             &req.direct_addrs,
             &streams,
-            &state.provisioning_token_hash,
         )
     };
 
@@ -93,13 +92,11 @@ mod tests {
     use rusqlite::Connection;
     use tower::ServiceExt;
 
-    const PROV_TOKEN: &str = "prov-secret";
-
     fn test_state() -> AppState {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrate(&conn).unwrap();
         crate::registry::migrate(&conn).unwrap();
-        AppState::new(conn, PROV_TOKEN, true)
+        AppState::new(conn, true)
     }
 
     fn catalog_request(token: &str, endpoint_id: &str) -> Request<Body> {
@@ -124,90 +121,58 @@ mod tests {
             .unwrap()
     }
 
-    #[tokio::test]
-    async fn catalog_accepts_registered_forwarder_device_token() {
-        let state = test_state();
-        {
-            let conn = state.conn.lock().unwrap();
-            crate::registry::create_enrollment_token(
-                &conn,
-                "tok-1",
-                crate::registry::DeviceKind::Forwarder,
-                None,
-                "forwarder-secret",
-            )
-            .unwrap();
-            crate::registry::register_device_with_enrollment_token(
-                &conn,
-                "ep-fwd",
-                crate::registry::DeviceKind::Forwarder,
-                "forwarder-secret",
-            )
-            .unwrap()
-            .unwrap();
-        }
+    /// Mint a forwarder device token for `endpoint_id` and return the bearer.
+    fn forwarder_token(state: &AppState, endpoint_id: &str) -> String {
+        let conn = state.conn.lock().unwrap();
+        crate::registry::register_device_minted(
+            &conn,
+            endpoint_id,
+            crate::registry::DeviceKind::Forwarder,
+        )
+        .unwrap()
+        .device_token
+    }
 
+    #[tokio::test]
+    async fn catalog_accepts_matching_forwarder_token() {
+        let state = test_state();
+        let token = forwarder_token(&state, "ep-fwd");
         let resp = router(state)
-            .oneshot(catalog_request("forwarder-secret", "ep-fwd"))
+            .oneshot(catalog_request(&token, "ep-fwd"))
             .await
             .unwrap();
-
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
-    async fn catalog_rejects_receiver_device_token() {
+    async fn catalog_rejects_receiver_token() {
         let state = test_state();
-        {
+        let token = {
             let conn = state.conn.lock().unwrap();
-            crate::registry::register_device(
+            crate::registry::register_device_minted(
                 &conn,
                 "ep-receiver",
                 crate::registry::DeviceKind::Receiver,
-                "receiver-secret",
             )
-            .unwrap();
-        }
-
+            .unwrap()
+            .device_token
+        };
         let resp = router(state)
-            .oneshot(catalog_request("receiver-secret", "ep-receiver"))
+            .oneshot(catalog_request(&token, "ep-receiver"))
             .await
             .unwrap();
-
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn catalog_rejects_revoked_registered_device_token() {
+    async fn catalog_rejects_forwarder_token_for_mismatched_endpoint() {
         let state = test_state();
-        {
-            let conn = state.conn.lock().unwrap();
-            crate::registry::create_enrollment_token(
-                &conn,
-                "tok-1",
-                crate::registry::DeviceKind::Forwarder,
-                None,
-                "forwarder-secret",
-            )
-            .unwrap();
-            crate::registry::register_device_with_enrollment_token(
-                &conn,
-                "ep-fwd",
-                crate::registry::DeviceKind::Forwarder,
-                "forwarder-secret",
-            )
-            .unwrap()
-            .unwrap();
-            crate::registry::revoke_enrollment_token(&conn, "tok-1")
-                .unwrap()
-                .unwrap();
-        }
-
+        let token = forwarder_token(&state, "ep-fwd");
+        // A valid forwarder token cannot push a catalog for a different endpoint.
         let resp = router(state)
-            .oneshot(catalog_request("forwarder-secret", "ep-fwd"))
+            .oneshot(catalog_request(&token, "ep-other"))
             .await
             .unwrap();
-
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

@@ -37,7 +37,6 @@ use crate::registry::{self, ApprovalState, DeviceKind};
 #[derive(Clone)]
 pub struct AppState {
     pub conn: Arc<Mutex<Connection>>,
-    pub provisioning_token_hash: Arc<Vec<u8>>,
     pub announcer_runtime: Arc<Mutex<AnnouncerRuntime>>,
     pub admin_proxy_trusted: bool,
     /// Monotonic receiver allow-list version. Bumped whenever the set of active
@@ -51,10 +50,9 @@ pub struct AppState {
 
 impl AppState {
     #[must_use]
-    pub fn new(conn: Connection, provisioning_token: &str, admin_proxy_trusted: bool) -> Self {
+    pub fn new(conn: Connection, admin_proxy_trusted: bool) -> Self {
         Self {
             conn: Arc::new(Mutex::new(conn)),
-            provisioning_token_hash: Arc::new(crate::registry::hash_token(provisioning_token)),
             announcer_runtime: Arc::new(Mutex::new(AnnouncerRuntime::new())),
             admin_proxy_trusted,
             allowlist_version: watch::channel(0).0,
@@ -83,32 +81,19 @@ pub(crate) fn authorize_active_device_kind(
     headers: &HeaderMap,
     kind: DeviceKind,
 ) -> Result<(), StatusCode> {
-    if register::authorized(headers, &state.provisioning_token_hash) {
-        return Ok(());
-    }
     let Some(raw) = register::bearer_token(headers) else {
         return Err(StatusCode::UNAUTHORIZED);
     };
     let conn = state.conn.lock().expect("registry mutex poisoned");
     match registry::authenticate_device(&conn, raw) {
-        Ok(Some(record)) => {
-            if record.device_kind == kind && record.approval_state == ApprovalState::Active {
-                return Ok(());
-            }
-            return Err(StatusCode::UNAUTHORIZED);
+        Ok(Some(record))
+            if record.device_kind == kind && record.approval_state == ApprovalState::Active =>
+        {
+            Ok(())
         }
-        Ok(None) => {}
+        Ok(_) => Err(StatusCode::UNAUTHORIZED),
         Err(err) => {
             tracing::error!(error = %err, "device authentication failed");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    }
-    // Legacy fallback (removed in Phase 4): enrollment-derived device token.
-    match registry::any_device_token_authorized(&conn, kind, raw) {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(StatusCode::UNAUTHORIZED),
-        Err(err) => {
-            tracing::error!(error = %err, "legacy device authorization failed");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -123,31 +108,19 @@ pub(crate) fn authorize_forwarder_catalog(
     headers: &HeaderMap,
     endpoint_id: &str,
 ) -> Result<(), StatusCode> {
-    if register::authorized(headers, &state.provisioning_token_hash) {
-        return Ok(());
-    }
     let Some(raw) = register::bearer_token(headers) else {
         return Err(StatusCode::UNAUTHORIZED);
     };
     let conn = state.conn.lock().expect("registry mutex poisoned");
     match registry::authenticate_device(&conn, raw) {
-        Ok(Some(record)) => {
-            if record.device_kind == DeviceKind::Forwarder && record.endpoint_id == endpoint_id {
-                return Ok(());
-            }
-            return Err(StatusCode::UNAUTHORIZED);
+        Ok(Some(record))
+            if record.device_kind == DeviceKind::Forwarder && record.endpoint_id == endpoint_id =>
+        {
+            Ok(())
         }
-        Ok(None) => {}
+        Ok(_) => Err(StatusCode::UNAUTHORIZED),
         Err(err) => {
             tracing::error!(error = %err, "device authentication failed");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    }
-    match registry::device_token_authorized(&conn, endpoint_id, DeviceKind::Forwarder, raw) {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(StatusCode::UNAUTHORIZED),
-        Err(err) => {
-            tracing::error!(error = %err, "legacy catalog authorization failed");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }

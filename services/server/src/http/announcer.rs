@@ -178,23 +178,25 @@ mod tests {
     use std::sync::TryLockError;
     use tower::ServiceExt;
 
-    const PROV_TOKEN: &str = "prov-secret";
+    // Deterministic active-receiver bearer seeded by `test_state`.
+    const RX_TOKEN: &str = "rtk_rxseed_rxsecret";
 
     fn test_state() -> AppState {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrate(&conn).unwrap();
         crate::registry::migrate(&conn).unwrap();
-        AppState::new(conn, PROV_TOKEN, true)
+        crate::registry::seed_active_device(
+            &conn,
+            "rx-seed",
+            crate::registry::DeviceKind::Receiver,
+            "rxseed",
+            "rxsecret",
+        );
+        AppState::new(conn, true)
     }
 
     fn json_request(uri: &str, body: &serde_json::Value) -> Request<Body> {
-        Request::builder()
-            .method("POST")
-            .uri(uri)
-            .header("Authorization", format!("Bearer {PROV_TOKEN}"))
-            .header("Content-Type", "application/json")
-            .body(Body::from(serde_json::to_vec(body).unwrap()))
-            .unwrap()
+        json_request_with_token(uri, RX_TOKEN, body)
     }
 
     async fn response_json(resp: axum::response::Response) -> serde_json::Value {

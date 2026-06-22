@@ -48,13 +48,21 @@ mod tests {
     use rusqlite::Connection;
     use tower::ServiceExt;
 
-    const PROV_TOKEN: &str = "prov-secret";
+    // Deterministic active-receiver bearer seeded by `test_state`.
+    const RX_TOKEN: &str = "rtk_rxseed_rxsecret";
 
     fn test_state() -> AppState {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrate(&conn).unwrap();
         crate::registry::migrate(&conn).unwrap();
-        AppState::new(conn, PROV_TOKEN, true)
+        crate::registry::seed_active_device(
+            &conn,
+            "rx-seed",
+            crate::registry::DeviceKind::Receiver,
+            "rxseed",
+            "rxsecret",
+        );
+        AppState::new(conn, true)
     }
 
     fn forwarders_request(token: &str) -> Request<Body> {
@@ -76,7 +84,6 @@ mod tests {
         let state = test_state();
         {
             let conn = state.conn.lock().unwrap();
-            let token_hash = crate::registry::hash_token(PROV_TOKEN);
             crate::registry::upsert_forwarder_catalog(
                 &conn,
                 "fwd-approved",
@@ -94,7 +101,6 @@ mod tests {
                         next_seq: 7,
                     },
                 ],
-                &token_hash,
             )
             .unwrap();
             crate::registry::approve_device(&conn, "fwd-approved")
@@ -112,13 +118,12 @@ mod tests {
                     epoch: 1,
                     next_seq: 1,
                 }],
-                &token_hash,
             )
             .unwrap();
         }
 
         let resp = router(state)
-            .oneshot(forwarders_request(PROV_TOKEN))
+            .oneshot(forwarders_request(RX_TOKEN))
             .await
             .unwrap();
 

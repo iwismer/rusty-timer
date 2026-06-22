@@ -38,9 +38,9 @@ pub struct RegisterResponse {
 /// Bootstrap/recovery registration.
 ///
 /// Authenticated by an enrollment voucher (new/recovering device) or the
-/// device's own minted token (idempotent re-register); the provisioning token
-/// is also accepted during the migration (Phases 1–3) and mints a token too.
-/// Steady-state clients never call this once they hold a minted token.
+/// device's own minted token (idempotent re-register). A voucher mints (or
+/// rebinds) a per-device token; steady-state clients never call this once they
+/// hold a minted token.
 pub async fn register(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -52,13 +52,7 @@ pub async fn register(
 
     let result = {
         let conn = state.conn.lock().expect("registry mutex poisoned");
-        register_authorized_device(
-            &conn,
-            &headers,
-            &state.provisioning_token_hash,
-            &req,
-            device_kind,
-        )
+        register_authorized_device(&conn, &headers, &req, device_kind)
     };
 
     match result {
@@ -86,18 +80,14 @@ pub async fn register(
 /// 1. the device's own minted token whose resolved `endpoint_id` matches the
 ///    request → idempotent, no new token;
 /// 2. an unused/own enrollment voucher of the matching kind → consume + mint;
-/// 3. [migration only] the provisioning token → mint;
-/// 4. otherwise `None`.
+/// 3. otherwise `None`.
 fn register_authorized_device(
     conn: &rusqlite::Connection,
     headers: &HeaderMap,
-    provisioning_token_hash: &[u8],
     req: &RegisterRequest,
     device_kind: DeviceKind,
 ) -> rusqlite::Result<Option<(DeviceRecord, Option<String>)>> {
-    let Some((record, device_token)) =
-        register_inner(conn, headers, provisioning_token_hash, req, device_kind)?
-    else {
+    let Some((record, device_token)) = register_inner(conn, headers, req, device_kind)? else {
         return Ok(None);
     };
 
@@ -117,39 +107,26 @@ fn register_authorized_device(
 fn register_inner(
     conn: &rusqlite::Connection,
     headers: &HeaderMap,
-    provisioning_token_hash: &[u8],
     req: &RegisterRequest,
     device_kind: DeviceKind,
 ) -> rusqlite::Result<Option<(DeviceRecord, Option<String>)>> {
-    if let Some(raw_bearer) = bearer_token(headers) {
-        // 1. A valid device token must match the claimed endpoint (and kind).
-        if let Some(record) = registry::authenticate_device(conn, raw_bearer)? {
-            if record.endpoint_id == req.endpoint_id && record.device_kind == device_kind {
-                return Ok(Some((record, None)));
-            }
-            return Ok(None);
+    let Some(raw_bearer) = bearer_token(headers) else {
+        return Ok(None);
+    };
+    // 1. A valid device token must match the claimed endpoint (and kind).
+    if let Some(record) = registry::authenticate_device(conn, raw_bearer)? {
+        if record.endpoint_id == req.endpoint_id && record.device_kind == device_kind {
+            return Ok(Some((record, None)));
         }
-        // 2. Enrollment voucher (consume + mint/rebind).
-        if let Some(minted) =
-            registry::register_device_with_voucher(conn, &req.endpoint_id, device_kind, raw_bearer)?
-        {
-            return Ok(Some((minted.record, Some(minted.device_token))));
-        }
+        return Ok(None);
     }
-
-    // 3. Provisioning token (migration only): mint so the client can persist a
-    //    real per-device credential.
-    if authorized(headers, provisioning_token_hash) {
-        let minted = registry::register_device_minted(conn, &req.endpoint_id, device_kind)?;
+    // 2. Enrollment voucher (consume + mint/rebind).
+    if let Some(minted) =
+        registry::register_device_with_voucher(conn, &req.endpoint_id, device_kind, raw_bearer)?
+    {
         return Ok(Some((minted.record, Some(minted.device_token))));
     }
-
     Ok(None)
-}
-
-/// Authorize a request against the provisioning bearer token.
-pub(super) fn authorized(headers: &HeaderMap, expected_hash: &[u8]) -> bool {
-    bearer_token(headers).is_some_and(|token| registry::verify_token(token, expected_hash))
 }
 
 pub(super) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
@@ -169,13 +146,17 @@ mod tests {
     use rusqlite::Connection;
     use tower::ServiceExt;
 
-    const PROV_TOKEN: &str = "prov-secret";
-
     fn test_state() -> AppState {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrate(&conn).unwrap();
         crate::registry::migrate(&conn).unwrap();
-        AppState::new(conn, PROV_TOKEN, true)
+        AppState::new(conn, true)
+    }
+
+    /// Create an enrollment voucher of `kind` with secret `secret`.
+    fn make_voucher(state: &AppState, kind: crate::registry::DeviceKind, secret: &str) {
+        let conn = state.conn.lock().unwrap();
+        crate::registry::create_enrollment_token(&conn, "tok", kind, None, secret).unwrap();
     }
 
     fn register_request(token: &str, body: &serde_json::Value) -> Request<Body> {
@@ -191,15 +172,19 @@ mod tests {
     #[tokio::test]
     async fn register_creates_pending() {
         let state = test_state();
+        make_voucher(
+            &state,
+            crate::registry::DeviceKind::Forwarder,
+            "enroll-secret",
+        );
         let app = router(state.clone());
 
         let resp = app
             .oneshot(register_request(
-                PROV_TOKEN,
+                "enroll-secret",
                 &serde_json::json!({
                     "endpoint_id": "ep-forwarder-1",
-                    "device_kind": "forwarder",
-                    "device_token": "device-bearer-1"
+                    "device_kind": "forwarder"
                 }),
             ))
             .await
@@ -220,15 +205,19 @@ mod tests {
     #[tokio::test]
     async fn register_persists_self_reported_display_name() {
         let state = test_state();
+        make_voucher(
+            &state,
+            crate::registry::DeviceKind::Receiver,
+            "enroll-named",
+        );
         let app = router(state.clone());
 
         let resp = app
             .oneshot(register_request(
-                PROV_TOKEN,
+                "enroll-named",
                 &serde_json::json!({
                     "endpoint_id": "ep-receiver-named",
                     "device_kind": "receiver",
-                    "device_token": "device-bearer-named",
                     "display_name": "dev-receiver"
                 }),
             ))
@@ -246,15 +235,19 @@ mod tests {
     #[tokio::test]
     async fn approve_marks_active() {
         let state = test_state();
+        make_voucher(
+            &state,
+            crate::registry::DeviceKind::Receiver,
+            "enroll-secret",
+        );
         let app = router(state.clone());
 
         let resp = app
             .oneshot(register_request(
-                PROV_TOKEN,
+                "enroll-secret",
                 &serde_json::json!({
                     "endpoint_id": "ep-receiver-1",
-                    "device_kind": "receiver",
-                    "device_token": "device-bearer-2"
+                    "device_kind": "receiver"
                 }),
             ))
             .await
@@ -635,27 +628,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn provisioning_token_register_mints() {
-        let state = test_state();
-        let resp = router(state)
-            .oneshot(register_request(
-                PROV_TOKEN,
-                &serde_json::json!({
-                    "endpoint_id": "ep-prov-1",
-                    "device_kind": "forwarder"
-                }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let minted = response_json(resp).await["device_token"]
-            .as_str()
-            .expect("provisioning registration mints a token")
-            .to_owned();
-        assert!(minted.starts_with("rtk_"));
     }
 
     async fn response_json(resp: axum::response::Response) -> serde_json::Value {
