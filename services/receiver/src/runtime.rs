@@ -60,14 +60,50 @@ pub fn profile_has_connect_credentials(profile: Option<&crate::db::Profile>) -> 
     })
 }
 
+/// Resolve the effective server URL+token for the P2P runtime.
+///
+/// The stored `profile` is the source of truth; an `override_` pair (env vars
+/// for the desktop app, CLI flags for headless) takes precedence when both its
+/// URL and token are present. Each source contributes only when *both* of its
+/// values are non-empty (after trimming); a partial source is ignored. Returns
+/// `None` when neither source is fully configured.
+pub fn resolve_server_config(
+    profile: Option<&crate::db::Profile>,
+    override_: (Option<String>, Option<String>),
+) -> Option<crate::p2p_runtime::ServerClientConfig> {
+    let non_empty = |s: String| {
+        let t = s.trim().to_owned();
+        if t.is_empty() { None } else { Some(t) }
+    };
+    // Override (env/CLI) wins when fully specified.
+    if let (Some(url), Some(token)) = (
+        override_.0.and_then(non_empty),
+        override_.1.and_then(non_empty),
+    ) {
+        return Some(crate::p2p_runtime::ServerClientConfig { url, token });
+    }
+    // Otherwise fall back to a fully-configured profile.
+    profile.and_then(|p| {
+        let url = non_empty(p.server_url.clone())?;
+        let token = non_empty(p.token.clone())?;
+        Some(crate::p2p_runtime::ServerClientConfig { url, token })
+    })
+}
+
+/// The default receiver data directory (OS app-local data dir, namespaced).
+/// Shared by [`init`] and callers that need to derive sibling paths (e.g. the
+/// persistent P2P secret-key file) from the same location.
+pub fn default_data_dir() -> std::path::PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("rusty-timer")
+        .join("receiver")
+}
+
 pub async fn init(
     receiver_id: Option<String>,
 ) -> Result<(Arc<AppState>, watch::Receiver<ShutdownSignal>), String> {
-    let data_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("rusty-timer")
-        .join("receiver");
-    init_with_data_dir(receiver_id, data_dir).await
+    init_with_data_dir(receiver_id, default_data_dir()).await
 }
 
 pub async fn init_with_data_dir(
@@ -90,6 +126,12 @@ pub async fn init_with_data_dir(
 
     let (state, shutdown_rx) = AppState::with_integrity(db, receiver_id, db_integrity_ok);
     state.logger.log("Receiver started");
+
+    // Populate the chip->participant lookup from any previously imported
+    // participant/chip data so the announcer can resolve bib/name immediately.
+    if let Err(e) = crate::control_api::reload_chip_lookup(&state).await {
+        warn!(error = %e, "failed to load chip lookup at startup");
+    }
 
     Ok((state, shutdown_rx))
 }
@@ -114,4 +156,52 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
         .set_connection_state(ConnectionState::Disconnected)
         .await;
     state.logger.log("Receiver stopped");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Profile;
+
+    fn profile(url: &str, token: &str) -> Profile {
+        Profile {
+            server_url: url.to_owned(),
+            token: token.to_owned(),
+            update_mode: String::new(),
+            receiver_id: None,
+        }
+    }
+
+    #[test]
+    fn resolve_server_config_env_overrides_profile() {
+        let p = profile("http://profile", "pt");
+        // Override (env/CLI) both set -> override wins.
+        let cfg = resolve_server_config(
+            Some(&p),
+            (Some("http://env".to_owned()), Some("et".to_owned())),
+        )
+        .expect("resolved");
+        assert_eq!(cfg.url, "http://env");
+        assert_eq!(cfg.token, "et");
+
+        // Override absent -> profile is used.
+        let cfg = resolve_server_config(Some(&p), (None, None)).expect("resolved");
+        assert_eq!(cfg.url, "http://profile");
+        assert_eq!(cfg.token, "pt");
+
+        // Neither source -> None.
+        assert!(resolve_server_config(None, (None, None)).is_none());
+
+        // Partial override (url only), no profile -> None.
+        assert!(resolve_server_config(None, (Some("http://x".to_owned()), None)).is_none());
+
+        // Partial override falls back to a full profile.
+        let cfg =
+            resolve_server_config(Some(&p), (Some("http://x".to_owned()), None)).expect("resolved");
+        assert_eq!(cfg.url, "http://profile");
+
+        // Whitespace-only values are treated as absent.
+        let blank = profile("  ", "  ");
+        assert!(resolve_server_config(Some(&blank), (None, None)).is_none());
+    }
 }

@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS profile (
     receiver_mode_json TEXT,
     receiver_id TEXT,
     dbf_enabled INTEGER NOT NULL DEFAULT 0,
-    dbf_path    TEXT NOT NULL DEFAULT 'C:\winrace\Files\IPICO.DBF'
+    dbf_path    TEXT NOT NULL DEFAULT 'C:\winrace\Files\IPICO.DBF',
+    -- Global announcer publish on/off (opt-in; default off).
+    announcer_enabled INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -93,4 +95,31 @@ CREATE TABLE IF NOT EXISTS earliest_epochs (
 CREATE TABLE IF NOT EXISTS forwarder_intent (
     endpoint_id TEXT PRIMARY KEY,
     connect     INTEGER NOT NULL
+);
+
+-- Participant + chip-assignment data, imported from .ppl/.bibchip files, used
+-- to resolve chip reads to bib/name locally for the announcer. Both are
+-- replaced wholesale on import ("upload replaces all"). The bib is the
+-- canonical i64 join key.
+CREATE TABLE IF NOT EXISTS participants (
+    bib         INTEGER PRIMARY KEY,
+    last        TEXT NOT NULL,
+    first       TEXT NOT NULL,
+    affiliation TEXT NOT NULL,
+    gender      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bib_chips (
+    chip_id TEXT PRIMARY KEY,
+    bib     INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_bib_chips_bib ON bib_chips (bib);
+
+-- Per-stream announcer publish opt-in. Presence of a stream_id means that
+-- stream publishes to the announcer (when the global toggle is on). Kept in a
+-- separate table so replacing the subscription set does not clobber the
+-- per-stream publish choice. Opt-in: absent = does not publish.
+CREATE TABLE IF NOT EXISTS announcer_publish_streams (
+    stream_id TEXT PRIMARY KEY
 );

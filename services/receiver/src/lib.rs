@@ -11,6 +11,7 @@ pub mod local_proxy;
 pub mod p2p_forwarder;
 pub mod p2p_runtime;
 pub mod p2p_session;
+pub mod participants;
 pub mod ports;
 pub mod runtime;
 pub mod ui_events;

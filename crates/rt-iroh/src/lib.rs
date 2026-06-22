@@ -54,9 +54,30 @@ impl From<iroh::endpoint::ConnectionError> for Error {
 pub fn load_or_create_secret_key(path: impl AsRef<Path>) -> Result<SecretKey, Error> {
     let path = path.as_ref();
     match fs::read(path) {
-        Ok(bytes) => secret_key_from_bytes(&bytes),
+        Ok(bytes) => {
+            // Harden an existing key file that is group/world-accessible (e.g.
+            // created before 0600 enforcement, restored from backup, or copied
+            // with loose permissions). Best-effort: failing to tighten does not
+            // block loading the key.
+            #[cfg(unix)]
+            tighten_secret_key_permissions(path);
+            secret_key_from_bytes(&bytes)
+        }
         Err(error) if error.kind() == ErrorKind::NotFound => create_secret_key(path),
         Err(error) => Err(error.into()),
+    }
+}
+
+/// Restrict an existing key file to owner-only read/write (`0600`) when any
+/// group/other permission bit is set.
+#[cfg(unix)]
+fn tighten_secret_key_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = fs::metadata(path) else {
+        return;
+    };
+    if meta.permissions().mode() & 0o077 != 0 {
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
     }
 }
 

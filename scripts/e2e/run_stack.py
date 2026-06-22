@@ -295,7 +295,8 @@ CREATE TABLE IF NOT EXISTS profile (
     receiver_mode_json TEXT,
     receiver_id TEXT,
     dbf_enabled INTEGER NOT NULL DEFAULT 0,
-    dbf_path    TEXT NOT NULL DEFAULT 'C:\\winrace\\Files\\IPICO.DBF'
+    dbf_path    TEXT NOT NULL DEFAULT 'C:\\winrace\\Files\\IPICO.DBF',
+    announcer_enabled INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS subscriptions (
     forwarder_endpoint_id TEXT NOT NULL,
@@ -305,6 +306,20 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     forwarder_id          TEXT,
     reader_ip             TEXT,
     PRIMARY KEY (forwarder_endpoint_id, stream_id)
+);
+CREATE TABLE IF NOT EXISTS announcer_publish_streams (
+    stream_id TEXT PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS participants (
+    bib         INTEGER PRIMARY KEY,
+    last        TEXT NOT NULL,
+    first       TEXT NOT NULL,
+    affiliation TEXT NOT NULL,
+    gender      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bib_chips (
+    chip_id TEXT PRIMARY KEY,
+    bib     INTEGER NOT NULL
 );
 """
 
@@ -319,9 +334,9 @@ def preseed_receiver_db(db_path: Path, forwarder_node_id: str, stream_id: str,
         conn.execute(
             "INSERT INTO profile "
             "(server_url, token, update_mode, receiver_mode_json, receiver_id, "
-            " dbf_enabled, dbf_path) VALUES (?,?,?,?,?,?,?)",
+            " dbf_enabled, dbf_path, announcer_enabled) VALUES (?,?,?,?,?,?,?,?)",
             (server_url, server_token, "check-and-download", None,
-             "rx-e2e", 1, str(dbf_path)),
+             "rx-e2e", 1, str(dbf_path), 1),
         )
         conn.execute(
             "INSERT INTO subscriptions "
@@ -329,6 +344,24 @@ def preseed_receiver_db(db_path: Path, forwarder_node_id: str, stream_id: str,
             " forwarder_id, reader_ip) VALUES (?,?,?,?,?,?)",
             (forwarder_node_id, stream_id, proxy_port, "finish", None, stream_id),
         )
+        # Opt the seeded stream in to announcer publishing (opt-in default).
+        conn.execute(
+            "INSERT INTO announcer_publish_streams (stream_id) VALUES (?)",
+            (stream_id,),
+        )
+        # Seed participant + chip data so announcer rows carry bib/name. Each
+        # emulated chip tag (EXPECTED_TAGS, bibs 1..NUM_READS) maps to a named
+        # participant.
+        for i, tag in enumerate(EXPECTED_TAGS, start=1):
+            conn.execute(
+                "INSERT INTO participants (bib, last, first, affiliation, gender) "
+                "VALUES (?,?,?,?,?)",
+                (i, f"Last{i}", f"First{i}", "", "X"),
+            )
+            conn.execute(
+                "INSERT INTO bib_chips (chip_id, bib) VALUES (?,?)",
+                (tag, i),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -1093,6 +1126,9 @@ static_allowed_receivers = ["{receiver_node_id}"]
         "--p2p-forwarder-node-id", forwarder_node_id,
         "--p2p-forwarder-direct-addr", f"127.0.0.1:{forwarder_p2p_port}",
         "--p2p-secret-key-seed-hex", RECEIVER_SEED_HEX,
+        # Loopback transport: explicit (a seed already implies this, but state it).
+        "--p2p-relay-disabled",
+        "--p2p-discovery-disabled",
         "--p2p-server-url", server_url,
         "--p2p-server-token", PROVISIONING_TOKEN,
         "--p2p-reconcile-ms", str(RECONCILE_MS),
@@ -1186,10 +1222,21 @@ static_allowed_receivers = ["{receiver_node_id}"]
                   f"generation={status.get('announcer_source_generation')}")
     results.expect_eq(f"server finisher_count == {NUM_READS} (distinct chips)",
                       status.get("finisher_count"), NUM_READS)
-    pushed_chips = {row.get("chip_id") for row in status.get("announcer_rows", [])}
+    announcer_rows = status.get("announcer_rows", [])
+    pushed_chips = {row.get("chip_id") for row in announcer_rows}
     results.check("server announcer rows cover all expected chips",
                   set(EXPECTED_TAGS).issubset(pushed_chips),
                   f"missing={set(EXPECTED_TAGS) - pushed_chips}")
+    # Every announcer row must carry a resolved bib and display name (seeded
+    # participant + chip data resolved locally on the receiver).
+    rows_missing_identity = [
+        row.get("chip_id")
+        for row in announcer_rows
+        if row.get("bib") is None or not row.get("display_name")
+    ]
+    results.check("server announcer rows carry bib + name",
+                  not rows_missing_identity,
+                  f"rows missing bib/name: {rows_missing_identity}")
 
     # DBF stability re-check: a second read must be identical (idempotent rebuild).
     results.expect_eq("DBF record count stable on recheck (no dup rows)",

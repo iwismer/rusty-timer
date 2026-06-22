@@ -423,6 +423,9 @@ def main() -> int:
         "RT_RECEIVER_DATA_DIR": str(receiver_data_dir),
         "RT_RECEIVER_ID": receiver_id,
         "RT_P2P_SECRET_KEY_SEED_HEX": RECEIVER_SEED_HEX,
+        # Loopback transport: explicit (a seed already implies this, but state it).
+        "RT_P2P_RELAY_DISABLED": "1",
+        "RT_P2P_DISCOVERY_DISABLED": "1",
         "RT_P2P_SERVER_URL": server_url,
         "RT_P2P_SERVER_TOKEN": PROVISIONING_TOKEN,
         "RT_P2P_RECONCILE_MS": "1000",
@@ -522,6 +525,8 @@ def run_receiver(mode: str, stack: Stack, work_dir: Path, receiver_env: dict) ->
             "--bind-addr", "127.0.0.1:0",
             "--receiver-id", receiver_env["RT_RECEIVER_ID"],
             "--p2p-secret-key-seed-hex", receiver_env["RT_P2P_SECRET_KEY_SEED_HEX"],
+            "--p2p-relay-disabled",
+            "--p2p-discovery-disabled",
             "--p2p-server-url", receiver_env["RT_P2P_SERVER_URL"],
             "--p2p-server-token", receiver_env["RT_P2P_SERVER_TOKEN"],
             "--p2p-reconcile-ms", receiver_env["RT_P2P_RECONCILE_MS"],

@@ -169,6 +169,7 @@ async fn local_streams_snapshot(state: &AppState) -> control_api::StreamsRespons
         Ok(cursors) => (cursors, None),
         Err(e) => (vec![], Some(format!("failed to load cursors: {e}"))),
     };
+    let announcer_publish_streams = db.load_announcer_publish_streams().unwrap_or_default();
     drop(db);
 
     let cursor_map: HashMap<&str, &crate::db::StreamCursorRecord> =
@@ -197,6 +198,7 @@ async fn local_streams_snapshot(state: &AppState) -> control_api::StreamsRespons
                         .as_deref()
                         .and_then(crate::ports::default_port)
                 }),
+                announcer_publish: announcer_publish_streams.contains(&sub.stream_id),
                 event_type: Some(sub.event_type),
                 online: None,
                 reader_connected: None,
@@ -332,6 +334,20 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
                 arg(args, "body")?,
             )
             .await?)
+        }
+        "import_participants" => {
+            ok(control_api::import_participants(state, arg(args, "contents")?).await?)
+        }
+        "import_chips" => ok(control_api::import_chips(state, arg(args, "contents")?).await?),
+        "set_announcer_enabled" => {
+            ok(control_api::set_announcer_enabled(state, arg(args, "enabled")?).await?)
+        }
+        "set_stream_announcer_publish" => {
+            let stream_id: String = arg(args, "stream_id")?;
+            ok(
+                control_api::set_stream_announcer_publish(state, &stream_id, arg(args, "publish")?)
+                    .await?,
+            )
         }
         other => Err(BridgeError::Unknown(other.to_owned())),
     }

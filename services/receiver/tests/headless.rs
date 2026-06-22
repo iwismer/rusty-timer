@@ -139,7 +139,7 @@ async fn rejects_non_loopback_bind_addr() {
 
 #[tokio::test]
 async fn p2p_startup_failure_does_not_leak_control_server() {
-    use receiver::p2p_runtime::{ForwarderPeerConfig, P2pReceiverConfig};
+    use receiver::p2p_runtime::{ForwarderPeerConfig, P2pReceiverConfig, ReceiverIdentity};
 
     let dir = tempfile::tempdir().expect("temp dir");
 
@@ -157,12 +157,19 @@ async fn p2p_startup_failure_does_not_leak_control_server() {
         bind_addr,
         receiver_id: None,
         p2p: Some(P2pReceiverConfig {
-            secret_key_seed: [9u8; 32],
+            identity: ReceiverIdentity::Seed([9u8; 32]),
+            relay_disabled: true,
+            discovery_disabled: true,
+            bind_addr_v4: Some(std::net::SocketAddrV4::new(
+                std::net::Ipv4Addr::LOCALHOST,
+                0,
+            )),
             forwarder: Some(ForwarderPeerConfig {
                 node_id: "not-a-valid-node-id".to_owned(),
                 direct_addr: "127.0.0.1:5000".parse().expect("parse addr"),
             }),
             server: None,
+            server_override: (None, None),
             reconcile_interval: Duration::from_millis(100),
         }),
     };

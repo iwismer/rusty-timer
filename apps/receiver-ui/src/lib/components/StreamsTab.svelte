@@ -7,6 +7,7 @@
     streamKey,
     streamIdentity,
     toggleSubscription,
+    setStreamAnnouncerPublish,
     updateStreamEventType,
     changeEarliestEpoch,
     replayStream,
@@ -562,6 +563,29 @@
                       >
                         {stream.subscribed ? "Unsubscribe" : "Subscribe"}
                       </button>
+
+                      {#if stream.subscribed}
+                        <label
+                          class="inline-flex items-center gap-1.5 text-xs text-text-muted"
+                          title="Publish this stream's finish reads to the announcer board"
+                        >
+                          <input
+                            data-testid="announcer-publish-toggle-{key}"
+                            type="checkbox"
+                            checked={stream.announcer_publish ?? false}
+                            disabled={store.streamAnnouncerBusy[key]}
+                            onclick={(e) => e.stopPropagation()}
+                            onchange={(e) => {
+                              e.stopPropagation();
+                              void setStreamAnnouncerPublish(
+                                stream,
+                                e.currentTarget.checked,
+                              );
+                            }}
+                          />
+                          Announce
+                        </label>
+                      {/if}
                     </div>
                   </div>
                 </td>

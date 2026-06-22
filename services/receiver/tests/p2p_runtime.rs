@@ -16,7 +16,8 @@ use axum::routing::post;
 use receiver::control_api::{ConnectionState, DiscoveredForwarder, DiscoveredStream};
 use receiver::db::{DbfConfig, EventType, StreamSubscription};
 use receiver::p2p_runtime::{
-    ForwarderPeerConfig, P2pReceiverConfig, ServerClientConfig, start_receiver_p2p,
+    ForwarderPeerConfig, P2pReceiverConfig, ReceiverIdentity, ServerClientConfig,
+    start_receiver_p2p,
 };
 use receiver::ui_events::ReceiverUiEvent;
 use rt_p2p_protocol::{
@@ -140,12 +141,19 @@ fn base_config(
 ) -> (P2pReceiverConfig, StreamSubscription) {
     let sub = stream_subscription(&node_id, local_port_override);
     let config = P2pReceiverConfig {
-        secret_key_seed: [seed; 32],
+        identity: ReceiverIdentity::Seed([seed; 32]),
+        relay_disabled: true,
+        discovery_disabled: true,
+        bind_addr_v4: Some(std::net::SocketAddrV4::new(
+            std::net::Ipv4Addr::LOCALHOST,
+            0,
+        )),
         forwarder: Some(ForwarderPeerConfig {
             node_id,
             direct_addr: direct,
         }),
         server: None,
+        server_override: (None, None),
         reconcile_interval: Duration::from_millis(50),
     };
     (config, sub)
@@ -537,12 +545,14 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
-        state
-            .db
-            .lock()
-            .await
-            .replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
-            .unwrap();
+        {
+            let mut db = state.db.lock().await;
+            db.replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
+                .unwrap();
+            // Opt this stream in to announcer publishing (global + per-stream).
+            db.set_announcer_enabled(true).unwrap();
+            db.set_stream_announcer_publish(STREAM_ID, true).unwrap();
+        }
 
         let (mut config, _sub) = base_config(node_id, direct, 77, None);
         config.server = Some(ServerClientConfig {
@@ -587,6 +597,71 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
     })
     .await
     .expect("announcer_push_pushes_rows_with_generation_and_no_duplicates timed out");
+}
+
+/// Phase 6 / Task 6.2: with the stream NOT opted in to announcer publishing,
+/// the receiver still registers + takes over (generation acquired) but pushes
+/// NO rows. Verifies per-stream gating.
+#[tokio::test]
+async fn announcer_does_not_push_when_stream_not_opted_in() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let forwarder = MockForwarderPeer::start([88; 32], script_two(VALID_FRAME))
+            .await
+            .unwrap();
+        let (node_id, direct) = forwarder_config(&forwarder);
+        let (thin_url, thin_state) = start_mock_server().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_state(dir.path()).await;
+        {
+            let mut db = state.db.lock().await;
+            db.replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
+                .unwrap();
+            // Global toggle on, but the stream is NOT opted in.
+            db.set_announcer_enabled(true).unwrap();
+        }
+
+        let (mut config, _sub) = base_config(node_id, direct, 89, None);
+        config.server = Some(ServerClientConfig {
+            url: thin_url,
+            token: "secret-token".to_owned(),
+        });
+        let runtime = start_receiver_p2p(Arc::clone(&state), config)
+            .await
+            .unwrap();
+
+        // Wait until events are durable and the generation has been taken over,
+        // proving the server path ran end-to-end.
+        poll_until(
+            || {
+                let state = Arc::clone(&state);
+                let thin_state = thin_state.clone();
+                async move {
+                    let durable = {
+                        let db = state.db.lock().await;
+                        db.load_received_events(STREAM_ID)
+                            .map(|e| e.len() >= 2)
+                            .unwrap_or(false)
+                    };
+                    durable && *thin_state.generation.lock().unwrap() >= 1
+                }
+            },
+            Duration::from_secs(10),
+        )
+        .await;
+
+        // Give any (erroneous) push a chance to land, then assert none did.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            thin_state.rows.lock().unwrap().is_empty(),
+            "no rows must be pushed for a stream that is not opted in"
+        );
+
+        runtime.shutdown().await;
+        forwarder.shutdown().await;
+    })
+    .await
+    .expect("announcer_does_not_push_when_stream_not_opted_in timed out");
 }
 
 /// A record carrying an explicit `stream_id` (used to script a stream-id
@@ -793,12 +868,13 @@ async fn announcer_push_recovers_when_server_starts_late() {
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
-        state
-            .db
-            .lock()
-            .await
-            .replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
-            .unwrap();
+        {
+            let mut db = state.db.lock().await;
+            db.replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
+                .unwrap();
+            db.set_announcer_enabled(true).unwrap();
+            db.set_stream_announcer_publish(STREAM_ID, true).unwrap();
+        }
 
         let (mut config, _sub) = base_config(node_id, direct, 85, None);
         config.server = Some(ServerClientConfig {
@@ -1051,9 +1127,16 @@ async fn discovered_forwarder_is_dialed_and_persists_events() {
             .unwrap();
 
         let config = P2pReceiverConfig {
-            secret_key_seed: [93; 32],
+            identity: ReceiverIdentity::Seed([93; 32]),
+            relay_disabled: true,
+            discovery_disabled: true,
+            bind_addr_v4: Some(std::net::SocketAddrV4::new(
+                std::net::Ipv4Addr::LOCALHOST,
+                0,
+            )),
             forwarder: None,
             server: None,
+            server_override: (None, None),
             reconcile_interval: Duration::from_millis(50),
         };
         let runtime = start_receiver_p2p(Arc::clone(&state), config)
@@ -1276,4 +1359,67 @@ async fn one_connection_multiplexes_multiple_data_streams() {
     })
     .await
     .expect("one_connection_multiplexes_multiple_data_streams timed out");
+}
+
+/// Phase 4 / Task 4.3: a runtime started with no server must rebind its
+/// server-bound tasks (register -> takeover -> discovery) when the stored
+/// profile gains a server and the `server_config_version` signal fires.
+#[tokio::test]
+async fn reconfigure_on_signal_rebinds_to_profile_server() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let (server_url, server_state) = start_mock_server().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_state(dir.path()).await;
+
+        // Start a bare runtime with NO server configured.
+        let config = P2pReceiverConfig {
+            identity: ReceiverIdentity::Seed([71u8; 32]),
+            relay_disabled: true,
+            discovery_disabled: true,
+            bind_addr_v4: Some("127.0.0.1:0".parse().unwrap()),
+            forwarder: None,
+            server: None,
+            server_override: (None, None),
+            reconcile_interval: Duration::from_millis(50),
+        };
+        let runtime = start_receiver_p2p(Arc::clone(&state), config)
+            .await
+            .unwrap();
+
+        // No server configured yet, so takeover must not have run.
+        assert_eq!(*server_state.generation.lock().unwrap(), 0);
+
+        // Save a profile pointing at the mock server.
+        {
+            let mut db = state.db.lock().await;
+            db.save_profile(&server_url, "tok", "check-and-download", None)
+                .unwrap();
+        }
+
+        // The reconcile loop must rebind and run register + takeover against the
+        // newly-configured server. Re-signal on each poll so the test does not
+        // race the spawned loop's watch subscription (production calls
+        // notify_server_config_changed long after the loop subscribes, so the
+        // edge-triggered signal is never missed there). Re-resolving to the
+        // same server is idempotent (no extra rebind/takeover).
+        poll_until(
+            || {
+                let server_state = server_state.clone();
+                let state = Arc::clone(&state);
+                async move {
+                    state.notify_server_config_changed();
+                    *server_state.generation.lock().unwrap() >= 1
+                }
+            },
+            Duration::from_secs(10),
+        )
+        .await;
+
+        tokio::time::timeout(Duration::from_secs(3), runtime.shutdown())
+            .await
+            .expect("runtime shutdown must complete promptly");
+    })
+    .await
+    .expect("reconfigure_on_signal_rebinds_to_profile_server timed out");
 }

@@ -237,6 +237,44 @@ async fn put_profile(
 }
 
 #[tauri::command]
+async fn import_participants(
+    state: State<'_, Arc<AppState>>,
+    contents: String,
+) -> CmdResult<control_api::ImportSummary> {
+    control_api::import_participants(&state, contents)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn import_chips(
+    state: State<'_, Arc<AppState>>,
+    contents: String,
+) -> CmdResult<control_api::ImportSummary> {
+    control_api::import_chips(&state, contents)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_announcer_enabled(state: State<'_, Arc<AppState>>, enabled: bool) -> CmdResult<()> {
+    control_api::set_announcer_enabled(&state, enabled)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_stream_announcer_publish(
+    state: State<'_, Arc<AppState>>,
+    stream_id: String,
+    publish: bool,
+) -> CmdResult<()> {
+    control_api::set_stream_announcer_publish(&state, &stream_id, publish)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_mode(state: State<'_, Arc<AppState>>) -> CmdResult<rt_domain::ReceiverMode> {
     control_api::get_mode(&state)
         .await
@@ -721,14 +759,12 @@ fn main() {
             // block_on is safe here because setup() runs before the Tauri event
             // loop starts, so we won't deadlock the async runtime.
             let receiver_id_override = receiver_id_override_from_env();
-            let data_dir_override = data_dir_override_from_env();
+            // Resolve the data dir once so the DB and the persistent P2P
+            // secret-key file live in the same place.
+            let data_dir =
+                data_dir_override_from_env().unwrap_or_else(receiver::runtime::default_data_dir);
             let (state, shutdown_rx) = tauri::async_runtime::block_on(async {
-                match data_dir_override {
-                    Some(dir) => {
-                        receiver::runtime::init_with_data_dir(receiver_id_override, dir).await
-                    }
-                    None => receiver::runtime::init(receiver_id_override).await,
-                }
+                receiver::runtime::init_with_data_dir(receiver_id_override, data_dir.clone()).await
             })
             .map_err(|e| -> Box<dyn std::error::Error> {
                 let msg = format!("Fatal: failed to initialize receiver runtime: {e}");
@@ -742,31 +778,52 @@ fn main() {
             // Start event bridge
             spawn_event_bridge(handle, &state);
 
-            // Optional local/dev P2P lane: when the RT_P2P_* env vars are
-            // present, start the same P2P receiver runtime as
-            // `receiver-headless` so the desktop app connects to a forwarder
-            // over iroh. Inert (no P2P) when the env vars are absent.
+            // P2P lane: always start a runtime so a fresh install has a live
+            // endpoint that a later profile save can reconfigure. The RT_P2P_*
+            // env vars (dev/loopback overrides) take precedence; otherwise a
+            // bare production config is used. The stored profile is the source
+            // of truth for the server URL+token, with the env vars as override.
             let p2p_handle = app.handle().clone();
-            match receiver::p2p_runtime::p2p_config_from_env() {
-                Ok(Some(p2p_config)) => {
-                    let p2p_state = state.clone();
-                    let p2p_runtime = tauri::async_runtime::block_on(async {
-                        receiver::p2p_runtime::start_receiver_p2p(p2p_state, p2p_config).await
-                    })
-                    .map_err(|e| -> Box<dyn std::error::Error> {
-                        let msg = format!("Fatal: failed to start P2P receiver runtime: {e}");
+            let p2p_key_path = data_dir.join("p2p_secret.key");
+            let mut p2p_config =
+                match receiver::p2p_runtime::p2p_config_from_env(p2p_key_path.clone()) {
+                    Ok(Some(cfg)) => cfg,
+                    Ok(None) => {
+                        receiver::p2p_runtime::P2pReceiverConfig::production_default(p2p_key_path)
+                    }
+                    Err(e) => {
+                        let msg = format!("Fatal: invalid P2P env configuration: {e}");
                         record_app_failure(&p2p_handle, &msg);
-                        Box::new(std::io::Error::other(msg))
-                    })?;
-                    app.manage(Mutex::new(Some(p2p_runtime)));
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    let msg = format!("Fatal: invalid P2P env configuration: {e}");
-                    record_app_failure(&p2p_handle, &msg);
-                    return Err(Box::new(std::io::Error::other(msg)));
-                }
-            }
+                        return Err(Box::new(std::io::Error::other(msg)));
+                    }
+                };
+            let profile = tauri::async_runtime::block_on(async {
+                state.db.lock().await.load_profile().ok().flatten()
+            });
+            let server_override = (
+                std::env::var(receiver::p2p_runtime::ENV_P2P_SERVER_URL).ok(),
+                std::env::var(receiver::p2p_runtime::ENV_P2P_SERVER_TOKEN).ok(),
+            );
+            // Record the override on shared state so control handlers
+            // (profile/status) resolve and gate consistently with the runtime.
+            tauri::async_runtime::block_on(async {
+                state.set_server_override(server_override.clone()).await;
+            });
+            p2p_config.server =
+                receiver::runtime::resolve_server_config(profile.as_ref(), server_override.clone());
+            // Keep the env override so a live profile save re-resolves with
+            // `env > profile` rather than dropping the override.
+            p2p_config.server_override = server_override;
+            let p2p_state = state.clone();
+            let p2p_runtime = tauri::async_runtime::block_on(async {
+                receiver::p2p_runtime::start_receiver_p2p(p2p_state, p2p_config).await
+            })
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                let msg = format!("Fatal: failed to start P2P receiver runtime: {e}");
+                record_app_failure(&p2p_handle, &msg);
+                Box::new(std::io::Error::other(msg))
+            })?;
+            app.manage(Mutex::new(Some(p2p_runtime)));
 
             // Spawn receiver runtime, keeping the handle so we can await
             // graceful shutdown (cancel session, stop proxies) before exit.

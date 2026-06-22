@@ -107,11 +107,17 @@ class CutoverCleanupTests(unittest.TestCase):
             self.assertIn('- "scripts/validate-packaging.sh"', event_block)
 
     def test_receiver_ui_removed_central_server_tabs_and_commands(self) -> None:
+        # Note: `AnnouncerTab.svelte` is intentionally NOT listed here. The
+        # central-server announcer config UI (`AnnouncerConfigForm.svelte` and
+        # the `*AnnouncerConfig` commands below) was removed at cutover, but the
+        # receiver later gained a *new*, P2P-native announcer tab (global
+        # publish toggle + participant/chip import + per-stream opt-in). That
+        # tab reuses the filename but shares none of the removed central-server
+        # surface, which the forbidden-symbol checks below still guard.
         for rel_path in [
             "apps/receiver-ui/src/lib/components/ForwardersTab.svelte",
             "apps/receiver-ui/src/lib/components/ForwardersTab.test.ts",
             "apps/receiver-ui/src/lib/components/RacesTab.svelte",
-            "apps/receiver-ui/src/lib/components/AnnouncerTab.svelte",
             "apps/shared-ui/src/components/AnnouncerConfigForm.svelte",
             "apps/shared-ui/src/lib/announcer-types.ts",
             "apps/shared-ui/src/lib/help/server-help.ts",

@@ -247,6 +247,19 @@ pub struct AppState {
     /// Keepalive receiver to prevent the watch channel from being dropped
     /// when no external subscribers exist.
     _dbf_config_keepalive: watch::Receiver<u64>,
+    /// Monotonic counter incremented when the server URL+token changes (e.g. a
+    /// profile save); the P2P reconcile loop uses this to rebind server-bound
+    /// tasks. Use `notify_server_config_changed()` and `server_config_rx()`.
+    server_config_version: watch::Sender<u64>,
+    /// Keepalive receiver so the watch channel is not dropped when the P2P
+    /// runtime (the only subscriber) is not yet started.
+    _server_config_keepalive: watch::Receiver<u64>,
+    /// The raw server URL+token override, set once at startup: env vars for the
+    /// desktop app, CLI flags for headless. Source of truth for "is an override
+    /// active" and for resolving the effective server in control handlers, so
+    /// both desktop and headless report/persist the same server the P2P runtime
+    /// targets. `(None, None)` when there is no override source.
+    server_override: tokio::sync::RwLock<(Option<String>, Option<String>)>,
 }
 
 impl AppState {
@@ -269,6 +282,7 @@ impl AppState {
                 restart: false,
             });
         let (dbf_config_version, _dbf_config_keepalive) = watch::channel(0u64);
+        let (server_config_version, _server_config_keepalive) = watch::channel(0u64);
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3))
             .build()
@@ -302,8 +316,22 @@ impl AppState {
             retry_streak: AtomicU64::new(0),
             dbf_config_version,
             _dbf_config_keepalive,
+            server_config_version,
+            _server_config_keepalive,
+            server_override: tokio::sync::RwLock::new((None, None)),
         });
         (state, shutdown_rx)
+    }
+
+    /// Record the server URL+token override (env for desktop, CLI for headless).
+    /// Called once at startup before control handlers serve.
+    pub async fn set_server_override(&self, override_: (Option<String>, Option<String>)) {
+        *self.server_override.write().await = override_;
+    }
+
+    /// The server URL+token override captured at startup.
+    pub async fn server_override(&self) -> (Option<String>, Option<String>) {
+        self.server_override.read().await.clone()
     }
 
     /// Subscribe to connection state changes.
@@ -317,6 +345,16 @@ impl AppState {
 
     pub fn dbf_config_rx(&self) -> watch::Receiver<u64> {
         self.dbf_config_version.subscribe()
+    }
+
+    /// Signal that the server URL+token configuration changed so the P2P
+    /// reconcile loop rebinds its server-bound tasks.
+    pub fn notify_server_config_changed(&self) {
+        self.server_config_version.send_modify(|v| *v += 1);
+    }
+
+    pub fn server_config_rx(&self) -> watch::Receiver<u64> {
+        self.server_config_version.subscribe()
     }
 
     pub fn connect_attempt_rx(&self) -> watch::Receiver<ConnectAttempt> {
@@ -842,6 +880,7 @@ impl AppState {
                 (vec![], true)
             }
         };
+        let announcer_publish_streams = db.load_announcer_publish_streams().unwrap_or_default();
         drop(db);
 
         let cursor_map: HashMap<&str, &crate::db::StreamCursorRecord> =
@@ -894,6 +933,7 @@ impl AppState {
                 reader_ip: display_reader_ip,
                 subscribed: true,
                 local_port: port,
+                announcer_publish: announcer_publish_streams.contains(&sub.stream_id),
                 event_type: Some(sub.event_type),
                 online: None,
                 reader_connected: None,
@@ -929,6 +969,7 @@ impl AppState {
                     reader_ip: None,
                     subscribed: false,
                     local_port: None,
+                    announcer_publish: false,
                     event_type: None,
                     online: None,
                     reader_connected: None,
@@ -1026,9 +1067,17 @@ fn is_uuid_format(value: &str) -> bool {
 
 #[derive(Debug, Serialize)]
 pub struct ProfileResponse {
+    /// Effective server URL (resolved: env override > profile).
     pub server_url: String,
+    /// Effective server token (resolved: env override > profile).
     pub token: String,
     pub receiver_id: String,
+    /// Where the effective server config comes from: `"env"` (RT_P2P_SERVER_*
+    /// override active), `"profile"` (stored profile), or `"none"`. The UI
+    /// renders the URL/token read-only when this is `"env"`.
+    pub server_source: String,
+    /// Global announcer publish toggle state.
+    pub announcer_enabled: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1070,6 +1119,8 @@ pub struct StreamEntry {
     pub reader_ip: Option<String>,
     pub subscribed: bool,
     pub local_port: Option<u16>,
+    /// Whether this stream is opted in to announcer publishing.
+    pub announcer_publish: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_type: Option<crate::db::EventType>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1229,18 +1280,168 @@ pub struct EventTypeRequest {
 // Handler functions (plain async, no Axum)
 // ---------------------------------------------------------------------------
 
+/// Summary returned by the participant/chip import commands.
+#[derive(Debug, Serialize)]
+pub struct ImportSummary {
+    /// Rows accepted into the table (participants or chip assignments).
+    pub imported: usize,
+    /// Chips that resolve to a participant after the import (post-join).
+    pub resolvable_chips: usize,
+}
+
+/// Import participants from `.ppl` file contents. Strict: a parse error rejects
+/// the whole file and leaves the existing table untouched. On success the table
+/// is replaced wholesale and the chip lookup is rebuilt.
+pub async fn import_participants(
+    state: &AppState,
+    contents: String,
+) -> Result<ImportSummary, ReceiverError> {
+    let participants =
+        crate::participants::parse_ppl(&contents).map_err(ReceiverError::BadRequest)?;
+    let imported = participants.len();
+    {
+        let mut db = state.db.lock().await;
+        db.replace_participants(&participants)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    }
+    let resolvable_chips = reload_chip_lookup(state).await?;
+    Ok(ImportSummary {
+        imported,
+        resolvable_chips,
+    })
+}
+
+/// Import bib->chip assignments from `.bibchip` file contents. Strict, like
+/// [`import_participants`].
+pub async fn import_chips(
+    state: &AppState,
+    contents: String,
+) -> Result<ImportSummary, ReceiverError> {
+    let chips = crate::participants::parse_bibchip(&contents).map_err(ReceiverError::BadRequest)?;
+    let imported = chips.len();
+    {
+        let mut db = state.db.lock().await;
+        db.replace_bib_chips(&chips)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    }
+    let resolvable_chips = reload_chip_lookup(state).await?;
+    Ok(ImportSummary {
+        imported,
+        resolvable_chips,
+    })
+}
+
+/// Enable or disable the global announcer publish toggle. The P2P reconcile
+/// loop picks up the change on its next pass (within one reconcile interval).
+pub async fn set_announcer_enabled(state: &AppState, enabled: bool) -> Result<(), ReceiverError> {
+    {
+        let db = state.db.lock().await;
+        db.set_announcer_enabled(enabled)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    }
+    // Other UI/bridge clients hold this in profile state; nudge them to refetch.
+    state.emit_resync();
+    Ok(())
+}
+
+/// Opt a single stream in/out of announcer publishing (opt-in default off).
+pub async fn set_stream_announcer_publish(
+    state: &AppState,
+    stream_id: &str,
+    publish: bool,
+) -> Result<(), ReceiverError> {
+    {
+        let db = state.db.lock().await;
+        db.set_stream_announcer_publish(stream_id, publish)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    }
+    // The per-stream publish flag rides on the streams snapshot, so broadcast
+    // it for other clients (SSE-only; does not restart stream workers).
+    state.emit_streams_snapshot().await;
+    Ok(())
+}
+
+/// Rebuild the in-memory chip->participant lookup from the durable
+/// participant/chip tables. Called at startup and after each import. Returns
+/// the number of resolvable chips. The lookup uses a single outer key
+/// (`"default"`); the announcer resolver searches across all outer maps.
+pub async fn reload_chip_lookup(state: &AppState) -> Result<usize, ReceiverError> {
+    let map = {
+        let db = state.db.lock().await;
+        db.load_chip_to_participant()
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?
+    };
+    let count = map.len();
+    let mut lookup = state.chip_lookup.write().await;
+    lookup.clear();
+    lookup.insert("default".to_owned(), map);
+    Ok(count)
+}
+
+/// Choose the server URL+token to persist on a profile save.
+///
+/// When a server env override is active the UI locks the URL/token inputs and
+/// `get_profile` returns the effective (env) values, which the client echoes
+/// back on save. Persisting those would copy the env token into the profile
+/// DB, so the stored values are preserved instead. Otherwise the request body
+/// (already trimmed for the URL) is persisted.
+fn server_fields_to_persist(
+    env_active: bool,
+    body_url: String,
+    body_token: String,
+    existing: Option<&crate::db::Profile>,
+) -> (String, String) {
+    if env_active {
+        existing.map_or((String::new(), String::new()), |p| {
+            (p.server_url.clone(), p.token.clone())
+        })
+    } else {
+        (body_url, body_token)
+    }
+}
+
+/// Whether a server URL+token override is active (both set and non-empty).
+/// When active, the stored profile server fields are read-only in the UI and
+/// must not be overwritten by a profile save.
+fn server_override_active(override_: &(Option<String>, Option<String>)) -> bool {
+    let non_empty = |s: &Option<String>| s.as_deref().is_some_and(|v| !v.trim().is_empty());
+    non_empty(&override_.0) && non_empty(&override_.1)
+}
+
 pub async fn get_profile(state: &AppState) -> Result<ProfileResponse, ReceiverError> {
     let receiver_id = state.receiver_id.read().await.clone();
-    let db = state.db.lock().await;
-    match db.load_profile() {
-        Ok(Some(p)) => Ok(ProfileResponse {
-            server_url: p.server_url,
-            token: p.token,
-            receiver_id,
-        }),
-        Ok(None) => Err(ReceiverError::NotFound("no profile".to_owned())),
-        Err(e) => Err(ReceiverError::Internal(e.to_string())),
+    let profile = {
+        let db = state.db.lock().await;
+        db.load_profile()
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?
+    };
+
+    // Report the effective server config and its source so the UI can show the
+    // real values (and lock the fields) when an override is active.
+    let override_ = state.server_override().await;
+    let env_active = server_override_active(&override_);
+    let resolved = crate::runtime::resolve_server_config(profile.as_ref(), override_);
+    let server_source = if env_active {
+        "env"
+    } else if resolved.is_some() {
+        "profile"
+    } else {
+        "none"
     }
+    .to_owned();
+    let (server_url, token) =
+        resolved.map_or_else(|| (String::new(), String::new()), |s| (s.url, s.token));
+    let announcer_enabled = {
+        let db = state.db.lock().await;
+        db.load_announcer_enabled().unwrap_or(false)
+    };
+    Ok(ProfileResponse {
+        server_url,
+        token,
+        receiver_id,
+        server_source,
+        announcer_enabled,
+    })
 }
 
 pub async fn get_mode(state: &AppState) -> Result<ReceiverMode, ReceiverError> {
@@ -1271,13 +1472,21 @@ pub async fn put_profile(state: &AppState, body: ProfileRequest) -> Result<(), R
     }
 
     let mut db = state.db.lock().await;
+    let existing = db.load_profile().ok().flatten();
     let persist_receiver_id = new_receiver_id
         .clone()
-        .or_else(|| db.load_profile().ok().flatten().and_then(|p| p.receiver_id));
+        .or_else(|| existing.as_ref().and_then(|p| p.receiver_id.clone()));
+
+    let (persist_url, persist_token) = server_fields_to_persist(
+        server_override_active(&state.server_override().await),
+        url,
+        body.token.clone(),
+        existing.as_ref(),
+    );
 
     match db.save_profile(
-        &url,
-        &body.token,
+        &persist_url,
+        &persist_token,
         DEFAULT_UPDATE_MODE,
         persist_receiver_id.as_deref(),
     ) {
@@ -1286,6 +1495,10 @@ pub async fn put_profile(state: &AppState, body: ProfileRequest) -> Result<(), R
             if let Some(id) = new_receiver_id {
                 *state.receiver_id.write().await = id;
             }
+            // The server URL+token may have changed; signal the P2P reconcile
+            // loop to rebind its server-bound tasks (register/takeover,
+            // discovery, announcer).
+            state.notify_server_config_changed();
             Ok(())
         }
         Err(e) => Err(ReceiverError::Internal(e.to_string())),
@@ -1533,10 +1746,16 @@ struct ServerStatusDevice {
 
 pub(crate) async fn server_device_status(state: &AppState) -> ServerDeviceStatus {
     let server_url = {
-        let db = state.db.lock().await;
-        match db.load_profile() {
-            Ok(Some(profile)) if !profile.server_url.trim().is_empty() => profile.server_url,
-            _ => return ServerDeviceStatus::not_configured(),
+        let profile = {
+            let db = state.db.lock().await;
+            db.load_profile().ok().flatten()
+        };
+        // Mirror the P2P runtime's resolution (env/CLI override > profile) so
+        // the status card reflects the server the receiver actually targets.
+        match crate::runtime::resolve_server_config(profile.as_ref(), state.server_override().await)
+        {
+            Some(server) => server.url,
+            None => return ServerDeviceStatus::not_configured(),
         }
     };
 
@@ -1960,6 +2179,10 @@ pub async fn admin_reset_profile(state: &AppState) -> Result<(), ReceiverError> 
         Ok(()) => {
             drop(db);
             *state.receiver_id.write().await = String::new();
+            // The server URL+token were cleared; rebind the always-on P2P
+            // runtime so it drops its old server-bound tasks immediately
+            // instead of waiting for a later profile save.
+            state.notify_server_config_changed();
             state.emit_streams_snapshot().await;
             Ok(())
         }
@@ -2001,6 +2224,13 @@ pub async fn admin_factory_reset(state: &AppState) -> Result<(), ReceiverError> 
         Ok(()) => {
             drop(db);
             *state.receiver_id.write().await = String::new();
+            // Drop the now-empty participant/chip lookup from memory so a
+            // factory reset does not leave prior identities resolvable.
+            if let Err(e) = reload_chip_lookup(state).await {
+                warn!(error = %e, "failed to reload chip lookup after factory reset");
+            }
+            // The server config was wiped; rebind the always-on P2P runtime.
+            state.notify_server_config_changed();
             state.emit_streams_snapshot().await;
             Ok(())
         }
@@ -2129,6 +2359,13 @@ macro_rules! receiver_command_list {
                 stream_id: "String",
                 body: "EventTypeRequest"
             ) -> "()",
+            import_participants(contents: "String") -> "ImportSummary",
+            import_chips(contents: "String") -> "ImportSummary",
+            set_announcer_enabled(enabled: "bool") -> "()",
+            set_stream_announcer_publish(
+                stream_id: "String",
+                publish: "bool"
+            ) -> "()",
         }
     };
 }
@@ -2217,7 +2454,50 @@ pub fn event_name(event: &ReceiverUiEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Db;
+    use crate::db::{Db, Profile};
+
+    fn profile(url: &str, token: &str) -> Profile {
+        Profile {
+            server_url: url.to_owned(),
+            token: token.to_owned(),
+            update_mode: String::new(),
+            receiver_id: Some("recv-1".to_owned()),
+        }
+    }
+
+    #[test]
+    fn server_fields_to_persist_preserves_stored_when_env_active() {
+        // Env override active: the echoed env values are ignored; the stored
+        // (DB) server fields are preserved so the env token never lands in DB.
+        let stored = profile("http://stored", "stored-token");
+        let (url, token) = server_fields_to_persist(
+            true,
+            "http://env".to_owned(),
+            "env-token".to_owned(),
+            Some(&stored),
+        );
+        assert_eq!(url, "http://stored");
+        assert_eq!(token, "stored-token");
+
+        // No stored profile + env active: persist empty, never the env token.
+        let (url, token) =
+            server_fields_to_persist(true, "http://env".to_owned(), "env-token".to_owned(), None);
+        assert_eq!(url, "");
+        assert_eq!(token, "");
+    }
+
+    #[test]
+    fn server_fields_to_persist_uses_body_when_no_env_override() {
+        let stored = profile("http://stored", "stored-token");
+        let (url, token) = server_fields_to_persist(
+            false,
+            "http://body".to_owned(),
+            "body-token".to_owned(),
+            Some(&stored),
+        );
+        assert_eq!(url, "http://body");
+        assert_eq!(token, "body-token");
+    }
 
     async fn count_connections_changed_events(
         ui_rx: &mut tokio::sync::broadcast::Receiver<ReceiverUiEvent>,
@@ -2267,6 +2547,100 @@ mod tests {
             snapshot.pending,
             "a freshly started grace clock must keep pending=true"
         );
+    }
+
+    #[tokio::test]
+    async fn import_participants_and_chips_populate_lookup() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let p = import_participants(&state, ";hdr\n1,Smith,John,,,M\n2,Doe,Jane\n".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(p.imported, 2);
+        let c = import_chips(&state, "BIB,CHIP\n1,0580\n2,0581\n".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(c.imported, 2);
+        assert_eq!(c.resolvable_chips, 2);
+        let lookup = state.chip_lookup.read().await;
+        let resolved = lookup
+            .values()
+            .find_map(|chips| chips.get("0580"))
+            .expect("chip resolves");
+        assert_eq!(resolved, &("1".to_owned(), "John Smith".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn malformed_import_is_rejected_without_mutation() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        // Seed a good participant set first.
+        import_participants(&state, "1,Smith,John\n".to_owned())
+            .await
+            .unwrap();
+        // A malformed row must reject the whole upload and not touch the table.
+        let err = import_participants(&state, "2,Good,Row\nz,bad,bib\n".to_owned())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ReceiverError::BadRequest(_)));
+        // Verify bib 2 was never written: chips for bib 1 and bib 2 should leave
+        // only bib 1 resolvable.
+        let summary = import_chips(&state, "1,aaa\n2,bbb\n".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(summary.imported, 2);
+        assert_eq!(
+            summary.resolvable_chips, 1,
+            "only bib 1 should resolve; the rejected import must not have added bib 2"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_chip_lookup_populates_resolver() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        {
+            let mut db = state.db.lock().await;
+            db.replace_participants(&[crate::participants::Participant {
+                bib: 12,
+                last: "Runner".to_owned(),
+                first: "Fast".to_owned(),
+                affiliation: String::new(),
+                gender: "X".to_owned(),
+            }])
+            .unwrap();
+            db.replace_bib_chips(&[(12, "chip-12".to_owned())]).unwrap();
+        }
+        let count = reload_chip_lookup(&state).await.unwrap();
+        assert_eq!(count, 1);
+        let lookup = state.chip_lookup.read().await;
+        let resolved = lookup
+            .values()
+            .find_map(|chips| chips.get("chip-12"))
+            .expect("chip resolves");
+        assert_eq!(resolved, &("12".to_owned(), "Fast Runner".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn server_config_version_signal_is_observable() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let mut rx = state.server_config_rx();
+        state.notify_server_config_changed();
+        assert!(rx.changed().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn put_profile_signals_server_config_change() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let mut rx = state.server_config_rx();
+        put_profile(
+            &state,
+            ProfileRequest {
+                server_url: "http://127.0.0.1:8080".to_owned(),
+                token: "tok".to_owned(),
+                receiver_id: None,
+            },
+        )
+        .await
+        .expect("put_profile ok");
+        assert!(rx.changed().await.is_ok());
     }
 
     #[test]

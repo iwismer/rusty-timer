@@ -25,6 +25,7 @@ const mockState = vi.hoisted(() => {
       savedReceiverId: "recv-test",
       savedServerUrl: "https://server.example.com",
       savedToken: "secret",
+      serverSource: "profile",
       saving: false,
       status: defaultStatus(),
       editDbfEnabled: false,
@@ -70,6 +71,7 @@ describe("ConfigTab", () => {
     mockState.store.savedReceiverId = "recv-test";
     mockState.store.savedServerUrl = "https://server.example.com";
     mockState.store.savedToken = "secret";
+    mockState.store.serverSource = "profile";
     mockState.store.saving = false;
     mockState.store.status = mockState.defaultStatus();
     mockState.store.editDbfEnabled = false;
@@ -104,6 +106,28 @@ describe("ConfigTab", () => {
     ).not.toBeInTheDocument();
     expect(
       screen.queryByTestId("server-approval-state"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("locks the server fields and shows a note when overridden by env", () => {
+    mockState.store.serverSource = "env";
+
+    render(ConfigTab);
+
+    expect(screen.getByTestId("server-url-input")).toBeDisabled();
+    expect(screen.getByTestId("token-input")).toBeDisabled();
+    expect(screen.getByTestId("server-env-override-note")).toBeInTheDocument();
+    // The receiver ID stays editable.
+    expect(screen.getByTestId("receiver-id-input")).not.toBeDisabled();
+  });
+
+  it("keeps the server fields editable when sourced from the profile", () => {
+    render(ConfigTab);
+
+    expect(screen.getByTestId("server-url-input")).not.toBeDisabled();
+    expect(screen.getByTestId("token-input")).not.toBeDisabled();
+    expect(
+      screen.queryByTestId("server-env-override-note"),
     ).not.toBeInTheDocument();
   });
 

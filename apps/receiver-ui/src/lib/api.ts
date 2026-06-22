@@ -8,6 +8,16 @@ export interface Profile {
   server_url: string;
   token: string;
   receiver_id: string;
+  // Where the effective server config comes from: "env" (environment override
+  // active), "profile" (stored profile), or "none". Optional for compatibility.
+  server_source?: "env" | "profile" | "none";
+  // Global announcer publish toggle state.
+  announcer_enabled?: boolean;
+}
+
+export interface ImportSummary {
+  imported: number;
+  resolvable_chips: number;
 }
 
 export interface StreamEntry {
@@ -20,6 +30,9 @@ export interface StreamEntry {
   reader_ip?: string | null;
   subscribed: boolean;
   local_port: number | null;
+  // Whether this stream is opted in to announcer publishing. Always sent by the
+  // backend; optional here so older fixtures/payloads remain valid.
+  announcer_publish?: boolean;
   event_type?: "start" | "finish";
   online?: boolean | null;
   reader_connected?: boolean | null;
@@ -249,6 +262,30 @@ export async function getProfile(): Promise<Profile> {
 
 export async function putProfile(profile: Profile): Promise<void> {
   await invoke("put_profile", { body: profile });
+}
+
+export async function importParticipants(
+  contents: string,
+): Promise<ImportSummary> {
+  return invoke<ImportSummary>("import_participants", { contents });
+}
+
+export async function importChips(contents: string): Promise<ImportSummary> {
+  return invoke<ImportSummary>("import_chips", { contents });
+}
+
+export async function setAnnouncerEnabled(enabled: boolean): Promise<void> {
+  await invoke("set_announcer_enabled", { enabled });
+}
+
+export async function setStreamAnnouncerPublish(
+  streamId: string,
+  publish: boolean,
+): Promise<void> {
+  await invoke("set_stream_announcer_publish", {
+    streamId,
+    publish,
+  });
 }
 
 export async function getStreams(): Promise<StreamsResponse> {

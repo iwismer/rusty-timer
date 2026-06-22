@@ -232,11 +232,14 @@ impl Db {
     ) -> DbResult<()> {
         let receiver_mode_json = self.load_receiver_mode_json_raw()?;
         let dbf_config = self.load_dbf_config()?;
+        // Preserve config flags that live on the profile row across the
+        // delete+insert (mirrors dbf handling).
+        let announcer_enabled = self.load_announcer_enabled()?;
         let tx = self.conn.transaction()?;
         tx.execute_batch("DELETE FROM profile")?;
         tx.execute(
-            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, dbf_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, &dbf_config.path],
+            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, dbf_path, announcer_enabled) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, &dbf_config.path, i64::from(announcer_enabled)],
         )?;
         tx.commit()?;
         Ok(())
@@ -466,6 +469,67 @@ impl Db {
         tx.commit()?;
         Ok(())
     }
+
+    /// Replace all participants with `participants` (upload-replaces-all).
+    pub fn replace_participants(
+        &mut self,
+        participants: &[crate::participants::Participant],
+    ) -> DbResult<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute_batch("DELETE FROM participants")?;
+        for p in participants {
+            tx.execute(
+                "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![p.bib, &p.last, &p.first, &p.affiliation, &p.gender],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Replace all bib->chip assignments with `chips` (upload-replaces-all).
+    pub fn replace_bib_chips(&mut self, chips: &[(i64, String)]) -> DbResult<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute_batch("DELETE FROM bib_chips")?;
+        for (bib, chip_id) in chips {
+            tx.execute(
+                "INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES (?1, ?2)",
+                rusqlite::params![chip_id, bib],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Build the chip-id -> (bib, "first last") lookup by joining `bib_chips`
+    /// to `participants`. Chips with no matching participant are skipped
+    /// (inner join), matching the legacy behavior. The bib is rendered as a
+    /// canonical decimal string via its i64 value.
+    pub fn load_chip_to_participant(
+        &self,
+    ) -> DbResult<std::collections::HashMap<String, (String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.chip_id, c.bib, p.first, p.last
+             FROM bib_chips c
+             JOIN participants p ON p.bib = c.bib",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let chip_id: String = r.get(0)?;
+            let bib: i64 = r.get(1)?;
+            let first: String = r.get(2)?;
+            let last: String = r.get(3)?;
+            let name = format!("{first} {last}").trim().to_owned();
+            Ok((chip_id, (bib.to_string(), name)))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (chip_id, value) = row?;
+            map.insert(chip_id, value);
+        }
+        Ok(map)
+    }
+
     pub fn load_resume_cursors(&self) -> DbResult<Vec<ResumeCursor>> {
         Ok(self
             .load_cursors()?
@@ -768,6 +832,19 @@ impl Db {
         })
     }
 
+    /// Clear all per-stream announcer source-generation fences.
+    ///
+    /// Fences are monotonic per stream, which is correct for a single server
+    /// but wrong across a server change: a replacement announcer backend may
+    /// start at a lower generation and would otherwise be fenced out forever.
+    /// The reconcile loop calls this when the server config changes so the new
+    /// server's generation is accepted fresh.
+    pub fn reset_announcer_fences(&self) -> DbResult<()> {
+        self.conn
+            .execute_batch("DELETE FROM announcer_source_fence")?;
+        Ok(())
+    }
+
     pub fn load_received_event(
         &self,
         stream_id: &str,
@@ -925,6 +1002,11 @@ impl Db {
             &self.conn,
             r"ALTER TABLE profile ADD COLUMN dbf_path TEXT NOT NULL DEFAULT 'C:\winrace\Files\IPICO.DBF';",
             "dbf_path",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE profile ADD COLUMN announcer_enabled INTEGER NOT NULL DEFAULT 0;",
+            "announcer_enabled",
         )?;
         apply_add_column_migration(
             &self.conn,
@@ -1112,8 +1194,9 @@ impl Db {
         tx.execute_batch("DELETE FROM gap_markers")?;
         tx.execute_batch("DELETE FROM earliest_epochs")?;
         tx.execute_batch("DELETE FROM subscriptions")?;
+        tx.execute_batch("DELETE FROM announcer_publish_streams")?;
         tx.execute(
-            "UPDATE profile SET update_mode = ?1, receiver_mode_json = NULL, dbf_enabled = 0, dbf_path = 'C:\\winrace\\Files\\IPICO.DBF'",
+            "UPDATE profile SET update_mode = ?1, receiver_mode_json = NULL, dbf_enabled = 0, dbf_path = 'C:\\winrace\\Files\\IPICO.DBF', announcer_enabled = 0",
             rusqlite::params![DEFAULT_UPDATE_MODE],
         )?;
         tx.commit()?;
@@ -1129,6 +1212,9 @@ impl Db {
         tx.execute_batch("DELETE FROM earliest_epochs")?;
         tx.execute_batch("DELETE FROM subscriptions")?;
         tx.execute_batch("DELETE FROM forwarder_intent")?;
+        tx.execute_batch("DELETE FROM announcer_publish_streams")?;
+        tx.execute_batch("DELETE FROM participants")?;
+        tx.execute_batch("DELETE FROM bib_chips")?;
         tx.execute_batch("DELETE FROM profile")?;
         tx.execute(
             "INSERT INTO profile (server_url, token, update_mode) VALUES ('', '', ?1)",
@@ -1174,6 +1260,60 @@ impl Db {
             return Err(DbError::ProfileMissing);
         }
         Ok(())
+    }
+
+    /// Whether the global announcer publish toggle is on. Defaults to `false`
+    /// (opt-in) when no profile row exists.
+    pub fn load_announcer_enabled(&self) -> DbResult<bool> {
+        let enabled: Option<i64> = self
+            .conn
+            .query_row("SELECT announcer_enabled FROM profile LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(enabled.unwrap_or(0) != 0)
+    }
+
+    /// Set the global announcer publish toggle. Requires a profile row
+    /// (created at receiver startup).
+    pub fn set_announcer_enabled(&self, enabled: bool) -> DbResult<()> {
+        let changed = self.conn.execute(
+            "UPDATE profile SET announcer_enabled = ?1",
+            rusqlite::params![i64::from(enabled)],
+        )?;
+        if changed == 0 {
+            return Err(DbError::ProfileMissing);
+        }
+        Ok(())
+    }
+
+    /// Enable or disable announcer publishing for a single stream (opt-in).
+    pub fn set_stream_announcer_publish(&self, stream_id: &str, publish: bool) -> DbResult<()> {
+        if publish {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO announcer_publish_streams (stream_id) VALUES (?1)",
+                rusqlite::params![stream_id],
+            )?;
+        } else {
+            self.conn.execute(
+                "DELETE FROM announcer_publish_streams WHERE stream_id = ?1",
+                rusqlite::params![stream_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The set of stream ids opted in to announcer publishing.
+    pub fn load_announcer_publish_streams(&self) -> DbResult<std::collections::HashSet<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT stream_id FROM announcer_publish_streams")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut set = std::collections::HashSet::new();
+        for row in rows {
+            set.insert(row?);
+        }
+        Ok(set)
     }
 
     pub fn update_subscription_event_type(
@@ -1491,6 +1631,79 @@ fn is_duplicate_column_error(message: &str, column_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn announcer_flags_persist() {
+        let mut db = Db::open_in_memory().unwrap();
+        // A profile row is required for the global toggle (created at startup).
+        db.save_profile("http://x", "t", DEFAULT_UPDATE_MODE, None)
+            .unwrap();
+        assert!(!db.load_announcer_enabled().unwrap(), "defaults to off");
+        db.set_announcer_enabled(true).unwrap();
+        assert!(db.load_announcer_enabled().unwrap());
+
+        // Saving the profile again must preserve the announcer toggle.
+        db.save_profile("http://y", "t2", DEFAULT_UPDATE_MODE, None)
+            .unwrap();
+        assert!(
+            db.load_announcer_enabled().unwrap(),
+            "announcer_enabled must survive a profile save"
+        );
+
+        // Per-stream publish is opt-in and tracked independently.
+        assert!(db.load_announcer_publish_streams().unwrap().is_empty());
+        db.set_stream_announcer_publish("127.0.0.1:1", true)
+            .unwrap();
+        assert!(
+            db.load_announcer_publish_streams()
+                .unwrap()
+                .contains("127.0.0.1:1")
+        );
+        db.set_stream_announcer_publish("127.0.0.1:1", false)
+            .unwrap();
+        assert!(db.load_announcer_publish_streams().unwrap().is_empty());
+    }
+
+    #[test]
+    fn replace_and_load_participants_and_chips() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_participants(&[crate::participants::Participant {
+            bib: 1,
+            last: "A".to_owned(),
+            first: "B".to_owned(),
+            affiliation: String::new(),
+            gender: "M".to_owned(),
+        }])
+        .unwrap();
+        db.replace_bib_chips(&[(1i64, "0580".to_owned())]).unwrap();
+        let map = db.load_chip_to_participant().unwrap();
+        assert_eq!(map.get("0580"), Some(&("1".to_owned(), "B A".to_owned())));
+    }
+
+    #[test]
+    fn unmatched_chip_is_skipped_and_replace_clears() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_bib_chips(&[(99, "deadbeef".to_owned())])
+            .unwrap();
+        // No participant for bib 99 -> chip is not resolvable.
+        assert!(db.load_chip_to_participant().unwrap().is_empty());
+        // Re-import replaces wholesale.
+        db.replace_participants(&[crate::participants::Participant {
+            bib: 5,
+            last: "Last".to_owned(),
+            first: "First".to_owned(),
+            affiliation: "Team".to_owned(),
+            gender: "X".to_owned(),
+        }])
+        .unwrap();
+        db.replace_bib_chips(&[(5, "abc".to_owned())]).unwrap();
+        let map = db.load_chip_to_participant().unwrap();
+        assert_eq!(map.len(), 1);
+        assert_eq!(
+            map.get("abc"),
+            Some(&("5".to_owned(), "First Last".to_owned()))
+        );
+    }
 
     #[test]
     fn migrates_legacy_thin_node_url_column_to_server_url() {
@@ -1887,6 +2100,18 @@ mod tests {
         db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
         db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
         db.set_forwarder_intent("f1", false).unwrap();
+        db.set_announcer_enabled(true).unwrap();
+        db.set_stream_announcer_publish("10.0.0.1:10000", true)
+            .unwrap();
+        db.replace_participants(&[crate::participants::Participant {
+            bib: 1,
+            last: "Last".to_owned(),
+            first: "First".to_owned(),
+            affiliation: String::new(),
+            gender: "X".to_owned(),
+        }])
+        .unwrap();
+        db.replace_bib_chips(&[(1, "0a1b".to_owned())]).unwrap();
         db.factory_reset().unwrap();
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.server_url, "");
@@ -1898,6 +2123,30 @@ mod tests {
         // forwarder_intent is cleared, so the default-true contract is restored.
         assert!(db.load_forwarder_intents().unwrap().is_empty());
         assert!(db.forwarder_should_connect("f1").unwrap());
+        // New tables and the global toggle must also be wiped.
+        assert!(!db.load_announcer_enabled().unwrap());
+        assert!(db.load_announcer_publish_streams().unwrap().is_empty());
+        assert!(db.load_chip_to_participant().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reset_announcer_fences_allows_lower_generation_after_server_change() {
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = "11111111-1111-1111-1111-111111111111";
+        // Fence advances to 10 against the original server.
+        db.accept_announcer_generation(stream_id, 10).unwrap();
+        // A replacement server starting at a lower generation would be fenced.
+        assert!(matches!(
+            db.accept_announcer_generation(stream_id, 3).unwrap(),
+            AnnouncerGenerationAcceptance::Stale { .. }
+        ));
+        // Resetting the fence (done on a server change) accepts it fresh.
+        db.reset_announcer_fences().unwrap();
+        assert_eq!(db.load_announcer_fence(stream_id).unwrap(), None);
+        assert_eq!(
+            db.accept_announcer_generation(stream_id, 3).unwrap(),
+            AnnouncerGenerationAcceptance::Current { generation: 3 }
+        );
     }
 
     #[test]

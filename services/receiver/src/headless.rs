@@ -55,7 +55,25 @@ impl HeadlessHost {
         // bound control server or orphaned tasks running; the bind address is
         // released promptly so a caller can retry.
         let p2p_runtime = match config.p2p {
-            Some(p2p_config) => Some(start_receiver_p2p(Arc::clone(&state), p2p_config).await?),
+            Some(mut p2p_config) => {
+                // The stored profile is the source of truth for the server
+                // URL+token; the CLI flags (already parsed into
+                // `p2p_config.server`) are the override.
+                let cli_override = p2p_config
+                    .server
+                    .take()
+                    .map_or((None, None), |s| (Some(s.url), Some(s.token)));
+                let profile = state.db.lock().await.load_profile().ok().flatten();
+                p2p_config.server =
+                    crate::runtime::resolve_server_config(profile.as_ref(), cli_override.clone());
+                // Record the override on shared state so control handlers
+                // (profile/status) resolve and gate consistently with the
+                // runtime, then preserve it on the config so a later
+                // profile-save reconfigure keeps `CLI override > profile`.
+                state.set_server_override(cli_override.clone()).await;
+                p2p_config.server_override = cli_override;
+                Some(start_receiver_p2p(Arc::clone(&state), p2p_config).await?)
+            }
             None => None,
         };
 

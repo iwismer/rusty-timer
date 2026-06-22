@@ -39,7 +39,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rt_iroh::{Endpoint, EndpointBuilder, NodeAddr, NodeId, SecretKey};
+use rt_iroh::{
+    Endpoint, EndpointBuilder, NodeAddr, NodeId, RelayMode, SecretKey, load_or_create_secret_key,
+};
 use rt_p2p_protocol::{
     CAP_CONTROL_EVENTS, CAP_REMOTE_CONFIG, Hello, MAX_FRAME_BYTES, SubscribeMode,
 };
@@ -87,7 +89,7 @@ pub struct ForwarderPeerConfig {
 ///
 /// `Debug` is implemented by hand (not derived) so the bearer token is never
 /// leaked through debug logs; it is rendered as `<redacted>`.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ServerClientConfig {
     /// Base URL, e.g. `http://127.0.0.1:8080`.
     pub url: String,
@@ -104,13 +106,30 @@ impl std::fmt::Debug for ServerClientConfig {
     }
 }
 
+/// The receiver's iroh identity source. Decoupled from transport so a
+/// persistent production identity can run with or without relays/discovery,
+/// mirroring the forwarder (`services/forwarder/src/p2p`).
+#[derive(Clone, Debug)]
+pub enum ReceiverIdentity {
+    /// Persistent production identity: load-or-create a secret key at this path.
+    KeyPath(std::path::PathBuf),
+    /// Deterministic loopback/dev seed.
+    Seed([u8; 32]),
+}
+
 /// Full P2P receiver configuration. Presence of this in
 /// [`HeadlessConfig`](crate::headless::HeadlessConfig) enables the P2P lane.
 #[derive(Clone, Debug)]
 pub struct P2pReceiverConfig {
-    /// Deterministic loopback secret-key seed (see
-    /// [`EndpointBuilder::test`]).
-    pub secret_key_seed: [u8; 32],
+    /// How this receiver's iroh secret key is sourced (persistent key path for
+    /// production, or a deterministic seed for loopback/dev).
+    pub identity: ReceiverIdentity,
+    /// Disable iroh relays (loopback/LAN/air-gapped deployments).
+    pub relay_disabled: bool,
+    /// Disable iroh discovery services.
+    pub discovery_disabled: bool,
+    /// Optional explicit IPv4 bind address for the endpoint.
+    pub bind_addr_v4: Option<std::net::SocketAddrV4>,
     /// An optional explicit forwarder peer to dial. When present it is seeded
     /// into the discovered-forwarders map at startup so the loopback/dev path
     /// works without a server. When absent, forwarders are learned entirely
@@ -118,9 +137,72 @@ pub struct P2pReceiverConfig {
     pub forwarder: Option<ForwarderPeerConfig>,
     /// Optional server client for announcer push and forwarder discovery.
     pub server: Option<ServerClientConfig>,
+    /// The raw server override (env vars for the desktop app, CLI flags for
+    /// headless) captured at construction, as `(url, token)`. The reconcile
+    /// loop re-resolves the effective server from `(profile, server_override)`
+    /// on a config-change signal, so a headless CLI override is not silently
+    /// lost when the profile is saved. Empty when there is no override source.
+    pub server_override: (Option<String>, Option<String>),
     /// How often to reconcile canonical subscriptions. Must be at least
     /// [`MIN_RECONCILE_INTERVAL`]; also used as the delivery retry cadence.
     pub reconcile_interval: Duration,
+}
+
+impl P2pReceiverConfig {
+    /// A bare production config: persistent key-path identity, relays and
+    /// discovery enabled, no explicit forwarder, and no server. The caller
+    /// sets `server` from the profile. Used for cold start so a fresh install
+    /// always has a live endpoint that a later profile save can reconfigure.
+    #[must_use]
+    pub fn production_default(key_path: std::path::PathBuf) -> Self {
+        Self {
+            identity: ReceiverIdentity::KeyPath(key_path),
+            relay_disabled: false,
+            discovery_disabled: false,
+            bind_addr_v4: None,
+            forwarder: None,
+            server: None,
+            server_override: (None, None),
+            reconcile_interval: Duration::from_millis(1000),
+        }
+    }
+}
+
+#[cfg(test)]
+impl P2pReceiverConfig {
+    /// Loopback/dev config from a seed, replicating `EndpointBuilder::test`
+    /// transport (relay off, discovery off, loopback bind). `relay_disabled`
+    /// is overridable so tests can exercise the transport knob independently.
+    pub(crate) fn for_test_seed(seed: [u8; 32], relay_disabled: bool) -> Self {
+        Self {
+            identity: ReceiverIdentity::Seed(seed),
+            relay_disabled,
+            discovery_disabled: true,
+            bind_addr_v4: Some(std::net::SocketAddrV4::new(
+                std::net::Ipv4Addr::LOCALHOST,
+                0,
+            )),
+            forwarder: None,
+            server: None,
+            server_override: (None, None),
+            reconcile_interval: Duration::from_millis(1000),
+        }
+    }
+
+    /// Production-style config using a persistent key path; relays/discovery
+    /// enabled by default (transport defaults are independent of identity).
+    pub(crate) fn for_test_keypath(path: std::path::PathBuf) -> Self {
+        Self {
+            identity: ReceiverIdentity::KeyPath(path),
+            relay_disabled: false,
+            discovery_disabled: false,
+            bind_addr_v4: None,
+            forwarder: None,
+            server: None,
+            server_override: (None, None),
+            reconcile_interval: Duration::from_millis(1000),
+        }
+    }
 }
 
 /// Build the client `Hello` presented during control-plane negotiation.
@@ -181,7 +263,22 @@ pub async fn start_receiver_p2p(
             config.reconcile_interval, MIN_RECONCILE_INTERVAL
         ));
     }
-    let endpoint = EndpointBuilder::test(config.secret_key_seed)
+    let secret_key = match &config.identity {
+        ReceiverIdentity::KeyPath(path) => load_or_create_secret_key(path)
+            .map_err(|e| format!("failed to load/create p2p key at {}: {e}", path.display()))?,
+        ReceiverIdentity::Seed(seed) => SecretKey::from_bytes(seed),
+    };
+    let mut builder = EndpointBuilder::default().secret_key(secret_key);
+    if config.relay_disabled {
+        builder = builder.relay_mode(RelayMode::Disabled);
+    }
+    if config.discovery_disabled {
+        builder = builder.clear_discovery();
+    }
+    if let Some(addr) = config.bind_addr_v4 {
+        builder = builder.bind_addr_v4(addr);
+    }
+    let endpoint = builder
         .bind()
         .await
         .map_err(|e| format!("failed to bind p2p endpoint: {e}"))?;
@@ -240,6 +337,31 @@ pub async fn start_receiver_p2p(
     Ok(P2pReceiverRuntime { shutdown_tx, task })
 }
 
+/// Replace the discovered-forwarders map with just the optional explicit
+/// (loopback/dev) forwarder seed. Called when the server config changes so
+/// forwarders learned from the previous server are not re-dialed; the new
+/// server's discovery loop (if any) then repopulates the map. An invalid seed
+/// node id is dropped because it cannot be dialed.
+async fn reseed_discovered_forwarders(
+    state: &Arc<AppState>,
+    forwarder: Option<&ForwarderPeerConfig>,
+) {
+    let mut discovered = state.discovered_forwarders.write().await;
+    discovered.clear();
+    if let Some(forwarder) = forwarder
+        && forwarder.node_id.parse::<NodeId>().is_ok()
+    {
+        discovered.insert(
+            forwarder.node_id.clone(),
+            DiscoveredForwarder {
+                display_name: None,
+                direct_addrs: vec![forwarder.direct_addr],
+                streams: Vec::new(),
+            },
+        );
+    }
+}
+
 /// Per-stream auxiliary worker bundle (local proxy, UI projection, DBF, announcer).
 struct StreamWorker {
     /// The canonical subscription this worker was built from. Reconciliation
@@ -284,7 +406,7 @@ impl StreamWorker {
 
 async fn run_reconcile_loop(
     state: Arc<AppState>,
-    config: P2pReceiverConfig,
+    mut config: P2pReceiverConfig,
     endpoint: Endpoint,
     reporter: Arc<SessionStatusReporter>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -293,29 +415,46 @@ async fn run_reconcile_loop(
     let mut workers: HashMap<String, ForwarderConnection> = HashMap::new();
     let mut stream_workers: HashMap<String, StreamWorker> = HashMap::new();
     let mut connect_attempt_rx = state.connect_attempt_rx();
+    let mut server_config_rx = state.server_config_rx();
     let mut force_reconnect: Option<Option<String>> = None;
 
     // When a server is configured, periodically refresh the discovered
     // forwarders map from its `GET /forwarders` feed. The task observes the
-    // same shutdown signal and is awaited/aborted below.
-    let discovery_task = config.server.clone().map(|thin| {
+    // same shutdown signal and is awaited/aborted below. Re-spawned when the
+    // server config changes (see the reconfigure branch below). The closure
+    // captures local clones (not `config`) so the reconfigure branch can still
+    // mutate `config.server`.
+    let discovery_seed = config.forwarder.clone();
+    let discovery_interval = config.reconcile_interval;
+    let spawn_discovery = |thin: ServerClientConfig, shutdown: watch::Receiver<bool>| {
         tokio::spawn(run_discovery_loop(
             Arc::clone(&state),
             thin,
-            config.forwarder.clone(),
-            config.reconcile_interval,
-            shutdown_rx.clone(),
+            discovery_seed.clone(),
+            discovery_interval,
+            shutdown,
             state.connect_attempt_rx(),
         ))
-    });
-    let approval_watch_task = config.server.as_ref().map(|thin| {
+    };
+    let mut discovery_task = config
+        .server
+        .clone()
+        .map(|thin| spawn_discovery(thin, shutdown_rx.clone()));
+    // The approval-watch task is also server-bound, so build it from a closure
+    // and keep it rebindable (`let mut`) the same way as discovery, so the
+    // reconfigure branch can restart it against a new server.
+    let spawn_approval_watch = |thin: ServerClientConfig, shutdown: watch::Receiver<bool>| {
         tokio::spawn(run_approval_watch_loop(
             Arc::clone(&state),
             thin.url.clone(),
-            config.reconcile_interval,
-            shutdown_rx.clone(),
+            discovery_interval,
+            shutdown,
         ))
-    });
+    };
+    let mut approval_watch_task = config
+        .server
+        .clone()
+        .map(|thin| spawn_approval_watch(thin, shutdown_rx.clone()));
 
     // Server announcer generation, acquired by registering this endpoint and
     // taking over the announcer generation. When the server is unavailable
@@ -388,6 +527,89 @@ async fn run_reconcile_loop(
                     let attempt = connect_attempt_rx.borrow().clone();
                     if attempt.restart {
                         force_reconnect = Some(attempt.endpoint_id);
+                    }
+                }
+            }
+            changed = server_config_rx.changed() => {
+                if changed.is_ok() {
+                    // Re-resolve the effective server config (profile is the
+                    // source of truth; env vars override). On a real change,
+                    // rebind every server-bound task: restart discovery, re-run
+                    // register/takeover, and rebuild stream workers so their
+                    // announcer clients pick up the new server. This causes a
+                    // brief session reconnect, which is acceptable and bounded.
+                    let profile = state.db.lock().await.load_profile().ok().flatten();
+                    // Re-resolve using the override captured at construction
+                    // (env vars for desktop, CLI flags for headless) so a
+                    // headless CLI override survives a profile save instead of
+                    // silently falling back to the stored profile.
+                    let new_server = crate::runtime::resolve_server_config(
+                        profile.as_ref(),
+                        config.server_override.clone(),
+                    );
+                    if new_server != config.server {
+                        info!("receiver server config changed; rebinding server-bound tasks");
+                        config.server = new_server;
+                        // Stop all existing stream workers FIRST. Each holds an
+                        // announcer push client bound to the previous server and
+                        // its (higher) generation. Draining them before the
+                        // fence reset below is required for correctness: were an
+                        // old worker still alive, it could race the reset, push
+                        // to the old server with the old generation, and re-raise
+                        // the fence so the new (possibly lower) generation is
+                        // permanently staled. Drain both the forwarder
+                        // connections and the per-stream (announcer) workers.
+                        for (_endpoint_id, worker) in workers.drain() {
+                            worker.stop().await;
+                        }
+                        for (_stream_id, worker) in stream_workers.drain() {
+                            worker.stop().await;
+                        }
+                        // Abort the server-bound discovery + approval-watch
+                        // tasks here; both are respawned after the reseed +
+                        // fence reset below so they bind to the new server.
+                        if let Some(task) = discovery_task.take() {
+                            task.abort();
+                            let _ = task.await;
+                        }
+                        if let Some(task) = approval_watch_task.take() {
+                            task.abort();
+                            let _ = task.await;
+                        }
+                        // Drop forwarders learned from the old server so stale
+                        // peers are not re-dialed; re-seed only the explicit
+                        // (loopback/dev) forwarder. Done before respawning
+                        // discovery so the new server's feed repopulates the
+                        // freshly-cleared map; when the server was cleared the
+                        // map stays empty so no old-server workers are rebuilt.
+                        reseed_discovered_forwarders(&state, config.forwarder.as_ref()).await;
+                        // Announcer generation fencing is per-stream and
+                        // monotonic; a replacement server may start at a lower
+                        // generation, which would otherwise permanently stale
+                        // every push. With all old workers now stopped, reset
+                        // the fences so the new server's generation is accepted
+                        // fresh without an old worker re-raising them.
+                        if let Err(e) = {
+                            let db = state.db.lock().await;
+                            db.reset_announcer_fences()
+                        } {
+                            warn!(error = %e, "failed to reset announcer fences on server change");
+                        }
+                        // Respawn discovery + approval-watch against the new
+                        // server, after the reseed so they repopulate the
+                        // freshly-cleared discovered-forwarders map.
+                        discovery_task = config
+                            .server
+                            .clone()
+                            .map(|thin| spawn_discovery(thin, shutdown_rx.clone()));
+                        approval_watch_task = config
+                            .server
+                            .clone()
+                            .map(|thin| spawn_approval_watch(thin, shutdown_rx.clone()));
+                        // Force re-running register/takeover and rebuilding all
+                        // forwarder + stream workers against the new server.
+                        announcer_generation = None;
+                        force_reconnect = Some(None);
                     }
                 }
             }
@@ -642,7 +864,7 @@ async fn reconcile_once(
     workers: &mut HashMap<String, ForwarderConnection>,
     stream_workers: &mut HashMap<String, StreamWorker>,
 ) {
-    let (subs, intents) = {
+    let (subs, intents, announcer_enabled, announcer_publish_streams) = {
         let db = state.db.lock().await;
         let subs = match db.load_stream_subscriptions() {
             Ok(subs) => subs,
@@ -658,7 +880,11 @@ async fn reconcile_once(
                 HashMap::new()
             }
         };
-        (subs, intents)
+        // Announcer gating inputs (global toggle + per-stream opt-in). Failures
+        // are treated as "disabled" so a transient DB error never publishes.
+        let enabled = db.load_announcer_enabled().unwrap_or(false);
+        let publish = db.load_announcer_publish_streams().unwrap_or_default();
+        (subs, intents, enabled, publish)
     };
 
     let discovered = state.discovered_forwarders.read().await.clone();
@@ -718,24 +944,34 @@ async fn reconcile_once(
         }
     }
 
-    let announcer_desired = config.server.is_some() && announcer_generation.is_some();
+    // Whether announcer push may run at all this pass: a server is configured,
+    // a fenced generation was acquired, and the global toggle is on. Per-stream
+    // opt-in is applied below via `announcer_publish_streams`.
+    let announcer_available =
+        config.server.is_some() && announcer_generation.is_some() && announcer_enabled;
+    let should_announce =
+        |stream_id: &str| announcer_available && announcer_publish_streams.contains(stream_id);
     for (stream_id, sub) in desired_streams {
+        let want_announce = should_announce(&stream_id);
         if let Some(existing) = stream_workers.get(&stream_id) {
             let config_changed = existing.sub != sub;
-            let announcer_missing = announcer_desired && !existing.announcer_active;
-            if !config_changed && !announcer_missing {
+            // Rebuild if the announcer state for this stream needs to change
+            // (turned on or off).
+            let announcer_mismatch = existing.announcer_active != want_announce;
+            if !config_changed && !announcer_mismatch {
                 continue;
             }
             if let Some(worker) = stream_workers.remove(&stream_id) {
                 if config_changed {
                     info!(%stream_id, "rebuilding p2p stream worker (subscription config changed)");
                 } else {
-                    info!(%stream_id, "rebuilding p2p stream worker (announcer now available)");
+                    info!(%stream_id, announce = want_announce, "rebuilding p2p stream worker (announcer state changed)");
                 }
                 worker.stop().await;
             }
         }
-        let worker = start_stream_worker(state, config, announcer_generation, &sub).await;
+        let worker =
+            start_stream_worker(state, config, announcer_generation, want_announce, &sub).await;
         stream_workers.insert(stream_id, worker);
     }
 
@@ -763,6 +999,7 @@ async fn start_stream_worker(
     state: &Arc<AppState>,
     config: &P2pReceiverConfig,
     announcer_generation: Option<i64>,
+    announce: bool,
     sub: &StreamSubscription,
 ) -> StreamWorker {
     let stream_id = sub.stream_id.clone();
@@ -835,9 +1072,12 @@ async fn start_stream_worker(
         )));
     }
 
-    // Announcer push.
+    // Announcer push. Gated by the per-stream + global opt-in resolved by the
+    // reconcile loop (`announce`).
     let mut announcer_active = false;
-    if let (Some(thin), Some(generation)) = (config.server.clone(), announcer_generation) {
+    if let (true, Some(thin), Some(generation)) =
+        (announce, config.server.clone(), announcer_generation)
+    {
         match ServerAnnouncerClient::new(&thin.url, thin.token.clone()) {
             Ok(client) => {
                 let client: Arc<dyn AnnouncerPushClient + Send + Sync> = Arc::new(client);
@@ -1287,18 +1527,47 @@ pub const ENV_P2P_SERVER_URL: &str = "RT_P2P_SERVER_URL";
 pub const ENV_P2P_SERVER_TOKEN: &str = "RT_P2P_SERVER_TOKEN";
 /// Env var overriding the subscription reconcile interval, in milliseconds.
 pub const ENV_P2P_RECONCILE_MS: &str = "RT_P2P_RECONCILE_MS";
+/// Env var for an explicit persistent secret-key file path (production
+/// identity). Mutually exclusive with [`ENV_P2P_SECRET_KEY_SEED_HEX`].
+pub const ENV_P2P_SECRET_KEY_PATH: &str = "RT_P2P_SECRET_KEY_PATH";
+/// Env var disabling iroh relays (truthy value = disabled).
+pub const ENV_P2P_RELAY_DISABLED: &str = "RT_P2P_RELAY_DISABLED";
+/// Env var disabling iroh discovery services (truthy value = disabled).
+pub const ENV_P2P_DISCOVERY_DISABLED: &str = "RT_P2P_DISCOVERY_DISABLED";
+
+/// Parse a boolean-ish env flag: empty/absent is `false`; `1/true/yes/on`
+/// (case-insensitive) is `true`; `0/false/no/off` is `false`; anything else is
+/// an error so typos surface loudly.
+fn parse_env_flag(value: Option<String>, key: &str) -> Result<bool, String> {
+    match value.as_deref().map(str::trim) {
+        None | Some("") => Ok(false),
+        Some(v) => match v.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            other => Err(format!("invalid {key}: expected a boolean, got `{other}`")),
+        },
+    }
+}
 
 /// Build an optional [`P2pReceiverConfig`] from a key->value lookup (e.g. env).
 ///
 /// Mirrors the `receiver-headless` CLI validation: P2P is enabled only when at
-/// least one key is present; the secret-key seed is then required; the forwarder
-/// node id and direct address must be supplied together (both or neither); the
-/// server URL and token must be supplied together; at least one of an
-/// explicit forwarder or a server must be configured; and the reconcile
-/// interval defaults to 1000ms and must be at least [`MIN_RECONCILE_INTERVAL`].
-/// Empty/whitespace-only values are treated as absent.
+/// least one key is present; the forwarder node id and direct address must be
+/// supplied together (both or neither); the server URL and token must be
+/// supplied together; and the reconcile interval defaults to 1000ms and must be
+/// at least [`MIN_RECONCILE_INTERVAL`]. Empty/whitespace-only values are treated
+/// as absent. A config with only identity/transport/reconcile knobs (no
+/// forwarder, no server) is valid and returns `server: None`; the caller then
+/// attaches the resolved profile/override server.
+///
+/// Identity: a seed and an explicit key path are mutually exclusive. When
+/// neither is given the receiver uses a persistent key at `default_key_path`
+/// (production identity). A seed implies the loopback/dev transport (relays and
+/// discovery off, loopback bind) unless overridden; otherwise transport follows
+/// the relay/discovery flags (default: enabled, i.e. production).
 pub fn p2p_config_from_lookup(
     get: impl Fn(&str) -> Option<String>,
+    default_key_path: std::path::PathBuf,
 ) -> Result<Option<P2pReceiverConfig>, String> {
     let trimmed = |key: &str| {
         get(key)
@@ -1309,16 +1578,22 @@ pub fn p2p_config_from_lookup(
     let forwarder_node_id = trimmed(ENV_P2P_FORWARDER_NODE_ID);
     let forwarder_direct_addr = trimmed(ENV_P2P_FORWARDER_DIRECT_ADDR);
     let secret_key_seed_hex = trimmed(ENV_P2P_SECRET_KEY_SEED_HEX);
+    let secret_key_path = trimmed(ENV_P2P_SECRET_KEY_PATH);
     let server_url = trimmed(ENV_P2P_SERVER_URL);
     let server_token = trimmed(ENV_P2P_SERVER_TOKEN);
     let reconcile_ms_raw = trimmed(ENV_P2P_RECONCILE_MS);
+    let relay_disabled_raw = trimmed(ENV_P2P_RELAY_DISABLED);
+    let discovery_disabled_raw = trimmed(ENV_P2P_DISCOVERY_DISABLED);
 
     let any_present = forwarder_node_id.is_some()
         || forwarder_direct_addr.is_some()
         || secret_key_seed_hex.is_some()
+        || secret_key_path.is_some()
         || server_url.is_some()
         || server_token.is_some()
-        || reconcile_ms_raw.is_some();
+        || reconcile_ms_raw.is_some()
+        || relay_disabled_raw.is_some()
+        || discovery_disabled_raw.is_some();
     if !any_present {
         return Ok(None);
     }
@@ -1346,6 +1621,7 @@ pub fn p2p_config_from_lookup(
         }
     };
 
+    let server_override = (server_url.clone(), server_token.clone());
     let server = match (server_url, server_token) {
         (Some(url), Some(token)) => Some(ServerClientConfig { url, token }),
         (None, None) => None,
@@ -1356,18 +1632,40 @@ pub fn p2p_config_from_lookup(
         }
     };
 
-    if forwarder.is_none() && server.is_none() {
-        return Err(format!(
-            "P2P requires either an explicit forwarder ({ENV_P2P_FORWARDER_NODE_ID} + \
-             {ENV_P2P_FORWARDER_DIRECT_ADDR}) or a server ({ENV_P2P_SERVER_URL} + \
-             {ENV_P2P_SERVER_TOKEN})"
-        ));
-    }
+    // Identity: seed XOR explicit key path; fall back to the persistent default
+    // key path when neither is given.
+    let identity = match (secret_key_seed_hex, secret_key_path) {
+        (Some(_), Some(_)) => {
+            return Err(format!(
+                "{ENV_P2P_SECRET_KEY_SEED_HEX} and {ENV_P2P_SECRET_KEY_PATH} are mutually exclusive"
+            ));
+        }
+        (Some(seed_hex), None) => ReceiverIdentity::Seed(parse_secret_key_seed_hex(&seed_hex)?),
+        (None, Some(path)) => ReceiverIdentity::KeyPath(std::path::PathBuf::from(path)),
+        (None, None) => ReceiverIdentity::KeyPath(default_key_path),
+    };
 
-    let secret_key_seed_hex = secret_key_seed_hex.ok_or_else(|| {
-        format!("{ENV_P2P_SECRET_KEY_SEED_HEX} is required when any P2P env var is set")
-    })?;
-    let secret_key_seed = parse_secret_key_seed_hex(&secret_key_seed_hex)?;
+    // A seed identity defaults to the loopback/dev transport (relays + discovery
+    // off, loopback bind) to preserve deterministic local behavior; explicit
+    // flags still override. A key-path identity defaults to production
+    // transport (relays + discovery on, OS-chosen bind).
+    let seed_identity = matches!(identity, ReceiverIdentity::Seed(_));
+    let relay_disabled = match relay_disabled_raw {
+        Some(v) => parse_env_flag(Some(v), ENV_P2P_RELAY_DISABLED)?,
+        None => seed_identity,
+    };
+    let discovery_disabled = match discovery_disabled_raw {
+        Some(v) => parse_env_flag(Some(v), ENV_P2P_DISCOVERY_DISABLED)?,
+        None => seed_identity,
+    };
+    let bind_addr_v4 = if seed_identity {
+        Some(std::net::SocketAddrV4::new(
+            std::net::Ipv4Addr::LOCALHOST,
+            0,
+        ))
+    } else {
+        None
+    };
 
     let reconcile_ms = match reconcile_ms_raw {
         Some(raw) => raw
@@ -1384,17 +1682,24 @@ pub fn p2p_config_from_lookup(
     }
 
     Ok(Some(P2pReceiverConfig {
-        secret_key_seed,
+        identity,
+        relay_disabled,
+        discovery_disabled,
+        bind_addr_v4,
         forwarder,
         server,
+        server_override,
         reconcile_interval,
     }))
 }
 
 /// Build an optional [`P2pReceiverConfig`] from process environment variables.
-/// See [`p2p_config_from_lookup`] for the validation rules.
-pub fn p2p_config_from_env() -> Result<Option<P2pReceiverConfig>, String> {
-    p2p_config_from_lookup(|key| std::env::var(key).ok())
+/// See [`p2p_config_from_lookup`] for the validation rules. `default_key_path`
+/// is the persistent secret-key path used when no seed/key-path env is set.
+pub fn p2p_config_from_env(
+    default_key_path: std::path::PathBuf,
+) -> Result<Option<P2pReceiverConfig>, String> {
+    p2p_config_from_lookup(|key| std::env::var(key).ok(), default_key_path)
 }
 
 #[cfg(test)]
@@ -1408,6 +1713,136 @@ mod tests {
     /// A valid IPICO chip-read frame (chip id `000000012345`).
     const SAMPLE_FRAME: &[u8] = b"aa400000000123450a2a01123018455927a7";
 
+    #[test]
+    fn config_supports_keypath_and_seed_identities_independent_of_transport() {
+        let p = std::path::PathBuf::from("/tmp/k.key");
+        let c1 = P2pReceiverConfig::for_test_keypath(p.clone());
+        assert!(matches!(c1.identity, ReceiverIdentity::KeyPath(ref x) if *x == p));
+        assert!(!c1.relay_disabled);
+        let c2 = P2pReceiverConfig::for_test_seed([7u8; 32], /*relay_disabled*/ true);
+        assert!(matches!(c2.identity, ReceiverIdentity::Seed(s) if s == [7u8; 32]));
+        assert!(c2.relay_disabled);
+    }
+
+    #[tokio::test]
+    async fn keypath_identity_persists_node_id_across_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("p2p_secret.key");
+        let id1 = bind_node_id(ReceiverIdentity::KeyPath(key.clone())).await;
+        let id2 = bind_node_id(ReceiverIdentity::KeyPath(key)).await;
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn production_default_has_keypath_identity_and_production_transport() {
+        let p = std::path::PathBuf::from("/tmp/k.key");
+        let cfg = P2pReceiverConfig::production_default(p.clone());
+        assert!(matches!(cfg.identity, ReceiverIdentity::KeyPath(ref x) if *x == p));
+        assert!(!cfg.relay_disabled);
+        assert!(!cfg.discovery_disabled);
+        assert!(cfg.bind_addr_v4.is_none());
+        assert!(cfg.forwarder.is_none());
+        assert!(cfg.server.is_none());
+    }
+
+    #[tokio::test]
+    async fn bare_runtime_binds_and_idles_without_server_or_forwarder() {
+        use crate::control_api::AppState;
+        use crate::db::Db;
+        // server=None, forwarder=None, loopback transport: the runtime must
+        // bind and run its reconcile loop without panicking (no discovery task,
+        // no announcer workers, generation stays None).
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let cfg = P2pReceiverConfig::for_test_seed([5u8; 32], true);
+        let rt = start_receiver_p2p(Arc::clone(&state), cfg)
+            .await
+            .expect("bare runtime starts");
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reseed_discovered_forwarders_clears_old_and_keeps_valid_seed() {
+        use crate::control_api::AppState;
+        use crate::db::Db;
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        // Populate with forwarders learned from a previous server.
+        {
+            let mut d = state.discovered_forwarders.write().await;
+            for id in ["old-a", "old-b"] {
+                d.insert(
+                    id.to_owned(),
+                    DiscoveredForwarder {
+                        display_name: None,
+                        direct_addrs: vec!["127.0.0.1:1".parse().unwrap()],
+                        streams: Vec::new(),
+                    },
+                );
+            }
+        }
+
+        // Clearing with no explicit seed (server cleared) empties the map, so
+        // no old-server forwarder can be re-dialed.
+        reseed_discovered_forwarders(&state, None).await;
+        assert!(state.discovered_forwarders.read().await.is_empty());
+
+        // Re-populate, then reseed with a valid explicit (loopback/dev)
+        // forwarder: only that entry survives.
+        {
+            let mut d = state.discovered_forwarders.write().await;
+            d.insert(
+                "old-a".to_owned(),
+                DiscoveredForwarder {
+                    display_name: None,
+                    direct_addrs: vec!["127.0.0.1:1".parse().unwrap()],
+                    streams: Vec::new(),
+                },
+            );
+        }
+        let seed_id = SecretKey::from_bytes(&[7u8; 32]).public().to_string();
+        let seed = ForwarderPeerConfig {
+            node_id: seed_id.clone(),
+            direct_addr: "127.0.0.1:9000".parse().unwrap(),
+        };
+        reseed_discovered_forwarders(&state, Some(&seed)).await;
+        let map = state.discovered_forwarders.read().await;
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&seed_id));
+        assert!(!map.contains_key("old-a"));
+    }
+
+    /// Bind a minimal loopback runtime with the given identity, capture the
+    /// resulting p2p node id, and shut it down.
+    #[cfg(test)]
+    async fn bind_node_id(identity: ReceiverIdentity) -> String {
+        use crate::control_api::AppState;
+        use crate::db::Db;
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let cfg = P2pReceiverConfig {
+            identity,
+            relay_disabled: true,
+            discovery_disabled: true,
+            bind_addr_v4: Some(std::net::SocketAddrV4::new(
+                std::net::Ipv4Addr::LOCALHOST,
+                0,
+            )),
+            forwarder: None,
+            server: None,
+            server_override: (None, None),
+            reconcile_interval: Duration::from_millis(1000),
+        };
+        let rt = start_receiver_p2p(Arc::clone(&state), cfg)
+            .await
+            .expect("runtime starts");
+        let id = state
+            .p2p_endpoint_id
+            .read()
+            .await
+            .clone()
+            .expect("endpoint id set after start");
+        rt.shutdown().await;
+        id
+    }
+
     /// A valid 64-hex-character secret-key seed for config-builder tests.
     const TEST_SEED_HEX: &str = "abababababababababababababababababababababababababababababababab";
 
@@ -1419,6 +1854,17 @@ mod tests {
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
         move |key: &str| map.get(key).cloned()
+    }
+
+    /// Default key path for config-builder tests; never written because these
+    /// tests do not bind an endpoint.
+    fn test_default_key_path() -> std::path::PathBuf {
+        std::path::PathBuf::from("/tmp/rt-p2p-test-default.key")
+    }
+
+    /// Wrapper over [`p2p_config_from_lookup`] supplying a test default key path.
+    fn cfg_from(pairs: &[(&str, &str)]) -> Result<Option<P2pReceiverConfig>, String> {
+        p2p_config_from_lookup(lookup(pairs), test_default_key_path())
     }
 
     #[test]
@@ -1443,7 +1889,48 @@ mod tests {
 
     #[test]
     fn p2p_config_from_lookup_none_when_no_keys() {
-        assert!(p2p_config_from_lookup(lookup(&[])).unwrap().is_none());
+        assert!(cfg_from(&[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn lookup_defaults_to_keypath_when_no_seed_and_rejects_both() {
+        // Server set, no seed/key-path env -> persistent default key path.
+        let cfg = cfg_from(&[
+            (ENV_P2P_SERVER_URL, "http://x"),
+            (ENV_P2P_SERVER_TOKEN, "t"),
+        ])
+        .unwrap()
+        .expect("config present");
+        assert!(matches!(cfg.identity, ReceiverIdentity::KeyPath(_)));
+        // Key-path identity defaults to production transport.
+        assert!(!cfg.relay_disabled);
+        assert!(!cfg.discovery_disabled);
+        assert!(cfg.bind_addr_v4.is_none());
+
+        // Seed AND explicit key path -> mutually exclusive error.
+        let seed_hex = "ab".repeat(32);
+        let err = cfg_from(&[
+            (ENV_P2P_SERVER_URL, "http://x"),
+            (ENV_P2P_SERVER_TOKEN, "t"),
+            (ENV_P2P_SECRET_KEY_SEED_HEX, seed_hex.as_str()),
+            (ENV_P2P_SECRET_KEY_PATH, "/k"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("mutually exclusive"), "got: {err}");
+    }
+
+    #[test]
+    fn lookup_relay_and_discovery_flags_parse() {
+        let cfg = cfg_from(&[
+            (ENV_P2P_SERVER_URL, "http://x"),
+            (ENV_P2P_SERVER_TOKEN, "t"),
+            (ENV_P2P_RELAY_DISABLED, "1"),
+            (ENV_P2P_DISCOVERY_DISABLED, "true"),
+        ])
+        .unwrap()
+        .expect("config present");
+        assert!(cfg.relay_disabled);
+        assert!(cfg.discovery_disabled);
     }
 
     #[test]
@@ -1504,28 +1991,28 @@ mod tests {
 
     #[test]
     fn p2p_config_from_lookup_builds_minimal_config() {
-        let cfg = p2p_config_from_lookup(lookup(&[
+        let cfg = cfg_from(&[
             (ENV_P2P_FORWARDER_NODE_ID, "endpoint-x"),
             (ENV_P2P_FORWARDER_DIRECT_ADDR, "127.0.0.1:5000"),
             (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
-        ]))
+        ])
         .unwrap()
         .expect("config present");
         let fwd = cfg.forwarder.as_ref().expect("forwarder present");
         assert_eq!(fwd.node_id, "endpoint-x");
         assert_eq!(fwd.direct_addr, "127.0.0.1:5000".parse().unwrap());
-        assert_eq!(cfg.secret_key_seed, [0xab; 32]);
+        assert!(matches!(cfg.identity, ReceiverIdentity::Seed(s) if s == [0xab; 32]));
         assert!(cfg.server.is_none());
         assert_eq!(cfg.reconcile_interval, Duration::from_millis(1000));
     }
 
     #[test]
     fn p2p_config_from_lookup_accepts_server_only_without_forwarder() {
-        let cfg = p2p_config_from_lookup(lookup(&[
+        let cfg = cfg_from(&[
             (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
             (ENV_P2P_SERVER_URL, "http://127.0.0.1:8080"),
             (ENV_P2P_SERVER_TOKEN, "tok"),
-        ]))
+        ])
         .unwrap()
         .expect("config present");
         assert!(
@@ -1536,41 +2023,69 @@ mod tests {
     }
 
     #[test]
-    fn p2p_config_from_lookup_requires_forwarder_or_server() {
-        let err = p2p_config_from_lookup(lookup(&[(ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX)]))
-            .unwrap_err();
-        assert!(err.contains("either an explicit forwarder"), "got: {err}");
+    fn p2p_config_from_lookup_allows_transport_only_without_forwarder_or_server() {
+        // Only identity/transport knobs set (no forwarder, no server). This is
+        // valid: the caller attaches the resolved profile/override server, so a
+        // dev override like RT_P2P_RELAY_DISABLED=1 with a stored-profile server
+        // must not fail at startup.
+        let cfg = cfg_from(&[
+            (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
+            (ENV_P2P_RELAY_DISABLED, "1"),
+        ])
+        .unwrap()
+        .expect("transport-only config is valid");
+        assert!(cfg.forwarder.is_none());
+        assert!(cfg.server.is_none());
+        assert_eq!(cfg.server_override, (None, None));
+        assert!(cfg.relay_disabled);
+    }
+
+    #[test]
+    fn p2p_config_from_lookup_captures_server_override() {
+        let cfg = cfg_from(&[
+            (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
+            (ENV_P2P_SERVER_URL, "http://127.0.0.1:8080"),
+            (ENV_P2P_SERVER_TOKEN, "tok"),
+        ])
+        .unwrap()
+        .expect("config present");
+        assert_eq!(
+            cfg.server_override,
+            (
+                Some("http://127.0.0.1:8080".to_owned()),
+                Some("tok".to_owned())
+            )
+        );
     }
 
     #[test]
     fn p2p_config_from_lookup_errors_on_partial_required_keys() {
-        let err = p2p_config_from_lookup(lookup(&[(ENV_P2P_FORWARDER_NODE_ID, "endpoint-x")]))
-            .unwrap_err();
+        let err = cfg_from(&[(ENV_P2P_FORWARDER_NODE_ID, "endpoint-x")]).unwrap_err();
         assert!(err.contains(ENV_P2P_FORWARDER_DIRECT_ADDR), "got: {err}");
     }
 
     #[test]
     fn p2p_config_from_lookup_server_requires_both() {
-        let err = p2p_config_from_lookup(lookup(&[
+        let err = cfg_from(&[
             (ENV_P2P_FORWARDER_NODE_ID, "endpoint-x"),
             (ENV_P2P_FORWARDER_DIRECT_ADDR, "127.0.0.1:5000"),
             (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
             (ENV_P2P_SERVER_URL, "http://127.0.0.1:8080"),
-        ]))
+        ])
         .unwrap_err();
         assert!(err.contains(ENV_P2P_SERVER_TOKEN), "got: {err}");
     }
 
     #[test]
     fn p2p_config_from_lookup_accepts_server_pair_and_reconcile_override() {
-        let cfg = p2p_config_from_lookup(lookup(&[
+        let cfg = cfg_from(&[
             (ENV_P2P_FORWARDER_NODE_ID, "endpoint-x"),
             (ENV_P2P_FORWARDER_DIRECT_ADDR, "127.0.0.1:5000"),
             (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
             (ENV_P2P_SERVER_URL, "http://127.0.0.1:8080"),
             (ENV_P2P_SERVER_TOKEN, "tok"),
             (ENV_P2P_RECONCILE_MS, "200"),
-        ]))
+        ])
         .unwrap()
         .expect("config present");
         let thin = cfg.server.expect("server configured");
@@ -1581,12 +2096,12 @@ mod tests {
 
     #[test]
     fn p2p_config_from_lookup_rejects_below_min_reconcile() {
-        let err = p2p_config_from_lookup(lookup(&[
+        let err = cfg_from(&[
             (ENV_P2P_FORWARDER_NODE_ID, "endpoint-x"),
             (ENV_P2P_FORWARDER_DIRECT_ADDR, "127.0.0.1:5000"),
             (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
             (ENV_P2P_RECONCILE_MS, "10"),
-        ]))
+        ])
         .unwrap_err();
         assert!(err.contains(ENV_P2P_RECONCILE_MS), "got: {err}");
     }
@@ -1741,12 +2256,16 @@ mod tests {
 
         // The outer config derives Debug and must inherit the redaction.
         let outer = P2pReceiverConfig {
-            secret_key_seed: [0u8; 32],
+            identity: ReceiverIdentity::Seed([0u8; 32]),
+            relay_disabled: true,
+            discovery_disabled: true,
+            bind_addr_v4: None,
             forwarder: Some(ForwarderPeerConfig {
                 node_id: "node".to_owned(),
                 direct_addr: "127.0.0.1:1".parse().unwrap(),
             }),
             server: Some(cfg),
+            server_override: (None, None),
             reconcile_interval: Duration::from_millis(50),
         };
         let outer_rendered = format!("{outer:?}");
