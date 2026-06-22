@@ -25,7 +25,6 @@
 {:else}
   <div class="flex flex-col min-h-screen min-h-[100dvh]">
     <NavBar
-      appName="Server"
       links={[
         { href: "/", label: "Status", active: currentPath === "/" },
         {
