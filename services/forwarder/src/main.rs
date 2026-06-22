@@ -248,6 +248,13 @@ async fn main() {
     }
     status_server.set_local_ip(local_ip).await;
 
+    let remote_config_handler = Arc::new(forwarder::p2p::ForwarderRemoteConfigHandler::new(
+        cfg.control.allow_remote_config,
+        config_state.clone(),
+        status_server.subsystem_arc(),
+        status_server.ui_sender(),
+        restart_signal.clone(),
+    ));
     let p2p_runtime = match forwarder::p2p::start_forwarder_p2p(
         &cfg.p2p,
         Arc::clone(&journal),
@@ -256,6 +263,8 @@ async fn main() {
             .map(|(addr, _)| addr.clone())
             .collect::<Vec<_>>(),
         cfg.display_name.clone(),
+        status_server.status_feed(),
+        remote_config_handler,
     )
     .await
     {

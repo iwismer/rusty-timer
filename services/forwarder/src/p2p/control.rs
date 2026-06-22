@@ -25,10 +25,11 @@ use prost::Message;
 use rt_iroh::Connection;
 use rt_iroh::{RecvStream, SendStream};
 use rt_p2p_protocol::{
-    ControlC2F, ControlF2C, DownloadProgress, Hello, MAX_FRAME_BYTES, Ping, Pong, ProtocolError,
-    ProtocolErrorCode, ReaderControlRequest, ReaderControlResponse, ReaderInfo, ReaderStatus,
-    StreamCatalog, SyncClock, UpsStatus, WireProtocolError, control_c2f, control_f2c, encode_frame,
-    negotiate,
+    CAP_CONTROL_EVENTS, CAP_REMOTE_CONFIG, ConfigGetRequest, ConfigGetResponse, ConfigSetRequest,
+    ConfigSetResponse, ControlC2F, ControlF2C, DownloadProgress, Hello, MAX_FRAME_BYTES, Ping,
+    Pong, ProtocolError, ProtocolErrorCode, ReaderControlRequest, ReaderControlResponse,
+    ReaderInfo, ReaderStatus, RestartRequest, RestartResponse, StreamCatalog, SyncClock, UpsStatus,
+    WireProtocolError, control_c2f, control_f2c, encode_frame, negotiate,
 };
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
@@ -172,6 +173,108 @@ impl ReaderControlHandler for NoopReaderControlHandler {
     }
 }
 
+/// Future returned by a remote-config get handler.
+pub type ConfigGetFuture<'a> = Pin<Box<dyn Future<Output = ConfigGetResponse> + Send + 'a>>;
+/// Future returned by a remote-config set handler.
+pub type ConfigSetFuture<'a> = Pin<Box<dyn Future<Output = ConfigSetResponse> + Send + 'a>>;
+/// Future returned by a remote-restart handler.
+pub type RestartFuture<'a> = Pin<Box<dyn Future<Output = RestartResponse> + Send + 'a>>;
+
+/// Serves remote forwarder configuration verbs (get/set/restart) received on
+/// the P2P control stream.
+///
+/// The whole feature is gated by a single forwarder config flag
+/// (`control.allow_remote_config`). [`Self::allow_remote_config`] drives both
+/// capability advertisement (the forwarder only advertises
+/// [`CAP_REMOTE_CONFIG`] when it returns `true`) and per-request gating, so
+/// even a peer that skips capability negotiation cannot mutate config or
+/// restart a forwarder that has the feature disabled.
+pub trait RemoteConfigHandler: std::fmt::Debug + Send + Sync + 'static {
+    /// Whether remote config is currently allowed. Controls capability
+    /// advertisement and gating of all three verbs.
+    fn allow_remote_config(&self) -> bool;
+
+    /// Returns the current forwarder config serialized as JSON (the same shape
+    /// `GET /api/v1/config` returns) plus the current `restart_needed` state.
+    ///
+    /// When remote config is disabled, implementations return an empty
+    /// `config_json` as the explicit "disabled" signal (the response shape has
+    /// no error field, and the capability is not advertised in that case).
+    fn get_config(&self, request: ConfigGetRequest) -> ConfigGetFuture<'_>;
+
+    /// Persists `config_json` (same shape as get) to the forwarder's TOML
+    /// config file and marks a restart as needed. On validation or IO failure
+    /// returns `ok = false` with a descriptive error and never panics.
+    fn set_config(&self, request: ConfigSetRequest) -> ConfigSetFuture<'_>;
+
+    /// Triggers the same graceful restart path as the HTTP restart endpoint.
+    fn restart(&self, request: RestartRequest) -> RestartFuture<'_>;
+}
+
+impl<C: RemoteConfigHandler + ?Sized> RemoteConfigHandler for Arc<C> {
+    fn allow_remote_config(&self) -> bool {
+        (**self).allow_remote_config()
+    }
+
+    fn get_config(&self, request: ConfigGetRequest) -> ConfigGetFuture<'_> {
+        (**self).get_config(request)
+    }
+
+    fn set_config(&self, request: ConfigSetRequest) -> ConfigSetFuture<'_> {
+        (**self).set_config(request)
+    }
+
+    fn restart(&self, request: RestartRequest) -> RestartFuture<'_> {
+        (**self).restart(request)
+    }
+}
+
+/// Default remote-config handler used until production wiring installs a real
+/// adapter. Reports the feature as disabled and rejects every verb, so the
+/// capability is never advertised and no config mutation/restart is possible.
+#[derive(Debug)]
+pub struct NoopRemoteConfigHandler;
+
+/// Error returned for any remote-config verb when the feature is disabled.
+pub(crate) const REMOTE_CONFIG_DISABLED: &str = "remote config disabled";
+
+impl RemoteConfigHandler for NoopRemoteConfigHandler {
+    fn allow_remote_config(&self) -> bool {
+        false
+    }
+
+    fn get_config(&self, request: ConfigGetRequest) -> ConfigGetFuture<'_> {
+        Box::pin(async move {
+            ConfigGetResponse {
+                request_id: request.request_id,
+                config_json: String::new(),
+                restart_needed: false,
+            }
+        })
+    }
+
+    fn set_config(&self, request: ConfigSetRequest) -> ConfigSetFuture<'_> {
+        Box::pin(async move {
+            ConfigSetResponse {
+                request_id: request.request_id,
+                ok: false,
+                restart_needed: false,
+                error: REMOTE_CONFIG_DISABLED.to_owned(),
+            }
+        })
+    }
+
+    fn restart(&self, request: RestartRequest) -> RestartFuture<'_> {
+        Box::pin(async move {
+            RestartResponse {
+                request_id: request.request_id,
+                accepted: false,
+                error: REMOTE_CONFIG_DISABLED.to_owned(),
+            }
+        })
+    }
+}
+
 /// Typed status/control-plane events sent from the forwarder to a receiver.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ControlEvent {
@@ -233,7 +336,7 @@ pub(crate) fn forwarder_hello() -> Hello {
     Hello {
         min_minor: PROTOCOL_MINOR,
         max_minor: PROTOCOL_MINOR,
-        capabilities: Vec::new(),
+        capabilities: vec![CAP_CONTROL_EVENTS.to_owned()],
         max_frame_bytes: u32::try_from(MAX_FRAME_BYTES).unwrap_or(u32::MAX),
         catalog_generation: 0,
     }
@@ -281,10 +384,11 @@ pub(crate) async fn negotiate_control_stream(
     catalog: &dyn CatalogProvider,
     handshake_timeout: Duration,
     heartbeat: HeartbeatConfig,
-) -> Result<(SendStream, RecvStream), BoxError> {
+    remote_config: &dyn RemoteConfigHandler,
+) -> Result<(SendStream, RecvStream, Vec<String>), BoxError> {
     match tokio::time::timeout(
         handshake_timeout,
-        negotiate_and_serve_catalog_stream(send, recv, catalog, heartbeat),
+        negotiate_and_serve_catalog_stream(send, recv, catalog, heartbeat, remote_config),
     )
     .await
     {
@@ -295,19 +399,22 @@ pub(crate) async fn negotiate_control_stream(
 
 /// Runs the post-negotiation heartbeat/control loop on an already-negotiated
 /// control stream until the peer disconnects cleanly (`Ok`) or is declared dead
-/// (`Err`). Uses the default no-op reader-control handler and no outbound event
-/// channel.
+/// (`Err`). Uses the default no-op reader-control handler and forwards status
+/// updates from the optional `outbound_events` channel to the peer.
 pub(crate) async fn run_control_stream_loop(
     send: SendStream,
     recv: RecvStream,
     heartbeat: HeartbeatConfig,
+    outbound_events: Option<ControlEventReceiver>,
+    remote_config: Arc<dyn RemoteConfigHandler>,
 ) -> Result<(), BoxError> {
     run_control_loop(
         send,
         recv,
         heartbeat,
         Arc::new(NoopReaderControlHandler),
-        None,
+        outbound_events,
+        remote_config,
     )
     .await
 }
@@ -322,6 +429,7 @@ pub(crate) async fn serve_control_with_typed_control(
     heartbeat: HeartbeatConfig,
     reader_control: Arc<dyn ReaderControlHandler>,
     outbound_events: Option<ControlEventReceiver>,
+    remote_config: Arc<dyn RemoteConfigHandler>,
 ) -> Result<(), BoxError> {
     let (send, recv) = connection.accept_bi().await?;
     serve_control_stream_with_typed_control(
@@ -332,11 +440,13 @@ pub(crate) async fn serve_control_with_typed_control(
         heartbeat,
         reader_control,
         outbound_events,
+        remote_config,
     )
     .await
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn serve_control_stream_with_typed_control(
     send: SendStream,
     recv: RecvStream,
@@ -345,11 +455,27 @@ pub(crate) async fn serve_control_stream_with_typed_control(
     heartbeat: HeartbeatConfig,
     reader_control: Arc<dyn ReaderControlHandler>,
     outbound_events: Option<ControlEventReceiver>,
+    remote_config: Arc<dyn RemoteConfigHandler>,
 ) -> Result<(), BoxError> {
-    let (send, recv) =
-        negotiate_control_stream(send, recv, catalog, handshake_timeout, heartbeat).await?;
+    let (send, recv, _capabilities) = negotiate_control_stream(
+        send,
+        recv,
+        catalog,
+        handshake_timeout,
+        heartbeat,
+        remote_config.as_ref(),
+    )
+    .await?;
 
-    run_control_loop(send, recv, heartbeat, reader_control, outbound_events).await
+    run_control_loop(
+        send,
+        recv,
+        heartbeat,
+        reader_control,
+        outbound_events,
+        remote_config,
+    )
+    .await
 }
 
 /// Accepts the control stream, negotiates versions, and serves the catalog.
@@ -364,7 +490,8 @@ async fn negotiate_and_serve_catalog_stream(
     mut recv: RecvStream,
     catalog: &dyn CatalogProvider,
     heartbeat: HeartbeatConfig,
-) -> Result<(SendStream, RecvStream), BoxError> {
+    remote_config: &dyn RemoteConfigHandler,
+) -> Result<(SendStream, RecvStream, Vec<String>), BoxError> {
     let control = read_frame::<ControlC2F>(&mut recv).await?;
     let client_hello = match control.msg {
         Some(control_c2f::Msg::Hello(hello)) => hello,
@@ -376,6 +503,13 @@ async fn negotiate_and_serve_catalog_stream(
     let snapshot = catalog.catalog();
     let mut server_hello = forwarder_hello();
     server_hello.catalog_generation = snapshot.generation;
+    // Advertise remote-config support only when the feature is enabled, so a
+    // receiver UI can tell whether remote config is available before it sends a
+    // request. Negotiation keeps the intersection, so this capability survives
+    // only when both peers advertise it.
+    if remote_config.allow_remote_config() {
+        server_hello.capabilities.push(CAP_REMOTE_CONFIG.to_owned());
+    }
 
     let hello_ok = match negotiate(&client_hello, &server_hello) {
         Ok(mut hello_ok) => {
@@ -402,6 +536,7 @@ async fn negotiate_and_serve_catalog_stream(
         }
     };
 
+    let capabilities = hello_ok.capabilities.clone();
     write_frame(
         &mut send,
         &ControlF2C {
@@ -417,7 +552,7 @@ async fn negotiate_and_serve_catalog_stream(
     )
     .await?;
 
-    Ok((send, recv))
+    Ok((send, recv, capabilities))
 }
 
 /// Runs the typed control loop until the peer misses `max_missed` consecutive
@@ -428,6 +563,7 @@ async fn run_control_loop(
     config: HeartbeatConfig,
     reader_control: Arc<dyn ReaderControlHandler>,
     mut outbound_events: Option<ControlEventReceiver>,
+    remote_config: Arc<dyn RemoteConfigHandler>,
 ) -> Result<(), BoxError> {
     // Read frames on a dedicated task so heartbeat ticks never cancel a
     // partially-read frame (which would desync the length-prefixed framing).
@@ -449,6 +585,10 @@ async fn run_control_loop(
     let mut nonce: u64 = 0;
     let mut outstanding: u32 = 0;
     let (control_response_tx, mut control_response_rx) = mpsc::channel::<ReaderControlResponse>(16);
+    // Remote-config verbs (get/set/restart) reply with arbitrary ControlF2C
+    // frames rather than a ReaderControlResponse, so they use a dedicated
+    // response channel served by its own select arm below.
+    let (config_response_tx, mut config_response_rx) = mpsc::channel::<ControlF2C>(16);
     let mut control_tasks = tokio::task::JoinSet::new();
 
     let result = loop {
@@ -496,6 +636,39 @@ async fn run_control_loop(
                                 let _ = control_response_tx.send(response).await;
                             });
                         }
+                        Some(control_c2f::Msg::ConfigGetRequest(request)) => {
+                            let remote_config = Arc::clone(&remote_config);
+                            let config_response_tx = config_response_tx.clone();
+                            control_tasks.spawn(async move {
+                                let response = remote_config.get_config(request).await;
+                                let frame = ControlF2C {
+                                    msg: Some(control_f2c::Msg::ConfigGetResponse(response)),
+                                };
+                                let _ = config_response_tx.send(frame).await;
+                            });
+                        }
+                        Some(control_c2f::Msg::ConfigSetRequest(request)) => {
+                            let remote_config = Arc::clone(&remote_config);
+                            let config_response_tx = config_response_tx.clone();
+                            control_tasks.spawn(async move {
+                                let response = remote_config.set_config(request).await;
+                                let frame = ControlF2C {
+                                    msg: Some(control_f2c::Msg::ConfigSetResponse(response)),
+                                };
+                                let _ = config_response_tx.send(frame).await;
+                            });
+                        }
+                        Some(control_c2f::Msg::RestartRequest(request)) => {
+                            let remote_config = Arc::clone(&remote_config);
+                            let config_response_tx = config_response_tx.clone();
+                            control_tasks.spawn(async move {
+                                let response = remote_config.restart(request).await;
+                                let frame = ControlF2C {
+                                    msg: Some(control_f2c::Msg::RestartResponse(response)),
+                                };
+                                let _ = config_response_tx.send(frame).await;
+                            });
+                        }
                         Some(control_c2f::Msg::Hello(_)) | None => {}
                     },
                     None => break Ok(()),
@@ -507,6 +680,16 @@ async fn run_control_loop(
                         let frame = ControlF2C {
                             msg: Some(control_f2c::Msg::ReaderControlResponse(response)),
                         };
+                        if write_frame(&mut send, &frame).await.is_err() {
+                            break Ok(());
+                        }
+                    }
+                    None => break Ok(()),
+                }
+            }
+            frame = config_response_rx.recv() => {
+                match frame {
+                    Some(frame) => {
                         if write_frame(&mut send, &frame).await.is_err() {
                             break Ok(());
                         }
@@ -622,10 +805,12 @@ mod tests {
             heartbeat,
             Arc::new(NoopReaderControlHandler),
             None,
+            Arc::new(NoopRemoteConfigHandler),
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_forwarder_with_control(
         seed: [u8; 32],
         catalog: StaticCatalog,
@@ -633,6 +818,7 @@ mod tests {
         heartbeat: HeartbeatConfig,
         handler: Arc<dyn ReaderControlHandler>,
         outbound_events: Option<ControlEventReceiver>,
+        remote_config: Arc<dyn RemoteConfigHandler>,
     ) -> Result<(Endpoint, NodeAddr, JoinHandle<Result<(), String>>), BoxError> {
         let endpoint = EndpointBuilder::test(seed).bind().await?;
         let node_addr = endpoint.node_addr().await;
@@ -651,6 +837,7 @@ mod tests {
                 heartbeat,
                 handler,
                 outbound_events,
+                remote_config,
             )
             .await;
             if let Err(error) = &result {
@@ -748,6 +935,419 @@ mod tests {
                 Ok(())
             })
         }
+    }
+
+    /// A configurable in-memory remote-config handler for exercising the
+    /// control-loop wiring without touching a TOML file. Gating mirrors the
+    /// production handler: when `allow` is false every verb is rejected.
+    #[derive(Debug)]
+    struct FakeRemoteConfigHandler {
+        allow: bool,
+        config_json: String,
+        restart_needed: bool,
+        last_set: Mutex<Option<String>>,
+        restart_calls: AtomicUsize,
+    }
+
+    impl FakeRemoteConfigHandler {
+        fn new(allow: bool) -> Self {
+            Self {
+                allow,
+                config_json: r#"{"schema_version":1}"#.to_owned(),
+                restart_needed: false,
+                last_set: Mutex::new(None),
+                restart_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl RemoteConfigHandler for FakeRemoteConfigHandler {
+        fn allow_remote_config(&self) -> bool {
+            self.allow
+        }
+
+        fn get_config(&self, request: ConfigGetRequest) -> ConfigGetFuture<'_> {
+            Box::pin(async move {
+                if !self.allow {
+                    return ConfigGetResponse {
+                        request_id: request.request_id,
+                        config_json: String::new(),
+                        restart_needed: false,
+                    };
+                }
+                ConfigGetResponse {
+                    request_id: request.request_id,
+                    config_json: self.config_json.clone(),
+                    restart_needed: self.restart_needed,
+                }
+            })
+        }
+
+        fn set_config(&self, request: ConfigSetRequest) -> ConfigSetFuture<'_> {
+            Box::pin(async move {
+                if !self.allow {
+                    return ConfigSetResponse {
+                        request_id: request.request_id,
+                        ok: false,
+                        restart_needed: false,
+                        error: REMOTE_CONFIG_DISABLED.to_owned(),
+                    };
+                }
+                *self.last_set.lock().unwrap() = Some(request.config_json.clone());
+                ConfigSetResponse {
+                    request_id: request.request_id,
+                    ok: true,
+                    restart_needed: true,
+                    error: String::new(),
+                }
+            })
+        }
+
+        fn restart(&self, request: RestartRequest) -> RestartFuture<'_> {
+            Box::pin(async move {
+                if !self.allow {
+                    return RestartResponse {
+                        request_id: request.request_id,
+                        accepted: false,
+                        error: REMOTE_CONFIG_DISABLED.to_owned(),
+                    };
+                }
+                self.restart_calls.fetch_add(1, Ordering::SeqCst);
+                RestartResponse {
+                    request_id: request.request_id,
+                    accepted: true,
+                    error: String::new(),
+                }
+            })
+        }
+    }
+
+    /// Builds a client `Hello` that advertises remote-config support so the
+    /// negotiated capability set can include [`CAP_REMOTE_CONFIG`].
+    fn hello_with_remote_config() -> Hello {
+        let mut hello = forwarder_hello();
+        hello.capabilities.push(CAP_REMOTE_CONFIG.to_owned());
+        hello
+    }
+
+    async fn spawn_forwarder_with_remote_config(
+        seed: [u8; 32],
+        remote_config: Arc<dyn RemoteConfigHandler>,
+    ) -> Result<(Endpoint, NodeAddr, JoinHandle<Result<(), String>>), BoxError> {
+        spawn_forwarder_with_control(
+            seed,
+            StaticCatalog::new(sample_catalog()),
+            LONG_HANDSHAKE,
+            quiet_heartbeat(),
+            Arc::new(NoopReaderControlHandler),
+            None,
+            remote_config,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn remote_config_capability_advertised_when_enabled() -> TestResult {
+        let (forwarder, forwarder_addr, handle) = spawn_forwarder_with_remote_config(
+            [60; 32],
+            Arc::new(FakeRemoteConfigHandler::new(true)),
+        )
+        .await?;
+
+        let receiver = EndpointBuilder::test([61; 32]).bind().await?;
+        let (connection, _send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, hello_with_remote_config()),
+        )
+        .await??;
+
+        let hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        match hello_ok.msg {
+            Some(control_f2c::Msg::HelloOk(ok)) => {
+                assert!(
+                    rt_p2p_protocol::has_capability(&ok.capabilities, CAP_REMOTE_CONFIG),
+                    "remote-config capability must be advertised when enabled"
+                );
+            }
+            other => return Err(format!("expected HelloOk, got {other:?}").into()),
+        }
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remote_config_capability_absent_when_disabled() -> TestResult {
+        let (forwarder, forwarder_addr, handle) = spawn_forwarder_with_remote_config(
+            [62; 32],
+            Arc::new(FakeRemoteConfigHandler::new(false)),
+        )
+        .await?;
+
+        let receiver = EndpointBuilder::test([63; 32]).bind().await?;
+        let (connection, _send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, hello_with_remote_config()),
+        )
+        .await??;
+
+        let hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        match hello_ok.msg {
+            Some(control_f2c::Msg::HelloOk(ok)) => {
+                assert!(
+                    !rt_p2p_protocol::has_capability(&ok.capabilities, CAP_REMOTE_CONFIG),
+                    "remote-config capability must NOT be advertised when disabled"
+                );
+            }
+            other => return Err(format!("expected HelloOk, got {other:?}").into()),
+        }
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn config_get_returns_config_json() -> TestResult {
+        let (forwarder, forwarder_addr, handle) = spawn_forwarder_with_remote_config(
+            [64; 32],
+            Arc::new(FakeRemoteConfigHandler::new(true)),
+        )
+        .await?;
+
+        let receiver = EndpointBuilder::test([65; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, hello_with_remote_config()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::ConfigGetRequest(ConfigGetRequest {
+                    request_id: "get-1".to_owned(),
+                })),
+            },
+        )
+        .await?;
+
+        let frame =
+            tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::ConfigGetResponse(response)) => {
+                assert_eq!(response.request_id, "get-1");
+                assert!(
+                    !response.config_json.is_empty(),
+                    "config_json must be non-empty when remote config is enabled"
+                );
+            }
+            other => return Err(format!("expected ConfigGetResponse, got {other:?}").into()),
+        }
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn config_set_roundtrip_reports_restart_needed() -> TestResult {
+        let handler = Arc::new(FakeRemoteConfigHandler::new(true));
+        let (forwarder, forwarder_addr, handle) =
+            spawn_forwarder_with_remote_config([66; 32], Arc::clone(&handler) as _).await?;
+
+        let receiver = EndpointBuilder::test([67; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, hello_with_remote_config()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        let payload = r#"{"schema_version":1,"display_name":"Edited"}"#;
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::ConfigSetRequest(ConfigSetRequest {
+                    request_id: "set-1".to_owned(),
+                    config_json: payload.to_owned(),
+                })),
+            },
+        )
+        .await?;
+
+        let frame =
+            tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::ConfigSetResponse(response)) => {
+                assert_eq!(response.request_id, "set-1");
+                assert!(response.ok, "set should succeed when enabled");
+                assert!(response.restart_needed);
+                assert!(response.error.is_empty());
+            }
+            other => return Err(format!("expected ConfigSetResponse, got {other:?}").into()),
+        }
+        assert_eq!(
+            handler.last_set.lock().unwrap().as_deref(),
+            Some(payload),
+            "handler must receive the config_json sent over the wire"
+        );
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn config_set_rejected_when_disabled() -> TestResult {
+        let (forwarder, forwarder_addr, handle) = spawn_forwarder_with_remote_config(
+            [68; 32],
+            Arc::new(FakeRemoteConfigHandler::new(false)),
+        )
+        .await?;
+
+        let receiver = EndpointBuilder::test([69; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, hello_with_remote_config()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::ConfigSetRequest(ConfigSetRequest {
+                    request_id: "set-2".to_owned(),
+                    config_json: r#"{"schema_version":1}"#.to_owned(),
+                })),
+            },
+        )
+        .await?;
+
+        let frame =
+            tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::ConfigSetResponse(response)) => {
+                assert_eq!(response.request_id, "set-2");
+                assert!(!response.ok, "set must be rejected when disabled");
+                assert_eq!(response.error, REMOTE_CONFIG_DISABLED);
+            }
+            other => return Err(format!("expected ConfigSetResponse, got {other:?}").into()),
+        }
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restart_request_accepted_when_enabled() -> TestResult {
+        let handler = Arc::new(FakeRemoteConfigHandler::new(true));
+        let (forwarder, forwarder_addr, handle) =
+            spawn_forwarder_with_remote_config([70; 32], Arc::clone(&handler) as _).await?;
+
+        let receiver = EndpointBuilder::test([71; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, hello_with_remote_config()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::RestartRequest(RestartRequest {
+                    request_id: "restart-1".to_owned(),
+                })),
+            },
+        )
+        .await?;
+
+        let frame =
+            tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::RestartResponse(response)) => {
+                assert_eq!(response.request_id, "restart-1");
+                assert!(response.accepted, "restart should be accepted when enabled");
+                assert!(response.error.is_empty());
+            }
+            other => return Err(format!("expected RestartResponse, got {other:?}").into()),
+        }
+        assert_eq!(handler.restart_calls.load(Ordering::SeqCst), 1);
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restart_request_rejected_when_disabled() -> TestResult {
+        let (forwarder, forwarder_addr, handle) = spawn_forwarder_with_remote_config(
+            [72; 32],
+            Arc::new(FakeRemoteConfigHandler::new(false)),
+        )
+        .await?;
+
+        let receiver = EndpointBuilder::test([73; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, hello_with_remote_config()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::RestartRequest(RestartRequest {
+                    request_id: "restart-2".to_owned(),
+                })),
+            },
+        )
+        .await?;
+
+        let frame =
+            tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::RestartResponse(response)) => {
+                assert_eq!(response.request_id, "restart-2");
+                assert!(!response.accepted, "restart must be rejected when disabled");
+                assert_eq!(response.error, REMOTE_CONFIG_DISABLED);
+            }
+            other => return Err(format!("expected RestartResponse, got {other:?}").into()),
+        }
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
     }
 
     #[tokio::test]
@@ -863,6 +1463,7 @@ mod tests {
             quiet_heartbeat(),
             Arc::new(EchoControlHandler),
             None,
+            Arc::new(NoopRemoteConfigHandler),
         )
         .await?;
 
@@ -925,6 +1526,7 @@ mod tests {
                 release_rx: Mutex::new(Some(release_rx)),
             }),
             Some(outbound_events),
+            Arc::new(NoopRemoteConfigHandler),
         )
         .await?;
 
@@ -1015,6 +1617,7 @@ mod tests {
             quiet_heartbeat(),
             Arc::new(SyncClockDriftHandler::new(Arc::clone(&clock_source))),
             Some(outbound_events),
+            Arc::new(NoopRemoteConfigHandler),
         )
         .await?;
 

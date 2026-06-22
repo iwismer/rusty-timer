@@ -279,7 +279,29 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
         "get_subscriptions" => ok(control_api::get_subscriptions(state).await?),
         "put_subscriptions" => ok(control_api::put_subscriptions(state, arg(args, "body")?).await?),
         "get_status" => ok(control_api::get_status(state).await),
+        "get_connections" => ok(control_api::get_connections(state).await),
         "reconnect_server" => ok(control_api::reconnect_server(state).await?),
+        "connect_forwarder" => {
+            ok(control_api::connect_forwarder(state, arg(args, "endpoint_id")?).await?)
+        }
+        "disconnect_forwarder" => {
+            ok(control_api::disconnect_forwarder(state, arg(args, "endpoint_id")?).await?)
+        }
+        "reconnect_forwarder" => {
+            ok(control_api::reconnect_forwarder(state, arg(args, "endpoint_id")?).await?)
+        }
+        "get_forwarder_config" => {
+            ok(control_api::get_forwarder_config(state, arg(args, "endpoint_id")?).await?)
+        }
+        "set_forwarder_config" => ok(control_api::set_forwarder_config(
+            state,
+            arg(args, "endpoint_id")?,
+            arg(args, "config_json")?,
+        )
+        .await?),
+        "restart_forwarder" => {
+            ok(control_api::restart_forwarder(state, arg(args, "endpoint_id")?).await?)
+        }
         "get_version" => ok(control_api::get_version()),
         "get_logs" => ok(control_api::get_logs(state).await),
         "admin_reset_cursor" => {

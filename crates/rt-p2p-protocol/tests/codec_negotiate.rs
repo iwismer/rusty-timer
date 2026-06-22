@@ -1,7 +1,8 @@
 use bytes::{BufMut, BytesMut};
 use prost::Message;
 use rt_p2p_protocol::{
-    Hello, Ping, ProtocolError, decode_frame, decode_message_frame, encode_frame, negotiate,
+    CAP_CONTROL_EVENTS, CAP_REMOTE_CONFIG, Hello, Ping, ProtocolError, decode_frame,
+    decode_message_frame, encode_frame, has_capability, negotiate,
 };
 
 #[test]
@@ -110,4 +111,34 @@ fn negotiate_picks_min_minor_and_capability_intersection() {
     let err = negotiate(&unsupported, &server).expect_err("unsupported version");
 
     assert!(matches!(err, ProtocolError::UnsupportedVersion { .. }));
+}
+
+#[test]
+fn negotiate_keeps_named_capability_only_when_both_advertise() {
+    let base_client = Hello {
+        min_minor: 1,
+        max_minor: 5,
+        capabilities: vec![CAP_CONTROL_EVENTS.to_string()],
+        max_frame_bytes: 4 * 1024 * 1024,
+        catalog_generation: 3,
+    };
+    let server_with = Hello {
+        min_minor: 1,
+        max_minor: 5,
+        capabilities: vec![CAP_CONTROL_EVENTS.to_string()],
+        max_frame_bytes: 4 * 1024 * 1024,
+        catalog_generation: 3,
+    };
+
+    let both = negotiate(&base_client, &server_with).expect("negotiate");
+    assert!(has_capability(&both.capabilities, CAP_CONTROL_EVENTS));
+    assert!(!has_capability(&both.capabilities, CAP_REMOTE_CONFIG));
+
+    let server_without = Hello {
+        capabilities: vec![CAP_REMOTE_CONFIG.to_string()],
+        ..server_with
+    };
+    let one_sided = negotiate(&base_client, &server_without).expect("negotiate");
+    assert!(!has_capability(&one_sided.capabilities, CAP_CONTROL_EVENTS));
+    assert!(!has_capability(&one_sided.capabilities, CAP_REMOTE_CONFIG));
 }

@@ -3,6 +3,7 @@
 
 import * as api from "./api";
 import type {
+  ConnectionsResponse,
   LastRead,
   ReceiverMode,
   StatusResponse,
@@ -21,7 +22,13 @@ import {
 
 // --------------- Tab enum ---------------
 
-export type TabId = "streams" | "mode" | "config" | "logs" | "admin";
+export type TabId =
+  | "connections"
+  | "streams"
+  | "mode"
+  | "config"
+  | "logs"
+  | "admin";
 
 export type UpdateState = {
   status: "available" | "downloaded";
@@ -43,6 +50,7 @@ export const store = $state({
 
   // Connection / status
   status: null as StatusResponse | null,
+  connections: null as ConnectionsResponse | null,
   error: null as string | null,
 
   // Streams
@@ -133,13 +141,51 @@ export function getConfigDirty(): boolean {
   );
 }
 
-export function getConnectionState(): string {
-  return store.status?.connection_state ?? "unknown";
-}
+export type OverallHealth = "ok" | "warn" | "err";
 
-export function getConnectionBadgeState(): "ok" | "warn" | "err" {
-  const cs = getConnectionState();
-  return cs === "connected" ? "ok" : cs === "disconnected" ? "err" : "warn";
+export function getOverallHealth(): OverallHealth {
+  const connections = store.connections;
+
+  // With no connections payload, or no configured server yet, the roll-up is
+  // unknown rather than healthy. Show warn until the receiver has enough data.
+  if (!connections || !connections.server.configured) return "warn";
+
+  const { server, forwarders } = connections;
+  const intendedForwarders = forwarders.filter(
+    (forwarder) => forwarder.pending || forwarder.state !== "disconnected",
+  );
+  const pendingForwarders = intendedForwarders.filter(
+    (forwarder) => forwarder.pending,
+  );
+  const nonPendingIntendedForwarders = intendedForwarders.filter(
+    (forwarder) => !forwarder.pending,
+  );
+  const unavailableForwarders = nonPendingIntendedForwarders.filter(
+    (forwarder) => forwarder.state === "unavailable",
+  );
+
+  // Reader-level offline status is not available to this roll-up yet; Phase 3
+  // should fold reader connectivity into the same err > warn > ok precedence.
+  if (server.reachable === false) return "err";
+  if (server.approval_state !== "active" && !server.waiting_for_approval) {
+    return "err";
+  }
+
+  // Pending forwarders are still connecting, so they contribute warn/amber but
+  // do not count as unavailable for the all-down/red health decision.
+  if (
+    nonPendingIntendedForwarders.length > 0 &&
+    unavailableForwarders.length === nonPendingIntendedForwarders.length
+  ) {
+    return "err";
+  }
+
+  if (server.waiting_for_approval) return "warn";
+  if (server.reachable !== true) return "warn";
+  if (pendingForwarders.length > 0) return "warn";
+  if (unavailableForwarders.length > 0) return "warn";
+
+  return "ok";
 }
 
 // --------------- Setters (for components that need to write imported state) ---------------
@@ -664,6 +710,14 @@ function applyStreamCountUpdates(updates: StreamCountUpdate[]): boolean {
   return hasUnknown;
 }
 
+export async function loadConnections(): Promise<void> {
+  try {
+    store.connections = await api.getConnections();
+  } catch (e) {
+    store.error = String(e);
+  }
+}
+
 export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
   if (loadAllInFlight) {
     loadAllQueued = true;
@@ -675,24 +729,34 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
     const modeEditVersionAtStart = modeEditVersion;
     const modeMutationVersionAtStart = modeMutationVersion;
     const streamRefreshVersionAtStart = streamRefreshVersion;
-    const [nextStatus, nextStreams, nextLogs, nextMode, nextMetrics] =
-      await Promise.all([
-        api.getStatus(),
-        api.getStreams(),
-        api.getLogs(),
-        api.getMode().catch(() => null),
-        api.getStreamMetrics().catch((e: unknown) => {
-          console.warn(
-            "getStreamMetrics failed, will rely on real-time updates:",
-            e,
-          );
-          return [] as api.StreamMetrics[];
-        }),
-      ]);
+    const [
+      nextStatus,
+      nextConnections,
+      nextStreams,
+      nextLogs,
+      nextMode,
+      nextMetrics,
+    ] = await Promise.all([
+      api.getStatus(),
+      api.getConnections().catch(() => null),
+      api.getStreams(),
+      api.getLogs(),
+      api.getMode().catch(() => null),
+      api.getStreamMetrics().catch((e: unknown) => {
+        console.warn(
+          "getStreamMetrics failed, will rely on real-time updates:",
+          e,
+        );
+        return [] as api.StreamMetrics[];
+      }),
+    ]);
 
     await loadDbfConfig();
 
     store.status = nextStatus;
+    if (nextConnections) {
+      store.connections = nextConnections;
+    }
     if (streamRefreshVersion === streamRefreshVersionAtStart) {
       store.streams = nextStreams;
       lastConcreteEpochByKey = nextConcreteEpochs(
@@ -1205,6 +1269,9 @@ export function initStore(): void {
     },
     onResync: () => {
       void loadAll();
+    },
+    onConnectionsChanged: () => {
+      void loadConnections();
     },
     onConnectionChange: () => {},
     onStreamCountsUpdated: (updates) => {

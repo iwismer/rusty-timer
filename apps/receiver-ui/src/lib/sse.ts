@@ -48,6 +48,7 @@ export type SseCallbacks = {
   onStreamsSnapshot: (streams: StreamsResponse) => void;
   onLogEntry: (entry: string) => void;
   onResync: () => void;
+  onConnectionsChanged: () => void;
   onConnectionChange: (connected: boolean) => void;
   onStreamCountsUpdated: (updates: StreamCountUpdate[]) => void;
   onForwarderMetricsUpdated: (update: ForwarderMetricsUpdate) => void;
@@ -86,6 +87,9 @@ export async function initSSE(callbacks: SseCallbacks): Promise<void> {
     }),
     listen("resync", () => {
       callbacks.onResync();
+    }),
+    listen("connections_changed", () => {
+      callbacks.onConnectionsChanged();
     }),
     listen<StreamCountsUpdatedPayload>("stream_counts_updated", (event) => {
       callbacks.onStreamCountsUpdated(event.payload.updates ?? []);

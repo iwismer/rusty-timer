@@ -1009,7 +1009,44 @@ impl Db {
         migrate_subscriptions_to_endpoint_stream_shape(&self.conn)?;
         migrate_cursors_to_stream_id_shape(&self.conn)?;
         migrate_earliest_epochs_to_stream_id_shape(&self.conn)?;
+        migrate_forwarder_intent(&self.conn)?;
         Ok(())
+    }
+
+    pub fn forwarder_should_connect(&self, endpoint_id: &str) -> DbResult<bool> {
+        let value: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT connect FROM forwarder_intent WHERE endpoint_id = ?1",
+                [endpoint_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value != Some(0))
+    }
+
+    pub fn set_forwarder_intent(&self, endpoint_id: &str, connect: bool) -> DbResult<()> {
+        self.conn.execute(
+            "INSERT INTO forwarder_intent(endpoint_id, connect) VALUES(?1, ?2)
+             ON CONFLICT(endpoint_id) DO UPDATE SET connect = excluded.connect",
+            rusqlite::params![endpoint_id, i64::from(connect)],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_forwarder_intents(&self) -> DbResult<std::collections::HashMap<String, bool>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT endpoint_id, connect FROM forwarder_intent")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (endpoint_id, connect) = row?;
+            map.insert(endpoint_id, connect);
+        }
+        Ok(map)
     }
 
     pub fn delete_all_cursors(&self) -> DbResult<usize> {
@@ -1091,6 +1128,7 @@ impl Db {
         tx.execute_batch("DELETE FROM gap_markers")?;
         tx.execute_batch("DELETE FROM earliest_epochs")?;
         tx.execute_batch("DELETE FROM subscriptions")?;
+        tx.execute_batch("DELETE FROM forwarder_intent")?;
         tx.execute_batch("DELETE FROM profile")?;
         tx.execute(
             "INSERT INTO profile (server_url, token, update_mode) VALUES ('', '', ?1)",
@@ -1379,6 +1417,16 @@ fn migrate_cursors_to_stream_id_shape(conn: &Connection) -> DbResult<()> {
     Ok(())
 }
 
+fn migrate_forwarder_intent(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS forwarder_intent (
+             endpoint_id TEXT PRIMARY KEY,
+             connect     INTEGER NOT NULL
+         );",
+    )?;
+    Ok(())
+}
+
 #[derive(Debug)]
 struct TableColumn {
     name: String,
@@ -1500,6 +1548,36 @@ mod tests {
             "near \"ALTER\": syntax error",
             "update_mode"
         ));
+    }
+
+    #[test]
+    fn forwarder_intent_defaults_to_connect_and_persists_disconnect() {
+        let db = Db::open_in_memory().unwrap();
+        // Unknown forwarder defaults to connect (true).
+        assert!(db.forwarder_should_connect("fwd-1").unwrap());
+        db.set_forwarder_intent("fwd-1", false).unwrap();
+        assert!(!db.forwarder_should_connect("fwd-1").unwrap());
+        let intents = db.load_forwarder_intents().unwrap();
+        assert_eq!(intents.get("fwd-1"), Some(&false));
+    }
+
+    #[test]
+    fn forwarder_intent_overwrite_and_independent_endpoints() {
+        let db = Db::open_in_memory().unwrap();
+        // Overwrite/update path: false then true reads back true.
+        db.set_forwarder_intent("fwd-1", false).unwrap();
+        assert!(!db.forwarder_should_connect("fwd-1").unwrap());
+        db.set_forwarder_intent("fwd-1", true).unwrap();
+        assert!(db.forwarder_should_connect("fwd-1").unwrap());
+
+        // Independence: setting one endpoint does not affect another.
+        db.set_forwarder_intent("fwd-1", false).unwrap();
+        db.set_forwarder_intent("fwd-2", true).unwrap();
+        assert!(!db.forwarder_should_connect("fwd-1").unwrap());
+        assert!(db.forwarder_should_connect("fwd-2").unwrap());
+        let intents = db.load_forwarder_intents().unwrap();
+        assert_eq!(intents.get("fwd-1"), Some(&false));
+        assert_eq!(intents.get("fwd-2"), Some(&true));
     }
 
     #[test]
@@ -1808,6 +1886,7 @@ mod tests {
         db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
         db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
         db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
+        db.set_forwarder_intent("f1", false).unwrap();
         db.factory_reset().unwrap();
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.server_url, "");
@@ -1816,6 +1895,9 @@ mod tests {
         assert!(db.load_subscriptions().unwrap().is_empty());
         assert!(db.load_cursors().unwrap().is_empty());
         assert!(db.load_earliest_epochs().unwrap().is_empty());
+        // forwarder_intent is cleared, so the default-true contract is restored.
+        assert!(db.load_forwarder_intents().unwrap().is_empty());
+        assert!(db.forwarder_should_connect("f1").unwrap());
     }
 
     #[test]

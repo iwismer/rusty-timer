@@ -66,7 +66,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, broadcast};
 use tracing::Instrument;
 
 // ---------------------------------------------------------------------------
@@ -124,10 +124,68 @@ pub struct ReaderStatus {
 }
 
 /// UPS daemon availability + latest readings snapshot.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UpsStatusState {
     pub available: bool,
     pub status: Option<rt_domain::UpsStatus>,
+}
+
+/// Forwarder-local status updates consumed by P2P control sessions.
+#[derive(Debug, Clone)]
+pub enum ForwarderStatusEvent {
+    ReaderStatus {
+        stream_id: String,
+        status: ReaderStatus,
+    },
+    ReaderInfo {
+        stream_id: String,
+        info: crate::reader_control::ReaderInfo,
+    },
+    UpsStatus(UpsStatusState),
+}
+
+/// Current forwarder status snapshot consumed by a newly connected P2P peer.
+#[derive(Debug, Clone, Default)]
+pub struct ForwarderStatusSnapshot {
+    pub readers: Vec<(String, ReaderStatus)>,
+    pub ups_status: Option<UpsStatusState>,
+}
+
+/// Read-only status feed for P2P control sessions.
+#[derive(Clone)]
+pub struct ForwarderStatusFeed {
+    subsystem: Arc<Mutex<SubsystemStatus>>,
+    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
+}
+
+impl ForwarderStatusFeed {
+    /// Atomically subscribe to the status broadcast and capture the current
+    /// snapshot under the same `SubsystemStatus` lock.
+    ///
+    /// Holding the lock across both operations guarantees the returned snapshot
+    /// and the delta stream do not overlap: every status update either landed in
+    /// the snapshot (and was broadcast before this subscription existed) or is
+    /// delivered as a post-snapshot delta on the returned receiver. This relies
+    /// on all `ForwarderStatusEvent` broadcasts being emitted while holding the
+    /// same lock. No `.await` is held across the lock.
+    pub async fn subscribe_and_snapshot(
+        &self,
+    ) -> (
+        broadcast::Receiver<ForwarderStatusEvent>,
+        ForwarderStatusSnapshot,
+    ) {
+        let ss = self.subsystem.lock().await;
+        let receiver = self.status_event_tx.subscribe();
+        let snapshot = ForwarderStatusSnapshot {
+            readers: ss
+                .readers()
+                .iter()
+                .map(|(stream_id, status)| (stream_id.clone(), status.clone()))
+                .collect(),
+            ups_status: ss.ups_status().cloned(),
+        };
+        (receiver, snapshot)
+    }
 }
 
 /// Tracks local subsystem readiness for the `/readyz` endpoint.
@@ -306,6 +364,7 @@ pub struct StatusServer {
     local_addr: SocketAddr,
     subsystem: Arc<Mutex<SubsystemStatus>>,
     ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
+    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
     logger: Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
     control_clients:
         Arc<std::sync::RwLock<HashMap<String, Arc<crate::reader_control::ControlClient>>>>,
@@ -345,6 +404,7 @@ struct AppState<J: JournalAccess + Send + 'static> {
     config_state: Option<Arc<ConfigState>>,
     restart_signal: Option<Arc<Notify>>,
     ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
+    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
     logger: Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
     control_clients:
         Arc<std::sync::RwLock<HashMap<String, Arc<crate::reader_control::ControlClient>>>>,
@@ -369,6 +429,7 @@ impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
             config_state: self.config_state.clone(),
             restart_signal: self.restart_signal.clone(),
             ui_tx: self.ui_tx.clone(),
+            status_event_tx: self.status_event_tx.clone(),
             logger: self.logger.clone(),
             control_clients: self.control_clients.clone(),
             download_trackers: self.download_trackers.clone(),
@@ -395,6 +456,14 @@ impl StatusServer {
     /// Return a clone of the UI event broadcast sender.
     pub fn ui_sender(&self) -> tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent> {
         self.ui_tx.clone()
+    }
+
+    /// Return a read-only status feed for P2P control sessions.
+    pub fn status_feed(&self) -> ForwarderStatusFeed {
+        ForwarderStatusFeed {
+            subsystem: self.subsystem.clone(),
+            status_event_tx: self.status_event_tx.clone(),
+        }
     }
 
     /// Return a clone of the shared UI logger Arc.
@@ -483,8 +552,24 @@ impl StatusServer {
     }
 
     /// Update the UPS status snapshot in the subsystem state.
+    ///
+    /// The local HTTP/UI snapshot is always updated, but the P2P control-event
+    /// broadcast only fires when the UPS status actually changed from the stored
+    /// previous value. The UPS poller calls this every interval, so gating the
+    /// broadcast on a real change avoids spamming connected receivers with
+    /// identical `UpsStatus` frames. The send happens under the subsystem lock so
+    /// it is ordered against `subscribe_and_snapshot`.
     pub async fn set_ups_status(&self, state: UpsStatusState) {
-        self.subsystem.lock().await.set_ups_status(state);
+        {
+            let mut ss = self.subsystem.lock().await;
+            let changed = ss.ups_status() != Some(&state);
+            ss.set_ups_status(state.clone());
+            if changed {
+                let _ = self
+                    .status_event_tx
+                    .send(ForwarderStatusEvent::UpsStatus(state));
+            }
+        }
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
     }
@@ -603,8 +688,14 @@ impl StatusServer {
                 .ui_tx
                 .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
                     ip: reader_ip.to_owned(),
-                    info,
+                    info: info.clone(),
                 });
+            // Broadcast under the lock so it is ordered against
+            // `subscribe_and_snapshot`.
+            let _ = self.status_event_tx.send(ForwarderStatusEvent::ReaderInfo {
+                stream_id: reader_ip.to_owned(),
+                info,
+            });
         }
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
@@ -641,8 +732,14 @@ impl StatusServer {
                 .ui_tx
                 .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
                     ip: reader_ip.to_owned(),
-                    info,
+                    info: info.clone(),
                 });
+            // Broadcast under the lock so it is ordered against
+            // `subscribe_and_snapshot`.
+            let _ = self.status_event_tx.send(ForwarderStatusEvent::ReaderInfo {
+                stream_id: reader_ip.to_owned(),
+                info,
+            });
         }
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
@@ -729,6 +826,7 @@ impl StatusServer {
         {
             let mut ss = self.subsystem.lock().await;
             if let Some(r) = ss.readers.get_mut(reader_ip) {
+                let changed = r.state != state;
                 if state == ReaderConnectionState::Disconnected {
                     r.reader_info = None;
                 }
@@ -744,6 +842,18 @@ impl StatusServer {
                         local_port: r.local_port,
                         current_epoch_name: r.current_epoch_name.clone(),
                     });
+                // Only broadcast a P2P control delta on an actual state
+                // transition, and do so under the lock so it is ordered against
+                // `subscribe_and_snapshot`. The local UI event above is always
+                // emitted.
+                if changed {
+                    let _ = self
+                        .status_event_tx
+                        .send(ForwarderStatusEvent::ReaderStatus {
+                            stream_id: reader_ip.to_owned(),
+                            status: r.clone(),
+                        });
+                }
             }
         }
         #[cfg(feature = "eink")]
@@ -793,6 +903,7 @@ impl StatusServer {
         let local_addr = listener.local_addr()?;
 
         let (ui_tx, _) = tokio::sync::broadcast::channel(256);
+        let (status_event_tx, _) = broadcast::channel(256);
         let logger = Arc::new(rt_ui_log::UiLogger::with_buffer(
             ui_tx.clone(),
             |entry| crate::ui_events::ForwarderUiEvent::LogEntry { entry },
@@ -813,6 +924,7 @@ impl StatusServer {
             config_state: None,
             restart_signal: None,
             ui_tx: ui_tx.clone(),
+            status_event_tx: status_event_tx.clone(),
             logger: logger.clone(),
             control_clients: control_clients.clone(),
             download_trackers: download_trackers.clone(),
@@ -834,6 +946,7 @@ impl StatusServer {
             local_addr,
             subsystem,
             ui_tx,
+            status_event_tx,
             logger,
             control_clients,
             download_trackers,
@@ -859,6 +972,7 @@ impl StatusServer {
         let local_addr = listener.local_addr()?;
 
         let (ui_tx, _) = tokio::sync::broadcast::channel(256);
+        let (status_event_tx, _) = broadcast::channel(256);
         let logger = Arc::new(rt_ui_log::UiLogger::with_buffer(
             ui_tx.clone(),
             |entry| crate::ui_events::ForwarderUiEvent::LogEntry { entry },
@@ -879,6 +993,7 @@ impl StatusServer {
             config_state: Some(config_state),
             restart_signal: Some(restart_signal),
             ui_tx: ui_tx.clone(),
+            status_event_tx: status_event_tx.clone(),
             logger: logger.clone(),
             control_clients: control_clients.clone(),
             download_trackers: download_trackers.clone(),
@@ -900,6 +1015,7 @@ impl StatusServer {
             local_addr,
             subsystem,
             ui_tx,
+            status_event_tx,
             logger,
             control_clients,
             download_trackers,
@@ -1203,8 +1319,12 @@ pub async fn apply_section_update(
                 return apply_control_action_from_config(&action, config_state, logger).await;
             }
             update_config_file(config_state, subsystem, ui_tx, |raw| {
+                // Preserve any existing allow_remote_config setting; this handler
+                // only mutates allow_power_actions.
+                let allow_remote_config = raw.control.as_ref().and_then(|c| c.allow_remote_config);
                 raw.control = Some(crate::config::RawControlConfig {
                     allow_power_actions,
+                    allow_remote_config,
                 });
                 Ok(())
             })
@@ -1401,6 +1521,29 @@ pub async fn apply_section_update(
     }
 }
 
+/// Read the config TOML file as a JSON value plus the current `restart_needed`
+/// state, returning a plain error message on failure.
+///
+/// Shared core for both the HTTP `GET /api/v1/config` endpoint and the P2P
+/// remote-config get verb, so the two always agree on the serialized shape.
+async fn read_config_value(
+    config_state: &ConfigState,
+    subsystem: &Arc<Mutex<SubsystemStatus>>,
+) -> Result<(serde_json::Value, bool), String> {
+    let _lock = config_state.write_lock.lock().await;
+
+    let toml_str =
+        std::fs::read_to_string(&config_state.path).map_err(|e| format!("File read error: {e}"))?;
+
+    let raw: crate::config::RawConfig =
+        toml::from_str(&toml_str).map_err(|e| format!("TOML parse error: {e}"))?;
+
+    let json = serde_json::to_value(&raw).map_err(|e| format!("JSON serialize error: {e}"))?;
+
+    let restart_needed = subsystem.lock().await.restart_needed();
+    Ok((json, restart_needed))
+}
+
 /// Read the config TOML file as JSON.
 ///
 /// Returns `(config_json, restart_needed)` on success.
@@ -1408,34 +1551,62 @@ pub async fn read_config_json(
     config_state: &ConfigState,
     subsystem: &Arc<Mutex<SubsystemStatus>>,
 ) -> Result<(serde_json::Value, bool), (u16, String)> {
+    read_config_value(config_state, subsystem)
+        .await
+        .map_err(|e| {
+            (
+                500u16,
+                serde_json::json!({"ok": false, "error": e}).to_string(),
+            )
+        })
+}
+
+/// Serialize the current config to a JSON string (identical to the body
+/// `GET /api/v1/config` returns) plus the current `restart_needed` state.
+///
+/// Used by the P2P remote-config get verb so the receiver UI round-trips the
+/// same document whether it reads config over HTTP or P2P.
+pub async fn config_json_string(
+    config_state: &ConfigState,
+    subsystem: &Arc<Mutex<SubsystemStatus>>,
+) -> Result<(String, bool), String> {
+    let (value, restart_needed) = read_config_value(config_state, subsystem).await?;
+    let json = serde_json::to_string(&value).map_err(|e| format!("JSON serialize error: {e}"))?;
+    Ok((json, restart_needed))
+}
+
+/// Persist a full config document (the same JSON shape `config_json_string`
+/// returns) to the TOML config file, then mark a restart as needed.
+///
+/// The document is parsed into the same [`crate::config::RawConfig`] the get
+/// path serializes, re-serialized to TOML, and validated by running the
+/// canonical loader before anything is written — so a document that would fail
+/// to load on restart is rejected without corrupting the on-disk file. Reuses
+/// the same atomic writer and `restart_needed` signal as the per-section HTTP
+/// writers. Returns a plain error message on failure.
+pub async fn write_config_json(
+    config_json: &str,
+    config_state: &ConfigState,
+    subsystem: &Arc<Mutex<SubsystemStatus>>,
+    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
+) -> Result<(), String> {
+    let raw: crate::config::RawConfig =
+        serde_json::from_str(config_json).map_err(|e| format!("invalid config JSON: {e}"))?;
+
     let _lock = config_state.write_lock.lock().await;
 
-    let toml_str = std::fs::read_to_string(&config_state.path).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
-                .to_string(),
-        )
-    })?;
+    let new_toml =
+        toml::to_string_pretty(&raw).map_err(|e| format!("TOML serialize error: {e}"))?;
 
-    let raw: crate::config::RawConfig = toml::from_str(&toml_str).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("TOML parse error: {}", e)})
-                .to_string(),
-        )
-    })?;
+    // Validate via the canonical loader so we never persist a config that would
+    // fail to load on the next restart.
+    crate::config::load_config_from_str(&new_toml, &config_state.path)
+        .map_err(|e| format!("config validation failed: {e}"))?;
 
-    let json = serde_json::to_value(&raw).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("JSON serialize error: {}", e)})
-                .to_string(),
-        )
-    })?;
+    write_atomic(&config_state.path, &new_toml).map_err(|e| format!("File write error: {e}"))?;
 
-    let restart_needed = subsystem.lock().await.restart_needed();
-    Ok((json, restart_needed))
+    mark_restart_needed_and_emit(subsystem, ui_tx).await;
+    Ok(())
 }
 
 fn text_response(status: StatusCode, body: impl Into<String>) -> Response {
@@ -2600,6 +2771,12 @@ async fn update_cached_reader_info<J: JournalAccess + Send + 'static>(
         .ui_tx
         .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
             ip: ip.to_owned(),
+            info: info.clone(),
+        });
+    let _ = state
+        .status_event_tx
+        .send(ForwarderStatusEvent::ReaderInfo {
+            stream_id: ip.to_owned(),
             info,
         });
 }
@@ -4159,6 +4336,7 @@ mod tests {
             restart_signal: None,
             logger: server.logger.clone(),
             ui_tx: server.ui_tx.clone(),
+            status_event_tx: server.status_event_tx.clone(),
             control_clients: server.control_clients.clone(),
             download_trackers: server.download_trackers.clone(),
             reconnect_notifies: server.reconnect_notifies.clone(),

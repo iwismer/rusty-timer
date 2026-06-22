@@ -87,6 +87,7 @@ pub enum ReceiverUiEvent {
         streams_count: usize,
         receiver_id: String,
     },
+    ConnectionsChanged,
     StreamsSnapshot {
         streams: Vec<StreamEntry>,
         degraded: bool,
@@ -134,6 +135,13 @@ mod tests {
         let event = ReceiverUiEvent::Resync;
         let json: serde_json::Value = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "resync");
+    }
+
+    #[test]
+    fn connections_changed_serializes_with_type_tag() {
+        let event = ReceiverUiEvent::ConnectionsChanged;
+        let json: serde_json::Value = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "connections_changed");
     }
 
     #[test]

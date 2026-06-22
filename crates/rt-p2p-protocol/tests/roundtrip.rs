@@ -1,7 +1,11 @@
 //! Prost round-trip tests: `encode` -> `decode` must equal the original.
 
 use prost::Message;
-use rt_p2p_protocol::{Hello, ReadRecord, WireProtocolError};
+use rt_p2p_protocol::{
+    ConfigGetRequest, ConfigGetResponse, ConfigSetRequest, ConfigSetResponse, ControlC2F,
+    ControlF2C, Hello, ReadRecord, RestartRequest, RestartResponse, WireProtocolError, control_c2f,
+    control_f2c,
+};
 
 // A stream_id is opaque bytes on the wire; this test uses a 16-byte sample.
 const STREAM_ID: [u8; 16] = [
@@ -73,6 +77,110 @@ fn read_record_default_round_trips() {
         .expect("encode default ReadRecord");
 
     let decoded = ReadRecord::decode(buf.as_slice()).expect("decode default ReadRecord");
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn config_get_request_control_c2f_round_trips() {
+    let original = ControlC2F {
+        msg: Some(control_c2f::Msg::ConfigGetRequest(ConfigGetRequest {
+            request_id: "config-get-1".to_string(),
+        })),
+    };
+
+    let mut buf = Vec::new();
+    original.encode(&mut buf).expect("encode ControlC2F");
+
+    let decoded = ControlC2F::decode(buf.as_slice()).expect("decode ControlC2F");
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn config_set_request_control_c2f_round_trips() {
+    let original = ControlC2F {
+        msg: Some(control_c2f::Msg::ConfigSetRequest(ConfigSetRequest {
+            request_id: "config-set-1".to_string(),
+            config_json: r#"{"reader":"alpha"}"#.to_string(),
+        })),
+    };
+
+    let mut buf = Vec::new();
+    original.encode(&mut buf).expect("encode ControlC2F");
+
+    let decoded = ControlC2F::decode(buf.as_slice()).expect("decode ControlC2F");
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn restart_request_control_c2f_round_trips() {
+    let original = ControlC2F {
+        msg: Some(control_c2f::Msg::RestartRequest(RestartRequest {
+            request_id: "restart-1".to_string(),
+        })),
+    };
+
+    let mut buf = Vec::new();
+    original.encode(&mut buf).expect("encode ControlC2F");
+
+    let decoded = ControlC2F::decode(buf.as_slice()).expect("decode ControlC2F");
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn config_get_response_control_f2c_round_trips() {
+    let original = ControlF2C {
+        msg: Some(control_f2c::Msg::ConfigGetResponse(ConfigGetResponse {
+            request_id: "config-get-1".to_string(),
+            config_json: r#"{"reader":"alpha"}"#.to_string(),
+            restart_needed: true,
+        })),
+    };
+
+    let mut buf = Vec::new();
+    original.encode(&mut buf).expect("encode ControlF2C");
+
+    let decoded = ControlF2C::decode(buf.as_slice()).expect("decode ControlF2C");
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn config_set_response_control_f2c_round_trips() {
+    let original = ControlF2C {
+        msg: Some(control_f2c::Msg::ConfigSetResponse(ConfigSetResponse {
+            request_id: "config-set-1".to_string(),
+            ok: false,
+            restart_needed: true,
+            error: "invalid reader port".to_string(),
+        })),
+    };
+
+    let mut buf = Vec::new();
+    original.encode(&mut buf).expect("encode ControlF2C");
+
+    let decoded = ControlF2C::decode(buf.as_slice()).expect("decode ControlF2C");
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn restart_response_control_f2c_round_trips() {
+    let original = ControlF2C {
+        msg: Some(control_f2c::Msg::RestartResponse(RestartResponse {
+            request_id: "restart-1".to_string(),
+            accepted: false,
+            error: "restart already pending".to_string(),
+        })),
+    };
+
+    let mut buf = Vec::new();
+    original.encode(&mut buf).expect("encode ControlF2C");
+
+    let decoded = ControlF2C::decode(buf.as_slice()).expect("decode ControlF2C");
 
     assert_eq!(decoded, original);
 }

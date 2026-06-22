@@ -107,6 +107,46 @@ export interface ServerDeviceStatus {
   message: string | null;
 }
 
+export type ForwarderConnState =
+  | "subscribed"
+  | "connected"
+  | "unavailable"
+  | "disconnected";
+
+export interface ReaderLiveStatus {
+  stream_id: string;
+  connected: boolean;
+  state: string;
+  last_read_unix_ms: number | null;
+  hardware_reader_id: string | null;
+  firmware_version: string | null;
+  model: string | null;
+}
+
+export interface UpsStatusPayload {
+  on_battery: boolean;
+  battery_percent: number;
+  runtime_seconds: number;
+}
+
+export interface ForwarderConnectionStatus {
+  endpoint_id: string;
+  display_name: string | null;
+  state: ForwarderConnState;
+  pending: boolean;
+  subscribed_count: number;
+  available_count: number;
+  readers: ReaderLiveStatus[];
+  ups: UpsStatusPayload | null;
+  restart_needed: boolean | null;
+  remote_config_available: boolean;
+}
+
+export interface ConnectionsResponse {
+  server: ServerDeviceStatus;
+  forwarders: ForwarderConnectionStatus[];
+}
+
 export interface StatusResponse {
   connection_state: ConnectionState;
   local_ok: boolean;
@@ -231,6 +271,62 @@ export async function getStatus(): Promise<StatusResponse> {
 
 export async function reconnectServer(): Promise<void> {
   await invoke("reconnect_server");
+}
+
+export async function getConnections(): Promise<ConnectionsResponse> {
+  return invoke<ConnectionsResponse>("get_connections");
+}
+
+export async function connectForwarder(endpointId: string): Promise<void> {
+  await invoke("connect_forwarder", { endpointId });
+}
+
+export async function disconnectForwarder(endpointId: string): Promise<void> {
+  await invoke("disconnect_forwarder", { endpointId });
+}
+
+export async function reconnectForwarder(endpointId: string): Promise<void> {
+  await invoke("reconnect_forwarder", { endpointId });
+}
+
+export interface ForwarderConfigResponse {
+  config_json: string;
+  restart_needed: boolean;
+}
+
+export interface SetForwarderConfigResponse {
+  ok: boolean;
+  restart_needed: boolean;
+  error: string | null;
+}
+
+export interface RestartForwarderResponse {
+  accepted: boolean;
+  error: string | null;
+}
+
+export async function getForwarderConfig(
+  endpointId: string,
+): Promise<ForwarderConfigResponse> {
+  return invoke<ForwarderConfigResponse>("get_forwarder_config", {
+    endpointId,
+  });
+}
+
+export async function setForwarderConfig(
+  endpointId: string,
+  configJson: string,
+): Promise<SetForwarderConfigResponse> {
+  return invoke<SetForwarderConfigResponse>("set_forwarder_config", {
+    endpointId,
+    configJson,
+  });
+}
+
+export async function restartForwarder(
+  endpointId: string,
+): Promise<RestartForwarderResponse> {
+  return invoke<RestartForwarderResponse>("restart_forwarder", { endpointId });
 }
 
 export async function getLogs(): Promise<LogsResponse> {

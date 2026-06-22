@@ -8,16 +8,18 @@
 //! on disk (fail-to-last-known on refresh failures) and force-closes a peer's
 //! open connections when an update revokes it.
 //!
-//! Scope: production startup currently wires the endpoint, accept loop, and
-//! allow-listed control-plane handshake. The data-stream subscriber handler and
-//! the server allow-list distribution components ([`ServerAllowListClient`]
-//! and [`run_allowlist_distribution`]) are available for P2P wiring, while the
-//! reader control/status mapping remains a later task.
+//! Scope: production startup wires the endpoint, accept loop, allow-listed
+//! control-plane handshake, data-stream subscriber handler, server allow-list
+//! distribution components ([`ServerAllowListClient`] and
+//! [`run_allowlist_distribution`]), and forwarder status events. Reader control
+//! actions are still handled by the no-op adapter until a production adapter is
+//! installed.
 
 mod allowlist;
 mod control;
 mod data;
 mod endpoint;
+mod remote_config;
 
 use std::net::SocketAddrV4;
 use std::num::TryFromIntError;
@@ -27,6 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::P2pConfig;
+use crate::status_http::ForwarderStatusFeed;
 use crate::storage::journal::Journal;
 use rt_iroh::{EndpointBuilder, NodeAddr, NodeId, RelayMode, SecretKey};
 use rt_p2p_protocol::{StreamCatalog, StreamEntry};
@@ -39,12 +42,15 @@ pub use allowlist::{
     ServerCatalogClient, apply_receiver_update, fetch_and_apply_once, run_allowlist_distribution,
 };
 pub use control::{
-    CatalogProvider, ControlEvent, ControlEventReceiver, ControlEventSender, HeartbeatConfig,
-    NoopReaderControlHandler, ReaderControlFuture, ReaderControlHandler, RewriteClockFuture,
-    StaticCatalog, SyncClockDriftHandler, SyncClockFuture, SyncClockSource, control_event_channel,
+    CatalogProvider, ConfigGetFuture, ConfigSetFuture, ControlEvent, ControlEventReceiver,
+    ControlEventSender, HeartbeatConfig, NoopReaderControlHandler, NoopRemoteConfigHandler,
+    ReaderControlFuture, ReaderControlHandler, RemoteConfigHandler, RestartFuture,
+    RewriteClockFuture, StaticCatalog, SyncClockDriftHandler, SyncClockFuture, SyncClockSource,
+    control_event_channel,
 };
 pub use data::{DataConfig, serve_data_streams};
 pub use endpoint::P2pEndpoint;
+pub use remote_config::ForwarderRemoteConfigHandler;
 
 const DEFAULT_P2P_SECRET_KEY_PATH: &str = "/var/lib/rusty-timer/p2p-secret.key";
 const DEFAULT_FORWARDER_CATALOG_PUSH_INTERVAL: Duration = Duration::from_secs(30);
@@ -87,11 +93,14 @@ impl P2pRuntime {
 /// network address (for example `10.0.0.5:10000`), so catalog stream ids are the
 /// UTF-8 bytes of those same keys and data subscriptions resolve back to the
 /// existing journal rows.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_forwarder_p2p(
     config: &P2pConfig,
     journal: Arc<Mutex<Journal>>,
     reader_streams: &[String],
     display_name: Option<String>,
+    status_feed: ForwarderStatusFeed,
+    remote_config: Arc<dyn RemoteConfigHandler>,
 ) -> Result<Option<P2pRuntime>, P2pStartError> {
     if !config.enabled {
         return Ok(None);
@@ -119,7 +128,9 @@ pub async fn start_forwarder_p2p(
         Arc::clone(&journal),
         DataConfig::default(),
     )
-    .await?;
+    .await?
+    .with_status_feed(status_feed)
+    .with_remote_config(remote_config);
 
     let run_endpoint = endpoint.clone();
     let mut tasks = vec![tokio::spawn(async move { run_endpoint.run().await })];
@@ -409,6 +420,7 @@ mod tests {
     use super::*;
 
     use crate::config::P2pConfig;
+    use crate::status_http::{StatusConfig, StatusServer, SubsystemStatus};
     use crate::storage::journal::Journal;
     use rt_iroh::EndpointBuilder;
     use rt_p2p_protocol::{
@@ -420,6 +432,18 @@ mod tests {
 
     type BoxError = Box<dyn std::error::Error + Send + Sync>;
     type TestResult = Result<(), BoxError>;
+
+    async fn status_feed() -> Result<ForwarderStatusFeed, BoxError> {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await?;
+        Ok(server.status_feed())
+    }
 
     fn p2p_config(receiver_id: String) -> P2pConfig {
         P2pConfig {
@@ -457,6 +481,8 @@ mod tests {
             Arc::clone(&journal),
             &[stream_key.to_owned()],
             None,
+            status_feed().await?,
+            Arc::new(NoopRemoteConfigHandler),
         )
         .await?
         .expect("p2p enabled");
@@ -554,6 +580,8 @@ mod tests {
             Arc::clone(&journal),
             &[stream_key.to_owned()],
             None,
+            status_feed().await?,
+            Arc::new(NoopRemoteConfigHandler),
         )
         .await?
         .expect("p2p enabled");

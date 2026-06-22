@@ -27,12 +27,18 @@ const mockState = vi.hoisted(() => {
       savedToken: "secret",
       saving: false,
       status: defaultStatus(),
+      editDbfEnabled: false,
+      dbfEnabled: false,
+      editDbfPath: "C:\\winrace\\Files\\IPICO.DBF",
+      dbfPath: "C:\\winrace\\Files\\IPICO.DBF",
+      dbfSaving: false,
+      dbfClearing: false,
     },
     getConfigDirty: vi.fn(() => false),
-    getConnectionState: vi.fn(() => "disconnected"),
-    getConnectionBadgeState: vi.fn(() => "err"),
     saveProfile: vi.fn(),
     reconnectServer: vi.fn(),
+    saveDbfConfig: vi.fn(),
+    clearDbfFile: vi.fn(),
     setEditReceiverId: vi.fn(),
     setEditServerUrl: vi.fn(),
     setEditToken: vi.fn(),
@@ -42,10 +48,10 @@ const mockState = vi.hoisted(() => {
 vi.mock("$lib/store.svelte", () => ({
   store: mockState.store,
   getConfigDirty: mockState.getConfigDirty,
-  getConnectionState: mockState.getConnectionState,
-  getConnectionBadgeState: mockState.getConnectionBadgeState,
   saveProfile: mockState.saveProfile,
   reconnectServer: mockState.reconnectServer,
+  saveDbfConfig: mockState.saveDbfConfig,
+  clearDbfFile: mockState.clearDbfFile,
   setEditReceiverId: mockState.setEditReceiverId,
   setEditServerUrl: mockState.setEditServerUrl,
   setEditToken: mockState.setEditToken,
@@ -66,26 +72,16 @@ describe("ConfigTab", () => {
     mockState.store.savedToken = "secret";
     mockState.store.saving = false;
     mockState.store.status = mockState.defaultStatus();
+    mockState.store.editDbfEnabled = false;
+    mockState.store.dbfEnabled = false;
+    mockState.store.editDbfPath = "C:\\winrace\\Files\\IPICO.DBF";
+    mockState.store.dbfPath = "C:\\winrace\\Files\\IPICO.DBF";
+    mockState.store.dbfSaving = false;
+    mockState.store.dbfClearing = false;
     mockState.getConfigDirty.mockReturnValue(false);
-    mockState.getConnectionState.mockReturnValue("disconnected");
-    mockState.getConnectionBadgeState.mockReturnValue("err");
   });
 
-  it("renders config inputs and the current connection state", () => {
-    render(ConfigTab);
-
-    expect(screen.getByTestId("receiver-id-input")).toHaveValue("recv-test");
-    expect(screen.getByTestId("server-url-input")).toHaveValue(
-      "https://server.example.com",
-    );
-    expect(screen.getByTestId("token-input")).toHaveValue("secret");
-    expect(screen.getByTestId("save-config-btn")).toBeDisabled();
-    expect(screen.getByTestId("config-connection-state")).toHaveTextContent(
-      "Disconnected",
-    );
-  });
-
-  it("shows when the receiver is waiting for server approval", () => {
+  it("renders server config inputs without connection status", () => {
     mockState.store.status.server = {
       configured: true,
       endpoint_id: "node-1",
@@ -97,9 +93,26 @@ describe("ConfigTab", () => {
 
     render(ConfigTab);
 
-    expect(screen.getByTestId("server-approval-state")).toHaveTextContent(
-      "Waiting for server admin approval",
+    expect(screen.getByTestId("receiver-id-input")).toHaveValue("recv-test");
+    expect(screen.getByTestId("server-url-input")).toHaveValue(
+      "https://server.example.com",
     );
+    expect(screen.getByTestId("token-input")).toHaveValue("secret");
+    expect(screen.getByTestId("save-config-btn")).toBeDisabled();
+    expect(
+      screen.queryByTestId("config-connection-state"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("server-approval-state"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("enables saving when the server config is dirty", () => {
+    mockState.getConfigDirty.mockReturnValue(true);
+
+    render(ConfigTab);
+
+    expect(screen.getByTestId("save-config-btn")).toBeEnabled();
   });
 
   it("offers a manual server reconnect action", async () => {
@@ -110,33 +123,22 @@ describe("ConfigTab", () => {
     expect(mockState.reconnectServer).toHaveBeenCalledOnce();
   });
 
-  it("reflects the connected state driven by the backend", () => {
-    mockState.store.status = {
-      ...mockState.defaultStatus(),
-      connection_state: "connected",
-    };
-    mockState.getConnectionState.mockReturnValue("connected");
-    mockState.getConnectionBadgeState.mockReturnValue("ok");
+  it("keeps reconnect disabled until dirty server config is saved", () => {
+    mockState.getConfigDirty.mockReturnValue(true);
 
     render(ConfigTab);
 
-    expect(screen.getByTestId("config-connection-state")).toHaveTextContent(
-      "Connected",
-    );
+    expect(screen.getByTestId("reconnect-server-btn")).toBeDisabled();
   });
 
-  it("reflects the connecting transitional state", () => {
-    mockState.store.status = {
-      ...mockState.defaultStatus(),
-      connection_state: "connecting",
-    };
-    mockState.getConnectionState.mockReturnValue("connecting");
-    mockState.getConnectionBadgeState.mockReturnValue("warn");
-
+  it("renders Race Director output config controls", () => {
     render(ConfigTab);
 
-    expect(screen.getByTestId("config-connection-state")).toHaveTextContent(
-      "Connecting...",
+    expect(screen.getByTestId("dbf-enabled-toggle")).not.toBeChecked();
+    expect(screen.getByTestId("dbf-path-input")).toHaveValue(
+      "C:\\winrace\\Files\\IPICO.DBF",
     );
+    expect(screen.getByTestId("save-dbf-btn")).toBeDisabled();
+    expect(screen.getByTestId("clear-dbf-btn")).toBeEnabled();
   });
 });

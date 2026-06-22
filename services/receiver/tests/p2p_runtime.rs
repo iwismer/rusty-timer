@@ -2,8 +2,9 @@
 //!
 //! These exercise the *real* loopback P2P lane end-to-end: a deterministic iroh
 //! receiver endpoint dials a scripted [`MockForwarderPeer`], runs the real
-//! reconnecting `p2p_session`, and drives the durable local proxy, durable DBF
-//! feed, and server announcer push off the post-commit durable hints.
+//! per-forwarder P2P connection with data subscriptions, and drives the durable
+//! local proxy, durable DBF feed, and server announcer push off post-commit
+//! durable hints.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -26,6 +27,7 @@ use rt_test_utils::poll_until;
 use tokio::io::AsyncReadExt;
 
 const STREAM_ID: &str = "127.0.0.1:10000";
+const STREAM_ID_2: &str = "127.0.0.1:10001";
 // A valid IPICO chip-read frame (chip id `000000012345`) so DBF/announcer
 // mapping produces real output.
 const VALID_FRAME: &[u8] = b"aa400000000123450a2a01123018455927a7";
@@ -87,6 +89,14 @@ fn script_two(raw: &[u8]) -> ForwarderScript {
         }],
         caught_up_through: Some(2),
         data_fault: ConnectivityFault::healthy(),
+        echo_subscribed_stream_id: false,
+        close_connection_after_data: false,
+        control_events: Vec::new(),
+        control_pings: 0,
+        control_ping_interval: std::time::Duration::from_millis(50),
+        config_get_json: String::new(),
+        config_restart_needed: false,
+        respond_to_config_requests: true,
     }
 }
 
@@ -594,10 +604,10 @@ fn record_with_sid(stream_id: &[u8], seq: u64, raw: &[u8]) -> ReadRecord {
 }
 
 /// A script whose `SubscribeOk` is for the subscribed stream but whose batch
-/// records carry a *different* `stream_id`. The receiver session validates the
-/// record stream id and fails with a non-retryable `StreamIdMismatch`, so its
-/// session task exits (no self-retry) — exactly the condition that would leave a
-/// dead worker in the reconcile map without a rebuild-on-finish pass.
+/// records carry a *different* `stream_id`. The receiver data subscription
+/// validates the record stream id and fails with a non-retryable
+/// `StreamIdMismatch`, so the forwarder connection must resubscribe the desired
+/// stream instead of leaving a finished data task in its task map.
 fn script_stream_mismatch() -> ForwarderScript {
     let other = b"127.0.0.1:10001".to_vec();
     ForwarderScript {
@@ -615,6 +625,14 @@ fn script_stream_mismatch() -> ForwarderScript {
         }],
         caught_up_through: None,
         data_fault: ConnectivityFault::healthy(),
+        echo_subscribed_stream_id: false,
+        close_connection_after_data: false,
+        control_events: Vec::new(),
+        control_pings: 0,
+        control_ping_interval: std::time::Duration::from_millis(50),
+        config_get_json: String::new(),
+        config_restart_needed: false,
+        respond_to_config_requests: true,
     }
 }
 
@@ -711,10 +729,9 @@ async fn changing_local_port_rebinds_proxy_to_new_port() {
     .expect("changing_local_port_rebinds_proxy_to_new_port timed out");
 }
 
-/// A non-retryable session failure exits the session task. Reconciliation must
-/// notice the finished session and rebuild the worker, which redials and
-/// re-subscribes; without that, the dead worker would linger and the forwarder
-/// would see exactly one subscribe forever.
+/// A non-retryable data subscription failure exits that stream's data task.
+/// Reconciliation must keep the stream desired on the per-forwarder connection,
+/// which resubscribes instead of leaving the finished task in place forever.
 #[tokio::test]
 async fn dead_session_worker_is_recreated_on_next_reconcile() {
     tokio::time::timeout(TEST_TIMEOUT, async {
@@ -737,9 +754,8 @@ async fn dead_session_worker_is_recreated_on_next_reconcile() {
             .await
             .unwrap();
 
-        // Each rebuilt worker redials and re-subscribes. A lingering dead worker
-        // would never re-subscribe, so seeing multiple subscribes proves the
-        // finished session was detected and the worker recreated.
+        // A lingering finished data task would never re-subscribe, so seeing
+        // multiple subscribes proves the desired stream is resubscribed.
         poll_until(
             || async { forwarder.subscribes().len() >= 3 },
             Duration::from_secs(10),
@@ -747,7 +763,7 @@ async fn dead_session_worker_is_recreated_on_next_reconcile() {
         .await;
         assert!(
             forwarder.subscribes().len() >= 3,
-            "dead worker must be recreated, producing repeated subscribes"
+            "finished data task must be replaced, producing repeated subscribes"
         );
 
         runtime.shutdown().await;
@@ -1120,4 +1136,144 @@ async fn shutdown_cancels_runtime_promptly() {
     })
     .await
     .expect("shutdown_cancels_runtime_promptly timed out");
+}
+
+/// Build a subscription for an arbitrary `stream_id` on a forwarder.
+fn stream_subscription_for(forwarder_endpoint_id: &str, stream_id: &str) -> StreamSubscription {
+    StreamSubscription {
+        forwarder_endpoint_id: forwarder_endpoint_id.to_owned(),
+        stream_id: stream_id.to_owned(),
+        local_port_override: None,
+        event_type: EventType::Finish,
+        forwarder_id: None,
+        reader_ip: Some(stream_id.to_owned()),
+    }
+}
+
+/// Like [`script_two`] but echoes the subscribed `stream_id` into every outbound
+/// data frame, so the one script can serve several distinct streams (each gets
+/// records tagged with its own id) over a single connection.
+fn script_two_echo(raw: &[u8]) -> ForwarderScript {
+    let mut script = script_two(raw);
+    script.echo_subscribed_stream_id = true;
+    script
+}
+
+/// Two stream subscriptions to ONE forwarder must be served by a single control
+/// session multiplexing two data streams over the SAME QUIC connection: both
+/// deliver their records, only one connection is opened, and removing one
+/// subscription leaves the other's durable rows and the control session intact.
+///
+/// Note: after the unsubscribe this asserts durable rows + control-session
+/// survival (one connection, still `Connected`/`Subscribed`), NOT live-stream
+/// liveness on the remaining stream — the scripted mock completes each data
+/// subscription after its replay, so the harness cannot observe an ongoing live
+/// stream here.
+#[tokio::test]
+async fn one_connection_multiplexes_multiple_data_streams() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let forwarder = MockForwarderPeer::start([92; 32], script_two_echo(VALID_FRAME))
+            .await
+            .unwrap();
+        let (node_id, direct) = forwarder_config(&forwarder);
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_state(dir.path()).await;
+        let (config, _sub) = base_config(node_id.clone(), direct, 93, None);
+        state
+            .db
+            .lock()
+            .await
+            .replace_stream_subscriptions(&[
+                stream_subscription_for(&node_id, STREAM_ID),
+                stream_subscription_for(&node_id, STREAM_ID_2),
+            ])
+            .unwrap();
+
+        let runtime = start_receiver_p2p(Arc::clone(&state), config)
+            .await
+            .unwrap();
+
+        // Both streams deliver their records durably.
+        poll_until(
+            || {
+                let state = Arc::clone(&state);
+                async move {
+                    let db = state.db.lock().await;
+                    let a = db
+                        .load_received_events(STREAM_ID)
+                        .map(|e| e.len())
+                        .unwrap_or(0);
+                    let b = db
+                        .load_received_events(STREAM_ID_2)
+                        .map(|e| e.len())
+                        .unwrap_or(0);
+                    a >= 2 && b >= 2
+                }
+            },
+            Duration::from_secs(10),
+        )
+        .await;
+
+        // Both subscriptions are served over ONE QUIC connection — one control
+        // session multiplexing two data streams — not one connection per stream.
+        assert_eq!(
+            forwarder.connection_count(),
+            1,
+            "both data streams must share a single forwarder connection"
+        );
+        assert!(
+            forwarder.subscribes().len() >= 2,
+            "both streams must have subscribed over the shared connection"
+        );
+
+        // Remove one subscription. The other stream's durable rows and the
+        // single control connection must remain intact (no reconnect).
+        state
+            .db
+            .lock()
+            .await
+            .replace_stream_subscriptions(&[stream_subscription_for(&node_id, STREAM_ID)])
+            .unwrap();
+
+        // Let reconcile drop the removed stream worker; the remaining stream's
+        // rows persist and no new connection is opened.
+        poll_until(
+            || {
+                let state = Arc::clone(&state);
+                async move {
+                    let db = state.db.lock().await;
+                    db.load_received_events(STREAM_ID)
+                        .map(|e| e.len())
+                        .unwrap_or(0)
+                        >= 2
+                }
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            forwarder.connection_count(),
+            1,
+            "removing one subscription must not reconnect the control session"
+        );
+
+        // The control session is intact: the forwarder still reads as connected
+        // (control up; the data replays have completed).
+        let snapshot = state.forwarder_state(&node_id).await;
+        assert!(
+            matches!(
+                snapshot.state,
+                receiver::control_api::ForwarderConnState::Connected
+                    | receiver::control_api::ForwarderConnState::Subscribed
+            ),
+            "control session must stay up after removing one subscription, got {:?}",
+            snapshot.state
+        );
+
+        runtime.shutdown().await;
+        forwarder.shutdown().await;
+    })
+    .await
+    .expect("one_connection_multiplexes_multiple_data_streams timed out");
 }

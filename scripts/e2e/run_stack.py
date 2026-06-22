@@ -36,12 +36,15 @@ Assertions (all must be green):
 
 Usage::
 
-    uv run scripts/e2e/run_stack.py            # build (if needed) + run BOTH lanes
+    uv run scripts/e2e/run_stack.py            # build (if needed) + run connections + BOTH lanes
     uv run scripts/e2e/run_stack.py --no-build # skip cargo build
     uv run scripts/e2e/run_stack.py --keep      # keep the temp dir on exit
     uv run scripts/e2e/run_stack.py --power-loss-target forwarder  # one lane only
 
-Stdlib only; uses ``cargo`` to build the four service binaries.
+Stdlib only; uses ``cargo`` to build the four service binaries. The receiver
+binary is built with its loopback-only ``test-bridge`` feature because the
+connections / remote-config assertions drive canonical control commands through
+``POST /bridge/invoke/{cmd}``.
 """
 
 from __future__ import annotations
@@ -58,6 +61,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -243,16 +247,7 @@ class Stack:
 # Build + node-id derivation
 # ---------------------------------------------------------------------------
 def cargo_build(*, agent_ui: bool = False):
-    if not agent_ui:
-        print("[build] cargo build -p emulator -p forwarder -p receiver -p server ...")
-        subprocess.run(
-            ["cargo", "build", "-p", "emulator", "-p", "forwarder", "-p", "receiver",
-             "-p", "server"],
-            cwd=str(REPO_ROOT),
-            check=True,
-        )
-        return
-
+    del agent_ui  # The bridge is now required by first-class E2E assertions.
     print("[build] cargo build -p emulator -p forwarder -p server ...")
     subprocess.run(
         ["cargo", "build", "-p", "emulator", "-p", "forwarder", "-p", "server"],
@@ -315,7 +310,9 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 
 
 def preseed_receiver_db(db_path: Path, forwarder_node_id: str, stream_id: str,
-                        proxy_port: int, dbf_path: Path):
+                        proxy_port: int, dbf_path: Path, *,
+                        server_url: str = "p2p://loopback",
+                        server_token: str = "e2e-token"):
     conn = sqlite3.connect(str(db_path))
     try:
         conn.executescript(PRESEED_SQL)
@@ -323,7 +320,7 @@ def preseed_receiver_db(db_path: Path, forwarder_node_id: str, stream_id: str,
             "INSERT INTO profile "
             "(server_url, token, update_mode, receiver_mode_json, receiver_id, "
             " dbf_enabled, dbf_path) VALUES (?,?,?,?,?,?,?)",
-            ("p2p://loopback", "e2e-token", "check-and-download", None,
+            (server_url, server_token, "check-and-download", None,
              "rx-e2e", 1, str(dbf_path)),
         )
         conn.execute(
@@ -449,7 +446,7 @@ def read_proxy_replay(port: int, expected_bytes: int, timeout: float = 10.0) -> 
 
 
 # ---------------------------------------------------------------------------
-# Server HTTP
+# Server HTTP + receiver bridge HTTP
 # ---------------------------------------------------------------------------
 def server_status(base_url: str) -> dict:
     with urllib.request.urlopen(f"{base_url}/status", timeout=5) as resp:
@@ -462,6 +459,53 @@ def server_healthy(base_url: str) -> bool:
             return resp.status == 200
     except Exception:  # noqa: BLE001
         return False
+
+
+def post_json(url: str, body: dict, *, headers: dict[str, str] | None = None) -> dict:
+    data = json.dumps(body).encode("utf-8")
+    request_headers = {"Content-Type": "application/json"}
+    if headers:
+        request_headers.update(headers)
+    request = urllib.request.Request(url, data=data, headers=request_headers, method="POST")
+    with urllib.request.urlopen(request, timeout=5) as resp:
+        payload = resp.read().decode()
+    return json.loads(payload) if payload else {}
+
+
+def server_approve_device(base_url: str, endpoint_id: str, display_name: str) -> dict:
+    return post_json(
+        f"{base_url}/admin/devices/approve",
+        {"endpoint_id": endpoint_id, "display_name": display_name},
+        headers={"Remote-User": "rt-e2e-admin"},
+    )
+
+
+def bridge_invoke(base_url: str, cmd: str, args: dict | None = None) -> dict:
+    return post_json(f"{base_url.rstrip('/')}/bridge/invoke/{cmd}", args or {})
+
+
+def bridge_invoke_error(base_url: str, cmd: str, args: dict | None = None) -> tuple[int, dict]:
+    try:
+        bridge_invoke(base_url, cmd, args)
+    except urllib.error.HTTPError as exc:
+        payload = exc.read().decode()
+        body = json.loads(payload) if payload else {}
+        return exc.code, body
+    raise AssertionError(f"expected bridge command {cmd!r} to fail")
+
+
+def forwarder_connection(connections: dict, endpoint_id: str) -> dict | None:
+    for forwarder in connections.get("forwarders", []):
+        if forwarder.get("endpoint_id") == endpoint_id:
+            return forwarder
+    return None
+
+
+def server_device_approval(base_url: str, endpoint_id: str) -> str | None:
+    for device in server_status(base_url).get("devices", []):
+        if device.get("endpoint_id") == endpoint_id:
+            return device.get("approval_state")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -567,6 +611,344 @@ def server_announcer_ready(base_url: str):
             and set(EXPECTED_TAGS).issubset(pushed_chips)):
         return status
     return False
+
+
+def run_connection_scenarios(tmp: Path, results: Results, stack: Stack):
+    print("\n########## connections + remote-config scenarios ##########")
+
+    # --- Ports (loopback only) ---
+    emulator_port = free_tcp_port()
+    forwarder_status_port = free_tcp_port()
+    forwarder_fanout_port = free_tcp_port()
+    forwarder_p2p_port = free_udp_port()
+    server_port = free_tcp_port()
+    proxy_port = free_tcp_port()
+
+    stream_id = f"127.0.0.1:{emulator_port}"
+    server_url = f"http://127.0.0.1:{server_port}"
+
+    # --- Deterministic node ids (shared seed->id derivation) ---
+    forwarder_node_id = derive_node_id(FORWARDER_SEED_HEX)
+    receiver_node_id = derive_node_id(RECEIVER_SEED_HEX)
+    print(f"[ids] forwarder={forwarder_node_id[:16]}…  receiver={receiver_node_id[:16]}…")
+
+    # --- Files ---
+    reads_file = tmp / "reads.txt"
+    reads_file.write_text("\n".join(EXPECTED_FRAMES) + "\n")
+
+    token_file = tmp / "forwarder-token"
+    token_file.write_text("e2e-forwarder-token\n")
+    server_token_file = tmp / "server-token"
+    server_token_file.write_text(f"{PROVISIONING_TOKEN}\n")
+
+    journal_path = tmp / "forwarder.sqlite3"
+    thin_db_path = tmp / "server.sqlite3"
+    receiver_data_dir = tmp / "receiver-data"
+    receiver_data_dir.mkdir(parents=True, exist_ok=True)
+    receiver_db_path = receiver_data_dir / "receiver.sqlite3"
+    dbf_path = tmp / "IPICO.DBF"
+
+    forwarder_config = tmp / "forwarder.toml"
+    forwarder_config.write_text(
+        f"""schema_version = 1
+
+display_name = "E2E Forwarder"
+
+[auth]
+token_file = "{token_file}"
+
+[journal]
+sqlite_path = "{journal_path}"
+
+[status_http]
+bind = "127.0.0.1:{forwarder_status_port}"
+
+[control]
+allow_remote_config = true
+
+[[readers]]
+target = "127.0.0.1:{emulator_port}"
+enabled = true
+local_fallback_port = {forwarder_fanout_port}
+
+[p2p]
+enabled = true
+secret_key_seed_hex = "{FORWARDER_SEED_HEX}"
+bind_addr_v4 = "127.0.0.1:{forwarder_p2p_port}"
+relay_disabled = true
+discovery_disabled = true
+max_concurrent_bidi_streams = 256
+server_url = "{server_url}"
+server_token_file = "{server_token_file}"
+allowlist_poll_interval_secs = 1
+allowlist_request_timeout_secs = 2
+"""
+    )
+
+    # --- Preseed receiver DB (canonical subscription + DBF profile) ---
+    preseed_receiver_db(
+        receiver_db_path,
+        forwarder_node_id,
+        stream_id,
+        proxy_port,
+        dbf_path,
+        server_url=server_url,
+        server_token=PROVISIONING_TOKEN,
+    )
+
+    # --- 1. server (trusted proxy enabled only for loopback admin approval) ---
+    thin = stack.add(Managed(
+        name="server[connections]",
+        argv=[str(bin_path("server"))],
+        log_path=tmp / "server.log",
+        env={
+            "SERVER_DB_PATH": str(thin_db_path),
+            "BIND_ADDR": f"127.0.0.1:{server_port}",
+            "SERVER_PROVISIONING_TOKEN": PROVISIONING_TOKEN,
+            "SERVER_TRUSTED_PROXY": "1",
+            "LOG_LEVEL": "info",
+        },
+    ))
+    thin.start()
+    wait_until(lambda: server_healthy(server_url), timeout=20,
+               what="server /healthz")
+    print("[up] server healthy")
+
+    # --- 2. emulator (deterministic, verbatim, once) ---
+    emulator = stack.add(Managed(
+        name="emulator[connections]",
+        argv=[str(bin_path("emulator")),
+              "-p", str(emulator_port),
+              "-f", str(reads_file),
+              "-d", str(READ_DELAY_MS),
+              "-t", "raw",
+              "--verbatim", "--once"],
+        log_path=tmp / "emulator.log",
+        env={"RUST_LOG": "info"},
+    ))
+    emulator.start()
+    wait_for_log(emulator.log_path, "[emulator] listening on", timeout=20,
+                 what="emulator TCP listener")
+    emulator.assert_alive()
+    print("[up] emulator listening")
+
+    # --- 3. forwarder (server-distributed allow-list starts empty/pending) ---
+    def make_forwarder(suffix: str) -> Managed:
+        return Managed(
+            name=f"forwarder[connections-{suffix}]",
+            argv=[str(bin_path("forwarder")), "--config", str(forwarder_config)],
+            log_path=tmp / f"forwarder-{suffix}.log",
+            env={"RUST_LOG": "info,forwarder=debug"},
+        )
+
+    forwarder = stack.add(make_forwarder("1"))
+    forwarder.start()
+    wait_for_log(forwarder.log_path, "p2p iroh server started", timeout=30,
+                 what="forwarder p2p startup")
+    forwarder.assert_alive()
+    print("[up] forwarder p2p serving")
+
+    # --- 4. receiver-headless (bridge + P2P + server announcer) ---
+    receiver = stack.add(Managed(
+        name="receiver-headless[connections]",
+        argv=[
+            str(bin_path("receiver-headless")),
+            "--data-dir", str(receiver_data_dir),
+            "--bind-addr", "127.0.0.1:0",
+            "--receiver-id", "rx-e2e",
+            "--p2p-forwarder-node-id", forwarder_node_id,
+            "--p2p-forwarder-direct-addr", f"127.0.0.1:{forwarder_p2p_port}",
+            "--p2p-secret-key-seed-hex", RECEIVER_SEED_HEX,
+            "--p2p-server-url", server_url,
+            "--p2p-server-token", PROVISIONING_TOKEN,
+            "--p2p-reconcile-ms", str(RECONCILE_MS),
+        ],
+        log_path=tmp / "receiver.log",
+        env={"RUST_LOG": "info,receiver=debug"},
+    ))
+    receiver.start()
+    wait_for_log(receiver.log_path, "receiver-headless listening on", timeout=30,
+                 what="receiver bridge startup")
+    bridge_url = receiver_headless_url(receiver.log_path)
+    print(f"[up] receiver-headless bridge at {bridge_url}")
+
+    def pending_receiver_connections():
+        connections = bridge_invoke(bridge_url, "get_connections")
+        server = connections.get("server", {})
+        forwarder_status = forwarder_connection(connections, forwarder_node_id)
+        if (server.get("approval_state") == "pending"
+                and server_device_approval(server_url, receiver_node_id) == "pending"
+                and forwarder_status is not None
+                and forwarder_status.get("state") != "subscribed"):
+            return connections
+        return False
+
+    pending_connections = wait_until(
+        pending_receiver_connections,
+        timeout=30,
+        what="receiver to be pending approval and not subscribed",
+    )
+    pending_forwarder = forwarder_connection(pending_connections, forwarder_node_id) or {}
+    results.expect_eq("connections: receiver starts pending server approval",
+                      pending_connections.get("server", {}).get("approval_state"), "pending")
+    results.expect_eq("connections: server status has receiver pending",
+                      server_device_approval(server_url, receiver_node_id), "pending")
+    results.check("connections: unapproved receiver is not subscribed",
+                  pending_forwarder.get("state") != "subscribed",
+                  f"state={pending_forwarder.get('state')} pending={pending_forwarder.get('pending')}")
+
+    approved = server_approve_device(server_url, receiver_node_id, "E2E Receiver")
+    results.expect_eq("connections: admin approval returns active receiver",
+                      approved.get("approval_state"), "active")
+
+    def subscribed_after_approval():
+        connections = bridge_invoke(bridge_url, "get_connections")
+        server = connections.get("server", {})
+        forwarder_status = forwarder_connection(connections, forwarder_node_id)
+        if (server.get("approval_state") == "active"
+                and server_device_approval(server_url, receiver_node_id) == "active"
+                and forwarder_status is not None
+                and forwarder_status.get("state") == "subscribed"
+                and forwarder_status.get("subscribed_count") == 1
+                and forwarder_status.get("remote_config_available") is True):
+            return connections
+        return False
+
+    active_connections = wait_until(
+        subscribed_after_approval,
+        timeout=45,
+        what="receiver to auto-connect after server approval",
+    )
+    active_forwarder = forwarder_connection(active_connections, forwarder_node_id) or {}
+    results.expect_eq("connections: receiver server approval is active",
+                      active_connections.get("server", {}).get("approval_state"), "active")
+    results.expect_eq("connections: approved receiver auto-connects/subscribes",
+                      active_forwarder.get("state"), "subscribed")
+    results.expect_eq("connections: remote config capability is advertised",
+                      active_forwarder.get("remote_config_available"), True)
+
+    wait_until(lambda: received_count(receiver_db_path) >= NUM_READS, timeout=45,
+               what=f"receiver to persist all {NUM_READS} events")
+    wait_until(lambda: dbf_ready(dbf_path), timeout=20,
+               what=f"DBF to contain all {NUM_READS} rows")
+    status = wait_until(lambda: server_announcer_ready(server_url), timeout=20,
+                        what="server announcer to receive all rows")
+    assert_received_events(results, receiver_db_path,
+                           "received_events (approval auto-connect)", stream_id)
+    results.expect_eq(f"connections: server finisher_count == {NUM_READS}",
+                      status.get("finisher_count"), NUM_READS)
+
+    bridge_invoke(bridge_url, "disconnect_forwarder", {"endpoint_id": forwarder_node_id})
+
+    def forwarder_disconnected():
+        connections = bridge_invoke(bridge_url, "get_connections")
+        forwarder_status = forwarder_connection(connections, forwarder_node_id)
+        if (forwarder_status is not None
+                and forwarder_status.get("state") == "disconnected"
+                and forwarder_status.get("pending") is False
+                and forwarder_status.get("remote_config_available") is False):
+            return forwarder_status
+        return False
+
+    disconnected = wait_until(
+        forwarder_disconnected,
+        timeout=20,
+        what="forwarder to disconnect via per-forwarder control",
+    )
+    results.expect_eq("connections: disconnect_forwarder stops forwarder worker",
+                      disconnected.get("state"), "disconnected")
+    results.expect_eq("connections: disconnected forwarder drops remote config session",
+                      disconnected.get("remote_config_available"), False)
+
+    bridge_invoke(bridge_url, "connect_forwarder", {"endpoint_id": forwarder_node_id})
+    reconnected = wait_until(
+        subscribed_after_approval,
+        timeout=45,
+        what="forwarder to reconnect via per-forwarder control",
+    )
+    reconnected_forwarder = forwarder_connection(reconnected, forwarder_node_id) or {}
+    results.expect_eq("connections: connect_forwarder restores subscription",
+                      reconnected_forwarder.get("state"), "subscribed")
+
+    config_response = bridge_invoke(
+        bridge_url,
+        "get_forwarder_config",
+        {"endpoint_id": forwarder_node_id},
+    )
+    config_json = config_response.get("config_json")
+    results.check("remote config: get returns non-empty config_json",
+                  isinstance(config_json, str) and len(config_json) > 0)
+    config_doc = json.loads(config_json)
+    results.expect_eq("remote config: get returns schema_version 1",
+                      config_doc.get("schema_version"), 1)
+
+    config_doc["display_name"] = "E2E Remote Config Updated"
+    set_response = bridge_invoke(
+        bridge_url,
+        "set_forwarder_config",
+        {"endpoint_id": forwarder_node_id, "config_json": json.dumps(config_doc)},
+    )
+    results.expect_eq("remote config: set full document succeeds",
+                      set_response.get("ok"), True)
+    results.expect_eq("remote config: set reports restart_needed",
+                      set_response.get("restart_needed"), True)
+
+    updated_config_response = bridge_invoke(
+        bridge_url,
+        "get_forwarder_config",
+        {"endpoint_id": forwarder_node_id},
+    )
+    updated_doc = json.loads(updated_config_response.get("config_json", "{}"))
+    results.expect_eq("remote config: updated document is readable",
+                      updated_doc.get("display_name"), "E2E Remote Config Updated")
+
+    updated_doc.setdefault("control", {})["allow_remote_config"] = False
+    disable_response = bridge_invoke(
+        bridge_url,
+        "set_forwarder_config",
+        {"endpoint_id": forwarder_node_id, "config_json": json.dumps(updated_doc)},
+    )
+    results.expect_eq("remote config gating: disabling remote config succeeds",
+                      disable_response.get("ok"), True)
+    results.expect_eq("remote config gating: disable reports restart_needed",
+                      disable_response.get("restart_needed"), True)
+
+    forwarder.stop()
+    forwarder2 = stack.add(make_forwarder("2"))
+    forwarder2.start()
+    wait_for_log(forwarder2.log_path, "p2p iroh server started", timeout=30,
+                 what="forwarder restart with remote config disabled")
+    forwarder2.assert_alive()
+    bridge_invoke(bridge_url, "reconnect_forwarder", {"endpoint_id": forwarder_node_id})
+
+    def remote_config_gated():
+        connections = bridge_invoke(bridge_url, "get_connections")
+        forwarder_status = forwarder_connection(connections, forwarder_node_id)
+        if (forwarder_status is not None
+                and forwarder_status.get("state") in {"connected", "subscribed"}
+                and forwarder_status.get("remote_config_available") is False):
+            return forwarder_status
+        return False
+
+    gated_forwarder = wait_until(
+        remote_config_gated,
+        timeout=45,
+        what="forwarder to reconnect without remote-config capability",
+    )
+    results.expect_eq("remote config gating: get_connections reports unavailable",
+                      gated_forwarder.get("remote_config_available"), False)
+    error_status, error_body = bridge_invoke_error(
+        bridge_url,
+        "set_forwarder_config",
+        {"endpoint_id": forwarder_node_id, "config_json": json.dumps(updated_doc)},
+    )
+    results.expect_eq("remote config gating: set is rejected when disabled",
+                      error_status, 409)
+    results.check("remote config gating: set error mentions unavailable",
+                  "remote config unavailable" in error_body.get("error", ""),
+                  error_body.get("error", ""))
+
+    return stack
 
 
 def run(
@@ -852,6 +1234,39 @@ def main() -> int:
     results = Results()
     all_green = True
     preserved: list[Path] = []
+
+    connections_tmp = Path(tempfile.mkdtemp(prefix="rt-e2e-connections-"))
+    print(f"[tmp] working dir (connections scenario): {connections_tmp}")
+    connections_results = Results()
+    connections_stack = Stack()
+    try:
+        run_connection_scenarios(connections_tmp, connections_results, connections_stack)
+    except Exception as exc:  # noqa: BLE001
+        print(f"\n[error] {type(exc).__name__}: {exc}", file=sys.stderr)
+        connections_results.check("orchestration completed (connections scenario)", False, str(exc))
+    finally:
+        try:
+            _dump_logs_on_failure(connections_stack, connections_results)
+        finally:
+            connections_stack.shutdown()
+
+    connections_passed = sum(1 for _, ok, _ in connections_results.checks if ok)
+    connections_total = len(connections_results.checks)
+    print(
+        f"\n=== connections scenario summary: "
+        f"{connections_passed}/{connections_total} checks passed ==="
+    )
+    results.checks.extend(
+        (f"[connections] {name}", ok, detail)
+        for name, ok, detail in connections_results.checks
+    )
+    connections_green = connections_results.all_passed and connections_total > 0
+    all_green = all_green and connections_green
+    if connections_green and not args.keep:
+        shutil.rmtree(connections_tmp, ignore_errors=True)
+    else:
+        preserved.append(connections_tmp)
+
     for i, target in enumerate(targets):
         last = i == len(targets) - 1
         tmp = Path(tempfile.mkdtemp(prefix=f"rt-e2e-{target}-"))
@@ -892,7 +1307,7 @@ def main() -> int:
     print("\n=== Summary (all lanes) ===")
     passed = sum(1 for _, ok, _ in results.checks if ok)
     total = len(results.checks)
-    print(f"  lanes: {', '.join(targets)}")
+    print(f"  scenarios: connections, {', '.join(targets)}")
     print(f"  {passed}/{total} checks passed")
 
     if all_green and total > 0:

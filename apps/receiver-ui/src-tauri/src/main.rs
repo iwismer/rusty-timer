@@ -308,8 +308,73 @@ async fn get_status(state: State<'_, Arc<AppState>>) -> CmdResult<control_api::S
 }
 
 #[tauri::command]
+async fn get_connections(
+    state: State<'_, Arc<AppState>>,
+) -> CmdResult<control_api::ConnectionsResponse> {
+    Ok(control_api::get_connections(&state).await)
+}
+
+#[tauri::command]
 async fn reconnect_server(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
     control_api::reconnect_server(&state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn connect_forwarder(state: State<'_, Arc<AppState>>, endpoint_id: String) -> CmdResult<()> {
+    control_api::connect_forwarder(&state, endpoint_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn disconnect_forwarder(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+) -> CmdResult<()> {
+    control_api::disconnect_forwarder(&state, endpoint_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reconnect_forwarder(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+) -> CmdResult<()> {
+    control_api::reconnect_forwarder(&state, endpoint_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_forwarder_config(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+) -> CmdResult<control_api::ForwarderConfigResponse> {
+    control_api::get_forwarder_config(&state, endpoint_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_forwarder_config(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+    config_json: String,
+) -> CmdResult<control_api::ForwarderConfigSetResult> {
+    control_api::set_forwarder_config(&state, endpoint_id, config_json)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn restart_forwarder(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+) -> CmdResult<control_api::ForwarderRestartResult> {
+    control_api::restart_forwarder(&state, endpoint_id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -821,6 +886,7 @@ mod tests {
                 streams_count: 0,
                 receiver_id: "recv".to_owned(),
             },
+            ReceiverUiEvent::ConnectionsChanged,
             ReceiverUiEvent::StreamsSnapshot {
                 streams: vec![],
                 degraded: false,

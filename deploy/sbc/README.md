@@ -171,16 +171,27 @@ SBC setup writes this control block by default:
 ```toml
 [control]
 allow_power_actions = true
+allow_remote_config = true
 ```
 
-That enables the config UI actions for restarting/shutting down the device.
-The setup script installs
+`allow_power_actions` enables the config UI actions for restarting/shutting
+down the device. The setup script installs
 `/etc/polkit-1/rules.d/90-rt-forwarder-power-actions.rules` when
 `[control].allow_power_actions = true`, and removes it when
 `[control].allow_power_actions = false`.
 
-For non-interactive installs, set `RT_SETUP_ALLOW_POWER_ACTIONS=0` to disable
-this behavior.
+`allow_remote_config` lets the server push configuration changes to the
+forwarder. It is provisioned `true` by default to keep field devices remotely
+manageable.
+
+For non-interactive installs:
+
+- Set `RT_SETUP_ALLOW_POWER_ACTIONS=0` to disable power actions. This flag
+  fails safe to `false` on an unrecognized value.
+- Set `RT_SETUP_ALLOW_REMOTE_CONFIG=0` (or `false`/`no`/`off`) to disable
+  remote config. Because the product default is on, an unrecognized value
+  falls back to the default (`true`) rather than disabling the feature;
+  disabling requires an explicit recognized falsey value.
 
 Power-action control endpoints are intentionally unauthenticated on the
 forwarder; this is expected for trusted-LAN SBC deployments.

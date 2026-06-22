@@ -19,8 +19,8 @@
 //! Updates are sourced from the server: [`ServerAllowListClient`] fetches
 //! the active receiver set over bearer-authenticated HTTP, and
 //! [`run_allowlist_distribution`] keeps the list fresh from a startup fetch,
-//! pushed snapshots, and periodic polling. The reader control/status mapping
-//! remains out of scope here.
+//! pushed snapshots, and periodic polling. Reader control/status event mapping
+//! remains out of scope for this allow-list module.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};

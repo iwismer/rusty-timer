@@ -14,16 +14,19 @@
 //!    durable contiguous cursor — never the latest *received* seq.
 //!
 //! On [`GapNotice`](rt_p2p_protocol::GapNotice) the session records a gap marker
-//! and jumps the cursor to `earliest_available_seq - 1`. On disconnect it
-//! reconnects with exponential backoff (1s → 30s) and resumes from the
-//! persisted cursor.
+//! and jumps the cursor to `earliest_available_seq - 1`. On disconnect a data
+//! subscription simply returns (a clean EOF is not an error); it does not loop.
+//! Reconnection with exponential backoff (1s → 30s) and resume-from-cursor is
+//! owned by the per-forwarder connection in [`crate::p2p_forwarder`], which
+//! reopens the subscription on the next reconcile.
 //!
-//! Production runtime wiring (dialing the configured forwarder for every
-//! subscription, multiplexing many streams) is intentionally minimal here and
-//! is owned by later tasks; this module provides the testable session core.
+//! This module provides the testable session core: the control handshake
+//! ([`connect_and_hello`]) and a single data-plane subscription
+//! ([`run_data_subscription_with_hint`]). Production runtime wiring — owning one
+//! control session per forwarder and multiplexing many data streams over it,
+//! with reconnection — lives in [`crate::p2p_forwarder`].
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use prost::Message;
@@ -33,106 +36,107 @@ use rt_p2p_protocol::{
     HelloOk, MAX_FRAME_BYTES, StreamCatalog, SubscribeMode, control_c2f, control_f2c, data_c2f,
     data_f2c, encode_frame,
 };
-use tokio::sync::{Mutex, broadcast, watch};
+use tokio::sync::{Mutex, broadcast};
 
-use crate::control_api::{AppState, ConnectionState};
+use crate::control_api::AppState;
 use crate::db::{Db, GapMarkerInsert, ReceivedEventInsert};
 
-/// Aggregates live-session connectivity across stream workers and reflects it
+/// Aggregates live control/data connectivity per forwarder and reflects it
 /// into the shared [`AppState`] connection state.
-///
-/// Each reconnecting session calls [`on_connected`](Self::on_connected) right
-/// after its control-plane handshake succeeds, which returns an RAII
-/// [`ConnectedSessionGuard`] that releases the session on drop. A shared
-/// atomic counter tracks how many sessions are currently live so the aggregate
-/// state is `Connected` while at least one session is up and falls back to
-/// `Connecting` when the last one drops (the runtime keeps retrying). Runtime
-/// start (`Connecting`) and shutdown (`Disconnected`) are driven separately by
-/// [`crate::p2p_runtime`].
 pub struct SessionStatusReporter {
     state: Arc<AppState>,
-    live_sessions: Arc<AtomicUsize>,
 }
 
 impl std::fmt::Debug for SessionStatusReporter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionStatusReporter")
-            .field("live_sessions", &self.live_sessions.load(Ordering::SeqCst))
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 impl SessionStatusReporter {
-    /// Build a reporter sharing `live_sessions` across every stream worker.
-    pub fn new(state: Arc<AppState>, live_sessions: Arc<AtomicUsize>) -> Self {
-        Self {
-            state,
-            live_sessions,
-        }
+    /// Build a reporter for per-forwarder connection state.
+    pub fn new(state: Arc<AppState>) -> Self {
+        Self { state }
     }
 
-    /// Record that a session's control-plane handshake just succeeded and
-    /// return an RAII guard whose drop releases the session.
-    ///
-    /// The guard's `Drop` decrements the shared live-session count even if the
-    /// owning `run_once` future is cancelled mid-session (e.g. a worker rebuild
-    /// on a subscription edit/removal races the session against the shutdown
-    /// signal). Without it a cancelled session would skip the decrement and the
-    /// aggregate status could remain falsely `Connected` after the last real
-    /// session ended.
-    async fn on_connected(&self) -> ConnectedSessionGuard {
-        self.live_sessions.fetch_add(1, Ordering::SeqCst);
+    pub(crate) fn app_state(&self) -> &Arc<AppState> {
+        &self.state
+    }
+
+    /// Record that a forwarder's control session is up.
+    pub async fn on_control_connected(&self, endpoint_id: &str) -> ControlConnectedGuard {
         self.state
-            .set_connection_state(ConnectionState::Connected)
+            .mark_forwarder_runtime(endpoint_id, |status| {
+                status.control_up = true;
+                status.pending_started_at = None;
+            })
             .await;
-        ConnectedSessionGuard {
+        ControlConnectedGuard {
             state: Arc::clone(&self.state),
-            live_sessions: Arc::clone(&self.live_sessions),
+            endpoint_id: endpoint_id.to_owned(),
+        }
+    }
+
+    /// Record one active data subscription stream for a forwarder.
+    pub async fn on_data_session(&self, endpoint_id: &str) -> DataSessionGuard {
+        self.state
+            .mark_forwarder_runtime(endpoint_id, |status| {
+                status.data_sessions = status.data_sessions.saturating_add(1);
+            })
+            .await;
+        DataSessionGuard {
+            state: Arc::clone(&self.state),
+            endpoint_id: endpoint_id.to_owned(),
         }
     }
 }
 
-/// RAII release guard for a connected P2P session (see
-/// [`SessionStatusReporter::on_connected`]). The decrement is cancellation-safe.
-struct ConnectedSessionGuard {
+/// RAII release guard for a forwarder control session. The release is
+/// cancellation-safe.
+pub struct ControlConnectedGuard {
     state: Arc<AppState>,
-    live_sessions: Arc<AtomicUsize>,
+    endpoint_id: String,
 }
 
-impl Drop for ConnectedSessionGuard {
+impl Drop for ControlConnectedGuard {
     fn drop(&mut self) {
-        let previous = self.live_sessions.fetch_sub(1, Ordering::SeqCst);
-        if previous > 1 {
-            // Other sessions are still live; the aggregate stays Connected.
-            return;
+        self.state
+            .update_forwarder_runtime_sync(&self.endpoint_id, |status| {
+                status.control_up = false;
+                status.pending_started_at = Some(std::time::Instant::now());
+            });
+        self.state
+            .recompute_aggregate_connection_state_sync_default_trying();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let state = Arc::clone(&self.state);
+            handle.spawn(async move {
+                state.recompute_aggregate_connection_state().await;
+            });
         }
-        // This was the last live session. Synchronously fall back to Connecting
-        // on the watch channel so `get_status` reflects reality immediately even
-        // though Drop cannot await UI-event side effects. Only transition *from*
-        // Connected: never clobber a shutdown-set Disconnected, and skip if a
-        // new session already raced in (count back above 0).
-        let live = Arc::clone(&self.live_sessions);
-        let changed = self.state.connection_state.send_if_modified(|state| {
-            if *state == ConnectionState::Connected && live.load(Ordering::SeqCst) == 0 {
-                *state = ConnectionState::Connecting;
-                true
-            } else {
-                false
-            }
-        });
-        if changed {
-            // Best-effort: emit the StatusChanged UI event + log entry off the
-            // current (possibly cancelled) task. Skipped when no runtime handle
-            // is available (e.g. during runtime teardown, where the runtime
-            // force-sets Disconnected anyway).
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let state = Arc::clone(&self.state);
-                handle.spawn(async move {
-                    state
-                        .emit_connection_state_side_effects(ConnectionState::Connecting)
-                        .await;
-                });
-            }
+    }
+}
+
+/// RAII release guard for a forwarder data subscription stream. The decrement
+/// is cancellation-safe.
+pub struct DataSessionGuard {
+    state: Arc<AppState>,
+    endpoint_id: String,
+}
+
+impl Drop for DataSessionGuard {
+    fn drop(&mut self) {
+        self.state
+            .update_forwarder_runtime_sync(&self.endpoint_id, |status| {
+                status.data_sessions = status.data_sessions.saturating_sub(1);
+            });
+        self.state
+            .recompute_aggregate_connection_state_sync_default_trying();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let state = Arc::clone(&self.state);
+            handle.spawn(async move {
+                state.recompute_aggregate_connection_state().await;
+            });
         }
     }
 }
@@ -197,13 +201,23 @@ pub enum P2pSessionError {
 }
 
 impl P2pSessionError {
-    /// Whether the reconnect loop should retry after this error.
+    /// Classifies an error as a transient transport failure versus a durable
+    /// protocol/data-integrity failure.
     ///
-    /// Transient transport/read/write failures are retryable (the loop backs
-    /// off and resumes from the persisted cursor). Durable failures — decode,
+    /// Transient transport/read/write failures (`true`) are the expected
+    /// disconnect/EOF signals when a connection drops; resuming from the
+    /// persisted cursor is safe. Durable failures (`false`) — decode,
     /// frame-size, protocol-sequencing, and data-integrity errors, plus durable
-    /// store errors — are surfaced to the caller instead of being retried
-    /// forever.
+    /// store errors — indicate the forwarder sent something the session must
+    /// not silently ack past.
+    ///
+    /// This is a pure classifier, *not* a retry gate: the production runtime no
+    /// longer loops forever inside a single data subscription. A data task that
+    /// ends (for any reason) is logged and then recreated on the next reconcile
+    /// by [`crate::p2p_forwarder`], which reopens the subscription from the
+    /// persisted cursor. Callers use this method to decide whether an ended
+    /// subscription is a routine disconnect worth a quiet log or a durable fault
+    /// worth surfacing.
     pub fn is_retryable(&self) -> bool {
         match self {
             P2pSessionError::Iroh(_)
@@ -252,36 +266,6 @@ impl Default for BackoffConfig {
     }
 }
 
-/// Doubles `current`, capped at `max`.
-fn next_backoff(current: Duration, max: Duration) -> Duration {
-    current.saturating_mul(2).min(max)
-}
-
-/// Parameters for a reconnecting single-stream session.
-#[derive(Clone, Debug)]
-pub struct SessionParams {
-    /// The stream to subscribe to. An arbitrary UTF-8 stream key (e.g. the
-    /// forwarder journal key `ip:port`), stored verbatim in the durable store.
-    pub stream_id: String,
-    /// The client `Hello` to present during control-plane negotiation.
-    pub client_hello: Hello,
-    /// Subscription mode (typically [`SubscribeMode::Replay`] to resume + go live).
-    pub mode: SubscribeMode,
-    /// Reconnect backoff bounds.
-    pub backoff: BackoffConfig,
-    /// Optional post-commit durable hint sink. After every durable insert /
-    /// cursor advance (and on gap-jump), the contiguous durable cursor is
-    /// broadcast on this channel so downstream workers — the durable local
-    /// proxy, the DBF feed, and the announcer push — can drain freshly
-    /// persisted rows. The hint is sent *after* the durable write, preserving
-    /// the insert-before-ack contract.
-    pub durable_hint_tx: Option<broadcast::Sender<i64>>,
-    /// Optional reporter that reflects this session's connect/disconnect
-    /// lifecycle into the shared [`AppState`] connection state. `None` for
-    /// session-core tests that do not exercise the aggregate connection state.
-    pub reporter: Option<Arc<SessionStatusReporter>>,
-}
-
 /// An established control-plane session with a forwarder peer.
 #[derive(Debug)]
 pub struct ControlSession {
@@ -291,9 +275,10 @@ pub struct ControlSession {
     pub hello_ok: HelloOk,
     /// The catalog delivered immediately after the handshake.
     pub catalog: StreamCatalog,
-    // Held to keep the control stream alive for the connection's lifetime.
-    _control_send: SendStream,
-    _control_recv: RecvStream,
+    /// Held to keep the control send stream alive for the connection's lifetime.
+    pub control_send: SendStream,
+    /// Control receive stream used by connection managers to detect disconnects.
+    pub control_recv: RecvStream,
 }
 
 fn stream_id_bytes(stream_id: &str) -> Vec<u8> {
@@ -335,13 +320,16 @@ fn now_unix_ms() -> i64 {
     .unwrap_or(i64::MAX)
 }
 
-async fn write_frame(send: &mut SendStream, message: &impl Message) -> Result<(), P2pSessionError> {
+pub(crate) async fn write_frame(
+    send: &mut SendStream,
+    message: &impl Message,
+) -> Result<(), P2pSessionError> {
     send.write_all(&encode_frame(message))
         .await
         .map_err(|e| P2pSessionError::Write(e.to_string()))
 }
 
-async fn read_frame<M>(recv: &mut RecvStream) -> Result<M, P2pSessionError>
+pub(crate) async fn read_frame<M>(recv: &mut RecvStream) -> Result<M, P2pSessionError>
 where
     M: Message + Default,
 {
@@ -396,9 +384,20 @@ pub async fn connect_and_hello(
         connection,
         hello_ok,
         catalog,
-        _control_send: send,
-        _control_recv: recv,
+        control_send: send,
+        control_recv: recv,
     })
+}
+
+/// Read control-plane frames until the control stream closes.
+pub async fn wait_control_stream_closed(recv: &mut RecvStream) -> Result<(), P2pSessionError> {
+    loop {
+        match read_frame::<ControlF2C>(recv).await {
+            Ok(_frame) => {}
+            Err(P2pSessionError::Read(_)) => return Ok(()),
+            Err(other) => return Err(other),
+        }
+    }
 }
 
 /// Insert every record of `batch` into the durable store (idempotent on
@@ -629,97 +628,10 @@ pub async fn run_data_subscription_with_hint(
     Ok(SessionOutcome::OpenedThenDisconnected)
 }
 
-async fn run_once(
-    endpoint: &Endpoint,
-    forwarder_addr: NodeAddr,
-    db: &Arc<Mutex<Db>>,
-    params: &SessionParams,
-) -> Result<SessionOutcome, P2pSessionError> {
-    let session = connect_and_hello(endpoint, forwarder_addr, params.client_hello.clone()).await?;
-    // The handshake succeeded: this session is live. Hold an RAII guard for the
-    // duration of the data subscription so the shared live-session count is
-    // released on drop even if this future is cancelled mid-session (worker
-    // rebuild on subscription edit/removal, or runtime shutdown) rather than
-    // only on a clean return.
-    let _connected_guard = match &params.reporter {
-        Some(reporter) => Some(reporter.on_connected().await),
-        None => None,
-    };
-    run_data_subscription_with_hint(
-        &session.connection,
-        db,
-        &params.stream_id,
-        params.mode,
-        params.durable_hint_tx.as_ref(),
-    )
-    .await
-}
-
-/// Run a reconnecting single-stream session: dial + hello + data subscription,
-/// and on disconnect back off (1s → 30s) and resume from the persisted cursor.
-///
-/// Returns `Ok(())` when `shutdown` is set to `true`. Each reconnect resumes
-/// from the cursor read inside [`run_data_subscription`], so no in-memory
-/// progress is lost across reconnects.
-///
-/// Only transient transport/read failures (see [`P2pSessionError::is_retryable`])
-/// are retried. Durable failures — decode, frame-size, protocol-sequencing, and
-/// data-integrity errors, plus durable store errors — are returned to the
-/// caller instead of being retried forever. Backoff resets only after a
-/// subscription actually opened ([`SessionOutcome::OpenedThenDisconnected`]); a
-/// pre-open disconnect or a retryable failure keeps growing the backoff window.
-pub async fn run_session_with_reconnect(
-    endpoint: &Endpoint,
-    forwarder_addr: NodeAddr,
-    db: &Arc<Mutex<Db>>,
-    params: &SessionParams,
-    mut shutdown: watch::Receiver<bool>,
-) -> Result<(), P2pSessionError> {
-    let mut backoff = params.backoff.initial;
-    loop {
-        if *shutdown.borrow() {
-            return Ok(());
-        }
-
-        let outcome = tokio::select! {
-            biased;
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() { return Ok(()); }
-                continue;
-            }
-            outcome = run_once(endpoint, forwarder_addr.clone(), db, params) => outcome,
-        };
-
-        let reset_backoff = match outcome {
-            Ok(SessionOutcome::OpenedThenDisconnected) => true,
-            Ok(SessionOutcome::DisconnectedBeforeOpen) => false,
-            Err(e) if e.is_retryable() => {
-                tracing::warn!(error = %e, "p2p session transient failure; retrying");
-                false
-            }
-            // Durable failures are not retryable: surface them to the caller.
-            Err(e) => return Err(e),
-        };
-
-        tokio::select! {
-            biased;
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() { return Ok(()); }
-            }
-            () = tokio::time::sleep(backoff) => {}
-        }
-
-        backoff = if reset_backoff {
-            params.backoff.initial
-        } else {
-            next_backoff(backoff, params.backoff.max)
-        };
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control_api::ConnectionState;
     use rt_iroh::EndpointBuilder;
     use rt_p2p_protocol::{ReadRecord, StreamCatalog, StreamEntry, SubscribeOk};
     use rt_test_utils::p2p::{ConnectivityFault, ForwarderScript, MockForwarderPeer};
@@ -805,6 +717,14 @@ mod tests {
             batches: Vec::new(),
             caught_up_through: None,
             data_fault: ConnectivityFault::healthy(),
+            echo_subscribed_stream_id: false,
+            close_connection_after_data: false,
+            control_events: Vec::new(),
+            control_pings: 0,
+            control_ping_interval: Duration::from_millis(50),
+            config_get_json: String::new(),
+            config_restart_needed: false,
+            respond_to_config_requests: true,
         }
     }
 
@@ -812,34 +732,66 @@ mod tests {
         EndpointBuilder::test([seed; 32]).bind().await.unwrap()
     }
 
-    fn reporter_state() -> (Arc<AppState>, Arc<AtomicUsize>, Arc<SessionStatusReporter>) {
+    fn reporter_state() -> (Arc<AppState>, Arc<SessionStatusReporter>) {
         let (state, _shutdown_rx) =
             AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
-        let live = Arc::new(AtomicUsize::new(0));
-        let reporter = Arc::new(SessionStatusReporter::new(
-            Arc::clone(&state),
-            Arc::clone(&live),
-        ));
-        (state, live, reporter)
+        let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
+        (state, reporter)
+    }
+
+    #[tokio::test]
+    async fn reporter_tracks_per_forwarder_states() {
+        let (state, _shutdown_rx) =
+            AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+        let reporter = SessionStatusReporter::new(Arc::clone(&state));
+
+        let control_guard = reporter.on_control_connected("fwd-1").await;
+        assert_eq!(
+            state.forwarder_state("fwd-1").await.state,
+            crate::control_api::ForwarderConnState::Connected
+        );
+
+        let data_guard = reporter.on_data_session("fwd-1").await;
+        assert_eq!(
+            state.forwarder_state("fwd-1").await.state,
+            crate::control_api::ForwarderConnState::Subscribed
+        );
+
+        drop(data_guard);
+        assert_eq!(
+            state.forwarder_state("fwd-1").await.state,
+            crate::control_api::ForwarderConnState::Connected
+        );
+
+        state
+            .db
+            .lock()
+            .await
+            .set_forwarder_intent("fwd-1", false)
+            .unwrap();
+        drop(control_guard);
+        assert_eq!(
+            state.forwarder_state("fwd-1").await.state,
+            crate::control_api::ForwarderConnState::Disconnected
+        );
     }
 
     #[tokio::test]
     async fn connected_session_guard_releases_on_cancellation() {
-        // A connected session whose run_once future is cancelled (guard dropped
-        // without a clean return) must still release its live-session count and
-        // fall the aggregate state back to Connecting — otherwise the badge can
-        // stay falsely "Connected" after the last session ends.
-        let (state, live, reporter) = reporter_state();
-        let guard = reporter.on_connected().await;
-        assert_eq!(live.load(Ordering::SeqCst), 1);
+        // A connected session whose control guard is dropped without a clean
+        // return (e.g. the connection task is cancelled mid-session) must still
+        // release its live-session count and fall the aggregate state back to
+        // Connecting — otherwise the badge can stay falsely "Connected" after
+        // the last session ends.
+        let (state, reporter) = reporter_state();
+        let guard = reporter.on_control_connected("fwd-1").await;
         assert_eq!(
             state.connection_state.borrow().clone(),
             ConnectionState::Connected
         );
 
-        drop(guard); // simulates run_once cancellation mid-session
+        drop(guard); // simulates connection-task cancellation mid-session
 
-        assert_eq!(live.load(Ordering::SeqCst), 0);
         assert_eq!(
             state.connection_state.borrow().clone(),
             ConnectionState::Connecting
@@ -850,20 +802,17 @@ mod tests {
     async fn connected_guard_keeps_connected_while_another_session_live() {
         // Dropping one of two live sessions must NOT fall back to Connecting:
         // the aggregate stays Connected until the last session drops.
-        let (state, live, reporter) = reporter_state();
-        let g1 = reporter.on_connected().await;
-        let g2 = reporter.on_connected().await;
-        assert_eq!(live.load(Ordering::SeqCst), 2);
+        let (state, reporter) = reporter_state();
+        let g1 = reporter.on_control_connected("fwd-1").await;
+        let g2 = reporter.on_control_connected("fwd-2").await;
 
         drop(g1);
-        assert_eq!(live.load(Ordering::SeqCst), 1);
         assert_eq!(
             state.connection_state.borrow().clone(),
             ConnectionState::Connected
         );
 
         drop(g2);
-        assert_eq!(live.load(Ordering::SeqCst), 0);
         assert_eq!(
             state.connection_state.borrow().clone(),
             ConnectionState::Connecting
@@ -1018,71 +967,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconnect_storm_resumes_without_duplicates() {
-        tokio::time::timeout(TEST_TIMEOUT, async {
-            let stream_id = stream_id();
-            let mut script = base_script();
-            script.batches = vec![batch(&[1, 2, 3])];
-            script.caught_up_through = Some(3);
-
-            let forwarder = MockForwarderPeer::start([42; 32], script).await.unwrap();
-            let endpoint = test_endpoint(43).await;
-            let db = test_db();
-            let (shutdown_tx, shutdown_rx) = watch::channel(false);
-            let params = SessionParams {
-                stream_id: stream_id.to_owned(),
-                client_hello: test_hello(0),
-                mode: SubscribeMode::Replay,
-                backoff: BackoffConfig {
-                    initial: Duration::from_millis(1),
-                    max: Duration::from_millis(1),
-                },
-                durable_hint_tx: None,
-                reporter: None,
-            };
-
-            let session_task = tokio::spawn({
-                let endpoint = endpoint.clone();
-                let db = Arc::clone(&db);
-                let forwarder_addr = forwarder.node_addr();
-                async move {
-                    run_session_with_reconnect(&endpoint, forwarder_addr, &db, &params, shutdown_rx)
-                        .await
-                }
-            });
-
-            poll_until(
-                || async { forwarder.subscribes().len() >= 4 },
-                Duration::from_secs(5),
-            )
-            .await;
-            shutdown_tx.send(true).unwrap();
-            session_task.await.unwrap().unwrap();
-
-            let guard = db.lock().await;
-            let events = guard.load_received_events(stream_id).unwrap();
-            assert_eq!(events.len(), 3, "reconnect storm must not duplicate rows");
-            assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 3);
-            drop(guard);
-
-            let subscribes = forwarder.subscribes();
-            assert!(subscribes.len() >= 4);
-            assert_eq!(subscribes[0].after_seq, 0);
-            assert!(
-                subscribes
-                    .iter()
-                    .skip(1)
-                    .all(|subscribe| subscribe.after_seq == 3),
-                "all reconnects after the first must resume from the durable cursor: {subscribes:?}"
-            );
-
-            forwarder.shutdown().await;
-        })
-        .await
-        .expect("reconnect_storm_resumes_without_duplicates timed out");
-    }
-
-    #[tokio::test]
     async fn duplicate_seq_deduped() {
         tokio::time::timeout(TEST_TIMEOUT, async {
             let stream_id = stream_id();
@@ -1171,47 +1055,10 @@ mod tests {
     }
 
     #[test]
-    fn backoff_doubles_and_caps_at_max() {
+    fn backoff_default_bounds() {
         let config = BackoffConfig::default();
         assert_eq!(config.initial, Duration::from_secs(1));
         assert_eq!(config.max, Duration::from_secs(30));
-        assert_eq!(
-            next_backoff(Duration::from_secs(1), config.max),
-            Duration::from_secs(2)
-        );
-        assert_eq!(
-            next_backoff(Duration::from_secs(16), config.max),
-            Duration::from_secs(30)
-        );
-        assert_eq!(
-            next_backoff(Duration::from_secs(30), config.max),
-            Duration::from_secs(30)
-        );
-    }
-
-    #[tokio::test]
-    async fn reconnect_loop_returns_when_shutdown_already_set() {
-        let endpoint = test_endpoint(18).await;
-        let db = test_db();
-        let forwarder = MockForwarderPeer::start([19; 32], base_script())
-            .await
-            .unwrap();
-        let (_tx, shutdown_rx) = watch::channel(true);
-        let params = SessionParams {
-            stream_id: stream_id().to_owned(),
-            client_hello: test_hello(0),
-            mode: SubscribeMode::Replay,
-            backoff: BackoffConfig::default(),
-            durable_hint_tx: None,
-            reporter: None,
-        };
-
-        let result =
-            run_session_with_reconnect(&endpoint, forwarder.node_addr(), &db, &params, shutdown_rx)
-                .await;
-        assert!(result.is_ok());
-
-        forwarder.shutdown().await;
     }
 
     fn record_with(seq: u64, raw: &str) -> ReadRecord {
@@ -1553,41 +1400,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconnect_loop_exits_when_shutdown_sender_dropped() {
-        let endpoint = test_endpoint(40).await;
-        let db = test_db();
-        let forwarder = MockForwarderPeer::start([41; 32], base_script())
-            .await
-            .unwrap();
-        let (tx, shutdown_rx) = watch::channel(false);
-        drop(tx);
-        let params = SessionParams {
-            stream_id: stream_id().to_owned(),
-            client_hello: test_hello(0),
-            mode: SubscribeMode::Replay,
-            backoff: BackoffConfig {
-                initial: Duration::from_millis(10),
-                max: Duration::from_millis(10),
-            },
-            durable_hint_tx: None,
-            reporter: None,
-        };
-
-        let result = tokio::time::timeout(
-            Duration::from_millis(100),
-            run_session_with_reconnect(&endpoint, forwarder.node_addr(), &db, &params, shutdown_rx),
-        )
-        .await;
-
-        assert!(
-            matches!(result, Ok(Ok(()))),
-            "closed shutdown channel must exit instead of spinning, got {result:?}"
-        );
-
-        forwarder.shutdown().await;
-    }
-
-    #[tokio::test]
     async fn disconnect_before_subscribe_ok_reports_pre_open() {
         tokio::time::timeout(TEST_TIMEOUT, async {
             let stream_id = stream_id();
@@ -1617,54 +1429,6 @@ mod tests {
         })
         .await
         .expect("disconnect_before_subscribe_ok_reports_pre_open timed out");
-    }
-
-    #[tokio::test]
-    async fn reconnect_loop_surfaces_durable_error() {
-        tokio::time::timeout(TEST_TIMEOUT, async {
-            let mut script = base_script();
-            // A durable data-integrity error: the forwarder hands back a foreign
-            // stream_id on SubscribeOk. The reconnect loop must surface it, not
-            // retry forever.
-            script.subscribe_ok.stream_id = other_sid_bytes();
-            // Keep the forwarder blocked awaiting an ack so the SubscribeOk frame
-            // is reliably delivered before the connection closes.
-            script.batches = vec![batch(&[1])];
-
-            let forwarder = MockForwarderPeer::start([32; 32], script).await.unwrap();
-            let endpoint = test_endpoint(33).await;
-            let db = test_db();
-            let (_tx, shutdown_rx) = watch::channel(false);
-            let params = SessionParams {
-                stream_id: stream_id().to_owned(),
-                client_hello: test_hello(0),
-                mode: SubscribeMode::Replay,
-                backoff: BackoffConfig {
-                    initial: Duration::from_millis(10),
-                    max: Duration::from_millis(50),
-                },
-                durable_hint_tx: None,
-                reporter: None,
-            };
-
-            let result = run_session_with_reconnect(
-                &endpoint,
-                forwarder.node_addr(),
-                &db,
-                &params,
-                shutdown_rx,
-            )
-            .await;
-
-            assert!(
-                matches!(result, Err(P2pSessionError::StreamIdMismatch { .. })),
-                "reconnect loop must surface durable errors, got {result:?}"
-            );
-
-            forwarder.shutdown().await;
-        })
-        .await
-        .expect("reconnect_loop_surfaces_durable_error timed out");
     }
 
     #[test]
