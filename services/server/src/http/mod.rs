@@ -15,6 +15,7 @@ use axum::{
     routing::{get, post},
 };
 use rusqlite::Connection;
+use tokio::sync::watch;
 
 use crate::announcer::AnnouncerRuntime;
 
@@ -37,6 +38,13 @@ pub struct AppState {
     pub provisioning_token_hash: Arc<Vec<u8>>,
     pub announcer_runtime: Arc<Mutex<AnnouncerRuntime>>,
     pub admin_proxy_trusted: bool,
+    /// Monotonic receiver allow-list version. Bumped whenever the set of active
+    /// receivers could change (currently: device approval), so forwarders
+    /// long-polling `GET /allowlist/receivers` are released immediately instead
+    /// of waiting for their periodic poll backstop. In-memory only: a server
+    /// restart resets it to 0, which forwarders self-heal from because a
+    /// mismatched `since` cursor returns the current snapshot immediately.
+    pub allowlist_version: watch::Sender<u64>,
 }
 
 impl AppState {
@@ -47,7 +55,17 @@ impl AppState {
             provisioning_token_hash: Arc::new(crate::registry::hash_token(provisioning_token)),
             announcer_runtime: Arc::new(Mutex::new(AnnouncerRuntime::new())),
             admin_proxy_trusted,
+            allowlist_version: watch::channel(0).0,
         }
+    }
+
+    /// Bump the receiver allow-list version, releasing any forwarders currently
+    /// long-polling for a change. Safe to call on every approval; an extra bump
+    /// only causes one harmless idempotent re-fetch.
+    pub fn bump_allowlist_version(&self) {
+        self.allowlist_version.send_modify(|version| {
+            *version = version.wrapping_add(1);
+        });
     }
 }
 

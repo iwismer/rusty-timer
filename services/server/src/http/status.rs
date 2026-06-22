@@ -153,7 +153,13 @@ pub async fn approve_device(
     };
 
     match result {
-        Ok(Some(record)) => (StatusCode::OK, Json(record)).into_response(),
+        Ok(Some(record)) => {
+            // Release forwarders long-polling the receiver allow-list so the
+            // newly approved receiver is admitted within milliseconds instead
+            // of waiting for the forwarder's periodic poll backstop.
+            state.bump_allowlist_version();
+            (StatusCode::OK, Json(record)).into_response()
+        }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(err) => {
             tracing::error!(error = %err, "device approval failed");

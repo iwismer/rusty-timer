@@ -41,6 +41,18 @@ const REVOKED_ERROR_CODE: u32 = 3;
 /// Production poll cadence for refreshing receiver authorization from the server.
 pub const DEFAULT_ALLOWLIST_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
+/// How long each long-poll request asks the server to hold open while waiting
+/// for an allow-list change. Bounds how long a forwarder waits between re-arming
+/// the push subscription, and is kept under typical proxy idle timeouts.
+pub const ALLOWLIST_PUSH_HOLD: Duration = Duration::from_secs(25);
+
+/// Initial reconnect backoff for the long-poll push subscription after a server
+/// error, doubled up to [`ALLOWLIST_PUSH_MAX_BACKOFF`].
+const ALLOWLIST_PUSH_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+
+/// Cap on the long-poll push subscription reconnect backoff.
+const ALLOWLIST_PUSH_MAX_BACKOFF: Duration = Duration::from_secs(30);
+
 /// Conservative bound on a single server allow-list HTTP request. Without a
 /// timeout a hung server would stall the distribution loop's initial refresh
 /// and polling indefinitely; this caps how long any one fetch can block.
@@ -276,6 +288,47 @@ impl ServerAllowListClient {
             .json()
             .await?)
     }
+
+    /// Long-polls the server allow-list: sends `since` (the last applied
+    /// version) and a `wait` budget, so the server holds the request until the
+    /// allow-list changes and returns the fresh snapshot — giving near-instant
+    /// approval propagation. The per-request timeout is overridden to exceed
+    /// `wait` so the held request is not aborted by the client's short default
+    /// timeout. A `since` of `None` requests an immediate snapshot (initial
+    /// fetch / resync).
+    async fn fetch_waiting(
+        &self,
+        since: Option<u64>,
+        wait: Duration,
+    ) -> Result<ReceiverAllowListUpdate, AllowListRefreshError> {
+        // Built by hand (rather than reqwest's `query` builder) so no extra
+        // reqwest feature is required; both values are plain integers, so no
+        // percent-encoding is needed.
+        let url = match since {
+            Some(since) => format!(
+                "{}/allowlist/receivers?wait={}&since={since}",
+                self.base_url,
+                wait.as_secs()
+            ),
+            None => format!(
+                "{}/allowlist/receivers?wait={}",
+                self.base_url,
+                wait.as_secs()
+            ),
+        };
+        Ok(self
+            .http
+            .get(url)
+            .bearer_auth(self.bearer_token.as_ref())
+            // Allow the response to arrive any time within the server hold plus
+            // a transport margin, regardless of the client's short default.
+            .timeout(wait + Duration::from_secs(10))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
 }
 
 /// HTTP client for registering the forwarder and pushing its stream catalog.
@@ -390,6 +443,11 @@ pub enum CatalogPushError {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReceiverAllowListUpdate {
     pub receiver_endpoint_ids: Vec<String>,
+    /// Monotonic allow-list version this snapshot reflects. Echoed back as
+    /// `since` on the next long-poll. Defaults to 0 for an older server that
+    /// does not emit a version, which simply degrades to immediate re-polling.
+    #[serde(default)]
+    pub version: u64,
 }
 
 impl ReceiverAllowListUpdate {
@@ -397,6 +455,7 @@ impl ReceiverAllowListUpdate {
     pub fn replace(receiver_endpoint_ids: Vec<String>) -> Self {
         Self {
             receiver_endpoint_ids,
+            version: 0,
         }
     }
 }
@@ -525,6 +584,58 @@ pub async fn run_allowlist_distribution(
                         "polled receiver allow-list refresh failed",
                     ),
                 }
+            }
+        }
+    }
+}
+
+/// Long-poll the server for receiver allow-list changes and forward each fresh
+/// snapshot into `push_tx`, which [`run_allowlist_distribution`] applies.
+///
+/// This is the push transport that complements the periodic poll backstop: an
+/// approval on the server releases the held request within milliseconds, so a
+/// newly approved receiver is admitted almost immediately instead of waiting
+/// up to a full poll interval. Loops until the receiving distribution loop is
+/// gone (the channel send fails). Server errors back off and retry; the
+/// distribution loop's polling keeps the allow-list correct meanwhile.
+pub async fn run_allowlist_push_subscription(
+    client: ServerAllowListClient,
+    push_tx: mpsc::Sender<ReceiverAllowListUpdate>,
+    hold: Duration,
+) {
+    // `None` requests an immediate snapshot; afterwards we echo the server's
+    // version as `since` to long-poll for the *next* change.
+    let mut since: Option<u64> = None;
+    let mut backoff = ALLOWLIST_PUSH_INITIAL_BACKOFF;
+
+    loop {
+        let started = tokio::time::Instant::now();
+        match client.fetch_waiting(since, hold).await {
+            Ok(update) => {
+                backoff = ALLOWLIST_PUSH_INITIAL_BACKOFF;
+                let version = update.version;
+                let changed = since != Some(version);
+                since = Some(version);
+                if changed {
+                    // A real change (or the initial snapshot): hand it to the
+                    // distribution loop. A closed channel means that loop is
+                    // gone, so this subscription has no consumer left.
+                    if push_tx.send(update).await.is_err() {
+                        return;
+                    }
+                } else {
+                    // No change within the hold. Pace the next request to the
+                    // intended hold window so a non-holding or older server
+                    // (which returns immediately and never sets a moving
+                    // version) is not hammered; a compliant server already
+                    // consumed ~`hold`, so this adds nothing.
+                    tokio::time::sleep_until(started + hold).await;
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "receiver allow-list push subscription failed; retrying");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(ALLOWLIST_PUSH_MAX_BACKOFF);
             }
         }
     }
@@ -1142,6 +1253,98 @@ mod tests {
         sync.abort();
         server.abort();
         receiver.close().await;
+        Ok(())
+    }
+
+    #[derive(Clone)]
+    struct PushServerState {
+        bearer_token: &'static str,
+        ids: Arc<TokioMutex<Vec<String>>>,
+        version: Arc<std::sync::atomic::AtomicU64>,
+        changed: Arc<tokio::sync::Notify>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct PushQuery {
+        since: Option<u64>,
+        wait: Option<u64>,
+    }
+
+    /// Mock long-poll allow-list endpoint mirroring the real server: holds the
+    /// request when the caller's `since` matches the current version, releasing
+    /// on a version bump, and always echoes the current `version`.
+    async fn push_allowlist_handler(
+        State(state): State<PushServerState>,
+        headers: HeaderMap,
+        axum::extract::Query(query): axum::extract::Query<PushQuery>,
+    ) -> Response {
+        let authorized = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == format!("Bearer {}", state.bearer_token));
+        if !authorized {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        let current = state.version.load(std::sync::atomic::Ordering::SeqCst);
+        let wait = query.wait.unwrap_or(0);
+        if wait > 0 && query.since == Some(current) {
+            let _ = tokio::time::timeout(Duration::from_secs(wait), state.changed.notified()).await;
+        }
+        let version = state.version.load(std::sync::atomic::Ordering::SeqCst);
+        let ids = state.ids.lock().await.clone();
+        Json(serde_json::json!({ "receiver_endpoint_ids": ids, "version": version }))
+            .into_response()
+    }
+
+    #[tokio::test]
+    async fn push_subscription_delivers_initial_snapshot_then_releases_on_bump() -> TestResult {
+        let ids = Arc::new(TokioMutex::new(Vec::<String>::new()));
+        let version = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let changed = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new()
+            .route("/allowlist/receivers", get(push_allowlist_handler))
+            .with_state(PushServerState {
+                bearer_token: "thin-secret",
+                ids: ids.clone(),
+                version: version.clone(),
+                changed: changed.clone(),
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let base_url = format!("http://{}", listener.local_addr()?);
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = ServerAllowListClient::new(base_url, "thin-secret");
+        let (tx, mut rx) = mpsc::channel(8);
+        let sub = tokio::spawn(run_allowlist_push_subscription(
+            client,
+            tx,
+            Duration::from_secs(5),
+        ));
+
+        // The initial request omits `since`, so the server returns immediately
+        // with the empty snapshot at version 0.
+        let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await?
+            .expect("initial snapshot delivered");
+        assert_eq!(first.version, 0);
+        assert!(first.receiver_endpoint_ids.is_empty());
+
+        // The subscription is now held at version 0. An approval bumps the
+        // version and must release it within milliseconds with the new set.
+        *ids.lock().await = vec!["receiver-1".to_owned()];
+        version.store(1, std::sync::atomic::Ordering::SeqCst);
+        changed.notify_waiters();
+
+        let second = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await?
+            .expect("approval releases the held long-poll");
+        assert_eq!(second.version, 1);
+        assert_eq!(second.receiver_endpoint_ids, vec!["receiver-1".to_owned()]);
+
+        sub.abort();
+        server.abort();
         Ok(())
     }
 

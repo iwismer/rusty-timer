@@ -37,9 +37,10 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 
 pub use allowlist::{
-    AllowList, AllowListRefreshError, CatalogPushError, DEFAULT_ALLOWLIST_POLL_INTERVAL,
-    ForwarderCatalog, ForwarderCatalogStream, ReceiverAllowListUpdate, ServerAllowListClient,
-    ServerCatalogClient, apply_receiver_update, fetch_and_apply_once, run_allowlist_distribution,
+    ALLOWLIST_PUSH_HOLD, AllowList, AllowListRefreshError, CatalogPushError,
+    DEFAULT_ALLOWLIST_POLL_INTERVAL, ForwarderCatalog, ForwarderCatalogStream,
+    ReceiverAllowListUpdate, ServerAllowListClient, ServerCatalogClient, apply_receiver_update,
+    fetch_and_apply_once, run_allowlist_distribution, run_allowlist_push_subscription,
 };
 pub use control::{
     CatalogProvider, ConfigGetFuture, ConfigSetFuture, ControlEvent, ControlEventReceiver,
@@ -136,23 +137,27 @@ pub async fn start_forwarder_p2p(
     let mut tasks = vec![tokio::spawn(async move { run_endpoint.run().await })];
 
     if let Some((base_url, bearer_token)) = server_credentials(config)? {
-        // Allow-list freshness is polling-only for now: the server has no
-        // server-push channel wired yet, so we hand `run_allowlist_distribution`
-        // a receiver whose sender is dropped immediately. The distribution loop
-        // treats the closed push channel as "no pushes" and relies on its
-        // periodic poll backstop. When a push transport is added, replace this
-        // dropped sender with the real one.
+        // Allow-list freshness comes from two sources feeding the same channel:
+        // a long-poll push subscription (near-instant on approval) and the
+        // periodic poll backstop inside `run_allowlist_distribution` (covers any
+        // push gap, e.g. a proxy severing the held request). Both apply
+        // idempotent snapshots, so overlap is harmless.
         let (push_tx, push_rx) = mpsc::channel(16);
-        drop(push_tx);
         let request_timeout = Duration::from_secs(config.allowlist_request_timeout_secs);
         let poll_interval = Duration::from_secs(config.allowlist_poll_interval_secs);
+        let allow_list_client = ServerAllowListClient::with_timeout(
+            base_url.clone(),
+            bearer_token.clone(),
+            request_timeout,
+        );
+        tasks.push(tokio::spawn(run_allowlist_push_subscription(
+            allow_list_client.clone(),
+            push_tx,
+            ALLOWLIST_PUSH_HOLD,
+        )));
         tasks.push(tokio::spawn(run_allowlist_distribution(
             allow_list,
-            ServerAllowListClient::with_timeout(
-                base_url.clone(),
-                bearer_token.clone(),
-                request_timeout,
-            ),
+            allow_list_client,
             push_rx,
             poll_interval,
         )));
