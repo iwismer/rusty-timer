@@ -58,7 +58,7 @@ const mockState = vi.hoisted(() => {
             remote_config_available: true,
           },
         ],
-      },
+      } as import("./api").ConnectionsResponse,
     },
     connectForwarder: vi.fn(async () => {}),
     disconnectForwarder: vi.fn(async () => {}),
@@ -152,7 +152,7 @@ describe("ConnectionsTab", () => {
           remote_config_available: true,
         },
       ],
-    };
+    } as import("./api").ConnectionsResponse;
   });
 
   it("renders the server card and forwarder state rows", () => {
@@ -276,12 +276,88 @@ describe("ConnectionsTab", () => {
     ).toEqual(["Reconnect", "Disconnect"]);
   });
 
+  it("shows reconnect but disables other controls for disconnected readers", () => {
+    mockState.store.connections.forwarders = [
+      {
+        endpoint_id: "endpoint-live",
+        display_name: "Live Forwarder",
+        state: "connected",
+        pending: false,
+        subscribed_count: 1,
+        available_count: 1,
+        readers: [
+          {
+            stream_id: "10.0.0.1:10000",
+            connected: false,
+            state: "offline",
+            last_read_unix_ms: null,
+            hardware_reader_id: null,
+            firmware_version: null,
+            model: null,
+          },
+        ],
+        ups: null as import("./api").UpsStatusPayload | null,
+        restart_needed: null,
+        remote_config_available: false,
+        reader_control_available: true,
+      },
+    ] as import("./api").ForwarderConnectionStatus[];
+
+    render(ConnectionsTab);
+
+    expect(screen.getByText("No reader data available")).toBeInTheDocument();
+    expect(screen.getByText("Sync Clock")).toBeDisabled();
+    expect(screen.getAllByText("Reconnect")[0]).toBeEnabled();
+  });
+
+  it("surfaces reader command failures from successful API responses", async () => {
+    mockState.readerControl.mockResolvedValueOnce({
+      success: false,
+      message: "reader not connected",
+      reader_info: null,
+    });
+    mockState.store.connections.forwarders = [
+      {
+        endpoint_id: "endpoint-live",
+        display_name: "Live Forwarder",
+        state: "connected",
+        pending: false,
+        subscribed_count: 1,
+        available_count: 1,
+        readers: [
+          {
+            stream_id: "10.0.0.1:10000",
+            connected: true,
+            state: "online",
+            last_read_unix_ms: null,
+            hardware_reader_id: "reader-42",
+            firmware_version: "1.2.3",
+            model: "IPICO",
+          },
+        ],
+        ups: null as import("./api").UpsStatusPayload | null,
+        restart_needed: null,
+        remote_config_available: false,
+        reader_control_available: true,
+      },
+    ] as import("./api").ForwarderConnectionStatus[];
+
+    render(ConnectionsTab);
+
+    await fireEvent.click(screen.getByText("Sync Clock"));
+
+    expect(
+      await screen.findByText("Sync Clock failed: reader not connected"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Clock synced")).not.toBeInTheDocument();
+  });
+
   it("renders unknown connection states with a safe fallback", () => {
     mockState.store.connections.forwarders = [
       {
         endpoint_id: "endpoint-unknown",
         display_name: "Unknown Forwarder",
-        state: "unexpected",
+        state: "unexpected" as import("./api").ForwarderConnState,
         pending: false,
         subscribed_count: 0,
         available_count: 0,

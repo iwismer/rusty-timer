@@ -587,18 +587,28 @@ impl AppState {
         let stream_id = decode_stream_id(info.stream_id);
         let reader_info =
             parse_reader_info_json(info.reader_info_json.as_deref(), endpoint_id, &stream_id);
-        let hardware_reader_id = optional_non_empty(info.hardware_reader_id);
-        let firmware_version = optional_non_empty(info.firmware_version);
-        let model = optional_non_empty(info.model);
+        let hardware = reader_info.as_ref().and_then(|info| info.hardware.as_ref());
+        let hardware_reader_id = optional_non_empty(info.hardware_reader_id)
+            .or_else(|| hardware.and_then(|h| h.reader_id.clone()));
+        let firmware_version = optional_non_empty(info.firmware_version)
+            .or_else(|| hardware.and_then(|h| h.fw_version.clone()));
+        let model =
+            optional_non_empty(info.model).or_else(|| hardware.and_then(|h| h.hw_code.clone()));
         let mut live_statuses = self.forwarder_live_status.lock().unwrap();
         let live_status = live_statuses.entry(endpoint_id.to_owned()).or_default();
         live_status
             .readers
             .entry(stream_id.clone())
             .and_modify(|reader| {
-                reader.hardware_reader_id = hardware_reader_id.clone();
-                reader.firmware_version = firmware_version.clone();
-                reader.model = model.clone();
+                if hardware_reader_id.is_some() {
+                    reader.hardware_reader_id = hardware_reader_id.clone();
+                }
+                if firmware_version.is_some() {
+                    reader.firmware_version = firmware_version.clone();
+                }
+                if model.is_some() {
+                    reader.model = model.clone();
+                }
                 if reader_info.is_some() {
                     reader.reader_info = reader_info.clone();
                 }
@@ -639,6 +649,8 @@ impl AppState {
             state: download_state_from_str(&progress.state),
             stored_reads: (progress.total != 0).then_some(progress.total as u32),
             downloaded_reads: progress.reads_received,
+            progress: progress.progress,
+            total: (progress.total != 0).then_some(progress.total),
             last_read_at: None,
             error: optional_non_empty(progress.error),
         };
@@ -3411,6 +3423,8 @@ mod tests {
                 state: rt_domain::DownloadState::Downloading,
                 stored_reads: Some(100),
                 downloaded_reads: 42,
+                progress: 42,
+                total: Some(100),
                 last_read_at: None,
                 error: None,
             })
@@ -3711,6 +3725,19 @@ mod tests {
                 connect_failures: 0,
             }
         };
+        state
+            .record_forwarder_reader_info(
+                "endpoint-a",
+                rt_p2p_protocol::ReaderInfo {
+                    stream_id: b"stream-a".to_vec(),
+                    hardware_reader_id: "reader-42".to_owned(),
+                    firmware_version: "1.2.3".to_owned(),
+                    model: "IPICO".to_owned(),
+                    reader_info_json: None,
+                },
+            )
+            .await;
+
         let response_info = expected_info.clone();
         tokio::spawn(async move {
             let ReaderCommand::Request {
@@ -3744,6 +3771,9 @@ mod tests {
             .and_then(|forwarder| forwarder.readers.first())
             .expect("reader status should be populated from response reader_info_json");
         assert_eq!(reader.reader_info, Some(expected_info));
+        assert_eq!(reader.hardware_reader_id.as_deref(), Some("reader-42"));
+        assert_eq!(reader.firmware_version.as_deref(), Some("1.2.3"));
+        assert_eq!(reader.model.as_deref(), Some("IPICO"));
     }
 
     #[tokio::test]

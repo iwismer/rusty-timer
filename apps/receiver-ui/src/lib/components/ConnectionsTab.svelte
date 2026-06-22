@@ -4,6 +4,7 @@
   import { loadConnections, store } from "$lib/store.svelte";
   import type {
     ForwarderConnectionStatus,
+    ReaderControlResult,
     ReaderLiveStatus,
     ServerDeviceStatus,
   } from "$lib/api";
@@ -188,17 +189,20 @@
     return {
       state: progress.state,
       reads_received: progress.downloaded_reads,
-      progress: progress.downloaded_reads,
-      total: progress.stored_reads ?? 0,
+      progress: progress.progress,
+      total: progress.total ?? 0,
       error: progress.error ?? undefined,
     };
   }
 
   async function runReaderCommand(
-    command: () => Promise<unknown>,
+    command: () => Promise<ReaderControlResult>,
   ): Promise<void> {
-    await command();
+    const result = await command();
     await loadConnections();
+    if (!result.success) {
+      throw new Error(result.message || "Reader command failed");
+    }
   }
 
   function selectedConfigForwarder(): ForwarderConnectionStatus | null {

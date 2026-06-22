@@ -153,6 +153,8 @@ export interface DownloadProgressUpdate {
   state: "downloading" | "complete" | "error" | "idle";
   stored_reads: number | null;
   downloaded_reads: number;
+  progress: number;
+  total: number | null;
   last_read_at: string | null;
   error: string | null;
 }

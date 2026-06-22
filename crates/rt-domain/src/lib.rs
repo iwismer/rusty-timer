@@ -218,6 +218,8 @@ pub struct DownloadProgressUpdate {
     pub state: DownloadState,
     pub stored_reads: Option<u32>,
     pub downloaded_reads: u32,
+    pub progress: u64,
+    pub total: Option<u64>,
     pub last_read_at: Option<String>,
     pub error: Option<String>,
 }
