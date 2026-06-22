@@ -577,28 +577,6 @@ export async function prefetchEarliestEpochOptions(
     )
       return;
 
-    // Replay-target epochs are a legacy (forwarder_id, reader_ip)-keyed lookup.
-    // For server-discovered canonical streams, fall back to the advertised
-    // current epoch so the controls do not show "No epochs available" before
-    // data-plane metrics arrive.
-    const { forwarder_id, reader_ip } = stream;
-    if (forwarder_id == null || reader_ip == null) {
-      if (stream.stream_epoch != null) {
-        store.earliestEpochOptions = {
-          ...store.earliestEpochOptions,
-          [key]: [
-            {
-              stream_epoch: stream.stream_epoch,
-              name: stream.current_epoch_name ?? null,
-              first_seen_at: null,
-              race_names: [],
-            },
-          ],
-        };
-      }
-      return;
-    }
-
     store.earliestEpochLoading = { ...store.earliestEpochLoading, [key]: true };
     store.earliestEpochLoadErrors = {
       ...store.earliestEpochLoadErrors,
@@ -606,15 +584,27 @@ export async function prefetchEarliestEpochOptions(
     };
 
     try {
+      // Replay-target epochs are looked up by canonical stream_id, matching
+      // how the P2P data plane persists received events. When the durable
+      // store has no events yet, fall back to the advertised current epoch so
+      // the controls do not show "No epochs available".
       const response = await api.getReplayTargetEpochs({
-        forwarder_id,
-        reader_ip,
+        stream_id: stream.stream_id,
       });
+      const epochs =
+        response.epochs.length === 0 && stream.stream_epoch != null
+          ? [
+              {
+                stream_epoch: stream.stream_epoch,
+                name: stream.current_epoch_name ?? null,
+                first_seen_at: null,
+                race_names: [],
+              },
+            ]
+          : response.epochs;
       store.earliestEpochOptions = {
         ...store.earliestEpochOptions,
-        [key]: [...response.epochs].sort(
-          (a, b) => b.stream_epoch - a.stream_epoch,
-        ),
+        [key]: [...epochs].sort((a, b) => b.stream_epoch - a.stream_epoch),
       };
     } catch (e) {
       store.earliestEpochLoadErrors = {

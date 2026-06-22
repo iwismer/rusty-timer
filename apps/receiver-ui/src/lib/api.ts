@@ -384,12 +384,11 @@ export async function putEarliestEpoch(
   await invoke("put_earliest_epoch", { body });
 }
 
-export async function getReplayTargetEpochs(
-  stream: StreamRef,
-): Promise<ReplayTargetEpochsResponse> {
+export async function getReplayTargetEpochs(stream: {
+  stream_id: string;
+}): Promise<ReplayTargetEpochsResponse> {
   return invoke<ReplayTargetEpochsResponse>("get_replay_target_epochs", {
-    forwarderId: stream.forwarder_id,
-    readerIp: stream.reader_ip,
+    streamId: stream.stream_id,
   });
 }
 

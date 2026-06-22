@@ -313,10 +313,9 @@ async fn put_earliest_epoch(
 #[tauri::command]
 async fn get_replay_target_epochs(
     state: State<'_, Arc<AppState>>,
-    forwarder_id: String,
-    reader_ip: String,
+    stream_id: String,
 ) -> CmdResult<control_api::ReplayTargetEpochsResponse> {
-    control_api::get_replay_target_epochs(&state, forwarder_id, reader_ip)
+    control_api::get_replay_target_epochs(&state, stream_id)
         .await
         .map_err(|e| e.to_string())
 }

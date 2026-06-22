@@ -679,28 +679,25 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Load the distinct epochs durably received for `stream_id`, newest first,
+    /// with the earliest `reader_timestamp` seen in each epoch.
+    ///
+    /// Keyed by the canonical `stream_id` because the live P2P data plane writes
+    /// `received_events` (and advances cursors) by `stream_id` alone, leaving the
+    /// legacy `(forwarder_id, reader_ip)` columns NULL. A legacy-keyed lookup
+    /// therefore matches nothing for currently-receiving streams.
     pub fn load_replay_target_epochs(
         &self,
-        forwarder_id: &str,
-        reader_ip: &str,
+        stream_id: &str,
     ) -> DbResult<Vec<(i64, Option<String>)>> {
         let mut stmt = self.conn.prepare(
-            "WITH matching_streams AS (
-                 SELECT stream_id FROM subscriptions
-                 WHERE forwarder_id = ?1 AND reader_ip = ?2
-                 UNION
-                 SELECT stream_id FROM cursors
-                 WHERE forwarder_id = ?1 AND reader_ip = ?2
-             )
-             SELECT epoch, MIN(reader_timestamp)
+            "SELECT epoch, MIN(reader_timestamp)
              FROM received_events
-             WHERE stream_id IN (SELECT stream_id FROM matching_streams)
+             WHERE stream_id = ?1
              GROUP BY epoch
              ORDER BY epoch DESC",
         )?;
-        let rows = stmt.query_map(rusqlite::params![forwarder_id, reader_ip], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?;
+        let rows = stmt.query_map(rusqlite::params![stream_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -2666,13 +2663,15 @@ mod tests {
     fn load_replay_target_epochs_uses_local_received_events() {
         let mut db = Db::open_in_memory().unwrap();
         let stream_id = "stream-a";
+        // Canonical live-mode subscription: legacy (forwarder_id, reader_ip)
+        // columns are NULL, exactly as the P2P data plane persists them.
         db.replace_stream_subscriptions(&[StreamSubscription {
             forwarder_endpoint_id: "endpoint-1".to_owned(),
             stream_id: stream_id.to_owned(),
             local_port_override: None,
             event_type: EventType::Finish,
-            forwarder_id: Some("fwd-1".to_owned()),
-            reader_ip: Some("10.0.0.1:10000".to_owned()),
+            forwarder_id: None,
+            reader_ip: None,
         }])
         .unwrap();
 
@@ -2694,9 +2693,7 @@ mod tests {
             .unwrap();
         }
 
-        let epochs = db
-            .load_replay_target_epochs("fwd-1", "10.0.0.1:10000")
-            .unwrap();
+        let epochs = db.load_replay_target_epochs(stream_id).unwrap();
         assert_eq!(
             epochs,
             vec![
@@ -2705,7 +2702,7 @@ mod tests {
             ]
         );
         assert!(
-            db.load_replay_target_epochs("other", "10.0.0.1:10000")
+            db.load_replay_target_epochs("other-stream")
                 .unwrap()
                 .is_empty()
         );

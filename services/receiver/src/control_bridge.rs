@@ -272,12 +272,9 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
         "put_earliest_epoch" => {
             ok(control_api::put_earliest_epoch(state, arg(args, "body")?).await?)
         }
-        "get_replay_target_epochs" => ok(control_api::get_replay_target_epochs(
-            state,
-            arg(args, "forwarder_id")?,
-            arg(args, "reader_ip")?,
-        )
-        .await?),
+        "get_replay_target_epochs" => {
+            ok(control_api::get_replay_target_epochs(state, arg(args, "stream_id")?).await?)
+        }
         "get_subscriptions" => ok(control_api::get_subscriptions(state).await?),
         "put_subscriptions" => ok(control_api::put_subscriptions(state, arg(args, "body")?).await?),
         "get_status" => ok(control_api::get_status(state).await),

@@ -259,13 +259,11 @@ describe("api client", () => {
     });
 
     const result = await getReplayTargetEpochs({
-      forwarder_id: "fwd-1",
-      reader_ip: "10.0.0.1:10000",
+      stream_id: "10.0.0.1:10000",
     });
 
     expect(mockInvoke).toHaveBeenCalledWith("get_replay_target_epochs", {
-      forwarderId: "fwd-1",
-      readerIp: "10.0.0.1:10000",
+      streamId: "10.0.0.1:10000",
     });
     expect(result.epochs).toEqual([
       {

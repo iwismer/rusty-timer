@@ -1572,12 +1572,11 @@ pub async fn get_stream_metrics(state: &AppState) -> Vec<crate::ui_events::Strea
 
 pub async fn get_replay_target_epochs(
     state: &AppState,
-    forwarder_id: String,
-    reader_ip: String,
+    stream_id: String,
 ) -> Result<ReplayTargetEpochsResponse, ReceiverError> {
     let db = state.db.lock().await;
     let rows = db
-        .load_replay_target_epochs(&forwarder_id, &reader_ip)
+        .load_replay_target_epochs(&stream_id)
         .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     Ok(ReplayTargetEpochsResponse {
         epochs: rows
@@ -2323,8 +2322,7 @@ macro_rules! receiver_command_list {
             get_stream_metrics() -> "Vec<StreamMetricsPayload>",
             put_earliest_epoch(body: "EarliestEpochRequest") -> "()",
             get_replay_target_epochs(
-                forwarder_id: "String",
-                reader_ip: "String"
+                stream_id: "String"
             ) -> "ReplayTargetEpochsResponse",
             get_subscriptions() -> "SubscriptionsBody",
             put_subscriptions(body: "SubscriptionsBody") -> "()",

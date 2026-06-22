@@ -1150,12 +1150,13 @@ describe("canonical-only stream identity", () => {
     expect(selectedEarliestEpochValue(streamB)).toBe("9");
   });
 
-  it("uses advertised stream epochs for canonical-only epoch options", async () => {
+  it("falls back to the advertised stream epoch when no events are stored yet", async () => {
     const { store, streamIdentity, prefetchEarliestEpochOptions } =
       await import("./store.svelte");
 
     store.earliestEpochOptions = {};
     store.earliestEpochLoading = {};
+    apiMocks.getReplayTargetEpochs.mockResolvedValueOnce({ epochs: [] });
 
     const stream = {
       forwarder_endpoint_id: "endpoint-1",
@@ -1168,6 +1169,9 @@ describe("canonical-only stream identity", () => {
 
     await prefetchEarliestEpochOptions([stream]);
 
+    expect(apiMocks.getReplayTargetEpochs).toHaveBeenCalledWith({
+      stream_id: "11111111-1111-1111-1111-111111111111",
+    });
     expect(store.earliestEpochOptions[streamIdentity(stream)]).toEqual([
       {
         stream_epoch: 12,
@@ -1176,7 +1180,6 @@ describe("canonical-only stream identity", () => {
         race_names: [],
       },
     ]);
-    expect(apiMocks.getReplayTargetEpochs).not.toHaveBeenCalled();
   });
 
   it("excludes canonical-only streams from the legacy live mode payload but keeps legacy ones", async () => {
