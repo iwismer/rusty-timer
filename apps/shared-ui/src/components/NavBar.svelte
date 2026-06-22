@@ -7,11 +7,13 @@
   let {
     appName = "",
     links = [],
+    actions = [],
     status,
     helpContext = undefined,
   }: {
     appName?: string;
     links?: Array<{ href: string; label: string; active?: boolean }>;
+    actions?: Array<{ href: string; label: string }>;
     status?: Snippet;
     helpContext?: HelpContextName;
   } = $props();
@@ -55,6 +57,17 @@
 
       {#if helpContext}
         <HelpSearch context={helpContext} />
+      {/if}
+
+      {#if actions.length > 0}
+        {#each actions as action}
+          <a
+            href={action.href}
+            class="p-1.5 rounded-md bg-surface-2 border border-border text-text-secondary text-xs no-underline cursor-pointer hover:bg-surface-3 hover:text-text-primary flex items-center gap-1.5"
+          >
+            {action.label}
+          </a>
+        {/each}
       {/if}
 
       <button
