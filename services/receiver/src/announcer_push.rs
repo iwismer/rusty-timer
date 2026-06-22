@@ -78,8 +78,12 @@ pub struct AnnouncerRow {
 }
 
 /// Transport abstraction for delivering announcer rows downstream.
+///
+/// `max_list_size` is the receiver-configured cap on the number of rows the
+/// server keeps visible in the public announcer feed; it rides every push so
+/// the server can re-trim its runtime when the operator changes it.
 pub trait AnnouncerPushClient {
-    fn push(&self, rows: &[AnnouncerRow]) -> Result<(), AnnouncerPushError>;
+    fn push(&self, rows: &[AnnouncerRow], max_list_size: u32) -> Result<(), AnnouncerPushError>;
 }
 
 /// Real HTTP transport for the server `/announcer/rows` endpoint.
@@ -109,7 +113,7 @@ impl ServerAnnouncerClient {
 }
 
 impl AnnouncerPushClient for ServerAnnouncerClient {
-    fn push(&self, rows: &[AnnouncerRow]) -> Result<(), AnnouncerPushError> {
+    fn push(&self, rows: &[AnnouncerRow], max_list_size: u32) -> Result<(), AnnouncerPushError> {
         if rows.is_empty() {
             return Ok(());
         }
@@ -131,6 +135,7 @@ impl AnnouncerPushClient for ServerAnnouncerClient {
                 "display_name": row.name.clone().unwrap_or_default(),
                 "reader_timestamp": serde_json::Value::Null,
                 "received_unix_ms": row.received_unix_ms,
+                "max_list_size": max_list_size,
             });
             let response = client
                 .post(&self.rows_url)
@@ -375,7 +380,8 @@ pub fn push_announcer_rows(
         });
     }
 
-    client.push(&rows)?;
+    let max_list_size = db.load_announcer_max_list_size()?;
+    client.push(&rows, max_list_size)?;
 
     // Only mark after a successful push, so a failed transport leaves rows
     // pending for a later retry (at-least-once + idempotency key downstream).
@@ -438,7 +444,11 @@ mod tests {
     }
 
     impl AnnouncerPushClient for RecordingClient {
-        fn push(&self, rows: &[AnnouncerRow]) -> Result<(), AnnouncerPushError> {
+        fn push(
+            &self,
+            rows: &[AnnouncerRow],
+            _max_list_size: u32,
+        ) -> Result<(), AnnouncerPushError> {
             self.batches.lock().unwrap().push(rows.to_vec());
             Ok(())
         }

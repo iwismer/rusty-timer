@@ -1112,6 +1112,8 @@ pub struct ProfileResponse {
     pub server_source: String,
     /// Global announcer publish toggle state.
     pub announcer_enabled: bool,
+    /// Receiver-configured cap on visible rows in the server announcer feed.
+    pub announcer_max_list_size: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1378,6 +1380,24 @@ pub async fn set_announcer_enabled(state: &AppState, enabled: bool) -> Result<()
     Ok(())
 }
 
+/// Set the receiver-configured cap on visible rows in the server announcer
+/// feed. The value is clamped to `1..=500` and rides the next announcer push to
+/// the server. The P2P reconcile loop picks up the change on its next pass.
+pub async fn set_announcer_max_list_size(
+    state: &AppState,
+    max_list_size: u32,
+) -> Result<(), ReceiverError> {
+    let clamped = max_list_size.clamp(1, 500);
+    {
+        let db = state.db.lock().await;
+        db.set_announcer_max_list_size(clamped)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    }
+    // Other UI/bridge clients hold this in profile state; nudge them to refetch.
+    state.emit_resync();
+    Ok(())
+}
+
 /// Opt a single stream in/out of announcer publishing (opt-in default off).
 pub async fn set_stream_announcer_publish(
     state: &AppState,
@@ -1465,9 +1485,12 @@ pub async fn get_profile(state: &AppState) -> Result<ProfileResponse, ReceiverEr
     .to_owned();
     let (server_url, token) =
         resolved.map_or_else(|| (String::new(), String::new()), |s| (s.url, s.token));
-    let announcer_enabled = {
+    let (announcer_enabled, announcer_max_list_size) = {
         let db = state.db.lock().await;
-        db.load_announcer_enabled().unwrap_or(false)
+        (
+            db.load_announcer_enabled().unwrap_or(false),
+            db.load_announcer_max_list_size().unwrap_or(25),
+        )
     };
     Ok(ProfileResponse {
         server_url,
@@ -1475,6 +1498,7 @@ pub async fn get_profile(state: &AppState) -> Result<ProfileResponse, ReceiverEr
         receiver_id,
         server_source,
         announcer_enabled,
+        announcer_max_list_size,
     })
 }
 
@@ -2394,6 +2418,7 @@ macro_rules! receiver_command_list {
             import_participants(contents: "String") -> "ImportSummary",
             import_chips(contents: "String") -> "ImportSummary",
             set_announcer_enabled(enabled: "bool") -> "()",
+            set_announcer_max_list_size(max_list_size: "u32") -> "()",
             set_stream_announcer_publish(
                 stream_id: "String",
                 publish: "bool"

@@ -2202,7 +2202,11 @@ mod tests {
     }
 
     impl AnnouncerPushClient for FlakyAnnouncerClient {
-        fn push(&self, rows: &[AnnouncerRow]) -> Result<(), AnnouncerPushError> {
+        fn push(
+            &self,
+            rows: &[AnnouncerRow],
+            _max_list_size: u32,
+        ) -> Result<(), AnnouncerPushError> {
             if self.fail.load(Ordering::SeqCst) {
                 return Err(AnnouncerPushError::Transport("simulated outage".to_owned()));
             }

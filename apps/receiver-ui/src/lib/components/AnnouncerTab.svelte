@@ -1,11 +1,36 @@
 <script lang="ts">
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import {
     store,
     setAnnouncerEnabled,
+    setAnnouncerMaxListSize,
     importParticipantsText,
     importChipsText,
   } from "$lib/store.svelte";
   import { inputClass, btnSecondary } from "$lib/ui-classes";
+
+  let maxListInput = $state(store.announcerMaxListSize);
+
+  // Keep the input in sync when the store value changes (e.g. profile reload).
+  $effect(() => {
+    maxListInput = store.announcerMaxListSize;
+  });
+
+  function commitMaxList() {
+    if (maxListInput !== store.announcerMaxListSize) {
+      void setAnnouncerMaxListSize(maxListInput);
+    }
+  }
+
+  let announcerUrl = $derived(
+    store.savedServerUrl
+      ? `${store.savedServerUrl.replace(/\/+$/, "")}/announcer`
+      : null,
+  );
+
+  async function openAnnouncerPage() {
+    if (announcerUrl) await openUrl(announcerUrl);
+  }
 
   // Legacy Race Director `.ppl`/`.bibchip` files are frequently Windows-1252
   // (accented names). `File.text()` assumes UTF-8 and would mangle them, so
@@ -61,6 +86,35 @@
         />
         {store.announcerEnabled ? "On" : "Off"}
       </label>
+    </div>
+
+    <div class="mt-4 flex flex-wrap items-end justify-between gap-4">
+      <label class="block text-xs font-medium text-text-muted">
+        Max finishers shown
+        <input
+          data-testid="announcer-max-list-input"
+          class="{inputClass} mt-1 w-24"
+          type="number"
+          min="1"
+          max="500"
+          bind:value={maxListInput}
+          disabled={store.announcerMaxListBusy}
+          onblur={commitMaxList}
+        />
+        <span class="mt-1 block text-[11px] text-text-muted">
+          Caps how many rows the server announcer feed keeps visible.
+        </span>
+      </label>
+
+      <button
+        data-testid="open-announcer-page-btn"
+        type="button"
+        class={btnSecondary}
+        disabled={!announcerUrl}
+        onclick={openAnnouncerPage}
+      >
+        Open announcer page
+      </button>
     </div>
   </section>
 

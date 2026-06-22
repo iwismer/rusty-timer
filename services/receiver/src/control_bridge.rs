@@ -339,6 +339,11 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
         "set_announcer_enabled" => {
             ok(control_api::set_announcer_enabled(state, arg(args, "enabled")?).await?)
         }
+        "set_announcer_max_list_size" => ok(control_api::set_announcer_max_list_size(
+            state,
+            arg(args, "max_list_size")?,
+        )
+        .await?),
         "set_stream_announcer_publish" => {
             let stream_id: String = arg(args, "stream_id")?;
             ok(

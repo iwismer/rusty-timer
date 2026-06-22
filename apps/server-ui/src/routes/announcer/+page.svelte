@@ -1,43 +1,74 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import {
-    AlertBanner,
-    Card,
-    StatCard,
-    StatusBadge,
-  } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
   import type { AnnouncerRow, StatusResponse } from "$lib/api";
 
   let status = $state<StatusResponse | null>(null);
-  let error = $state<string | null>(null);
+  let loadError = $state<string | null>(null);
   let loading = $state(true);
   let poll: ReturnType<typeof setInterval> | undefined;
 
-  let newestRows = $derived.by(() => {
-    return [...(status?.announcer_rows ?? [])].sort(compareRowsNewestFirst);
-  });
+  // Keys that arrived since the last poll, used to flash new rows. Seeded on
+  // the first successful load so an initial backlog does not all flash at once.
+  let seenKeys = new Set<string>();
+  let seeded = false;
+  let flashKeys = $state(new Set<string>());
+
+  let rows = $derived.by(() =>
+    [...(status?.announcer_rows ?? [])].sort(compareRowsNewestFirst),
+  );
+  let finisherCount = $derived(status?.finisher_count ?? 0);
 
   function compareRowsNewestFirst(a: AnnouncerRow, b: AnnouncerRow) {
     return Date.parse(b.received_at) - Date.parse(a.received_at);
   }
 
-  function formatReceivedAt(value: string) {
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return value;
-    return date.toLocaleString();
+  function rowKey(row: AnnouncerRow): string {
+    return `${row.stream_id}:${row.seq}`;
   }
 
-  function rowTime(row: AnnouncerRow) {
-    return row.reader_timestamp || formatReceivedAt(row.received_at);
+  function rowTime(row: AnnouncerRow): string {
+    if (row.reader_timestamp) return row.reader_timestamp;
+    const date = new Date(row.received_at);
+    return Number.isNaN(date.getTime())
+      ? row.received_at
+      : date.toLocaleTimeString();
+  }
+
+  function markFlash(key: string) {
+    const next = new Set(flashKeys);
+    next.add(key);
+    flashKeys = next;
+    setTimeout(() => {
+      const updated = new Set(flashKeys);
+      updated.delete(key);
+      flashKeys = updated;
+    }, 1200);
+  }
+
+  function reconcileNewRows(current: AnnouncerRow[]) {
+    if (!seeded) {
+      for (const row of current) seenKeys.add(rowKey(row));
+      seeded = true;
+      return;
+    }
+    for (const row of current) {
+      const key = rowKey(row);
+      if (!seenKeys.has(key)) {
+        seenKeys.add(key);
+        markFlash(key);
+      }
+    }
   }
 
   async function loadStatus() {
     try {
-      status = await api.getStatus();
-      error = null;
+      const next = await api.getStatus();
+      status = next;
+      loadError = null;
+      reconcileNewRows(next.announcer_rows ?? []);
     } catch (err) {
-      error = String(err);
+      loadError = String(err);
     } finally {
       loading = false;
     }
@@ -53,80 +84,92 @@
   });
 </script>
 
-<div class="mx-auto px-4 py-6 space-y-6" style="max-width: 1100px;">
-  <div class="flex flex-wrap items-center justify-between gap-3">
-    <div>
-      <h1 class="text-2xl font-bold text-text-primary m-0">Announcer</h1>
-      <p class="text-sm text-text-muted mt-1 mb-0">
-        Rolling finish list, newest reads first.
-      </p>
-    </div>
-    {#if loading}
-      <StatusBadge label="Loading" state="warn" />
-    {:else if error}
-      <StatusBadge label="Status stale" state="err" />
-    {:else}
-      <StatusBadge label="Live" state="ok" />
-    {/if}
-  </div>
+<svelte:head>
+  <title>Announcer Feed · Rusty Timer</title>
+</svelte:head>
 
-  {#if error}
-    <AlertBanner
-      variant="err"
-      message={`Could not refresh announcer rows: ${error}`}
-    />
-  {/if}
-
-  <div class="grid gap-4 sm:grid-cols-2">
-    <Card>
-      <StatCard label="Finishers" value={status?.finisher_count ?? "—"} />
-    </Card>
-    <Card>
-      <StatCard
-        label="Announcer generation"
-        value={status?.announcer_source_generation ?? "—"}
-      />
-    </Card>
-  </div>
-
-  <Card title="Finishers">
-    {#if !status}
-      <p class="text-sm text-text-muted m-0">Loading finishers…</p>
-    {:else if newestRows.length === 0}
-      <p class="text-sm text-text-muted m-0">No finishers announced yet.</p>
-    {:else}
-      <div class="overflow-x-auto">
-        <table class="w-full border-collapse text-sm">
-          <thead>
-            <tr class="text-left text-text-muted border-b border-border">
-              <th class="py-2 pr-4 font-medium">Time</th>
-              <th class="py-2 pr-4 font-medium">Chip</th>
-              <th class="py-2 pr-4 font-medium">Bib</th>
-              <th class="py-2 pr-4 font-medium">Name</th>
-              <th class="py-2 pr-4 font-medium">Stream</th>
-              <th class="py-2 pr-4 font-medium">Seq</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each newestRows as row (`${row.stream_id}:${row.seq}`)}
-              <tr class="border-b border-border last:border-0">
-                <td class="py-2 pr-4 text-text-primary">{rowTime(row)}</td>
-                <td class="py-2 pr-4 text-text-primary font-mono"
-                  >{row.chip_id}</td
-                >
-                <td class="py-2 pr-4 text-text-primary font-mono"
-                  >{row.bib ?? "—"}</td
-                >
-                <td class="py-2 pr-4 text-text-primary">{row.display_name}</td>
-                <td class="py-2 pr-4 text-text-primary font-mono"
-                  >{row.stream_id}</td
-                >
-                <td class="py-2 pr-4 text-text-primary font-mono">{row.seq}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+<main class="min-h-screen bg-surface-0 text-text-primary px-6 py-8">
+  {#if loading}
+    <p class="text-sm text-text-muted">Loading announcer feed…</p>
+  {:else}
+    <section class="max-w-[1100px] mx-auto">
+      <div
+        class="rounded-md border border-status-warn-border bg-status-warn-bg px-4 py-3 mb-5"
+      >
+        <p class="text-sm text-status-warn m-0">
+          Not official results. Times and places are announcer assist only.
+        </p>
       </div>
-    {/if}
-  </Card>
-</div>
+
+      <h1 class="text-3xl font-bold m-0 mb-1">Announcer Feed</h1>
+      <p class="text-sm text-text-muted mt-0 mb-4">
+        Newest finishers at the top.
+      </p>
+
+      {#if loadError}
+        <p
+          data-testid="announcer-load-error"
+          class="text-sm text-status-err mb-4"
+        >
+          Could not refresh announcer feed: {loadError}
+        </p>
+      {/if}
+
+      {#if rows.length === 0}
+        <p class="text-sm text-text-muted">Waiting for first finisher…</p>
+      {:else}
+        <ul class="list-none p-0 m-0 grid gap-3">
+          {#each rows as row (rowKey(row))}
+            <li
+              data-testid={"announcer-row-" + rowKey(row)}
+              class={[
+                "rounded-md border border-border bg-surface-1 p-4",
+                flashKeys.has(rowKey(row)) ? "flash-new" : "",
+              ]
+                .join(" ")
+                .trim()}
+            >
+              <div class="flex items-center justify-between gap-3">
+                <p class="text-lg font-semibold m-0">
+                  {row.display_name || "Unknown runner"}
+                </p>
+                {#if row.bib !== null && row.bib !== undefined}
+                  <p class="text-sm text-text-muted m-0">Bib {row.bib}</p>
+                {/if}
+              </div>
+              <p class="text-sm text-text-muted mt-2 mb-0">
+                Time {rowTime(row)}
+              </p>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+
+      <footer class="mt-6 border-t border-border pt-4">
+        <p class="text-base font-medium m-0">
+          Finishers announced: {finisherCount}
+        </p>
+      </footer>
+    </section>
+  {/if}
+</main>
+
+<style>
+  .flash-new {
+    animation: announcer-flash 1.2s ease-out;
+    border-color: var(--status-ok-border, #a7f3d0);
+  }
+
+  @keyframes announcer-flash {
+    0% {
+      background-color: color-mix(
+        in srgb,
+        var(--status-ok-bg, #ecfdf5) 85%,
+        white
+      );
+    }
+    100% {
+      background-color: transparent;
+    }
+  }
+</style>

@@ -235,11 +235,12 @@ impl Db {
         // Preserve config flags that live on the profile row across the
         // delete+insert (mirrors dbf handling).
         let announcer_enabled = self.load_announcer_enabled()?;
+        let announcer_max_list_size = self.load_announcer_max_list_size()?;
         let tx = self.conn.transaction()?;
         tx.execute_batch("DELETE FROM profile")?;
         tx.execute(
-            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, dbf_path, announcer_enabled) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, &dbf_config.path, i64::from(announcer_enabled)],
+            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, dbf_path, announcer_enabled, announcer_max_list_size) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, &dbf_config.path, i64::from(announcer_enabled), i64::from(announcer_max_list_size)],
         )?;
         tx.commit()?;
         Ok(())
@@ -1007,6 +1008,11 @@ impl Db {
         )?;
         apply_add_column_migration(
             &self.conn,
+            "ALTER TABLE profile ADD COLUMN announcer_max_list_size INTEGER NOT NULL DEFAULT 25;",
+            "announcer_max_list_size",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
             "ALTER TABLE subscriptions ADD COLUMN event_type TEXT NOT NULL DEFAULT 'finish';",
             "event_type",
         )?;
@@ -1277,6 +1283,35 @@ impl Db {
         let changed = self.conn.execute(
             "UPDATE profile SET announcer_enabled = ?1",
             rusqlite::params![i64::from(enabled)],
+        )?;
+        if changed == 0 {
+            return Err(DbError::ProfileMissing);
+        }
+        Ok(())
+    }
+
+    /// Receiver-configured cap on the number of rows the server announcer feed
+    /// keeps visible. Defaults to 25 when unset or out of range.
+    pub fn load_announcer_max_list_size(&self) -> DbResult<u32> {
+        let value: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT announcer_max_list_size FROM profile LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let resolved = value
+            .filter(|n| *n > 0)
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(25);
+        Ok(resolved)
+    }
+
+    pub fn set_announcer_max_list_size(&self, max_list_size: u32) -> DbResult<()> {
+        let changed = self.conn.execute(
+            "UPDATE profile SET announcer_max_list_size = ?1",
+            rusqlite::params![i64::from(max_list_size)],
         )?;
         if changed == 0 {
             return Err(DbError::ProfileMissing);
@@ -1659,6 +1694,30 @@ mod tests {
         db.set_stream_announcer_publish("127.0.0.1:1", false)
             .unwrap();
         assert!(db.load_announcer_publish_streams().unwrap().is_empty());
+    }
+
+    #[test]
+    fn announcer_max_list_size_persists_and_defaults() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.save_profile("http://x", "t", DEFAULT_UPDATE_MODE, None)
+            .unwrap();
+        assert_eq!(
+            db.load_announcer_max_list_size().unwrap(),
+            25,
+            "defaults to 25"
+        );
+
+        db.set_announcer_max_list_size(60).unwrap();
+        assert_eq!(db.load_announcer_max_list_size().unwrap(), 60);
+
+        // Must survive a profile save (delete+insert).
+        db.save_profile("http://y", "t2", DEFAULT_UPDATE_MODE, None)
+            .unwrap();
+        assert_eq!(
+            db.load_announcer_max_list_size().unwrap(),
+            60,
+            "announcer_max_list_size must survive a profile save"
+        );
     }
 
     #[test]

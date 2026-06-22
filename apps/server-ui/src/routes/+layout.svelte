@@ -24,11 +24,6 @@
     links={[
       { href: "/", label: "Status", active: currentPath === "/" },
       {
-        href: "/announcer",
-        label: "Announcer",
-        active: currentPath === "/announcer",
-      },
-      {
         href: "/sbc-setup",
         label: "SBC Setup",
         active: currentPath === "/sbc-setup",

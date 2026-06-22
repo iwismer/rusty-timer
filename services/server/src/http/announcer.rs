@@ -13,7 +13,11 @@ use crate::announcer::{AnnouncerInputEvent, AnnouncerRuntime};
 use crate::http::{AppState, register};
 use crate::registry::{self, AnnouncerRowRecord, AnnouncerStorageError};
 
-const MAX_ANNOUNCER_ROWS: usize = 25;
+/// Fallback visible-row cap when a pushing receiver does not send its own
+/// `max_list_size` (older receivers, or a malformed value). The announcer
+/// source (receiver) owns this setting; this only bounds what the server
+/// retains in the live runtime for the public feed.
+const DEFAULT_MAX_ANNOUNCER_ROWS: usize = 25;
 
 #[derive(Debug, Deserialize)]
 pub struct PushRowRequest {
@@ -25,6 +29,10 @@ pub struct PushRowRequest {
     pub display_name: String,
     pub reader_timestamp: Option<String>,
     pub received_unix_ms: i64,
+    /// Receiver-configured cap on visible announcer rows. Absent or zero falls
+    /// back to [`DEFAULT_MAX_ANNOUNCER_ROWS`].
+    #[serde(default)]
+    pub max_list_size: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,6 +63,11 @@ pub async fn push_row(
         return (StatusCode::BAD_REQUEST, "invalid received_unix_ms").into_response();
     }
 
+    let max_list_size = req
+        .max_list_size
+        .filter(|n| *n > 0)
+        .map_or(DEFAULT_MAX_ANNOUNCER_ROWS, |n| n as usize);
+
     let record = AnnouncerRowRecord {
         announcer_source_generation: req.announcer_source_generation,
         stream_id: req.stream_id,
@@ -70,7 +83,11 @@ pub async fn push_row(
         let conn = state.conn.lock().expect("registry mutex poisoned");
         registry::upsert_announcer_row(&conn, &record).and_then(|()| {
             let rows = registry::list_announcer_rows_ordered(&conn)?;
-            Ok(rebuild_runtime(&state.announcer_runtime, rows))
+            Ok(rebuild_runtime(
+                &state.announcer_runtime,
+                rows,
+                max_list_size,
+            ))
         })
     };
 
@@ -130,6 +147,7 @@ pub async fn takeover(State(state): State<AppState>, headers: HeaderMap) -> Resp
 fn rebuild_runtime(
     runtime: &std::sync::Mutex<AnnouncerRuntime>,
     rows: Vec<AnnouncerRowRecord>,
+    max_list_size: usize,
 ) -> u64 {
     let mut runtime = runtime.lock().expect("announcer runtime mutex poisoned");
     runtime.reset();
@@ -146,7 +164,7 @@ fn rebuild_runtime(
             reader_timestamp: row.reader_timestamp,
             received_at,
         };
-        runtime.ingest(event, MAX_ANNOUNCER_ROWS);
+        runtime.ingest(event, max_list_size);
     }
     runtime.finisher_count()
 }
@@ -252,6 +270,43 @@ mod tests {
         let runtime = state.announcer_runtime.lock().unwrap();
         assert_eq!(runtime.finisher_count(), 2);
         assert_eq!(runtime.rows().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn max_list_size_trims_visible_rows_but_counts_all_finishers() {
+        let state = test_state();
+        let app = router(state.clone());
+
+        for seq in 1..=3u64 {
+            let received = 1_000 * i64::try_from(seq).unwrap();
+            let mut body = row_body(seq, 0, received);
+            body["max_list_size"] = serde_json::json!(2);
+            let resp = app
+                .clone()
+                .oneshot(json_request("/announcer/rows", &body))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        let runtime = state.announcer_runtime.lock().unwrap();
+        assert_eq!(runtime.finisher_count(), 3);
+        assert_eq!(runtime.rows().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn missing_max_list_size_falls_back_to_default() {
+        let state = test_state();
+        let app = router(state.clone());
+
+        let resp = app
+            .oneshot(json_request("/announcer/rows", &row_body(1, 0, 1_000)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let runtime = state.announcer_runtime.lock().unwrap();
+        assert_eq!(runtime.rows().len(), 1);
     }
 
     #[test]

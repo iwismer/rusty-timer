@@ -13,6 +13,8 @@ export interface Profile {
   server_source?: "env" | "profile" | "none";
   // Global announcer publish toggle state.
   announcer_enabled?: boolean;
+  // Receiver-configured cap on visible rows in the server announcer feed.
+  announcer_max_list_size?: number;
 }
 
 export interface ImportSummary {
@@ -276,6 +278,12 @@ export async function importChips(contents: string): Promise<ImportSummary> {
 
 export async function setAnnouncerEnabled(enabled: boolean): Promise<void> {
   await invoke("set_announcer_enabled", { enabled });
+}
+
+export async function setAnnouncerMaxListSize(
+  maxListSize: number,
+): Promise<void> {
+  await invoke("set_announcer_max_list_size", { maxListSize });
 }
 
 export async function setStreamAnnouncerPublish(

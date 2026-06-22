@@ -80,6 +80,8 @@ export const store = $state({
   // Announcer publishing controls.
   announcerEnabled: false,
   announcerBusy: false,
+  announcerMaxListSize: 25,
+  announcerMaxListBusy: false,
   importBusy: false,
   importMessage: null as string | null,
   importError: null as string | null,
@@ -799,6 +801,7 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
       store.savedReceiverId = p.receiver_id;
       store.serverSource = p.server_source ?? "none";
       store.announcerEnabled = p.announcer_enabled ?? false;
+      store.announcerMaxListSize = p.announcer_max_list_size ?? 25;
       // Only overwrite edit fields if the user hasn't made unsaved changes.
       if (!configWasDirty) {
         store.editServerUrl = p.server_url;
@@ -1052,6 +1055,24 @@ export async function setAnnouncerEnabled(enabled: boolean): Promise<void> {
     store.error = `Failed to update announcer setting: ${e}`;
   } finally {
     store.announcerBusy = false;
+  }
+}
+
+export async function setAnnouncerMaxListSize(
+  maxListSize: number,
+): Promise<void> {
+  // Clamp to the same range the backend enforces so the UI does not send
+  // obviously-invalid values.
+  const clamped = Math.min(500, Math.max(1, Math.round(maxListSize)));
+  store.announcerMaxListBusy = true;
+  try {
+    store.error = null;
+    await api.setAnnouncerMaxListSize(clamped);
+    store.announcerMaxListSize = clamped;
+  } catch (e) {
+    store.error = `Failed to update announcer list size: ${e}`;
+  } finally {
+    store.announcerMaxListBusy = false;
   }
 }
 
