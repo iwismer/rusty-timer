@@ -179,7 +179,7 @@ describe("ConnectionsTab", () => {
     );
   });
 
-  it("renders forwarder reader and UPS live status", () => {
+  it("renders UPS live status without duplicate forwarder reader summary pills", () => {
     mockState.store.connections.forwarders = [
       {
         endpoint_id: "endpoint-live",
@@ -212,17 +212,14 @@ describe("ConnectionsTab", () => {
     render(ConnectionsTab);
 
     expect(
-      screen.getByTestId("forwarder-reader-endpoint-live-10.0.0.1:10000"),
-    ).toHaveTextContent("reader-42");
-    expect(
-      screen.getByTestId("forwarder-reader-endpoint-live-10.0.0.1:10000"),
-    ).toHaveTextContent("offline");
+      screen.queryByTestId("forwarder-reader-endpoint-live-10.0.0.1:10000"),
+    ).not.toBeInTheDocument();
     expect(screen.getByTestId("forwarder-ups-endpoint-live")).toHaveTextContent(
       "64%",
     );
   });
 
-  it("places forwarder actions below the reader summary and above reader controls", () => {
+  it("places forwarder actions above reader controls", () => {
     mockState.store.connections.forwarders = [
       {
         endpoint_id: "endpoint-live",
@@ -252,20 +249,73 @@ describe("ConnectionsTab", () => {
     render(ConnectionsTab);
 
     const row = screen.getByTestId("forwarder-row-endpoint-live");
-    const readerSummary = screen.getByTestId(
-      "forwarder-reader-endpoint-live-10.0.0.1:10000",
-    );
+    expect(
+      screen.queryByTestId("forwarder-reader-endpoint-live-10.0.0.1:10000"),
+    ).not.toBeInTheDocument();
     const configure = screen.getByTestId("forwarder-configure-endpoint-live");
     const banner = within(row).getByText("Banner:");
 
     expect(
-      readerSummary.compareDocumentPosition(configure) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    expect(
       configure.compareDocumentPosition(banner) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+
+  it("labels reader controls by IP and shows hardware id plus local proxy status", () => {
+    mockState.store.connections.forwarders = [
+      {
+        endpoint_id: "endpoint-live",
+        display_name: "Live Forwarder",
+        state: "subscribed",
+        pending: false,
+        subscribed_count: 1,
+        available_count: 2,
+        readers: [
+          {
+            stream_id: "10.0.0.1:10000",
+            connected: true,
+            state: "connected",
+            last_read_unix_ms: null,
+            hardware_reader_id: "0",
+            firmware_version: "1.2.3",
+            model: "IPICO",
+            local_port: 9100,
+          },
+          {
+            stream_id: "10.0.0.1:10001",
+            connected: false,
+            state: "disconnected",
+            last_read_unix_ms: null,
+            hardware_reader_id: "0",
+            firmware_version: null,
+            model: null,
+            local_port: null,
+          },
+        ],
+        ups: null,
+        restart_needed: null,
+        remote_config_available: false,
+        reader_control_available: true,
+      },
+    ] as import("./api").ForwarderConnectionStatus[];
+
+    render(ConnectionsTab);
+
+    expect(
+      screen.queryByTestId("forwarder-reader-endpoint-live-10.0.0.1:10000"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("forwarder-reader-endpoint-live-10.0.0.1:10001"),
+    ).not.toBeInTheDocument();
+
+    const panels = screen.getAllByTestId("reader-control-panel");
+    expect(panels).toHaveLength(2);
+    expect(panels[0]).toHaveTextContent("Reader: 10.0.0.1:10000");
+    expect(panels[0]).toHaveTextContent("Hardware reader ID: 0");
+    expect(panels[0]).toHaveTextContent("Local proxy: 127.0.0.1:9100");
+    expect(panels[1]).toHaveTextContent("Reader: 10.0.0.1:10001");
+    expect(panels[1]).toHaveTextContent("Hardware reader ID: 0");
+    expect(panels[1]).toHaveTextContent("Local proxy: not subscribed");
   });
 
   it("shows configure only for forwarders that support remote config", () => {

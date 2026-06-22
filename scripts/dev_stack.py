@@ -9,9 +9,9 @@ UIs.
 
 It starts, on loopback only:
 
-    emulator  --(TCP)-->  forwarder  --(iroh P2P)-->  receiver (desktop app)
-                                                           |
-                              server  <--(register / catalog / announcer)--+
+    emulator(s) --(TCP)--> forwarder  --(iroh P2P)-->  receiver (desktop app)
+                                                            |
+                               server  <--(register / catalog / announcer)--+
 
 The flow mirrors production (no static allow-list, no preseeded subscription,
 no hand-fed node ids):
@@ -46,6 +46,7 @@ Usage::
     uv run scripts/dev_stack.py --receiver none
     uv run scripts/dev_stack.py --no-build      # skip the build step
     uv run scripts/dev_stack.py --read-delay-ms 500
+    uv run scripts/dev_stack.py --readers 2     # attach two reader emulators
     uv run scripts/dev_stack.py --data-dir /tmp/rt-dev   # reuse a data dir
 
 Stdlib only; uses ``npm``/``cargo`` to build the UIs + service binaries and
@@ -153,6 +154,12 @@ def bin_path(name: str) -> Path:
 # ---------------------------------------------------------------------------
 # Process management
 # ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class ForwarderReaderPorts:
+    emulator_port: int
+    fanout_port: int
+
+
 @dataclass
 class Managed:
     name: str
@@ -279,12 +286,19 @@ def write_forwarder_config(
     auth_token_file: Path,
     journal_path: Path,
     status_port: int,
-    emulator_port: int,
-    fanout_port: int,
+    readers: list[ForwarderReaderPorts],
     p2p_port: int,
     server_url: str,
     server_token_file: Path,
 ) -> None:
+    reader_blocks = "\n".join(
+        f"""[[readers]]
+target = "127.0.0.1:{reader.emulator_port}"
+enabled = true
+local_fallback_port = {reader.fanout_port}
+"""
+        for reader in readers
+    )
     path.write_text(
         f"""schema_version = 1
 display_name = "Dev Forwarder"
@@ -298,11 +312,7 @@ sqlite_path = "{journal_path}"
 [status_http]
 bind = "127.0.0.1:{status_port}"
 
-[[readers]]
-target = "127.0.0.1:{emulator_port}"
-enabled = true
-local_fallback_port = {fanout_port}
-
+{reader_blocks}
 [p2p]
 enabled = true
 secret_key_seed_hex = "{FORWARDER_SEED_HEX}"
@@ -319,7 +329,14 @@ server_token_file = "{server_token_file}"
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
-def main() -> int:
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -340,6 +357,12 @@ def main() -> int:
         type=int,
         default=1000,
         help="delay between emulated reads in ms (default: 1000)",
+    )
+    parser.add_argument(
+        "--readers",
+        type=positive_int,
+        default=1,
+        help="number of reader emulators to attach to the dev forwarder (default: 1)",
     )
     parser.add_argument(
         "--keep",
@@ -366,6 +389,11 @@ def main() -> int:
             "falls back to a free port if taken)"
         ),
     )
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
     args = parser.parse_args()
 
     if not args.no_build:
@@ -380,19 +408,26 @@ def main() -> int:
     # The two web UIs use stable preferred ports (overridable) so their URLs
     # stay consistent across runs; the rest stay ephemeral. Each preferred port
     # falls back to an OS-assigned free port if it happens to be in use.
-    emulator_port = free_tcp_port()
+    reader_ports = [
+        ForwarderReaderPorts(
+            emulator_port=free_tcp_port(),
+            fanout_port=free_tcp_port(),
+        )
+        for _ in range(args.readers)
+    ]
     forwarder_status_port = fixed_or_free_tcp_port(
         args.forwarder_status_port, what="forwarder status/UI"
     )
-    forwarder_fanout_port = free_tcp_port()
     forwarder_p2p_port = free_udp_port()
     server_port = fixed_or_free_tcp_port(args.server_port, what="server UI")
 
     server_url = f"http://127.0.0.1:{server_port}"
     receiver_id = "dev-receiver"
     # The forwarder journals each reader stream under its network address; the
-    # catalog stream id the receiver will discover is therefore this:
-    expected_stream_id = f"127.0.0.1:{emulator_port}"
+    # catalog stream ids the receiver will discover are therefore these:
+    expected_stream_ids = [
+        f"127.0.0.1:{reader.emulator_port}" for reader in reader_ports
+    ]
 
     # --- Files ---
     reads_file = work_dir / "reads.txt"
@@ -412,8 +447,7 @@ def main() -> int:
         auth_token_file=auth_token_file,
         journal_path=journal_path,
         status_port=forwarder_status_port,
-        emulator_port=emulator_port,
-        fanout_port=forwarder_fanout_port,
+        readers=reader_ports,
         p2p_port=forwarder_p2p_port,
         server_url=server_url,
         server_token_file=server_token_file,
@@ -457,23 +491,31 @@ def main() -> int:
         wait_tcp(server_port, timeout=20, what="server")
         thin.assert_alive()
 
-        # --- emulator (loops the reads file forever) ---
-        emulator = stack.add(Managed(
-            name="emulator",
-            argv=[
-                str(bin_path("emulator")),
-                "-p", str(emulator_port),
-                "-f", str(reads_file),
-                "-d", str(args.read_delay_ms),
-                "-t", "raw",
-            ],
-            log_path=work_dir / "emulator.log",
-            env={"RUST_LOG": "info"},
-        ))
-        emulator.start()
-        wait_for_log(emulator.log_path, "listening on", timeout=20,
-                     what="emulator TCP listener")
-        emulator.assert_alive()
+        # --- emulators (each loops the reads file forever) ---
+        for index, reader in enumerate(reader_ports, start=1):
+            log_name = "emulator.log" if index == 1 else f"emulator-{index}.log"
+            emulator = stack.add(
+                Managed(
+                    name=f"emulator-{index}",
+                    argv=[
+                        str(bin_path("emulator")),
+                        "-p", str(reader.emulator_port),
+                        "-f", str(reads_file),
+                        "-d", str(args.read_delay_ms),
+                        "-t", "raw",
+                    ],
+                    log_path=work_dir / log_name,
+                    env={"RUST_LOG": "info"},
+                )
+            )
+            emulator.start()
+            wait_for_log(
+                emulator.log_path,
+                "listening on",
+                timeout=20,
+                what=f"emulator {index} TCP listener",
+            )
+            emulator.assert_alive()
 
         # --- forwarder (P2P, seeded; self-registers + pushes catalog + fetches
         #     the receiver allow-list from the server) ---
@@ -494,8 +536,8 @@ def main() -> int:
             server_url=server_url,
             server_port=server_port,
             forwarder_status_port=forwarder_status_port,
-            emulator_port=emulator_port,
-            expected_stream_id=expected_stream_id,
+            reader_ports=reader_ports,
+            expected_stream_ids=expected_stream_ids,
             receiver_env=receiver_env,
             mode=args.receiver,
         )
@@ -572,8 +614,15 @@ def print_summary(**kw) -> None:
     print(f"  SBC setup:       {thin}/sbc-setup")
     print(f"  Server announcer:{thin}/announcer")
     print(f"  Forwarder UI:       http://127.0.0.1:{kw['forwarder_status_port']}/   (status API at /api/v1/status)")
-    print(f"  Emulator (reads):   127.0.0.1:{kw['emulator_port']}   (log: {kw['work_dir']}/emulator.log)")
-    print(f"  Expected stream id: {kw['expected_stream_id']}   (appears once the forwarder is approved)")
+    for index, reader in enumerate(kw["reader_ports"], start=1):
+        log_name = "emulator.log" if index == 1 else f"emulator-{index}.log"
+        print(
+            f"  Emulator {index} (reads): 127.0.0.1:{reader.emulator_port}   "
+            f"(log: {kw['work_dir']}/{log_name})"
+        )
+    print("  Expected stream ids (appear once the forwarder is approved):")
+    for stream_id in kw["expected_stream_ids"]:
+        print(f"    {stream_id}")
     print(f"  Receiver data dir:  {kw['receiver_data_dir']}")
     print(f"  Logs / work dir:    {kw['work_dir']}")
     print("-" * 72)

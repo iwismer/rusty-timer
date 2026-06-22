@@ -224,8 +224,44 @@ fn download_state_from_str(state: &str) -> rt_domain::DownloadState {
     }
 }
 
-fn sorted_reader_statuses(live_status: &ForwarderLiveStatus) -> Vec<ReaderLiveStatus> {
+fn subscription_local_ports(
+    subscriptions: &[StreamSubscription],
+) -> HashMap<(String, String), Option<u16>> {
+    subscriptions
+        .iter()
+        .map(|subscription| {
+            let display_reader_ip = subscription.reader_ip.clone().or_else(|| {
+                crate::ports::reader_addr_if_port_mappable(&subscription.stream_id)
+                    .map(std::borrow::ToOwned::to_owned)
+            });
+            let local_port = subscription.local_port_override.or_else(|| {
+                display_reader_ip
+                    .as_deref()
+                    .and_then(crate::ports::default_port)
+            });
+            (
+                (
+                    subscription.forwarder_endpoint_id.clone(),
+                    subscription.stream_id.clone(),
+                ),
+                local_port,
+            )
+        })
+        .collect()
+}
+
+fn sorted_reader_statuses(
+    live_status: &ForwarderLiveStatus,
+    local_ports: &HashMap<(String, String), Option<u16>>,
+    endpoint_id: &str,
+) -> Vec<ReaderLiveStatus> {
     let mut readers = live_status.readers.values().cloned().collect::<Vec<_>>();
+    for reader in &mut readers {
+        reader.local_port = local_ports
+            .get(&(endpoint_id.to_owned(), reader.stream_id.clone()))
+            .copied()
+            .flatten();
+    }
     readers.sort_by(|a, b| a.stream_id.cmp(&b.stream_id));
     readers
 }
@@ -551,6 +587,7 @@ impl AppState {
             model: None,
             reader_info: None,
             download_progress: None,
+            local_port: None,
         };
         let mut live_statuses = self.forwarder_live_status.lock().unwrap();
         let live_status = live_statuses.entry(endpoint_id.to_owned()).or_default();
@@ -563,12 +600,14 @@ impl AppState {
                 let model = existing.model.clone();
                 let reader_info = existing.reader_info.clone();
                 let download_progress = existing.download_progress.clone();
+                let local_port = existing.local_port;
                 *existing = ReaderLiveStatus {
                     hardware_reader_id,
                     firmware_version,
                     model,
                     reader_info,
                     download_progress,
+                    local_port,
                     ..reader.clone()
                 };
             })
@@ -623,6 +662,7 @@ impl AppState {
                 model,
                 reader_info,
                 download_progress: None,
+                local_port: None,
             });
     }
 
@@ -672,6 +712,7 @@ impl AppState {
                 model: None,
                 reader_info: None,
                 download_progress: Some(progress_update),
+                local_port: None,
             });
     }
 
@@ -927,6 +968,7 @@ impl AppState {
         endpoints.extend(reader_control_endpoints.iter().cloned());
 
         let mut subscribed_counts: HashMap<String, usize> = HashMap::new();
+        let local_ports = subscription_local_ports(subscriptions);
         for subscription in subscriptions {
             endpoints.insert(subscription.forwarder_endpoint_id.clone());
             *subscribed_counts
@@ -955,7 +997,7 @@ impl AppState {
                     subscribed_count: subscribed_counts.get(&endpoint_id).copied().unwrap_or(0),
                     available_count: discovered_forwarder
                         .map_or(0, |forwarder| forwarder.streams.len()),
-                    readers: sorted_reader_statuses(&live_status),
+                    readers: sorted_reader_statuses(&live_status, &local_ports, &endpoint_id),
                     ups: live_status.ups,
                 }
             })
@@ -1429,6 +1471,7 @@ pub struct ReaderLiveStatus {
     pub model: Option<String>,
     pub reader_info: Option<rt_domain::ReaderInfo>,
     pub download_progress: Option<rt_domain::DownloadProgressUpdate>,
+    pub local_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1972,6 +2015,7 @@ pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
     endpoints.extend(state.forwarder_config_endpoints());
     endpoints.extend(state.forwarder_reader_control_endpoints());
     let mut subscribed_counts: HashMap<String, usize> = HashMap::new();
+    let local_ports = subscription_local_ports(&subscriptions);
     for subscription in &subscriptions {
         endpoints.insert(subscription.forwarder_endpoint_id.clone());
         *subscribed_counts
@@ -1991,7 +2035,7 @@ pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
             pending: snapshot.pending,
             subscribed_count: subscribed_counts.get(&endpoint_id).copied().unwrap_or(0),
             available_count: discovered_forwarder.map_or(0, |forwarder| forwarder.streams.len()),
-            readers: sorted_reader_statuses(&live_status),
+            readers: sorted_reader_statuses(&live_status, &local_ports, &endpoint_id),
             ups: live_status.ups,
             restart_needed: None,
             remote_config_available: state.forwarder_remote_config_available(&endpoint_id),
@@ -3290,7 +3334,16 @@ mod tests {
 
     #[tokio::test]
     async fn get_connections_reports_forwarder_reader_and_ups_live_status() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[crate::db::StreamSubscription {
+            forwarder_endpoint_id: "endpoint-a".to_owned(),
+            stream_id: "stream-a".to_owned(),
+            local_port_override: Some(9100),
+            event_type: crate::db::EventType::Finish,
+            forwarder_id: None,
+            reader_ip: None,
+        }])
+        .unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
         state.discovered_forwarders.write().await.insert(
             "endpoint-a".to_owned(),
@@ -3406,6 +3459,7 @@ mod tests {
         assert!(forwarder.readers[0].connected);
         assert_eq!(forwarder.readers[0].state, "online");
         assert_eq!(forwarder.readers[0].last_read_unix_ms, Some(5678));
+        assert_eq!(forwarder.readers[0].local_port, Some(9100));
         assert_eq!(
             forwarder.readers[0].hardware_reader_id.as_deref(),
             Some("reader-42")
@@ -3432,6 +3486,7 @@ mod tests {
         assert_eq!(forwarder.readers[1].stream_id, "stream-b");
         assert!(forwarder.readers[1].connected);
         assert_eq!(forwarder.readers[1].last_read_unix_ms, Some(1234));
+        assert_eq!(forwarder.readers[1].local_port, None);
         let ups = forwarder
             .ups
             .as_ref()

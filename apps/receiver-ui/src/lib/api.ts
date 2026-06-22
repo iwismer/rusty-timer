@@ -169,6 +169,7 @@ export interface ReaderLiveStatus {
   model: string | null;
   reader_info?: ReaderInfo | null;
   download_progress?: DownloadProgressUpdate | null;
+  local_port?: number | null;
 }
 
 export interface UpsStatusPayload {

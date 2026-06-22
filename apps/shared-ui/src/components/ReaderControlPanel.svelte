@@ -35,8 +35,11 @@
 
   let {
     readerIp,
+    readerDetail = undefined,
     readerInfo = null,
     readerState = "disconnected",
+    readerStateLabel = undefined,
+    localProxyPort = null,
     downloadProgress = null,
     disabled = false,
     readerClockDisplay = undefined,
@@ -55,8 +58,13 @@
     onReconnect,
   }: {
     readerIp: string;
+    /** Secondary identity, usually the stream id, when the display label may not be unique. */
+    readerDetail?: string;
     readerInfo: ReaderInfoData | null;
     readerState: ReaderConnectionState;
+    /** Raw state label from the owning app, e.g. "online" or "offline". */
+    readerStateLabel?: string;
+    localProxyPort?: number | null;
     downloadProgress: {
       state: DownloadStateType;
       reads_received: number;
@@ -238,7 +246,38 @@
   }
 </script>
 
-<div class="mt-4 pt-4 border-t border-border">
+<div
+  class="mt-4 pt-4 border-t border-border"
+  data-testid="reader-control-panel"
+>
+  <div class="mb-3 flex flex-wrap items-start justify-between gap-2">
+    <div class="min-w-0">
+      <p class="truncate text-sm font-semibold text-text-primary">
+        Reader: {readerIp}
+      </p>
+      {#if readerInfo?.hardware?.reader_id}
+        <p class="mt-0.5 truncate font-mono text-xs text-text-muted">
+          Hardware reader ID: {readerInfo.hardware.reader_id}
+        </p>
+      {/if}
+      {#if readerDetail}
+        <p class="mt-0.5 truncate font-mono text-xs text-text-muted">
+          Stream: {readerDetail}
+        </p>
+      {/if}
+      <p class="mt-0.5 truncate font-mono text-xs text-text-muted">
+        Local proxy: {localProxyPort == null
+          ? "not subscribed"
+          : `127.0.0.1:${localProxyPort}`}
+      </p>
+    </div>
+    <span
+      class="rounded-full border border-border bg-surface-2 px-2 py-0.5 text-xs text-text-muted"
+    >
+      {readerStateLabel ?? readerState}
+    </span>
+  </div>
+
   {#if !readerInfo && readerState === "disconnected"}
     <p class="mb-4 text-sm text-text-muted">No reader data available</p>
   {/if}

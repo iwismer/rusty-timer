@@ -149,12 +149,14 @@
     return !forwarder.pending && forwarder.state === "unavailable";
   }
 
-  function readerDotClass(reader: ReaderLiveStatus): string {
-    return reader.connected ? "bg-status-ok" : "bg-status-err";
+  function readerLabel(reader: ReaderLiveStatus): string {
+    return reader.stream_id;
   }
 
-  function readerLabel(reader: ReaderLiveStatus): string {
-    return reader.hardware_reader_id ?? reader.stream_id;
+  function readerForwarderStateLabel(reader: ReaderLiveStatus): string {
+    if (reader.connected) return "connected to forwarder";
+    if (reader.state === "connecting") return "connecting to forwarder";
+    return "disconnected from forwarder";
   }
 
   function readerConnectionState(
@@ -293,34 +295,17 @@
                 <p class="mt-0.5 truncate font-mono text-xs text-text-muted">
                   {forwarder.endpoint_id}
                 </p>
-                {#if forwarder.readers.length > 0 || forwarder.ups}
+                {#if forwarder.ups}
                   <div class="mt-2 flex flex-wrap items-center gap-2">
-                    {#each forwarder.readers as reader (reader.stream_id)}
-                      <span
-                        data-testid={`forwarder-reader-${forwarder.endpoint_id}-${reader.stream_id}`}
-                        class="inline-flex max-w-[220px] items-center gap-1 rounded-full border border-border bg-surface-2 px-2 py-0.5 text-xs text-text-muted"
-                        title={reader.stream_id}
-                      >
-                        <span
-                          class="h-1.5 w-1.5 shrink-0 rounded-full {readerDotClass(
-                            reader,
-                          )}"
-                        ></span>
-                        <span class="truncate">{readerLabel(reader)}</span>
-                        <span class="text-text-muted">{reader.state}</span>
-                      </span>
-                    {/each}
-                    {#if forwarder.ups}
-                      <span
-                        data-testid={`forwarder-ups-${forwarder.endpoint_id}`}
-                        class="inline-flex items-center rounded-full border border-border bg-surface-2 px-2 py-0.5 text-xs"
-                      >
-                        <BatteryIndicator
-                          percent={forwarder.ups.battery_percent}
-                          charging={!forwarder.ups.on_battery}
-                        />
-                      </span>
-                    {/if}
+                    <span
+                      data-testid={`forwarder-ups-${forwarder.endpoint_id}`}
+                      class="inline-flex items-center rounded-full border border-border bg-surface-2 px-2 py-0.5 text-xs"
+                    >
+                      <BatteryIndicator
+                        percent={forwarder.ups.battery_percent}
+                        charging={!forwarder.ups.on_battery}
+                      />
+                    </span>
                   </div>
                 {/if}
 
@@ -402,6 +387,8 @@
                         readerIp={readerLabel(reader)}
                         readerInfo={readerInfoForPanel(reader)}
                         readerState={readerConnectionState(reader)}
+                        readerStateLabel={readerForwarderStateLabel(reader)}
+                        localProxyPort={reader.local_port ?? null}
                         downloadProgress={downloadProgressForPanel(reader)}
                         disabled={busyByEndpoint[forwarder.endpoint_id]}
                         helpContext="forwarder"
