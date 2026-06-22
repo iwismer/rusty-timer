@@ -131,7 +131,13 @@
 
   function streamPrimaryLabel(stream: StreamEntry): string {
     if (!stream.subscribed) return stream.stream_id;
-    return stream.display_alias ?? stream.forwarder_id ?? stream.stream_id;
+    return stream.reader_ip ?? stream.stream_id;
+  }
+
+  function streamForwarderLabel(
+    stream: StreamEntry,
+  ): string | null | undefined {
+    return stream.display_alias?.trim() || stream.forwarder_id;
   }
 
   function streamSecondaryLabel(stream: StreamEntry): string | null {
@@ -332,7 +338,7 @@
                       <div>
                         <span class="text-text-muted">Forwarder:</span>
                         <span class="font-mono text-text-primary ml-1"
-                          >{formatOptional(stream.forwarder_id)}</span
+                          >{formatOptional(streamForwarderLabel(stream))}</span
                         >
                       </div>
                       {#if stream.stream_epoch != null}

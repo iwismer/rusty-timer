@@ -91,6 +91,36 @@ describe("StreamsTab", () => {
     ]);
   });
 
+  it("labels subscribed stream rows by reader IP and expanded forwarder details by display name", async () => {
+    store.streams = {
+      streams: [
+        {
+          forwarder_endpoint_id: "endpoint-1",
+          stream_id: "stream-10.0.0.1:10000",
+          forwarder_id: "forwarder-internal-id",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 10100,
+          display_alias: "Start Line Forwarder",
+          reads_total: 15,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    };
+
+    render(StreamsTab);
+
+    const row = screen.getByText("10.0.0.1:10000").closest("tr")!;
+    expect(row).toBeInTheDocument();
+
+    await fireEvent.click(row);
+
+    const forwarderDetail = screen.getByText("Forwarder:").parentElement!;
+    expect(forwarderDetail).toHaveTextContent("Start Line Forwarder");
+    expect(forwarderDetail).not.toHaveTextContent("forwarder-internal-id");
+  });
+
   it("shows metrics in expanded row when available", async () => {
     const key = streamKey("fwd-1", "10.0.0.1:10000");
     store.streamMetrics = new Map([
@@ -116,7 +146,7 @@ describe("StreamsTab", () => {
     render(StreamsTab);
 
     // Click to expand the row
-    const row = screen.getByText("Finish").closest("tr")!;
+    const row = screen.getByText("10.0.0.1:10000").closest("tr")!;
     await fireEvent.click(row);
 
     // Verify lifetime metrics
@@ -142,7 +172,7 @@ describe("StreamsTab", () => {
 
     render(StreamsTab);
 
-    const row = screen.getByText("Finish").closest("tr")!;
+    const row = screen.getByText("10.0.0.1:10000").closest("tr")!;
     await fireEvent.click(row);
 
     expect(screen.getByText("Metrics unavailable")).toBeInTheDocument();
@@ -262,8 +292,12 @@ describe("StreamsTab", () => {
 
     render(StreamsTab);
 
-    const alphaRow = screen.getByText("Alpha").closest("tr")!;
-    const betaRow = screen.getByText("Beta").closest("tr")!;
+    const alphaRow = screen
+      .getByText("11111111-1111-1111-1111-111111111111")
+      .closest("tr")!;
+    const betaRow = screen
+      .getByText("22222222-2222-2222-2222-222222222222")
+      .closest("tr")!;
     expect(alphaRow).not.toBe(betaRow);
 
     // Expanding Alpha exposes only Alpha's canonical-keyed controls.
@@ -298,7 +332,9 @@ describe("StreamsTab", () => {
 
     render(StreamsTab);
 
-    await fireEvent.click(screen.getByRole("button", { name: /finish/i }));
+    await fireEvent.click(
+      screen.getByRole("button", { name: /10\.0\.0\.1:10000/i }),
+    );
 
     const selector = screen.getByTestId(
       "dbf-event-type-fwd-1/stream-10.0.0.1:10000",

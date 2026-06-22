@@ -133,7 +133,7 @@ describe("receiver layout SSE updates", () => {
 
     expect(await screen.findByText("0 reads")).toBeInTheDocument();
     // Wait for loadAll to fully complete (streams table populated)
-    await screen.findByText("fwd-1");
+    await screen.findByText("10.0.0.1:10000");
 
     const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
     expect(callbacks).toBeTruthy();
@@ -154,7 +154,7 @@ describe("receiver layout SSE updates", () => {
   it("does not revive the removed aggregate forwarder list from metrics events", async () => {
     render(Layout);
 
-    await screen.findByText("fwd-1");
+    await screen.findByText("10.0.0.1:10000");
 
     const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
     expect(callbacks).toBeTruthy();
@@ -172,7 +172,7 @@ describe("receiver layout SSE updates", () => {
   it("resync refreshes local stream data without loading aggregate forwarders", async () => {
     render(Layout);
 
-    await screen.findByText("fwd-1");
+    await screen.findByText("10.0.0.1:10000");
 
     const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
     expect(callbacks).toBeTruthy();
