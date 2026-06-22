@@ -544,12 +544,11 @@ pub fn revoke_enrollment_token(
     get_enrollment_token(conn, token_id)
 }
 
-/// Register (or re-register) a device under the TOFU model.
-///
-/// A brand-new endpoint is recorded as `pending`. Re-registration of an
-/// existing endpoint refreshes its kind and hashed token while preserving any
-/// existing approval state (idempotent for an already-approved device).
-pub fn register_device(
+/// Test-only: seed a device row with a hashed token (no `token_id`, so it does
+/// not authenticate via [`authenticate_device`]). Tests use it to populate the
+/// registry; production registration goes through [`register_device_with_voucher`].
+#[cfg(test)]
+pub(crate) fn register_device(
     conn: &Connection,
     endpoint_id: &str,
     device_kind: DeviceKind,
@@ -578,10 +577,20 @@ pub fn register_device(
 ///
 /// The token secret is returned exactly once; the server persists only its
 /// salted hash and the lookup `token_id`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MintedRegistration {
     pub record: DeviceRecord,
     pub device_token: String,
+}
+
+// Manual `Debug` so the minted secret is never leaked through formatting.
+impl std::fmt::Debug for MintedRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MintedRegistration")
+            .field("record", &self.record)
+            .field("device_token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Mint (rotate) the per-device token for an existing `devices` row, setting its
@@ -602,6 +611,10 @@ fn mint_device_token_into(tx: &Connection, endpoint_id: &str) -> rusqlite::Resul
              WHERE endpoint_id = ?1",
             params![endpoint_id, token_id, token_hash, now],
         ) {
+            // 0 rows means the device row does not exist; callers always create
+            // it first, so treat that as an error rather than minting a token
+            // for a non-existent device.
+            Ok(0) => return Err(rusqlite::Error::QueryReturnedNoRows),
             Ok(_) => return Ok(format_device_token(&token_id, &secret)),
             Err(err @ rusqlite::Error::SqliteFailure(failure, _))
                 if failure.code == rusqlite::ErrorCode::ConstraintViolation =>
@@ -614,14 +627,11 @@ fn mint_device_token_into(tx: &Connection, endpoint_id: &str) -> rusqlite::Resul
     Err(last_err.unwrap_or(rusqlite::Error::QueryReturnedNoRows))
 }
 
-/// Register a device under the provisioning-token path **and mint** its bearer
-/// token (Phases 1–3 only).
-///
-/// A brand-new endpoint is recorded `pending`; an existing endpoint keeps its
-/// approval state (idempotent for an already-approved device). Either way a
-/// fresh token is minted and returned so the client can persist a real
-/// per-device credential.
-pub fn register_device_minted(
+/// Test-only: register-or-keep a device and mint its bearer token, returning the
+/// raw token. Tests use it to obtain a working device token; production minting
+/// happens via [`register_device_with_voucher`] on the `/register` path.
+#[cfg(test)]
+pub(crate) fn register_device_minted(
     conn: &Connection,
     endpoint_id: &str,
     device_kind: DeviceKind,
@@ -1427,8 +1437,7 @@ mod tests {
             "rx-token",
         )
         .unwrap();
-        register_device_with_enrollment_token(&conn, "ep-rx", DeviceKind::Receiver, "rx-token")
-            .unwrap();
+        register_device_with_voucher(&conn, "ep-rx", DeviceKind::Receiver, "rx-token").unwrap();
 
         // Forwarder with an admin token name AND a self-pushed catalog name:
         // the admin-assigned token name wins.
@@ -1440,8 +1449,7 @@ mod tests {
             "fwd-token",
         )
         .unwrap();
-        register_device_with_enrollment_token(&conn, "ep-fwd", DeviceKind::Forwarder, "fwd-token")
-            .unwrap();
+        register_device_with_voucher(&conn, "ep-fwd", DeviceKind::Forwarder, "fwd-token").unwrap();
         upsert_forwarder_catalog(
             &conn,
             "ep-fwd",

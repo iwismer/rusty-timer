@@ -34,9 +34,10 @@ pub struct ForwarderCatalogResponse {
 
 /// `POST /forwarder/catalog` — M2M forwarder identity and stream catalog push.
 ///
-/// Accepts the shared provisioning token for legacy deployments and enrolled
-/// forwarder-scoped device tokens for per-device authorization. Receiver tokens
-/// must not authorize this endpoint.
+/// Authorized only by the forwarder's own minted device token, bound to the
+/// `endpoint_id` in the request body (any approval state, so a pending forwarder
+/// can publish its catalog for the admin to review). Receiver tokens must not
+/// authorize this endpoint.
 pub async fn push_catalog(
     State(state): State<AppState>,
     headers: HeaderMap,

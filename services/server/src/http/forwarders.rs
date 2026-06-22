@@ -18,9 +18,8 @@ pub struct ForwardersResponse {
 
 /// `GET /forwarders` — M2M discovery of approved forwarders for receivers.
 ///
-/// Authorized by the provisioning bearer token (same posture as
-/// `GET /allowlist/receivers`). Returns only approved (`active`) forwarder
-/// devices joined with their pushed stream catalog.
+/// Authorized by an active receiver's minted device token. Returns only
+/// approved (`active`) forwarder devices joined with their pushed stream catalog.
 pub async fn list_forwarders(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(status) = authorize_active_device_kind(&state, &headers, DeviceKind::Receiver) {
         return status.into_response();

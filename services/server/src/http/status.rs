@@ -18,12 +18,14 @@
 //!   fail-closed guard, the node ignores [`ADMIN_HEADER`] entirely unless the
 //!   operator sets `SERVER_TRUSTED_PROXY` at startup to assert that such a
 //!   proxy is present; otherwise every `/admin/*` request is denied.
-//! - **M2M / device routes**: `POST /register`, `POST /forwarder/catalog`, and
-//!   `GET /allowlist/receivers` accept the shared provisioning bearer token for
-//!   legacy deployments. Enrolled forwarders may also use their non-revoked
-//!   forwarder token for idempotent registration, catalog pushes, and receiver
-//!   allow-list fetches. `POST /announcer/rows` and `POST /announcer/takeover`
-//!   still use the provisioning bearer token. These do not depend on the proxy.
+//! - **M2M / device routes**: every device route authenticates a server-minted
+//!   per-device bearer token (`rtk_<token_id>_<secret>`) and asserts kind +
+//!   approval per endpoint: `GET /allowlist/receivers` requires an active
+//!   forwarder; `GET /forwarders`, `POST /announcer/rows`, and `POST
+//!   /announcer/takeover` require an active receiver; `POST /forwarder/catalog`
+//!   requires the matching forwarder (any approval). `POST /register` accepts a
+//!   single-use enrollment voucher (admin-issued) or the device's own token.
+//!   There is no shared provisioning secret. These do not depend on the proxy.
 //!
 //! See `docs/network-architecture.md` for the deployment topology.
 

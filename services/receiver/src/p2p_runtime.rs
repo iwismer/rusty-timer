@@ -509,6 +509,34 @@ async fn run_reconcile_loop(
             && let Some(thin) = config.server.clone()
         {
             let receiver_id = state.receiver_id.read().await.clone();
+            // If the startup overlay could not mint a token (e.g. the server was
+            // unreachable at boot), `config.server` still holds the bootstrap
+            // voucher, which `takeover`/discovery reject. Re-attempt the
+            // mint+persist here each pass until it succeeds, then adopt the
+            // minted token and rebind discovery so it stops 401-ing. This is a
+            // cheap no-op once a token is held (the comparison fails and the
+            // persisted token short-circuits resolution).
+            let thin = if config.server == server_baseline {
+                match resolve_receiver_device_token(&state, &thin, &endpoint_id).await {
+                    Some(minted) => {
+                        let minted_server = ServerClientConfig {
+                            url: thin.url.clone(),
+                            token: minted,
+                        };
+                        config.server = Some(minted_server.clone());
+                        if let Some(task) = discovery_task.take() {
+                            task.abort();
+                            let _ = task.await;
+                        }
+                        discovery_task =
+                            Some(spawn_discovery(minted_server.clone(), shutdown_rx.clone()));
+                        minted_server
+                    }
+                    None => thin,
+                }
+            } else {
+                thin
+            };
             tokio::select! {
                 biased;
                 changed = shutdown_rx.changed() => {

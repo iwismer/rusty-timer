@@ -1,4 +1,5 @@
-//! `POST /register` — TOFU device self-registration.
+//! `POST /register` — bootstrap/recovery device registration (enrollment
+//! voucher or the device's own minted token; mints the per-device token).
 
 use axum::{
     Json,
