@@ -84,8 +84,11 @@ RECEIVER_SEED_HEX = "ab" * 32
 # Production uses per-device tokens; one shared token is fine for local dev.
 PROVISIONING_TOKEN = "dev-provisioning-token"
 
-# Reads file shape (looped forever by the emulator).
+# Reads file shape (looped forever by the emulator). The generated chip IDs
+# intentionally match the first rows of test_assets/bibchip/large.txt so the
+# bundled large.ppl + large.txt imports resolve dev-stack reads to participants.
 NUM_FRAMES = 25
+DEV_CHIP_BASE_HEX = "058003700000"
 
 # Stable preferred ports for the two web UIs so their URLs are consistent across
 # runs. Overridable via CLI flags; each falls back to an OS-assigned free port
@@ -98,7 +101,7 @@ DEFAULT_SERVER_PORT = 8675
 # Deterministic IPICO frame construction (mirrors ipico_core::read checksum).
 # ---------------------------------------------------------------------------
 def build_frame(chip_index: int) -> str:
-    tag = format(chip_index, "012x")
+    tag = format(int(DEV_CHIP_BASE_HEX, 16) + chip_index, "012x")
     core = "aa" + "40" + tag + "0a2a" + "01" + "12" + "30" + "18" + "45" + "59" + "00"
     checksum = sum(ord(c) for c in core[2:34]) % 256
     return core + format(checksum, "02x")
