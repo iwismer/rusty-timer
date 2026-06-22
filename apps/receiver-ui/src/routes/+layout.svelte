@@ -13,7 +13,6 @@
   import StreamsTab from "$lib/components/StreamsTab.svelte";
   import ConfigTab from "$lib/components/ConfigTab.svelte";
   import AnnouncerTab from "$lib/components/AnnouncerTab.svelte";
-  import ModeTab from "$lib/components/ModeTab.svelte";
   import LogsTab from "$lib/components/LogsTab.svelte";
   import AdminTab from "$lib/components/AdminTab.svelte";
   import "@rusty-timer/shared-ui/styles/tokens.css";
@@ -65,8 +64,6 @@
       <ConfigTab />
     {:else if store.activeTab === "announcer"}
       <AnnouncerTab />
-    {:else if store.activeTab === "mode"}
-      <ModeTab />
     {:else if store.activeTab === "logs"}
       <LogsTab />
     {:else if store.activeTab === "admin"}

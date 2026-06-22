@@ -4,7 +4,6 @@
     store,
     getConfigDirty,
     saveProfile,
-    reconnectServer,
     saveDbfConfig,
     clearDbfFile,
     setEditServerUrl,
@@ -12,6 +11,7 @@
     setEditReceiverId,
   } from "$lib/store.svelte";
   import { inputClass, btnPrimary, btnSecondary } from "$lib/ui-classes";
+  import ReceiverModeConfig from "$lib/components/ReceiverModeConfig.svelte";
 
   function getDbfDirty(): boolean {
     return (
@@ -84,28 +84,7 @@
     </button>
   </div>
 
-  <section class="mt-6 rounded-lg border border-border bg-surface-1 p-4">
-    <div class="flex items-center justify-between gap-4">
-      <div>
-        <p class="text-xs font-medium text-text-muted">Connection</p>
-        <p class="mt-1 text-xs text-text-muted">
-          Connection status is shown in the Connections tab.
-        </p>
-      </div>
-
-      <button
-        data-testid="reconnect-server-btn"
-        class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
-        onclick={() => void reconnectServer()}
-        disabled={getConfigDirty() || store.saving}
-        title={getConfigDirty()
-          ? "Save server configuration before reconnecting"
-          : "Retry server discovery and P2P subscriptions"}
-      >
-        Reconnect
-      </button>
-    </div>
-  </section>
+  <ReceiverModeConfig />
 
   <section class="mt-6 rounded-lg border border-border bg-surface-1 p-4">
     <p class="text-xs font-medium text-text-muted mb-3">Race Director Output</p>

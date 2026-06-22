@@ -34,12 +34,17 @@ const mockState = vi.hoisted(() => {
       dbfPath: "C:\\winrace\\Files\\IPICO.DBF",
       dbfSaving: false,
       dbfClearing: false,
+      modeDraft: "live",
+      modeBusy: false,
     },
     getConfigDirty: vi.fn(() => false),
+    getModeDirty: vi.fn(() => false),
     saveProfile: vi.fn(),
-    reconnectServer: vi.fn(),
     saveDbfConfig: vi.fn(),
     clearDbfFile: vi.fn(),
+    applyMode: vi.fn(),
+    markModeEdited: vi.fn(),
+    setModeDraft: vi.fn(),
     setEditReceiverId: vi.fn(),
     setEditServerUrl: vi.fn(),
     setEditToken: vi.fn(),
@@ -49,10 +54,13 @@ const mockState = vi.hoisted(() => {
 vi.mock("$lib/store.svelte", () => ({
   store: mockState.store,
   getConfigDirty: mockState.getConfigDirty,
+  getModeDirty: mockState.getModeDirty,
   saveProfile: mockState.saveProfile,
-  reconnectServer: mockState.reconnectServer,
   saveDbfConfig: mockState.saveDbfConfig,
   clearDbfFile: mockState.clearDbfFile,
+  applyMode: mockState.applyMode,
+  markModeEdited: mockState.markModeEdited,
+  setModeDraft: mockState.setModeDraft,
   setEditReceiverId: mockState.setEditReceiverId,
   setEditServerUrl: mockState.setEditServerUrl,
   setEditToken: mockState.setEditToken,
@@ -80,7 +88,10 @@ describe("ConfigTab", () => {
     mockState.store.dbfPath = "C:\\winrace\\Files\\IPICO.DBF";
     mockState.store.dbfSaving = false;
     mockState.store.dbfClearing = false;
+    mockState.store.modeDraft = "live";
+    mockState.store.modeBusy = false;
     mockState.getConfigDirty.mockReturnValue(false);
+    mockState.getModeDirty.mockReturnValue(false);
   });
 
   it("renders server config inputs without connection status", () => {
@@ -139,20 +150,13 @@ describe("ConfigTab", () => {
     expect(screen.getByTestId("save-config-btn")).toBeEnabled();
   });
 
-  it("offers a manual server reconnect action", async () => {
+  it("omits server connection controls because status lives in Connections", () => {
     render(ConfigTab);
 
-    await fireEvent.click(screen.getByTestId("reconnect-server-btn"));
-
-    expect(mockState.reconnectServer).toHaveBeenCalledOnce();
-  });
-
-  it("keeps reconnect disabled until dirty server config is saved", () => {
-    mockState.getConfigDirty.mockReturnValue(true);
-
-    render(ConfigTab);
-
-    expect(screen.getByTestId("reconnect-server-btn")).toBeDisabled();
+    expect(screen.queryByText("Connection")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("reconnect-server-btn"),
+    ).not.toBeInTheDocument();
   });
 
   it("renders Race Director output config controls", () => {
@@ -164,5 +168,31 @@ describe("ConfigTab", () => {
     );
     expect(screen.getByTestId("save-dbf-btn")).toBeDisabled();
     expect(screen.getByTestId("clear-dbf-btn")).toBeEnabled();
+  });
+
+  it("renders receiver mode controls with a separate apply button", () => {
+    mockState.getModeDirty.mockReturnValue(true);
+
+    render(ConfigTab);
+
+    expect(screen.getByTestId("mode-select")).toHaveValue("live");
+    expect(screen.getByTestId("save-mode-btn")).toBeEnabled();
+    expect(screen.getByTestId("save-config-btn")).toBeDisabled();
+  });
+
+  it("tracks receiver mode edits separately from profile config", async () => {
+    mockState.getModeDirty.mockReturnValue(true);
+
+    render(ConfigTab);
+
+    await fireEvent.change(screen.getByTestId("mode-select"), {
+      target: { value: "targeted_replay" },
+    });
+    await fireEvent.click(screen.getByTestId("save-mode-btn"));
+
+    expect(mockState.setModeDraft).toHaveBeenCalledWith("targeted_replay");
+    expect(mockState.markModeEdited).toHaveBeenCalledOnce();
+    expect(mockState.applyMode).toHaveBeenCalledOnce();
+    expect(mockState.saveProfile).not.toHaveBeenCalled();
   });
 });

@@ -9,6 +9,7 @@ describe("TabBar", () => {
 
     expect(screen.queryByRole("tab", { name: "Forwarders" })).toBeNull();
     expect(screen.queryByRole("tab", { name: "Races" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Mode" })).toBeNull();
   });
 
   it("exposes the receiver Announcer tab (publishing + participant import)", () => {
