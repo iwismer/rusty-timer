@@ -208,9 +208,11 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<HeadlessConfig
 
 /// Assemble the optional P2P config from parsed flags. P2P is enabled only when
 /// at least one P2P flag is present; the forwarder node id and direct address
-/// must be supplied together (both or neither); the server URL and token must
-/// be supplied together; and at least one of an explicit forwarder or a server
-/// must be configured.
+/// must be supplied together (both or neither); and the server URL and token
+/// must be supplied together. A config with only identity/transport/reconcile
+/// flags (no forwarder, no server) is valid: the stored profile then supplies
+/// the server, which `HeadlessHost::start` resolves with the CLI flags as the
+/// override.
 ///
 /// Identity: a seed and an explicit key path are mutually exclusive; when
 /// neither is given, a persistent key at `default_key_path` is used. A seed
@@ -322,7 +324,7 @@ fn usage() -> String {
     concat!(
         "usage: receiver-headless --data-dir <path> [--bind-addr <addr:port>] [--receiver-id <id>]\n",
         "\n",
-        "P2P (configure an explicit forwarder, a server, or both):\n",
+        "P2P (all optional; the stored profile supplies the server when omitted):\n",
         "  [--p2p-secret-key-seed-hex <64-hex>]  (dev/loopback identity; default: persistent key in data dir)\n",
         "  [--p2p-secret-key-path <path>]  (persistent identity; mutually exclusive with seed)\n",
         "  [--p2p-relay-disabled] [--p2p-discovery-disabled]  (transport; forced on for a seed)\n",

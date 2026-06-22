@@ -254,6 +254,12 @@ pub struct AppState {
     /// Keepalive receiver so the watch channel is not dropped when the P2P
     /// runtime (the only subscriber) is not yet started.
     _server_config_keepalive: watch::Receiver<u64>,
+    /// The raw server URL+token override, set once at startup: env vars for the
+    /// desktop app, CLI flags for headless. Source of truth for "is an override
+    /// active" and for resolving the effective server in control handlers, so
+    /// both desktop and headless report/persist the same server the P2P runtime
+    /// targets. `(None, None)` when there is no override source.
+    server_override: tokio::sync::RwLock<(Option<String>, Option<String>)>,
 }
 
 impl AppState {
@@ -312,8 +318,20 @@ impl AppState {
             _dbf_config_keepalive,
             server_config_version,
             _server_config_keepalive,
+            server_override: tokio::sync::RwLock::new((None, None)),
         });
         (state, shutdown_rx)
+    }
+
+    /// Record the server URL+token override (env for desktop, CLI for headless).
+    /// Called once at startup before control handlers serve.
+    pub async fn set_server_override(&self, override_: (Option<String>, Option<String>)) {
+        *self.server_override.write().await = override_;
+    }
+
+    /// The server URL+token override captured at startup.
+    pub async fn server_override(&self) -> (Option<String>, Option<String>) {
+        self.server_override.read().await.clone()
     }
 
     /// Subscribe to connection state changes.
@@ -1382,13 +1400,12 @@ fn server_fields_to_persist(
     }
 }
 
-/// Whether a server URL+token environment override is active (both set and
-/// non-empty). When active, the stored profile server fields are read-only in
-/// the UI and must not be overwritten by a profile save.
-fn server_env_override_active() -> bool {
-    let non_empty = |k: &str| std::env::var(k).ok().is_some_and(|v| !v.trim().is_empty());
-    non_empty(crate::p2p_runtime::ENV_P2P_SERVER_URL)
-        && non_empty(crate::p2p_runtime::ENV_P2P_SERVER_TOKEN)
+/// Whether a server URL+token override is active (both set and non-empty).
+/// When active, the stored profile server fields are read-only in the UI and
+/// must not be overwritten by a profile save.
+fn server_override_active(override_: &(Option<String>, Option<String>)) -> bool {
+    let non_empty = |s: &Option<String>| s.as_deref().is_some_and(|v| !v.trim().is_empty());
+    non_empty(&override_.0) && non_empty(&override_.1)
 }
 
 pub async fn get_profile(state: &AppState) -> Result<ProfileResponse, ReceiverError> {
@@ -1400,11 +1417,10 @@ pub async fn get_profile(state: &AppState) -> Result<ProfileResponse, ReceiverEr
     };
 
     // Report the effective server config and its source so the UI can show the
-    // real values (and lock the fields) when an environment override is active.
-    let env_url = std::env::var(crate::p2p_runtime::ENV_P2P_SERVER_URL).ok();
-    let env_token = std::env::var(crate::p2p_runtime::ENV_P2P_SERVER_TOKEN).ok();
-    let env_active = server_env_override_active();
-    let resolved = crate::runtime::resolve_server_config(profile.as_ref(), (env_url, env_token));
+    // real values (and lock the fields) when an override is active.
+    let override_ = state.server_override().await;
+    let env_active = server_override_active(&override_);
+    let resolved = crate::runtime::resolve_server_config(profile.as_ref(), override_);
     let server_source = if env_active {
         "env"
     } else if resolved.is_some() {
@@ -1462,7 +1478,7 @@ pub async fn put_profile(state: &AppState, body: ProfileRequest) -> Result<(), R
         .or_else(|| existing.as_ref().and_then(|p| p.receiver_id.clone()));
 
     let (persist_url, persist_token) = server_fields_to_persist(
-        server_env_override_active(),
+        server_override_active(&state.server_override().await),
         url,
         body.token.clone(),
         existing.as_ref(),
@@ -1736,13 +1752,8 @@ pub(crate) async fn server_device_status(state: &AppState) -> ServerDeviceStatus
         };
         // Mirror the P2P runtime's resolution (env/CLI override > profile) so
         // the status card reflects the server the receiver actually targets.
-        match crate::runtime::resolve_server_config(
-            profile.as_ref(),
-            (
-                std::env::var(crate::p2p_runtime::ENV_P2P_SERVER_URL).ok(),
-                std::env::var(crate::p2p_runtime::ENV_P2P_SERVER_TOKEN).ok(),
-            ),
-        ) {
+        match crate::runtime::resolve_server_config(profile.as_ref(), state.server_override().await)
+        {
             Some(server) => server.url,
             None => return ServerDeviceStatus::not_configured(),
         }

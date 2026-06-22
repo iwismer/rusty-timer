@@ -66,8 +66,11 @@ impl HeadlessHost {
                 let profile = state.db.lock().await.load_profile().ok().flatten();
                 p2p_config.server =
                     crate::runtime::resolve_server_config(profile.as_ref(), cli_override.clone());
-                // Preserve the CLI override so a later profile-save reconfigure
-                // re-resolves with `CLI override > profile` instead of losing it.
+                // Record the override on shared state so control handlers
+                // (profile/status) resolve and gate consistently with the
+                // runtime, then preserve it on the config so a later
+                // profile-save reconfigure keeps `CLI override > profile`.
+                state.set_server_override(cli_override.clone()).await;
                 p2p_config.server_override = cli_override;
                 Some(start_receiver_p2p(Arc::clone(&state), p2p_config).await?)
             }

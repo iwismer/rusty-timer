@@ -550,42 +550,62 @@ async fn run_reconcile_loop(
                     if new_server != config.server {
                         info!("receiver server config changed; rebinding server-bound tasks");
                         config.server = new_server;
+                        // Stop all existing stream workers FIRST. Each holds an
+                        // announcer push client bound to the previous server and
+                        // its (higher) generation. Draining them before the
+                        // fence reset below is required for correctness: were an
+                        // old worker still alive, it could race the reset, push
+                        // to the old server with the old generation, and re-raise
+                        // the fence so the new (possibly lower) generation is
+                        // permanently staled. Drain both the forwarder
+                        // connections and the per-stream (announcer) workers.
+                        for (_endpoint_id, worker) in workers.drain() {
+                            worker.stop().await;
+                        }
+                        for (_stream_id, worker) in stream_workers.drain() {
+                            worker.stop().await;
+                        }
+                        // Abort the server-bound discovery + approval-watch
+                        // tasks here; both are respawned after the reseed +
+                        // fence reset below so they bind to the new server.
                         if let Some(task) = discovery_task.take() {
                             task.abort();
                             let _ = task.await;
                         }
-                        discovery_task = config
-                            .server
-                            .clone()
-                            .map(|thin| spawn_discovery(thin, shutdown_rx.clone()));
-                        // The approval-watch task is also server-bound; rebind
-                        // it against the new server too.
                         if let Some(task) = approval_watch_task.take() {
                             task.abort();
                             let _ = task.await;
                         }
-                        approval_watch_task = config
-                            .server
-                            .clone()
-                            .map(|thin| spawn_approval_watch(thin, shutdown_rx.clone()));
                         // Drop forwarders learned from the old server so stale
                         // peers are not re-dialed; re-seed only the explicit
-                        // (loopback/dev) forwarder. When the new server is
-                        // present its discovery loop repopulates the map; when
-                        // the server was cleared the map stays empty so no
-                        // old-server workers are rebuilt.
+                        // (loopback/dev) forwarder. Done before respawning
+                        // discovery so the new server's feed repopulates the
+                        // freshly-cleared map; when the server was cleared the
+                        // map stays empty so no old-server workers are rebuilt.
                         reseed_discovered_forwarders(&state, config.forwarder.as_ref()).await;
                         // Announcer generation fencing is per-stream and
                         // monotonic; a replacement server may start at a lower
                         // generation, which would otherwise permanently stale
-                        // every push. Reset the fences so the new server's
-                        // generation is accepted fresh.
+                        // every push. With all old workers now stopped, reset
+                        // the fences so the new server's generation is accepted
+                        // fresh without an old worker re-raising them.
                         if let Err(e) = {
                             let db = state.db.lock().await;
                             db.reset_announcer_fences()
                         } {
                             warn!(error = %e, "failed to reset announcer fences on server change");
                         }
+                        // Respawn discovery + approval-watch against the new
+                        // server, after the reseed so they repopulate the
+                        // freshly-cleared discovered-forwarders map.
+                        discovery_task = config
+                            .server
+                            .clone()
+                            .map(|thin| spawn_discovery(thin, shutdown_rx.clone()));
+                        approval_watch_task = config
+                            .server
+                            .clone()
+                            .map(|thin| spawn_approval_watch(thin, shutdown_rx.clone()));
                         // Force re-running register/takeover and rebuilding all
                         // forwarder + stream workers against the new server.
                         announcer_generation = None;
