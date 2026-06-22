@@ -8,6 +8,7 @@
     driftColorClass,
     computeDownloadPercent,
     formatLastSeen,
+    readerControlDisabled,
   } from "../lib/reader-view-model";
   import {
     READ_MODE_OPTIONS,
@@ -221,6 +222,9 @@
   }
 
   let isDisabled = $derived(disabled || busy);
+  let controlDisabled = $derived(
+    disabled || readerControlDisabled(readerState, busy),
+  );
 
   let downloadPercent = $derived(
     computeDownloadPercent(
@@ -236,10 +240,11 @@
 
 <div class="mt-4 pt-4 border-t border-border">
   {#if !readerInfo && readerState === "disconnected"}
-    <p class="text-sm text-text-muted">No reader data available</p>
-  {:else}
-    <!-- Info grid -->
-    <div class="grid grid-cols-2 gap-x-8 gap-y-2 text-sm mb-4">
+    <p class="mb-4 text-sm text-text-muted">No reader data available</p>
+  {/if}
+
+  <!-- Info grid -->
+  <div class="grid grid-cols-2 gap-x-8 gap-y-2 text-sm mb-4">
       <div class="col-span-2">
         <span class="text-text-muted">Banner:</span>
         <span class="font-mono ml-2 text-xs"
@@ -319,7 +324,7 @@
               );
             }
           }}
-          disabled={isDisabled}
+          disabled={controlDisabled}
         >
           {#each READ_MODE_OPTIONS as option}
             <option value={option.value}>{option.label}</option>
@@ -347,7 +352,7 @@
               oninput={(e) => {
                 timeoutDraft = (e.currentTarget as HTMLInputElement).value;
               }}
-              disabled={isDisabled}
+              disabled={controlDisabled}
             />
             <span>s</span>
           </label>
@@ -355,7 +360,7 @@
         <button
           class="px-2.5 py-0.5 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
           onclick={handleSetReadMode}
-          disabled={isDisabled}>Apply</button
+          disabled={controlDisabled}>Apply</button
         >
       </span>
     </div>
@@ -377,7 +382,7 @@
         <button
           class="px-2.5 py-0.5 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
           onclick={handleSetTto}
-          disabled={isDisabled}
+          disabled={controlDisabled}
         >
           {readerInfo?.tto_enabled ? "Disable TTO" : "Enable TTO"}
         </button>
@@ -392,7 +397,7 @@
         <button
           class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
           onclick={handleSyncClock}
-          disabled={isDisabled}>Sync Clock</button
+          disabled={controlDisabled}>Sync Clock</button
         >{#if onOpenHelpModal}<HelpTip
             fieldKey="sync_clock"
             sectionKey="reader_live"
@@ -404,7 +409,7 @@
         <button
           class="px-3 py-1.5 text-sm rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
           onclick={handleRefresh}
-          disabled={isDisabled}>Refresh</button
+          disabled={controlDisabled}>Refresh</button
         >{#if onOpenHelpModal}<HelpTip
             fieldKey="refresh_reader"
             sectionKey="reader_live"
@@ -418,7 +423,7 @@
             ? "px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
             : "px-3 py-1.5 text-sm rounded-md bg-green-600 text-white border-none cursor-pointer hover:bg-green-700 disabled:opacity-50"}
           onclick={handleSetRecording}
-          disabled={isDisabled}
+          disabled={controlDisabled}
           >{readerInfo?.recording
             ? "Stop Recording"
             : "Start Recording"}</button
@@ -433,7 +438,7 @@
         <button
           class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
           onclick={handleStartDownload}
-          disabled={isDisabled}>Download Reads</button
+          disabled={controlDisabled}>Download Reads</button
         >{#if onOpenHelpModal}<HelpTip
             fieldKey="download_reads"
             sectionKey="reader_live"
@@ -445,7 +450,7 @@
         <button
           class="px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
           onclick={handleClearRecords}
-          disabled={isDisabled}>Clear Records</button
+          disabled={controlDisabled}>Clear Records</button
         >{#if onOpenHelpModal}<HelpTip
             fieldKey="clear_records"
             sectionKey="reader_live"
@@ -457,7 +462,7 @@
         <button
           class="px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
           onclick={handleStopDownload}
-          disabled={isDisabled}>Stop Download</button
+          disabled={controlDisabled}>Stop Download</button
         >
       {/if}
       {#if readerState === "disconnected"}
@@ -488,17 +493,16 @@
       </div>
     {/if}
 
-    <!-- Feedback banner -->
-    {#if feedback}
-      <div class="mt-3">
-        <AlertBanner
-          variant={feedback.kind}
-          message={feedback.message}
-          onDismiss={() => {
-            clearFeedback();
-          }}
-        />
-      </div>
-    {/if}
+  <!-- Feedback banner -->
+  {#if feedback}
+    <div class="mt-3">
+      <AlertBanner
+        variant={feedback.kind}
+        message={feedback.message}
+        onDismiss={() => {
+          clearFeedback();
+        }}
+      />
+    </div>
   {/if}
 </div>

@@ -128,6 +128,37 @@ export type ForwarderConnState =
   | "unavailable"
   | "disconnected";
 
+export type ReadMode = "raw" | "event" | "fsls";
+
+export interface ReaderInfo {
+  banner?: string | null;
+  hardware?: {
+    fw_version?: string | null;
+    hw_code?: string | null;
+    reader_id?: string | null;
+  } | null;
+  config?: {
+    mode: ReadMode;
+    timeout: number;
+  } | null;
+  tto_enabled?: boolean | null;
+  clock?: { reader_clock: string; drift_ms: number } | null;
+  estimated_stored_reads?: number | null;
+  recording?: boolean | null;
+  connect_failures?: number;
+}
+
+export interface DownloadProgressUpdate {
+  reader_ip: string;
+  state: "downloading" | "complete" | "error" | "idle";
+  stored_reads: number | null;
+  downloaded_reads: number;
+  progress: number;
+  total: number | null;
+  last_read_at: string | null;
+  error: string | null;
+}
+
 export interface ReaderLiveStatus {
   stream_id: string;
   connected: boolean;
@@ -136,6 +167,8 @@ export interface ReaderLiveStatus {
   hardware_reader_id: string | null;
   firmware_version: string | null;
   model: string | null;
+  reader_info?: ReaderInfo | null;
+  download_progress?: DownloadProgressUpdate | null;
 }
 
 export interface UpsStatusPayload {
@@ -155,6 +188,7 @@ export interface ForwarderConnectionStatus {
   ups: UpsStatusPayload | null;
   restart_needed: boolean | null;
   remote_config_available: boolean;
+  reader_control_available?: boolean;
 }
 
 export interface ConnectionsResponse {
@@ -350,6 +384,12 @@ export interface RestartForwarderResponse {
   error: string | null;
 }
 
+export interface ReaderControlResult {
+  success: boolean;
+  message: string;
+  reader_info: ReaderInfo | null;
+}
+
 export async function getForwarderConfig(
   endpointId: string,
 ): Promise<ForwarderConfigResponse> {
@@ -372,6 +412,114 @@ export async function restartForwarder(
   endpointId: string,
 ): Promise<RestartForwarderResponse> {
   return invoke<RestartForwarderResponse>("restart_forwarder", { endpointId });
+}
+
+export async function readerGetInfo(
+  endpointId: string,
+  streamId: string,
+): Promise<ReaderControlResult> {
+  return invoke<ReaderControlResult>("reader_get_info", {
+    endpointId,
+    streamId,
+  });
+}
+
+export async function readerSyncClock(
+  endpointId: string,
+  streamId: string,
+): Promise<ReaderControlResult> {
+  return invoke<ReaderControlResult>("reader_sync_clock", {
+    endpointId,
+    streamId,
+  });
+}
+
+export async function readerSetReadMode(
+  endpointId: string,
+  streamId: string,
+  mode: ReadMode,
+  timeout: number,
+): Promise<ReaderControlResult> {
+  return invoke<ReaderControlResult>("reader_set_read_mode", {
+    endpointId,
+    streamId,
+    mode,
+    timeout,
+  });
+}
+
+export async function readerSetTto(
+  endpointId: string,
+  streamId: string,
+  enabled: boolean,
+): Promise<ReaderControlResult> {
+  return invoke<ReaderControlResult>("reader_set_tto", {
+    endpointId,
+    streamId,
+    enabled,
+  });
+}
+
+export async function readerSetRecording(
+  endpointId: string,
+  streamId: string,
+  enabled: boolean,
+): Promise<ReaderControlResult> {
+  return invoke<ReaderControlResult>("reader_set_recording", {
+    endpointId,
+    streamId,
+    enabled,
+  });
+}
+
+export async function readerClearRecords(
+  endpointId: string,
+  streamId: string,
+): Promise<ReaderControlResult> {
+  return invoke<ReaderControlResult>("reader_clear_records", {
+    endpointId,
+    streamId,
+  });
+}
+
+export async function readerStartDownload(
+  endpointId: string,
+  streamId: string,
+): Promise<ReaderControlResult> {
+  return invoke<ReaderControlResult>("reader_start_download", {
+    endpointId,
+    streamId,
+  });
+}
+
+export async function readerStopDownload(
+  endpointId: string,
+  streamId: string,
+): Promise<ReaderControlResult> {
+  return invoke<ReaderControlResult>("reader_stop_download", {
+    endpointId,
+    streamId,
+  });
+}
+
+export async function readerRefresh(
+  endpointId: string,
+  streamId: string,
+): Promise<ReaderControlResult> {
+  return invoke<ReaderControlResult>("reader_refresh", {
+    endpointId,
+    streamId,
+  });
+}
+
+export async function readerReconnect(
+  endpointId: string,
+  streamId: string,
+): Promise<ReaderControlResult> {
+  return invoke<ReaderControlResult>("reader_reconnect", {
+    endpointId,
+    streamId,
+  });
 }
 
 export async function getLogs(): Promise<LogsResponse> {

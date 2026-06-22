@@ -19,6 +19,7 @@ mod allowlist;
 mod control;
 mod data;
 mod endpoint;
+mod reader_control;
 mod remote_config;
 
 use std::net::SocketAddrV4;
@@ -51,6 +52,7 @@ pub use control::{
 };
 pub use data::{DataConfig, serve_data_streams};
 pub use endpoint::P2pEndpoint;
+pub use reader_control::ForwarderReaderControlHandler;
 pub use remote_config::ForwarderRemoteConfigHandler;
 
 const DEFAULT_P2P_SECRET_KEY_PATH: &str = "/var/lib/rusty-timer/p2p-secret.key";
@@ -102,6 +104,7 @@ pub async fn start_forwarder_p2p(
     display_name: Option<String>,
     status_feed: ForwarderStatusFeed,
     remote_config: Arc<dyn RemoteConfigHandler>,
+    reader_control: Arc<dyn ReaderControlHandler>,
 ) -> Result<Option<P2pRuntime>, P2pStartError> {
     if !config.enabled {
         return Ok(None);
@@ -131,7 +134,8 @@ pub async fn start_forwarder_p2p(
     )
     .await?
     .with_status_feed(status_feed)
-    .with_remote_config(remote_config);
+    .with_remote_config(remote_config)
+    .with_reader_control(reader_control);
 
     let run_endpoint = endpoint.clone();
     let mut tasks = vec![tokio::spawn(async move { run_endpoint.run().await })];
@@ -488,6 +492,7 @@ mod tests {
             None,
             status_feed().await?,
             Arc::new(NoopRemoteConfigHandler),
+            Arc::new(NoopReaderControlHandler),
         )
         .await?
         .expect("p2p enabled");
@@ -587,6 +592,7 @@ mod tests {
             None,
             status_feed().await?,
             Arc::new(NoopRemoteConfigHandler),
+            Arc::new(NoopReaderControlHandler),
         )
         .await?
         .expect("p2p enabled");

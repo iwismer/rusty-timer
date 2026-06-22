@@ -255,6 +255,9 @@ async fn main() {
         status_server.ui_sender(),
         restart_signal.clone(),
     ));
+    let reader_control_handler = Arc::new(forwarder::p2p::ForwarderReaderControlHandler::new(
+        status_server.reader_control_service(),
+    ));
     let p2p_runtime = match forwarder::p2p::start_forwarder_p2p(
         &cfg.p2p,
         Arc::clone(&journal),
@@ -265,6 +268,7 @@ async fn main() {
         cfg.display_name.clone(),
         status_server.status_feed(),
         remote_config_handler,
+        reader_control_handler,
     )
     .await
     {

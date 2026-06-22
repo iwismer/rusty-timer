@@ -24,8 +24,9 @@ use crate::storage::journal::Journal;
 
 use super::allowlist::AllowList;
 use super::control::{
-    CatalogProvider, ControlEvent, ControlEventSender, HeartbeatConfig, NoopRemoteConfigHandler,
-    RemoteConfigHandler, control_event_channel, negotiate_control_stream, run_control_stream_loop,
+    CatalogProvider, ControlEvent, ControlEventSender, HeartbeatConfig, NoopReaderControlHandler,
+    NoopRemoteConfigHandler, RemoteConfigHandler, control_event_channel, negotiate_control_stream,
+    run_control_stream_loop,
 };
 use super::data::{DataConfig, serve_data_streams};
 
@@ -51,6 +52,7 @@ struct ConnectionConfig {
     handshake_timeout: Duration,
     heartbeat: HeartbeatConfig,
     remote_config: Arc<dyn RemoteConfigHandler>,
+    reader_control: Arc<dyn super::control::ReaderControlHandler>,
 }
 
 /// The forwarder's P2P endpoint and accept loop.
@@ -65,6 +67,7 @@ pub struct P2pEndpoint {
     handshake_timeout: Duration,
     heartbeat: HeartbeatConfig,
     remote_config: Arc<dyn RemoteConfigHandler>,
+    reader_control: Arc<dyn super::control::ReaderControlHandler>,
     #[cfg(test)]
     _test_tempdir: Option<Arc<tempfile::TempDir>>,
 }
@@ -80,6 +83,7 @@ impl std::fmt::Debug for P2pEndpoint {
             .field("handshake_timeout", &self.handshake_timeout)
             .field("heartbeat", &self.heartbeat)
             .field("remote_config", &self.remote_config)
+            .field("reader_control", &self.reader_control)
             .finish_non_exhaustive()
     }
 }
@@ -125,6 +129,7 @@ impl P2pEndpoint {
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             heartbeat: HeartbeatConfig::default(),
             remote_config: Arc::new(NoopRemoteConfigHandler),
+            reader_control: Arc::new(NoopReaderControlHandler),
             #[cfg(test)]
             _test_tempdir: None,
         })
@@ -142,6 +147,17 @@ impl P2pEndpoint {
     #[must_use]
     pub fn with_remote_config(mut self, remote_config: Arc<dyn RemoteConfigHandler>) -> Self {
         self.remote_config = remote_config;
+        self
+    }
+
+    /// Installs the reader-control handler that serves reader-specific verbs
+    /// on the control plane and drives `CAP_READER_CONTROL` advertisement.
+    #[must_use]
+    pub fn with_reader_control(
+        mut self,
+        reader_control: Arc<dyn super::control::ReaderControlHandler>,
+    ) -> Self {
+        self.reader_control = reader_control;
         self
     }
 
@@ -179,6 +195,7 @@ impl P2pEndpoint {
                         handshake_timeout: self.handshake_timeout,
                         heartbeat: self.heartbeat,
                         remote_config: Arc::clone(&self.remote_config),
+                        reader_control: Arc::clone(&self.reader_control),
                     };
                     tokio::spawn(async move {
                         handle_connection(connection, allow_list, catalog, journal, config).await;
@@ -250,6 +267,7 @@ async fn handle_connection(
         config.handshake_timeout,
         config.heartbeat,
         config.remote_config.as_ref(),
+        config.reader_control.as_ref(),
     )
     .await
     {
@@ -293,6 +311,7 @@ async fn handle_connection(
         control_recv,
         config.heartbeat,
         outbound_events,
+        config.reader_control,
         config.remote_config,
     )
     .await;
@@ -363,6 +382,9 @@ fn publish_status_event(tx: &ControlEventSender, event: ForwarderStatusEvent) ->
         ForwarderStatusEvent::ReaderInfo { stream_id, info } => {
             try_send_control_event(tx, reader_info_event(&stream_id, &info))
         }
+        ForwarderStatusEvent::DownloadProgress { stream_id, event } => {
+            try_send_control_event(tx, download_progress_event(&stream_id, &event))
+        }
         ForwarderStatusEvent::UpsStatus(status) => {
             ups_status_event(&status).is_none_or(|event| try_send_control_event(tx, event))
         }
@@ -390,13 +412,58 @@ fn reader_status_event(stream_id: &str, status: &ReaderStatus) -> ControlEvent {
 }
 
 fn reader_info_event(stream_id: &str, info: &crate::reader_control::ReaderInfo) -> ControlEvent {
-    let hardware = info.hardware.as_ref();
-    ControlEvent::ReaderInfo(rt_p2p_protocol::ReaderInfo {
+    let domain_info = crate::reader_control_service::native_info_to_domain(info);
+    match super::reader_control::domain_info_to_p2p_event(stream_id.as_bytes(), domain_info) {
+        Ok(info) => ControlEvent::ReaderInfo(info),
+        Err(error) => {
+            tracing::warn!(%error, "failed to serialize reader info for p2p event");
+            let hardware = info.hardware.as_ref();
+            ControlEvent::ReaderInfo(rt_p2p_protocol::ReaderInfo {
+                stream_id: stream_id.as_bytes().to_vec(),
+                hardware_reader_id: hardware
+                    .map_or_else(String::new, |hardware| hardware.reader_id.to_string()),
+                firmware_version: hardware
+                    .map_or_else(String::new, |hardware| hardware.fw_version.clone()),
+                model: hardware.map_or_else(String::new, |hardware| hardware.hw_code.to_string()),
+                reader_info_json: None,
+            })
+        }
+    }
+}
+
+fn download_progress_event(
+    stream_id: &str,
+    event: &crate::reader_control::DownloadEvent,
+) -> ControlEvent {
+    let (state, reads_received, progress, total, error) = match event {
+        crate::reader_control::DownloadEvent::Downloading {
+            progress,
+            total,
+            reads_received,
+        } => (
+            "downloading".to_owned(),
+            *reads_received,
+            u64::from(*progress),
+            u64::from(*total),
+            String::new(),
+        ),
+        crate::reader_control::DownloadEvent::Complete { reads_received } => {
+            ("complete".to_owned(), *reads_received, 0, 0, String::new())
+        }
+        crate::reader_control::DownloadEvent::Error { message } => {
+            ("error".to_owned(), 0, 0, 0, message.clone())
+        }
+        crate::reader_control::DownloadEvent::Idle => ("idle".to_owned(), 0, 0, 0, String::new()),
+    };
+    ControlEvent::DownloadProgress(rt_p2p_protocol::DownloadProgress {
         stream_id: stream_id.as_bytes().to_vec(),
-        hardware_reader_id: hardware
-            .map_or_else(String::new, |hardware| hardware.reader_id.to_string()),
-        firmware_version: hardware.map_or_else(String::new, |hardware| hardware.fw_version.clone()),
-        model: hardware.map_or_else(String::new, |hardware| hardware.hw_code.to_string()),
+        downloaded_bytes: progress,
+        total_bytes: total,
+        state,
+        reads_received,
+        progress,
+        total,
+        error,
     })
 }
 
@@ -470,6 +537,7 @@ mod tests {
                 handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
                 heartbeat: HeartbeatConfig::default(),
                 remote_config: Arc::new(NoopRemoteConfigHandler),
+                reader_control: Arc::new(NoopReaderControlHandler),
                 _test_tempdir: Some(tempdir),
             })
         }
@@ -999,11 +1067,43 @@ mod tests {
         assert_eq!(info.hardware_reader_id, "7");
         assert_eq!(info.firmware_version, "1.2.3");
         assert_eq!(info.model, "42");
+        let rich: rt_domain::ReaderInfo = serde_json::from_str(
+            info.reader_info_json
+                .as_deref()
+                .expect("rich reader info json"),
+        )?;
+        assert_eq!(
+            rich.hardware.and_then(|hardware| hardware.reader_id),
+            Some("7".to_owned())
+        );
 
         accept.abort();
         receiver.close().await;
         forwarder.endpoint().close().await;
         Ok(())
+    }
+
+    #[test]
+    fn download_progress_status_event_maps_to_control_event() {
+        let event = download_progress_event(
+            DATA_STREAM_KEY,
+            &crate::reader_control::DownloadEvent::Downloading {
+                progress: 11,
+                total: 99,
+                reads_received: 3,
+            },
+        );
+
+        let ControlEvent::DownloadProgress(progress) = event else {
+            panic!("expected download progress event");
+        };
+        assert_eq!(progress.stream_id, DATA_STREAM_KEY.as_bytes());
+        assert_eq!(progress.state, "downloading");
+        assert_eq!(progress.reads_received, 3);
+        assert_eq!(progress.progress, 11);
+        assert_eq!(progress.total, 99);
+        assert_eq!(progress.downloaded_bytes, 11);
+        assert_eq!(progress.total_bytes, 99);
     }
 
     #[tokio::test]

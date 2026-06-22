@@ -67,10 +67,16 @@ message StreamCatalog {
 message ReaderControlRequest {
   // Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
   bytes stream_id = 1;
-  // Action verb (e.g. "connect", "disconnect", "download").
+  // Action verb (e.g. "sync_clock", "set_read_mode", "start_download").
   string command = 2;
   // Correlation id echoed in the matching ReaderControlResponse.
   string request_id = 3;
+  // Optional read mode for set_read_mode ("raw", "event", or "fsls").
+  optional string mode = 4;
+  // Optional timeout seconds for set_read_mode.
+  optional uint32 timeout = 5;
+  // Optional boolean for set_tto and set_recording.
+  optional bool enabled = 6;
 }
 
 // Result of a ReaderControlRequest.
@@ -80,6 +86,8 @@ message ReaderControlResponse {
   string request_id = 2;
   bool success = 3;
   string message = 4;
+  // Serialized rt_domain::ReaderInfo, present for commands that return updated reader info.
+  optional string reader_info_json = 5;
 }
 
 // Connection/liveness status for a reader.
@@ -100,6 +108,8 @@ message ReaderInfo {
   string hardware_reader_id = 2;
   string firmware_version = 3;
   string model = 4;
+  // Serialized rt_domain::ReaderInfo. When present, this is the authoritative rich payload.
+  optional string reader_info_json = 5;
 }
 
 // Progress of an in-flight download (e.g. backup retrieval).
@@ -108,6 +118,12 @@ message DownloadProgress {
   bytes stream_id = 1;
   uint64 downloaded_bytes = 2;
   uint64 total_bytes = 3;
+  // Human/machine readable progress state (e.g. "downloading", "complete", "error").
+  string state = 4;
+  uint32 reads_received = 5;
+  uint64 progress = 6;
+  uint64 total = 7;
+  string error = 8;
 }
 
 // Uninterruptible power supply status reported by the forwarder host.

@@ -6,16 +6,17 @@ use std::time::Duration;
 
 use rt_iroh::{Endpoint, NodeAddr, RecvStream, SendStream};
 use rt_p2p_protocol::{
-    CAP_REMOTE_CONFIG, ConfigGetRequest, ConfigGetResponse, ConfigSetRequest, ConfigSetResponse,
-    ControlC2F, ControlF2C, Hello, Pong, RestartRequest, RestartResponse, SubscribeMode,
-    control_c2f, control_f2c, has_capability,
+    CAP_READER_CONTROL, CAP_REMOTE_CONFIG, ConfigGetRequest, ConfigGetResponse, ConfigSetRequest,
+    ConfigSetResponse, ControlC2F, ControlF2C, Hello, Pong, ReaderControlRequest,
+    ReaderControlResponse, RestartRequest, RestartResponse, SubscribeMode, control_c2f,
+    control_f2c, has_capability,
 };
 use tokio::sync::{Mutex, Notify, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::warn;
 
-use crate::control_api::{ConfigCommand, FORWARDER_CONFIG_TIMEOUT};
+use crate::control_api::{ConfigCommand, FORWARDER_CONFIG_TIMEOUT, ReaderCommand};
 use crate::db::Db;
 use crate::p2p_session::{
     BackoffConfig, P2pSessionError, SessionStatusReporter, connect_and_hello, read_frame,
@@ -210,8 +211,27 @@ async fn run_connected_forwarder(
     // never returns `None` while connected (only the registered clone is handed
     // to commands; an incapable session simply never receives any).
     let _config_tx_keepalive = config_tx;
+
+    let reader_control = has_capability(&hello_ok.capabilities, CAP_READER_CONTROL);
+    let (reader_tx, mut reader_rx) = mpsc::channel::<ReaderCommand>(32);
+    let _reader_registration_guard = if reader_control {
+        let guard = reporter
+            .app_state()
+            .register_forwarder_reader_control_tx(endpoint_id, reader_tx.clone());
+        reporter
+            .app_state()
+            .recompute_aggregate_connection_state()
+            .await;
+        Some(guard)
+    } else {
+        None
+    };
+    let _reader_tx_keepalive = reader_tx;
+
     let mut pending_config: HashMap<String, PendingConfigRequest> = HashMap::new();
+    let mut pending_reader: HashMap<String, PendingReaderRequest> = HashMap::new();
     let mut next_config_request_id: u64 = 0;
+    let mut next_reader_request_id: u64 = 0;
     let prune_interval = FORWARDER_CONFIG_TIMEOUT.min(Duration::from_secs(1));
     let mut pending_config_prune_tick =
         tokio::time::interval_at(Instant::now() + prune_interval, prune_interval);
@@ -294,6 +314,7 @@ async fn run_connected_forwarder(
                             reporter,
                             &recompute_notify,
                             &mut pending_config,
+                            &mut pending_reader,
                         ).await {
                             warn!(%endpoint_id, %error, "failed to handle forwarder control frame");
                             break;
@@ -302,6 +323,19 @@ async fn run_connected_forwarder(
                     // The reader task ended: clean disconnect/EOF or a decode/
                     // protocol error (already logged by the reader task).
                     None => break,
+                }
+            }
+            command = reader_rx.recv() => {
+                if let Some(command) = command
+                    && let Err(error) = handle_reader_command(
+                        command,
+                        &mut control_send,
+                        &mut pending_reader,
+                        &mut next_reader_request_id,
+                    ).await
+                {
+                    warn!(%endpoint_id, %error, "failed to send reader control request");
+                    break;
                 }
             }
             command = config_rx.recv() => {
@@ -323,7 +357,9 @@ async fn run_connected_forwarder(
                 }
             }
             _ = pending_config_prune_tick.tick() => {
-                prune_expired_pending_config(&mut pending_config, Instant::now());
+                let now = Instant::now();
+                prune_expired_pending_config(&mut pending_config, now);
+                prune_expired_pending_reader(&mut pending_reader, now);
             }
         }
     }
@@ -339,6 +375,7 @@ async fn run_connected_forwarder(
     // hanging until its timeout. The remote-config channel is deregistered by
     // `_config_registration_guard` on normal exit, panic, or task abort.
     drop(pending_config);
+    drop(pending_reader);
     reporter
         .app_state()
         .clear_forwarder_live_status(endpoint_id)
@@ -387,7 +424,16 @@ struct PendingConfigRequest {
     responder: PendingConfigResponder,
 }
 
+struct PendingReaderRequest {
+    deadline: Instant,
+    responder: oneshot::Sender<ReaderControlResponse>,
+}
+
 fn prune_expired_pending_config(pending: &mut HashMap<String, PendingConfigRequest>, now: Instant) {
+    pending.retain(|_, request| request.deadline > now);
+}
+
+fn prune_expired_pending_reader(pending: &mut HashMap<String, PendingReaderRequest>, now: Instant) {
     pending.retain(|_, request| request.deadline > now);
 }
 
@@ -445,6 +491,86 @@ async fn handle_config_command(
     result
 }
 
+async fn handle_reader_command(
+    command: ReaderCommand,
+    send: &mut SendStream,
+    pending: &mut HashMap<String, PendingReaderRequest>,
+    next_request_id: &mut u64,
+) -> Result<(), P2pSessionError> {
+    prune_expired_pending_reader(pending, Instant::now());
+    *next_request_id += 1;
+    let request_id = next_request_id.to_string();
+    let ReaderCommand::Request {
+        stream_id,
+        action,
+        resp,
+    } = command;
+    let request = action_to_request(stream_id, action, request_id.clone());
+    let frame = ControlC2F {
+        msg: Some(control_c2f::Msg::ReaderControlRequest(request)),
+    };
+    pending.insert(
+        request_id.clone(),
+        PendingReaderRequest {
+            deadline: Instant::now() + FORWARDER_CONFIG_TIMEOUT,
+            responder: resp,
+        },
+    );
+    let result = write_frame(send, &frame).await;
+    if result.is_err() {
+        pending.remove(&request_id);
+    }
+    result
+}
+
+fn action_to_request(
+    stream_id: String,
+    action: rt_domain::ReaderControlAction,
+    request_id: String,
+) -> ReaderControlRequest {
+    let mut request = ReaderControlRequest {
+        stream_id: stream_id.into_bytes(),
+        command: String::new(),
+        request_id,
+        mode: None,
+        timeout: None,
+        enabled: None,
+    };
+    match action {
+        rt_domain::ReaderControlAction::GetInfo => request.command = "get_info".to_owned(),
+        rt_domain::ReaderControlAction::SyncClock => request.command = "sync_clock".to_owned(),
+        rt_domain::ReaderControlAction::SetReadMode { mode, timeout } => {
+            request.command = "set_read_mode".to_owned();
+            request.mode = Some(match mode {
+                rt_domain::ReadMode::Raw => "raw".to_owned(),
+                rt_domain::ReadMode::Event => "event".to_owned(),
+                rt_domain::ReadMode::FirstLastSeen => "fsls".to_owned(),
+            });
+            request.timeout = Some(u32::from(timeout));
+        }
+        rt_domain::ReaderControlAction::SetTto { enabled } => {
+            request.command = "set_tto".to_owned();
+            request.enabled = Some(enabled);
+        }
+        rt_domain::ReaderControlAction::SetRecording { enabled } => {
+            request.command = "set_recording".to_owned();
+            request.enabled = Some(enabled);
+        }
+        rt_domain::ReaderControlAction::ClearRecords => {
+            request.command = "clear_records".to_owned()
+        }
+        rt_domain::ReaderControlAction::StartDownload => {
+            request.command = "start_download".to_owned()
+        }
+        rt_domain::ReaderControlAction::StopDownload => {
+            request.command = "stop_download".to_owned()
+        }
+        rt_domain::ReaderControlAction::Refresh => request.command = "refresh".to_owned(),
+        rt_domain::ReaderControlAction::Reconnect => request.command = "reconnect".to_owned(),
+    }
+    request
+}
+
 async fn handle_control_frame(
     endpoint_id: &str,
     frame: ControlF2C,
@@ -452,6 +578,7 @@ async fn handle_control_frame(
     reporter: &Arc<SessionStatusReporter>,
     recompute_notify: &Notify,
     pending_config: &mut HashMap<String, PendingConfigRequest>,
+    pending_reader: &mut HashMap<String, PendingReaderRequest>,
 ) -> Result<(), P2pSessionError> {
     match frame.msg {
         Some(control_f2c::Msg::ReaderStatus(status)) => {
@@ -470,6 +597,12 @@ async fn handle_control_frame(
             reporter
                 .app_state()
                 .store_forwarder_ups_status_sync(endpoint_id, status);
+            recompute_notify.notify_one();
+        }
+        Some(control_f2c::Msg::DownloadProgress(progress)) => {
+            reporter
+                .app_state()
+                .store_forwarder_download_progress_sync(endpoint_id, progress);
             recompute_notify.notify_one();
         }
         Some(control_f2c::Msg::Ping(ping)) => {
@@ -509,11 +642,14 @@ async fn handle_control_frame(
                 let _ = tx.send(response);
             }
         }
+        Some(control_f2c::Msg::ReaderControlResponse(response)) => {
+            if let Some(request) = pending_reader.remove(&response.request_id) {
+                let _ = request.responder.send(response);
+            }
+        }
         Some(
             control_f2c::Msg::Pong(_)
-            | control_f2c::Msg::DownloadProgress(_)
             | control_f2c::Msg::SyncClock(_)
-            | control_f2c::Msg::ReaderControlResponse(_)
             | control_f2c::Msg::HelloOk(_)
             | control_f2c::Msg::StreamCatalog(_),
         )
@@ -602,16 +738,17 @@ mod tests {
 
     use rt_iroh::{Endpoint, EndpointBuilder};
     use rt_p2p_protocol::{
-        CAP_REMOTE_CONFIG, ControlF2C, DownloadProgress, EventBatch, Hello, MAX_FRAME_BYTES,
-        ReadRecord, ReaderStatus, StreamCatalog, SubscribeMode, SubscribeOk, control_f2c,
+        CAP_READER_CONTROL, CAP_REMOTE_CONFIG, ControlF2C, DownloadProgress, EventBatch, Hello,
+        MAX_FRAME_BYTES, ReadRecord, ReaderStatus, StreamCatalog, SubscribeMode, SubscribeOk,
+        control_f2c,
     };
     use rt_test_utils::p2p::{ConnectivityFault, ForwarderScript, MockForwarderPeer};
     use rt_test_utils::poll_until;
     use tokio::sync::{Mutex, broadcast, oneshot};
 
     use crate::control_api::{
-        AppState, ConfigCommand, ForwarderConnState, get_connections, get_forwarder_config,
-        restart_forwarder, set_forwarder_config,
+        AppState, ConfigCommand, ForwarderConnState, ReaderCommand, get_connections,
+        get_forwarder_config, restart_forwarder, set_forwarder_config,
     };
     use crate::db::Db;
     use crate::p2p_session::{BackoffConfig, SessionStatusReporter};
@@ -657,6 +794,8 @@ mod tests {
             config_get_json: String::new(),
             config_restart_needed: false,
             respond_to_config_requests: true,
+            reader_control_info_json: None,
+            respond_to_reader_control_requests: true,
         }
     }
 
@@ -895,6 +1034,11 @@ mod tests {
                     stream_id: STREAM_ID.as_bytes().to_vec(),
                     downloaded_bytes: 0,
                     total_bytes: 0,
+                    state: String::new(),
+                    reads_received: 0,
+                    progress: 0,
+                    total: 0,
+                    error: String::new(),
                 })),
             },
             // Live reader status the receiver must reflect in get_connections.
@@ -1042,6 +1186,25 @@ mod tests {
         script
     }
 
+    fn reader_control_hello() -> Hello {
+        Hello {
+            min_minor: 1,
+            max_minor: 1,
+            capabilities: vec!["data".to_owned(), CAP_READER_CONTROL.to_owned()],
+            max_frame_bytes: u32::try_from(MAX_FRAME_BYTES).unwrap(),
+            catalog_generation: 0,
+        }
+    }
+
+    fn reader_control_script() -> ForwarderScript {
+        let mut script = base_script();
+        script.server_hello = reader_control_hello();
+        script.reader_control_info_json = Some("{\"tto_enabled\":true}".to_owned());
+        script.control_pings = 2;
+        script.control_ping_interval = Duration::from_millis(40);
+        script
+    }
+
     /// Over a REAL control session that negotiated `CAP_REMOTE_CONFIG`, the
     /// receiver must round-trip config get/set and restart, surface
     /// `remote_config_available = true`, and keep the heartbeat alive
@@ -1165,6 +1328,98 @@ mod tests {
         })
         .await
         .expect("remote config get/set/restart test timed out");
+    }
+
+    /// Over a REAL control session that negotiated `CAP_READER_CONTROL`, the
+    /// receiver must expose reader-control availability, send a typed request,
+    /// route the response by request id, and keep the heartbeat alive.
+    #[tokio::test]
+    async fn reader_control_request_over_real_session() {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let forwarder = MockForwarderPeer::start([52; 32], reader_control_script())
+                .await
+                .unwrap();
+            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint = Arc::new(test_endpoint(53).await);
+            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+            let (state, _shutdown_rx) =
+                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
+
+            let connection = ForwarderConnection::start(
+                endpoint_id.clone(),
+                Arc::clone(&endpoint),
+                forwarder.node_addr(),
+                Arc::clone(&db),
+                reader_control_hello(),
+                Arc::clone(&reporter),
+                BackoffConfig {
+                    initial: Duration::from_millis(50),
+                    max: Duration::from_millis(50),
+                },
+            );
+
+            poll_until(
+                || {
+                    let state = Arc::clone(&state);
+                    let endpoint_id = endpoint_id.clone();
+                    async move {
+                        get_connections(&state)
+                            .await
+                            .forwarders
+                            .iter()
+                            .any(|f| f.endpoint_id == endpoint_id && f.reader_control_available)
+                    }
+                },
+                Duration::from_secs(5),
+            )
+            .await;
+
+            let tx = state
+                .forwarder_reader_control_tx(&endpoint_id)
+                .expect("reader-control sender should be registered");
+            let (resp_tx, resp_rx) = oneshot::channel();
+            tx.send(ReaderCommand::Request {
+                stream_id: STREAM_ID.to_owned(),
+                action: rt_domain::ReaderControlAction::SyncClock,
+                resp: resp_tx,
+            })
+            .await
+            .expect("send reader-control command");
+
+            let response = tokio::time::timeout(FORWARDER_CONFIG_TIMEOUT, resp_rx)
+                .await
+                .expect("reader-control response should arrive before timeout")
+                .expect("reader-control responder should stay open");
+            assert!(response.success);
+            assert_eq!(response.message, "");
+            assert_eq!(
+                response.reader_info_json.as_deref(),
+                Some("{\"tto_enabled\":true}")
+            );
+
+            let requests = forwarder.reader_control_requests();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].command, "sync_clock");
+            assert_eq!(requests[0].stream_id, STREAM_ID.as_bytes());
+
+            poll_until(
+                || async { forwarder.pongs().len() >= 2 },
+                Duration::from_secs(10),
+            )
+            .await;
+            assert_eq!(
+                state.forwarder_state(&endpoint_id).await.state,
+                ForwarderConnState::Connected,
+                "the reader-control exchange must not disconnect the control session"
+            );
+
+            connection.stop().await;
+            forwarder.shutdown().await;
+            endpoint.close().await;
+        })
+        .await
+        .expect("reader-control request test timed out");
     }
 
     #[test]

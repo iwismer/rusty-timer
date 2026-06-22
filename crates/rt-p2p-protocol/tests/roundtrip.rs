@@ -3,14 +3,19 @@
 use prost::Message;
 use rt_p2p_protocol::{
     ConfigGetRequest, ConfigGetResponse, ConfigSetRequest, ConfigSetResponse, ControlC2F,
-    ControlF2C, Hello, ReadRecord, RestartRequest, RestartResponse, WireProtocolError, control_c2f,
-    control_f2c,
+    ControlF2C, DownloadProgress, Hello, ReadRecord, ReaderControlRequest, ReaderControlResponse,
+    ReaderInfo, RestartRequest, RestartResponse, WireProtocolError, control_c2f, control_f2c,
 };
 
 // A stream_id is opaque bytes on the wire; this test uses a 16-byte sample.
 const STREAM_ID: [u8; 16] = [
     0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10,
 ];
+
+#[test]
+fn reader_control_capability_constant_is_exported() {
+    assert_eq!(rt_p2p_protocol::CAP_READER_CONTROL, "reader_control");
+}
 
 #[test]
 fn read_record_round_trips() {
@@ -63,6 +68,145 @@ fn protocol_error_round_trips() {
     original.encode(&mut buf).expect("encode ProtocolError");
 
     let decoded = WireProtocolError::decode(buf.as_slice()).expect("decode ProtocolError");
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn sync_clock_reader_control_request_round_trips() {
+    let original = ControlC2F {
+        msg: Some(control_c2f::Msg::ReaderControlRequest(
+            ReaderControlRequest {
+                stream_id: STREAM_ID.to_vec(),
+                command: "sync_clock".to_string(),
+                request_id: "reader-control-1".to_string(),
+                mode: None,
+                timeout: None,
+                enabled: None,
+            },
+        )),
+    };
+
+    let mut buf = Vec::new();
+    original.encode(&mut buf).expect("encode ControlC2F");
+
+    let decoded = ControlC2F::decode(buf.as_slice()).expect("decode ControlC2F");
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn set_read_mode_reader_control_request_round_trips() {
+    let original = ControlC2F {
+        msg: Some(control_c2f::Msg::ReaderControlRequest(
+            ReaderControlRequest {
+                stream_id: STREAM_ID.to_vec(),
+                command: "set_read_mode".to_string(),
+                request_id: "reader-control-2".to_string(),
+                mode: Some("event".to_string()),
+                timeout: Some(7),
+                enabled: None,
+            },
+        )),
+    };
+
+    let mut buf = Vec::new();
+    original.encode(&mut buf).expect("encode ControlC2F");
+
+    let decoded = ControlC2F::decode(buf.as_slice()).expect("decode ControlC2F");
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn set_tto_reader_control_request_round_trips() {
+    let original = ControlC2F {
+        msg: Some(control_c2f::Msg::ReaderControlRequest(
+            ReaderControlRequest {
+                stream_id: STREAM_ID.to_vec(),
+                command: "set_tto".to_string(),
+                request_id: "reader-control-3".to_string(),
+                mode: None,
+                timeout: None,
+                enabled: Some(true),
+            },
+        )),
+    };
+
+    let mut buf = Vec::new();
+    original.encode(&mut buf).expect("encode ControlC2F");
+
+    let decoded = ControlC2F::decode(buf.as_slice()).expect("decode ControlC2F");
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn reader_control_response_with_reader_info_json_round_trips() {
+    let original = ControlF2C {
+        msg: Some(control_f2c::Msg::ReaderControlResponse(
+            ReaderControlResponse {
+                stream_id: STREAM_ID.to_vec(),
+                request_id: "reader-control-4".to_string(),
+                success: true,
+                message: "clock synced".to_string(),
+                reader_info_json: Some(
+                    r#"{"clock":{"reader_clock":"2026-06-22T12:00:00.000","drift_ms":5}}"#
+                        .to_string(),
+                ),
+            },
+        )),
+    };
+
+    let mut buf = Vec::new();
+    original.encode(&mut buf).expect("encode ControlF2C");
+
+    let decoded = ControlF2C::decode(buf.as_slice()).expect("decode ControlF2C");
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn pushed_reader_info_with_reader_info_json_round_trips() {
+    let original = ControlF2C {
+        msg: Some(control_f2c::Msg::ReaderInfo(ReaderInfo {
+            stream_id: STREAM_ID.to_vec(),
+            hardware_reader_id: "42".to_string(),
+            firmware_version: "1.2.3".to_string(),
+            model: "IPICO".to_string(),
+            reader_info_json: Some(
+                r#"{"hardware":{"reader_id":"42"},"tto_enabled":true}"#.to_string(),
+            ),
+        })),
+    };
+
+    let mut buf = Vec::new();
+    original.encode(&mut buf).expect("encode ControlF2C");
+
+    let decoded = ControlF2C::decode(buf.as_slice()).expect("decode ControlF2C");
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn download_progress_with_read_counts_round_trips() {
+    let original = ControlF2C {
+        msg: Some(control_f2c::Msg::DownloadProgress(DownloadProgress {
+            stream_id: STREAM_ID.to_vec(),
+            downloaded_bytes: 100,
+            total_bytes: 1000,
+            state: "downloading".to_string(),
+            reads_received: 42,
+            progress: 100,
+            total: 1000,
+            error: String::new(),
+        })),
+    };
+
+    let mut buf = Vec::new();
+    original.encode(&mut buf).expect("encode ControlF2C");
+
+    let decoded = ControlF2C::decode(buf.as_slice()).expect("decode ControlF2C");
 
     assert_eq!(decoded, original);
 }

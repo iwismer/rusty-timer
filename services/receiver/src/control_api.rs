@@ -9,7 +9,8 @@ use crate::error::ReceiverError;
 use crate::ui_events::ReceiverUiEvent;
 use rt_domain::ReceiverMode;
 use rt_p2p_protocol::{
-    ConfigGetResponse, ConfigSetResponse, ReaderInfo, ReaderStatus, RestartResponse, UpsStatus,
+    ConfigGetResponse, ConfigSetResponse, DownloadProgress, ReaderControlResponse, ReaderInfo,
+    ReaderStatus, RestartResponse, UpsStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
@@ -66,6 +67,16 @@ pub(crate) enum ConfigCommand {
     },
     Restart {
         resp: oneshot::Sender<RestartResponse>,
+    },
+}
+
+/// A reader-control request bridged from control API commands to the live
+/// P2P control loop for a forwarder that negotiated `CAP_READER_CONTROL`.
+pub(crate) enum ReaderCommand {
+    Request {
+        stream_id: String,
+        action: rt_domain::ReaderControlAction,
+        resp: oneshot::Sender<ReaderControlResponse>,
     },
 }
 
@@ -137,6 +148,7 @@ struct ForwarderConnectionsFingerprint {
     discovered: bool,
     display_name: Option<String>,
     remote_config_available: bool,
+    reader_control_available: bool,
     subscribed_count: usize,
     available_count: usize,
     readers: Vec<ReaderLiveStatus>,
@@ -188,6 +200,30 @@ fn optional_non_empty(value: String) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
+fn parse_reader_info_json(
+    reader_info_json: Option<&str>,
+    endpoint_id: &str,
+    stream_id: &str,
+) -> Option<rt_domain::ReaderInfo> {
+    let json = reader_info_json.filter(|json| !json.is_empty())?;
+    match serde_json::from_str(json) {
+        Ok(reader_info) => Some(reader_info),
+        Err(error) => {
+            warn!(%endpoint_id, %stream_id, %error, "forwarder sent invalid reader_info_json");
+            None
+        }
+    }
+}
+
+fn download_state_from_str(state: &str) -> rt_domain::DownloadState {
+    match state {
+        "downloading" => rt_domain::DownloadState::Downloading,
+        "complete" => rt_domain::DownloadState::Complete,
+        "error" => rt_domain::DownloadState::Error,
+        _ => rt_domain::DownloadState::Idle,
+    }
+}
+
 fn sorted_reader_statuses(live_status: &ForwarderLiveStatus) -> Vec<ReaderLiveStatus> {
     let mut readers = live_status.readers.values().cloned().collect::<Vec<_>>();
     readers.sort_by(|a, b| a.stream_id.cmp(&b.stream_id));
@@ -233,6 +269,7 @@ pub struct AppState {
     /// as the `remote_config_available` signal, so a command to a down or
     /// incapable forwarder fails fast.
     forwarder_config_tx: StdMutex<HashMap<String, mpsc::Sender<ConfigCommand>>>,
+    forwarder_reader_control_tx: StdMutex<HashMap<String, mpsc::Sender<ReaderCommand>>>,
     last_connections_fingerprint: StdMutex<Option<ConnectionsFingerprint>>,
     connect_attempt: AtomicU64,
     connect_attempt_version: watch::Sender<ConnectAttempt>,
@@ -309,6 +346,7 @@ impl AppState {
             forwarder_runtime: Arc::new(StdMutex::new(HashMap::new())),
             forwarder_live_status: Arc::new(StdMutex::new(HashMap::new())),
             forwarder_config_tx: StdMutex::new(HashMap::new()),
+            forwarder_reader_control_tx: StdMutex::new(HashMap::new()),
             last_connections_fingerprint: StdMutex::new(None),
             connect_attempt: AtomicU64::new(0),
             connect_attempt_version,
@@ -511,6 +549,8 @@ impl AppState {
             hardware_reader_id: None,
             firmware_version: None,
             model: None,
+            reader_info: None,
+            download_progress: None,
         };
         let mut live_statuses = self.forwarder_live_status.lock().unwrap();
         let live_status = live_statuses.entry(endpoint_id.to_owned()).or_default();
@@ -521,10 +561,14 @@ impl AppState {
                 let hardware_reader_id = existing.hardware_reader_id.clone();
                 let firmware_version = existing.firmware_version.clone();
                 let model = existing.model.clone();
+                let reader_info = existing.reader_info.clone();
+                let download_progress = existing.download_progress.clone();
                 *existing = ReaderLiveStatus {
                     hardware_reader_id,
                     firmware_version,
                     model,
+                    reader_info,
+                    download_progress,
                     ..reader.clone()
                 };
             })
@@ -541,24 +585,93 @@ impl AppState {
     /// recompute (see [`Self::store_forwarder_reader_status_sync`]).
     pub(crate) fn store_forwarder_reader_info_sync(&self, endpoint_id: &str, info: ReaderInfo) {
         let stream_id = decode_stream_id(info.stream_id);
+        let reader_info =
+            parse_reader_info_json(info.reader_info_json.as_deref(), endpoint_id, &stream_id);
+        let hardware = reader_info.as_ref().and_then(|info| info.hardware.as_ref());
+        let hardware_reader_id = optional_non_empty(info.hardware_reader_id)
+            .or_else(|| hardware.and_then(|h| h.reader_id.clone()));
+        let firmware_version = optional_non_empty(info.firmware_version)
+            .or_else(|| hardware.and_then(|h| h.fw_version.clone()));
+        let model =
+            optional_non_empty(info.model).or_else(|| hardware.and_then(|h| h.hw_code.clone()));
         let mut live_statuses = self.forwarder_live_status.lock().unwrap();
         let live_status = live_statuses.entry(endpoint_id.to_owned()).or_default();
         live_status
             .readers
             .entry(stream_id.clone())
             .and_modify(|reader| {
-                reader.hardware_reader_id = optional_non_empty(info.hardware_reader_id.clone());
-                reader.firmware_version = optional_non_empty(info.firmware_version.clone());
-                reader.model = optional_non_empty(info.model.clone());
+                if hardware_reader_id.is_some() {
+                    reader.hardware_reader_id = hardware_reader_id.clone();
+                }
+                if firmware_version.is_some() {
+                    reader.firmware_version = firmware_version.clone();
+                }
+                if model.is_some() {
+                    reader.model = model.clone();
+                }
+                if reader_info.is_some() {
+                    reader.reader_info = reader_info.clone();
+                }
             })
             .or_insert_with(|| ReaderLiveStatus {
                 stream_id,
                 connected: false,
                 state: "unknown".to_owned(),
                 last_read_unix_ms: None,
-                hardware_reader_id: optional_non_empty(info.hardware_reader_id),
-                firmware_version: optional_non_empty(info.firmware_version),
-                model: optional_non_empty(info.model),
+                hardware_reader_id,
+                firmware_version,
+                model,
+                reader_info,
+                download_progress: None,
+            });
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn record_forwarder_download_progress(
+        &self,
+        endpoint_id: &str,
+        progress: DownloadProgress,
+    ) {
+        self.store_forwarder_download_progress_sync(endpoint_id, progress);
+        self.recompute_aggregate_connection_state().await;
+    }
+
+    /// Quick, lock-only store of a reader's download progress with NO aggregate
+    /// recompute (see [`Self::store_forwarder_reader_status_sync`]).
+    pub(crate) fn store_forwarder_download_progress_sync(
+        &self,
+        endpoint_id: &str,
+        progress: DownloadProgress,
+    ) {
+        let stream_id = decode_stream_id(progress.stream_id);
+        let progress_update = rt_domain::DownloadProgressUpdate {
+            reader_ip: stream_id.clone(),
+            state: download_state_from_str(&progress.state),
+            stored_reads: (progress.total != 0).then_some(progress.total as u32),
+            downloaded_reads: progress.reads_received,
+            progress: progress.progress,
+            total: (progress.total != 0).then_some(progress.total),
+            last_read_at: None,
+            error: optional_non_empty(progress.error),
+        };
+        let mut live_statuses = self.forwarder_live_status.lock().unwrap();
+        let live_status = live_statuses.entry(endpoint_id.to_owned()).or_default();
+        live_status
+            .readers
+            .entry(stream_id.clone())
+            .and_modify(|reader| {
+                reader.download_progress = Some(progress_update.clone());
+            })
+            .or_insert_with(|| ReaderLiveStatus {
+                stream_id,
+                connected: false,
+                state: "unknown".to_owned(),
+                last_read_unix_ms: None,
+                hardware_reader_id: None,
+                firmware_version: None,
+                model: None,
+                reader_info: None,
+                download_progress: Some(progress_update),
             });
     }
 
@@ -643,6 +756,65 @@ impl AppState {
             .collect()
     }
 
+    /// Register the reader-control request channel for a forwarder whose live
+    /// control session negotiated `CAP_READER_CONTROL`.
+    pub(crate) fn register_forwarder_reader_control_tx(
+        self: &Arc<Self>,
+        endpoint_id: &str,
+        tx: mpsc::Sender<ReaderCommand>,
+    ) -> ForwarderReaderControlRegistrationGuard {
+        self.forwarder_reader_control_tx
+            .lock()
+            .unwrap()
+            .insert(endpoint_id.to_owned(), tx.clone());
+        ForwarderReaderControlRegistrationGuard {
+            state: Arc::clone(self),
+            endpoint_id: endpoint_id.to_owned(),
+            tx,
+        }
+    }
+
+    fn deregister_forwarder_reader_control_tx(
+        &self,
+        endpoint_id: &str,
+        tx: &mpsc::Sender<ReaderCommand>,
+    ) {
+        let mut registrations = self.forwarder_reader_control_tx.lock().unwrap();
+        if registrations
+            .get(endpoint_id)
+            .is_some_and(|registered| registered.same_channel(tx))
+        {
+            registrations.remove(endpoint_id);
+        }
+    }
+
+    pub(crate) fn forwarder_reader_control_tx(
+        &self,
+        endpoint_id: &str,
+    ) -> Option<mpsc::Sender<ReaderCommand>> {
+        self.forwarder_reader_control_tx
+            .lock()
+            .unwrap()
+            .get(endpoint_id)
+            .cloned()
+    }
+
+    pub(crate) fn forwarder_reader_control_available(&self, endpoint_id: &str) -> bool {
+        self.forwarder_reader_control_tx
+            .lock()
+            .unwrap()
+            .contains_key(endpoint_id)
+    }
+
+    fn forwarder_reader_control_endpoints(&self) -> Vec<String> {
+        self.forwarder_reader_control_tx
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
     pub(crate) async fn clear_forwarder_live_status(&self, endpoint_id: &str) {
         {
             self.forwarder_live_status
@@ -710,6 +882,7 @@ impl AppState {
         let discovered = self.discovered_forwarders.read().await.clone();
         let live_statuses = self.forwarder_live_status.lock().unwrap().clone();
         let config_endpoints = self.forwarder_config_endpoints();
+        let reader_control_endpoints = self.forwarder_reader_control_endpoints();
         let fingerprint = Self::connections_fingerprint(
             next.clone(),
             &statuses,
@@ -718,6 +891,7 @@ impl AppState {
             &subscriptions,
             &live_statuses,
             &config_endpoints,
+            &reader_control_endpoints,
         );
         let connections_changed = {
             let mut last = self.last_connections_fingerprint.lock().unwrap();
@@ -734,6 +908,7 @@ impl AppState {
         self.set_connection_state_if_changed(next).await;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn connections_fingerprint(
         aggregate_state: ConnectionState,
         statuses: &HashMap<String, ForwarderRuntimeStatus>,
@@ -742,12 +917,14 @@ impl AppState {
         subscriptions: &[StreamSubscription],
         live_statuses: &HashMap<String, ForwarderLiveStatus>,
         config_endpoints: &[String],
+        reader_control_endpoints: &[String],
     ) -> ConnectionsFingerprint {
         let mut endpoints: BTreeSet<String> = statuses.keys().cloned().collect();
         endpoints.extend(intents.keys().cloned());
         endpoints.extend(discovered.keys().cloned());
         endpoints.extend(live_statuses.keys().cloned());
         endpoints.extend(config_endpoints.iter().cloned());
+        endpoints.extend(reader_control_endpoints.iter().cloned());
 
         let mut subscribed_counts: HashMap<String, usize> = HashMap::new();
         for subscription in subscriptions {
@@ -774,6 +951,7 @@ impl AppState {
                     display_name: discovered_forwarder
                         .and_then(|forwarder| forwarder.display_name.clone()),
                     remote_config_available: config_endpoints.contains(&endpoint_id),
+                    reader_control_available: reader_control_endpoints.contains(&endpoint_id),
                     subscribed_count: subscribed_counts.get(&endpoint_id).copied().unwrap_or(0),
                     available_count: discovered_forwarder
                         .map_or(0, |forwarder| forwarder.streams.len()),
@@ -1068,6 +1246,28 @@ impl Drop for ForwarderConfigRegistrationGuard {
     }
 }
 
+/// RAII registration for a forwarder's live reader-control command channel.
+pub(crate) struct ForwarderReaderControlRegistrationGuard {
+    state: Arc<AppState>,
+    endpoint_id: String,
+    tx: mpsc::Sender<ReaderCommand>,
+}
+
+impl Drop for ForwarderReaderControlRegistrationGuard {
+    fn drop(&mut self) {
+        self.state
+            .deregister_forwarder_reader_control_tx(&self.endpoint_id, &self.tx);
+        self.state
+            .recompute_aggregate_connection_state_sync_default_trying();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let state = Arc::clone(&self.state);
+            handle.spawn(async move {
+                state.recompute_aggregate_connection_state().await;
+            });
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Request/Response types
 // ---------------------------------------------------------------------------
@@ -1227,6 +1427,8 @@ pub struct ReaderLiveStatus {
     pub hardware_reader_id: Option<String>,
     pub firmware_version: Option<String>,
     pub model: Option<String>,
+    pub reader_info: Option<rt_domain::ReaderInfo>,
+    pub download_progress: Option<rt_domain::DownloadProgressUpdate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1251,6 +1453,7 @@ pub struct ForwarderConnectionStatus {
     /// negotiated `CAP_REMOTE_CONFIG`; gates the UI's view/edit/restart
     /// affordances.
     pub remote_config_available: bool,
+    pub reader_control_available: bool,
 }
 
 /// Result of [`get_forwarder_config`]: the forwarder's full config document and
@@ -1274,6 +1477,14 @@ pub struct ForwarderConfigSetResult {
 pub struct ForwarderRestartResult {
     pub accepted: bool,
     pub error: Option<String>,
+}
+
+/// Result of a reader-control command proxied to a forwarder over P2P.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReaderControlResult {
+    pub success: bool,
+    pub message: String,
+    pub reader_info: Option<rt_domain::ReaderInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1759,6 +1970,7 @@ pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
     let mut endpoints: BTreeSet<String> = discovered.keys().cloned().collect();
     endpoints.extend(live_statuses.keys().cloned());
     endpoints.extend(state.forwarder_config_endpoints());
+    endpoints.extend(state.forwarder_reader_control_endpoints());
     let mut subscribed_counts: HashMap<String, usize> = HashMap::new();
     for subscription in &subscriptions {
         endpoints.insert(subscription.forwarder_endpoint_id.clone());
@@ -1783,6 +1995,7 @@ pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
             ups: live_status.ups,
             restart_needed: None,
             remote_config_available: state.forwarder_remote_config_available(&endpoint_id),
+            reader_control_available: state.forwarder_reader_control_available(&endpoint_id),
         });
     }
 
@@ -2045,6 +2258,236 @@ pub async fn restart_forwarder(
         accepted: response.accepted,
         error: optional_non_empty(response.error),
     })
+}
+
+fn forwarder_reader_control_unavailable() -> ReceiverError {
+    ReceiverError::NotConnected("forwarder not connected or reader control unavailable".to_owned())
+}
+
+fn enqueue_reader_command(
+    tx: &mpsc::Sender<ReaderCommand>,
+    command: ReaderCommand,
+) -> Result<(), ReceiverError> {
+    match tx.try_send(command) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(_)) => Err(ReceiverError::UpstreamError(
+            "forwarder reader control channel busy".to_owned(),
+        )),
+        Err(TrySendError::Closed(_)) => Err(forwarder_reader_control_unavailable()),
+    }
+}
+
+async fn await_reader_response(
+    rx: oneshot::Receiver<ReaderControlResponse>,
+) -> Result<ReaderControlResponse, ReceiverError> {
+    match tokio::time::timeout(FORWARDER_CONFIG_TIMEOUT, rx).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(_)) => Err(ReceiverError::NotConnected(
+            "forwarder control session ended before responding".to_owned(),
+        )),
+        Err(_) => Err(ReceiverError::UpstreamError(
+            "timed out waiting for reader control response".to_owned(),
+        )),
+    }
+}
+
+async fn reader_control_command(
+    state: &AppState,
+    endpoint_id: String,
+    stream_id: String,
+    action: rt_domain::ReaderControlAction,
+) -> Result<ReaderControlResult, ReceiverError> {
+    let tx = state
+        .forwarder_reader_control_tx(&endpoint_id)
+        .ok_or_else(forwarder_reader_control_unavailable)?;
+    let (resp_tx, resp_rx) = oneshot::channel();
+    enqueue_reader_command(
+        &tx,
+        ReaderCommand::Request {
+            stream_id: stream_id.clone(),
+            action,
+            resp: resp_tx,
+        },
+    )?;
+    let response = await_reader_response(resp_rx).await?;
+    let reader_info = match response
+        .reader_info_json
+        .as_deref()
+        .filter(|json| !json.is_empty())
+    {
+        Some(json) => Some(serde_json::from_str(json).map_err(|error| {
+            ReceiverError::UpstreamError(format!(
+                "forwarder returned invalid reader_info_json: {error}"
+            ))
+        })?),
+        None => None,
+    };
+    if response.reader_info_json.is_some() {
+        state.store_forwarder_reader_info_sync(
+            &endpoint_id,
+            ReaderInfo {
+                stream_id: if response.stream_id.is_empty() {
+                    stream_id.into_bytes()
+                } else {
+                    response.stream_id.clone()
+                },
+                hardware_reader_id: String::new(),
+                firmware_version: String::new(),
+                model: String::new(),
+                reader_info_json: response.reader_info_json.clone(),
+            },
+        );
+        state.recompute_aggregate_connection_state().await;
+    }
+    Ok(ReaderControlResult {
+        success: response.success,
+        message: response.message,
+        reader_info,
+    })
+}
+
+pub async fn reader_get_info(
+    state: &AppState,
+    endpoint_id: String,
+    stream_id: String,
+) -> Result<ReaderControlResult, ReceiverError> {
+    reader_control_command(
+        state,
+        endpoint_id,
+        stream_id,
+        rt_domain::ReaderControlAction::GetInfo,
+    )
+    .await
+}
+
+pub async fn reader_sync_clock(
+    state: &AppState,
+    endpoint_id: String,
+    stream_id: String,
+) -> Result<ReaderControlResult, ReceiverError> {
+    reader_control_command(
+        state,
+        endpoint_id,
+        stream_id,
+        rt_domain::ReaderControlAction::SyncClock,
+    )
+    .await
+}
+
+pub async fn reader_set_read_mode(
+    state: &AppState,
+    endpoint_id: String,
+    stream_id: String,
+    mode: rt_domain::ReadMode,
+    timeout: u8,
+) -> Result<ReaderControlResult, ReceiverError> {
+    reader_control_command(
+        state,
+        endpoint_id,
+        stream_id,
+        rt_domain::ReaderControlAction::SetReadMode { mode, timeout },
+    )
+    .await
+}
+
+pub async fn reader_set_tto(
+    state: &AppState,
+    endpoint_id: String,
+    stream_id: String,
+    enabled: bool,
+) -> Result<ReaderControlResult, ReceiverError> {
+    reader_control_command(
+        state,
+        endpoint_id,
+        stream_id,
+        rt_domain::ReaderControlAction::SetTto { enabled },
+    )
+    .await
+}
+
+pub async fn reader_set_recording(
+    state: &AppState,
+    endpoint_id: String,
+    stream_id: String,
+    enabled: bool,
+) -> Result<ReaderControlResult, ReceiverError> {
+    reader_control_command(
+        state,
+        endpoint_id,
+        stream_id,
+        rt_domain::ReaderControlAction::SetRecording { enabled },
+    )
+    .await
+}
+
+pub async fn reader_clear_records(
+    state: &AppState,
+    endpoint_id: String,
+    stream_id: String,
+) -> Result<ReaderControlResult, ReceiverError> {
+    reader_control_command(
+        state,
+        endpoint_id,
+        stream_id,
+        rt_domain::ReaderControlAction::ClearRecords,
+    )
+    .await
+}
+
+pub async fn reader_start_download(
+    state: &AppState,
+    endpoint_id: String,
+    stream_id: String,
+) -> Result<ReaderControlResult, ReceiverError> {
+    reader_control_command(
+        state,
+        endpoint_id,
+        stream_id,
+        rt_domain::ReaderControlAction::StartDownload,
+    )
+    .await
+}
+
+pub async fn reader_stop_download(
+    state: &AppState,
+    endpoint_id: String,
+    stream_id: String,
+) -> Result<ReaderControlResult, ReceiverError> {
+    reader_control_command(
+        state,
+        endpoint_id,
+        stream_id,
+        rt_domain::ReaderControlAction::StopDownload,
+    )
+    .await
+}
+
+pub async fn reader_refresh(
+    state: &AppState,
+    endpoint_id: String,
+    stream_id: String,
+) -> Result<ReaderControlResult, ReceiverError> {
+    reader_control_command(
+        state,
+        endpoint_id,
+        stream_id,
+        rt_domain::ReaderControlAction::Refresh,
+    )
+    .await
+}
+
+pub async fn reader_reconnect(
+    state: &AppState,
+    endpoint_id: String,
+    stream_id: String,
+) -> Result<ReaderControlResult, ReceiverError> {
+    reader_control_command(
+        state,
+        endpoint_id,
+        stream_id,
+        rt_domain::ReaderControlAction::Reconnect,
+    )
+    .await
 }
 
 pub async fn get_logs(state: &AppState) -> LogsResponse {
@@ -2396,6 +2839,29 @@ macro_rules! receiver_command_list {
                 config_json: "String"
             ) -> "ForwarderConfigSetResult",
             restart_forwarder(endpoint_id: "String") -> "ForwarderRestartResult",
+            reader_get_info(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
+            reader_sync_clock(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
+            reader_set_read_mode(
+                endpoint_id: "String",
+                stream_id: "String",
+                mode: "ReadMode",
+                timeout: "u8"
+            ) -> "ReaderControlResult",
+            reader_set_tto(
+                endpoint_id: "String",
+                stream_id: "String",
+                enabled: "bool"
+            ) -> "ReaderControlResult",
+            reader_set_recording(
+                endpoint_id: "String",
+                stream_id: "String",
+                enabled: "bool"
+            ) -> "ReaderControlResult",
+            reader_clear_records(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
+            reader_start_download(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
+            reader_stop_download(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
+            reader_refresh(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
+            reader_reconnect(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
             get_version() -> "String",
             get_logs() -> "LogsResponse",
             admin_reset_cursor(body: "CursorResetRequest") -> "()",
@@ -2857,6 +3323,28 @@ mod tests {
                 },
             )
             .await;
+        let rich_reader_info = rt_domain::ReaderInfo {
+            hardware: Some(rt_domain::HardwareInfo {
+                fw_version: Some("1.2.3".to_owned()),
+                hw_code: Some("IPICO".to_owned()),
+                reader_id: Some("reader-42".to_owned()),
+            }),
+            config: Some(rt_domain::Config3Info {
+                mode: rt_domain::ReadMode::Event,
+                timeout: 7,
+            }),
+            tto_enabled: Some(true),
+            ..rt_domain::ReaderInfo {
+                banner: None,
+                hardware: None,
+                config: None,
+                tto_enabled: None,
+                clock: None,
+                estimated_stored_reads: None,
+                recording: None,
+                connect_failures: 0,
+            }
+        };
         state
             .record_forwarder_reader_info(
                 "endpoint-a",
@@ -2865,6 +3353,33 @@ mod tests {
                     hardware_reader_id: "reader-42".to_owned(),
                     firmware_version: "1.2.3".to_owned(),
                     model: "IPICO".to_owned(),
+                    reader_info_json: Some(serde_json::to_string(&rich_reader_info).unwrap()),
+                },
+            )
+            .await;
+        state
+            .record_forwarder_download_progress(
+                "endpoint-a",
+                rt_p2p_protocol::DownloadProgress {
+                    stream_id: b"stream-a".to_vec(),
+                    downloaded_bytes: 0,
+                    total_bytes: 0,
+                    state: "downloading".to_owned(),
+                    reads_received: 42,
+                    progress: 42,
+                    total: 100,
+                    error: String::new(),
+                },
+            )
+            .await;
+        state
+            .record_forwarder_reader_status(
+                "endpoint-a",
+                rt_p2p_protocol::ReaderStatus {
+                    stream_id: b"stream-a".to_vec(),
+                    connected: true,
+                    state: "online".to_owned(),
+                    last_read_unix_ms: 5678,
                 },
             )
             .await;
@@ -2888,9 +3403,9 @@ mod tests {
             .expect("forwarder should be present");
         assert_eq!(forwarder.readers.len(), 2);
         assert_eq!(forwarder.readers[0].stream_id, "stream-a");
-        assert!(!forwarder.readers[0].connected);
-        assert_eq!(forwarder.readers[0].state, "offline");
-        assert_eq!(forwarder.readers[0].last_read_unix_ms, None);
+        assert!(forwarder.readers[0].connected);
+        assert_eq!(forwarder.readers[0].state, "online");
+        assert_eq!(forwarder.readers[0].last_read_unix_ms, Some(5678));
         assert_eq!(
             forwarder.readers[0].hardware_reader_id.as_deref(),
             Some("reader-42")
@@ -2900,6 +3415,20 @@ mod tests {
             Some("1.2.3")
         );
         assert_eq!(forwarder.readers[0].model.as_deref(), Some("IPICO"));
+        assert_eq!(forwarder.readers[0].reader_info, Some(rich_reader_info));
+        assert_eq!(
+            forwarder.readers[0].download_progress,
+            Some(rt_domain::DownloadProgressUpdate {
+                reader_ip: "stream-a".to_owned(),
+                state: rt_domain::DownloadState::Downloading,
+                stored_reads: Some(100),
+                downloaded_reads: 42,
+                progress: 42,
+                total: Some(100),
+                last_read_at: None,
+                error: None,
+            })
+        );
         assert_eq!(forwarder.readers[1].stream_id, "stream-b");
         assert!(forwarder.readers[1].connected);
         assert_eq!(forwarder.readers[1].last_read_unix_ms, Some(1234));
@@ -3171,6 +3700,103 @@ mod tests {
             "full config command queue should fail fast, not wait for enqueue capacity"
         );
         assert!(result.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn reader_control_command_routes_request_and_stores_reader_info() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let _guard = state.register_forwarder_reader_control_tx("endpoint-a", tx);
+        let expected_info = rt_domain::ReaderInfo {
+            clock: Some(rt_domain::ClockInfo {
+                reader_clock: "2026-06-22T12:00:00Z".to_owned(),
+                drift_ms: 12,
+            }),
+            tto_enabled: Some(true),
+            ..rt_domain::ReaderInfo {
+                banner: None,
+                hardware: None,
+                config: None,
+                tto_enabled: None,
+                clock: None,
+                estimated_stored_reads: None,
+                recording: None,
+                connect_failures: 0,
+            }
+        };
+        state
+            .record_forwarder_reader_info(
+                "endpoint-a",
+                rt_p2p_protocol::ReaderInfo {
+                    stream_id: b"stream-a".to_vec(),
+                    hardware_reader_id: "reader-42".to_owned(),
+                    firmware_version: "1.2.3".to_owned(),
+                    model: "IPICO".to_owned(),
+                    reader_info_json: None,
+                },
+            )
+            .await;
+
+        let response_info = expected_info.clone();
+        tokio::spawn(async move {
+            let ReaderCommand::Request {
+                stream_id,
+                action,
+                resp,
+            } = rx.recv().await.expect("reader command");
+            assert_eq!(stream_id, "stream-a");
+            assert_eq!(action, rt_domain::ReaderControlAction::SyncClock);
+            resp.send(ReaderControlResponse {
+                stream_id: b"stream-a".to_vec(),
+                request_id: "1".to_owned(),
+                success: true,
+                message: String::new(),
+                reader_info_json: Some(serde_json::to_string(&response_info).unwrap()),
+            })
+            .expect("send reader response");
+        });
+
+        let result = reader_sync_clock(&state, "endpoint-a".to_owned(), "stream-a".to_owned())
+            .await
+            .expect("reader sync clock");
+
+        assert!(result.success);
+        assert_eq!(result.reader_info, Some(expected_info.clone()));
+        let response = get_connections(&state).await;
+        let reader = response
+            .forwarders
+            .iter()
+            .find(|forwarder| forwarder.endpoint_id == "endpoint-a")
+            .and_then(|forwarder| forwarder.readers.first())
+            .expect("reader status should be populated from response reader_info_json");
+        assert_eq!(reader.reader_info, Some(expected_info));
+        assert_eq!(reader.hardware_reader_id.as_deref(), Some("reader-42"));
+        assert_eq!(reader.firmware_version.as_deref(), Some("1.2.3"));
+        assert_eq!(reader.model.as_deref(), Some("IPICO"));
+    }
+
+    #[tokio::test]
+    async fn reader_control_command_rejects_invalid_reader_info_json() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let _guard = state.register_forwarder_reader_control_tx("endpoint-a", tx);
+        tokio::spawn(async move {
+            let ReaderCommand::Request { resp, .. } = rx.recv().await.expect("reader command");
+            resp.send(ReaderControlResponse {
+                stream_id: b"stream-a".to_vec(),
+                request_id: "1".to_owned(),
+                success: true,
+                message: String::new(),
+                reader_info_json: Some("{".to_owned()),
+            })
+            .expect("send reader response");
+        });
+
+        let result = reader_refresh(&state, "endpoint-a".to_owned(), "stream-a".to_owned()).await;
+
+        assert!(matches!(result, Err(ReceiverError::UpstreamError(_))));
     }
 
     #[tokio::test]

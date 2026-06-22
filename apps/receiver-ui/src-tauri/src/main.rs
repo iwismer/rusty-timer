@@ -427,6 +427,120 @@ async fn restart_forwarder(
 }
 
 #[tauri::command]
+async fn reader_get_info(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+    stream_id: String,
+) -> CmdResult<control_api::ReaderControlResult> {
+    control_api::reader_get_info(&state, endpoint_id, stream_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reader_sync_clock(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+    stream_id: String,
+) -> CmdResult<control_api::ReaderControlResult> {
+    control_api::reader_sync_clock(&state, endpoint_id, stream_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reader_set_read_mode(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+    stream_id: String,
+    mode: rt_domain::ReadMode,
+    timeout: u8,
+) -> CmdResult<control_api::ReaderControlResult> {
+    control_api::reader_set_read_mode(&state, endpoint_id, stream_id, mode, timeout)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reader_set_tto(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+    stream_id: String,
+    enabled: bool,
+) -> CmdResult<control_api::ReaderControlResult> {
+    control_api::reader_set_tto(&state, endpoint_id, stream_id, enabled)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reader_set_recording(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+    stream_id: String,
+    enabled: bool,
+) -> CmdResult<control_api::ReaderControlResult> {
+    control_api::reader_set_recording(&state, endpoint_id, stream_id, enabled)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reader_clear_records(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+    stream_id: String,
+) -> CmdResult<control_api::ReaderControlResult> {
+    control_api::reader_clear_records(&state, endpoint_id, stream_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reader_start_download(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+    stream_id: String,
+) -> CmdResult<control_api::ReaderControlResult> {
+    control_api::reader_start_download(&state, endpoint_id, stream_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reader_stop_download(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+    stream_id: String,
+) -> CmdResult<control_api::ReaderControlResult> {
+    control_api::reader_stop_download(&state, endpoint_id, stream_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reader_refresh(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+    stream_id: String,
+) -> CmdResult<control_api::ReaderControlResult> {
+    control_api::reader_refresh(&state, endpoint_id, stream_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reader_reconnect(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+    stream_id: String,
+) -> CmdResult<control_api::ReaderControlResult> {
+    control_api::reader_reconnect(&state, endpoint_id, stream_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_version() -> String {
     control_api::get_version()
 }

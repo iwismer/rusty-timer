@@ -43,7 +43,8 @@ use rt_iroh::{
     Endpoint, EndpointBuilder, NodeAddr, NodeId, RelayMode, SecretKey, load_or_create_secret_key,
 };
 use rt_p2p_protocol::{
-    CAP_CONTROL_EVENTS, CAP_REMOTE_CONFIG, Hello, MAX_FRAME_BYTES, SubscribeMode,
+    CAP_CONTROL_EVENTS, CAP_READER_CONTROL, CAP_REMOTE_CONFIG, Hello, MAX_FRAME_BYTES,
+    SubscribeMode,
 };
 use tokio::sync::{Mutex, broadcast, watch};
 use tokio::task::JoinHandle;
@@ -214,6 +215,7 @@ fn client_hello() -> Hello {
             "data".to_owned(),
             CAP_CONTROL_EVENTS.to_owned(),
             CAP_REMOTE_CONFIG.to_owned(),
+            CAP_READER_CONTROL.to_owned(),
         ],
         max_frame_bytes: u32::try_from(MAX_FRAME_BYTES).unwrap_or(u32::MAX),
         catalog_generation: 0,
@@ -1889,6 +1891,16 @@ mod tests {
         assert!(rt_p2p_protocol::has_capability(
             &hello.capabilities,
             rt_p2p_protocol::CAP_REMOTE_CONFIG
+        ));
+    }
+
+    #[test]
+    fn client_hello_advertises_reader_control_capability() {
+        let hello = client_hello();
+
+        assert!(rt_p2p_protocol::has_capability(
+            &hello.capabilities,
+            rt_p2p_protocol::CAP_READER_CONTROL
         ));
     }
 

@@ -77,12 +77,21 @@ pub struct ReaderControlRequest {
     /// Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
     #[prost(bytes = "vec", tag = "1")]
     pub stream_id: ::prost::alloc::vec::Vec<u8>,
-    /// Action verb (e.g. "connect", "disconnect", "download").
+    /// Action verb (e.g. "sync_clock", "set_read_mode", "start_download").
     #[prost(string, tag = "2")]
     pub command: ::prost::alloc::string::String,
     /// Correlation id echoed in the matching ReaderControlResponse.
     #[prost(string, tag = "3")]
     pub request_id: ::prost::alloc::string::String,
+    /// Optional read mode for set_read_mode ("raw", "event", or "fsls").
+    #[prost(string, optional, tag = "4")]
+    pub mode: ::core::option::Option<::prost::alloc::string::String>,
+    /// Optional timeout seconds for set_read_mode.
+    #[prost(uint32, optional, tag = "5")]
+    pub timeout: ::core::option::Option<u32>,
+    /// Optional boolean for set_tto and set_recording.
+    #[prost(bool, optional, tag = "6")]
+    pub enabled: ::core::option::Option<bool>,
 }
 /// Result of a ReaderControlRequest.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -96,6 +105,9 @@ pub struct ReaderControlResponse {
     pub success: bool,
     #[prost(string, tag = "4")]
     pub message: ::prost::alloc::string::String,
+    /// Serialized rt_domain::ReaderInfo, present for commands that return updated reader info.
+    #[prost(string, optional, tag = "5")]
+    pub reader_info_json: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Connection/liveness status for a reader.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -124,6 +136,9 @@ pub struct ReaderInfo {
     pub firmware_version: ::prost::alloc::string::String,
     #[prost(string, tag = "4")]
     pub model: ::prost::alloc::string::String,
+    /// Serialized rt_domain::ReaderInfo. When present, this is the authoritative rich payload.
+    #[prost(string, optional, tag = "5")]
+    pub reader_info_json: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Progress of an in-flight download (e.g. backup retrieval).
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -135,6 +150,17 @@ pub struct DownloadProgress {
     pub downloaded_bytes: u64,
     #[prost(uint64, tag = "3")]
     pub total_bytes: u64,
+    /// Human/machine readable progress state (e.g. "downloading", "complete", "error").
+    #[prost(string, tag = "4")]
+    pub state: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "5")]
+    pub reads_received: u32,
+    #[prost(uint64, tag = "6")]
+    pub progress: u64,
+    #[prost(uint64, tag = "7")]
+    pub total: u64,
+    #[prost(string, tag = "8")]
+    pub error: ::prost::alloc::string::String,
 }
 /// Uninterruptible power supply status reported by the forwarder host.
 #[derive(Clone, PartialEq, ::prost::Message)]

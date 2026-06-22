@@ -15,6 +15,9 @@ pub const CAP_CONTROL_EVENTS: &str = "control-events";
 /// Phase 4 remote configuration).
 pub const CAP_REMOTE_CONFIG: &str = "remote-config";
 
+/// Peer supports reader-specific control verbs on the control stream.
+pub const CAP_READER_CONTROL: &str = "reader_control";
+
 /// Returns `true` when `cap` is present in a negotiated capability set.
 ///
 /// `caps` is typically [`HelloOk.capabilities`](crate::HelloOk), the
@@ -34,6 +37,7 @@ mod tests {
 
         assert!(has_capability(&caps, CAP_CONTROL_EVENTS));
         assert!(!has_capability(&caps, CAP_REMOTE_CONFIG));
+        assert!(!has_capability(&caps, CAP_READER_CONTROL));
         assert!(!has_capability(&[], CAP_CONTROL_EVENTS));
     }
 }
