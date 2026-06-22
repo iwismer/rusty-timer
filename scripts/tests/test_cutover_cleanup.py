@@ -139,16 +139,9 @@ class CutoverCleanupTests(unittest.TestCase):
             "getAnnouncerConfig",
             "putAnnouncerConfig",
             "resetAnnouncer",
-            "readerGetInfo",
-            "readerSyncClock",
-            "readerSetReadMode",
-            "readerSetTto",
-            "readerSetRecording",
-            "readerClearRecords",
-            "readerStartDownload",
-            "readerStopDownload",
-            "readerRefresh",
-            "readerReconnect",
+            # Reader-control wrappers are intentionally allowed again: they now
+            # target direct receiver<->forwarder P2P control, not the old
+            # central-server WebSocket proxy path.
         ]:
             self.assertNotIn(forbidden, receiver_api)
             self.assertNotIn(forbidden, receiver_store)
@@ -174,16 +167,8 @@ class CutoverCleanupTests(unittest.TestCase):
             "get_announcer_config",
             "put_announcer_config",
             "reset_announcer",
-            "reader_get_info",
-            "reader_sync_clock",
-            "reader_set_read_mode",
-            "reader_set_tto",
-            "reader_set_recording",
-            "reader_clear_records",
-            "reader_start_download",
-            "reader_stop_download",
-            "reader_refresh",
-            "reader_reconnect",
+            # Reader-control commands are intentionally allowed again via the
+            # direct P2P receiver<->forwarder bridge, not the old server proxy.
         ]
         for forbidden in legacy_receiver_commands:
             self.assertNotIn(forbidden, receiver_registry)
@@ -201,9 +186,6 @@ class CutoverCleanupTests(unittest.TestCase):
             "readerInfos",
             "readerStates",
             "downloadProgress",
-            "export type ReaderConnectionState",
-            "export type DownloadState",
-            "export interface ReaderInfo",
         ]:
             self.assertNotIn(forbidden, receiver_api)
             self.assertNotIn(forbidden, receiver_store)
