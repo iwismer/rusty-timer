@@ -156,8 +156,11 @@ class CutoverCleanupTests(unittest.TestCase):
             "get_forwarders",
             "get_forwarder_race",
             "set_forwarder_race",
-            "get_forwarder_config",
-            "set_forwarder_config",
+            # NOTE: get_forwarder_config/set_forwarder_config are intentionally
+            # NOT forbidden anymore. The legacy *central-server-proxied* config
+            # commands were removed in the P2P cutover; these names are now
+            # reused by the direct receiver<->forwarder P2P remote-config
+            # feature (control_api.rs + control_bridge.rs + tauri main.rs).
             "restart_forwarder_service",
             "restart_forwarder_device",
             "shutdown_forwarder_device",
