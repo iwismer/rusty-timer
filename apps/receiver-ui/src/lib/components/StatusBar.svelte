@@ -8,19 +8,13 @@
 
   function computeCounts() {
     const list = store.streams?.streams ?? [];
-    let online = 0;
-    let degraded = 0;
-    let offline = 0;
     let totalReads = 0;
     for (const s of list) {
-      if (s.online === true && s.reader_connected === true) online++;
-      else if (s.online === false) offline++;
-      else degraded++;
       if (s.subscribed && s.reads_total != null) {
         totalReads += s.reads_total;
       }
     }
-    return { online, degraded, offline, totalReads };
+    return { totalReads };
   }
 
   function healthLabel(health: OverallHealth): string {
@@ -50,27 +44,6 @@
       title={healthLabel(overallHealth)}
       aria-label={healthLabel(overallHealth)}
     ></span>
-    {#if c.online > 0}
-      <span class="flex items-center gap-1">
-        <span class="w-2 h-2 rounded-full bg-status-ok"></span>
-        <span class="text-text-muted">{c.online}</span>
-        <span class="text-text-muted hidden @[300px]:inline">online</span>
-      </span>
-    {/if}
-    {#if c.degraded > 0}
-      <span class="flex items-center gap-1">
-        <span class="w-2 h-2 rounded-full bg-status-warn"></span>
-        <span class="text-text-muted">{c.degraded}</span>
-        <span class="text-text-muted hidden @[300px]:inline">degraded</span>
-      </span>
-    {/if}
-    {#if c.offline > 0}
-      <span class="flex items-center gap-1">
-        <span class="w-2 h-2 rounded-full bg-status-err"></span>
-        <span class="text-text-muted">{c.offline}</span>
-        <span class="text-text-muted hidden @[300px]:inline">offline</span>
-      </span>
-    {/if}
     <span class="font-mono text-text-primary"
       >{c.totalReads.toLocaleString()} reads</span
     >

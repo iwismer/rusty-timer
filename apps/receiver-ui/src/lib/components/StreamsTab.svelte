@@ -511,7 +511,7 @@
                         >
                           Replay
                         </button>
-                      {:else if stream.subscribed}
+                      {:else if store.modeDraft !== "targeted_replay"}
                         {@const options = store.earliestEpochOptions[key] ?? []}
                         {@const selectedEarliest =
                           selectedEarliestEpochValue(stream)}

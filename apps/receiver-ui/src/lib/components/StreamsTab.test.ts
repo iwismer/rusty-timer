@@ -201,7 +201,21 @@ describe("StreamsTab", () => {
     expect(screen.getByText("Available")).toBeInTheDocument();
     expect(screen.getAllByText("—").length).toBeGreaterThan(0);
 
+    store.earliestEpochOptions = {
+      "endpoint-abc/reader-finish-1": [
+        {
+          stream_epoch: 7,
+          name: null,
+          first_seen_at: null,
+          race_names: [],
+        },
+      ],
+    };
+
     await fireEvent.click(screen.getByText("reader-finish-1").closest("tr")!);
+    expect(
+      screen.getByTestId("earliest-epoch-endpoint-abc/reader-finish-1"),
+    ).toHaveValue("7");
     const subscribe = screen.getByTestId(
       "subscribe-toggle-endpoint-abc/reader-finish-1",
     );

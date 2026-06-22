@@ -1208,16 +1208,21 @@ async fn project_stream_ui_state(state: &Arc<AppState>, stream_id: &str, ui_key:
     }
 
     if let Some(last) = events.last() {
+        let chip_id = crate::ui_events::chip_id_from_raw_frame(&last.raw_frame);
+        let resolved = {
+            let snapshot = state.chip_lookup.read().await.clone();
+            SnapshotResolver { snapshot }.resolve(&chip_id)
+        };
         let _ = state
             .ui_tx
             .send(ReceiverUiEvent::LastRead(crate::ui_events::LastRead {
                 forwarder_id: ui_key.forwarder_id.clone(),
                 reader_ip: ui_key.reader_ip.clone(),
-                chip_id: crate::ui_events::chip_id_from_raw_frame(&last.raw_frame),
+                chip_id,
                 timestamp: unix_ms_to_rfc3339(last.received_unix_ms)
                     .unwrap_or_else(|| last.received_unix_ms.to_string()),
-                bib: None,
-                name: None,
+                bib: resolved.as_ref().map(|participant| participant.bib.clone()),
+                name: resolved.map(|participant| participant.name),
             }));
     }
 
@@ -2118,6 +2123,43 @@ mod tests {
             dbf_delivered_unix_ms: None,
         })
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_ui_projection_resolves_last_read_participant_names() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        crate::control_api::import_participants(&state, "42,Lovelace,Ada\n".to_owned())
+            .await
+            .unwrap();
+        crate::control_api::import_chips(&state, "42,000000012345\n".to_owned())
+            .await
+            .unwrap();
+        {
+            let db = state.db.lock().await;
+            insert_chip_event(&db, "stream-a", 1, 1_700_000_000_123);
+        }
+        let mut ui_rx = state.ui_tx.subscribe();
+
+        project_stream_ui_state(
+            &state,
+            "stream-a",
+            &StreamKey::new("fwd-1", "10.0.0.1:10000"),
+        )
+        .await;
+
+        let mut resolved = None;
+        while let Ok(Ok(event)) =
+            tokio::time::timeout(Duration::from_millis(25), ui_rx.recv()).await
+        {
+            if let ReceiverUiEvent::LastRead(read) = event {
+                resolved = Some(read);
+                break;
+            }
+        }
+        let read = resolved.expect("last read event");
+        assert_eq!(read.chip_id, "000000012345");
+        assert_eq!(read.bib.as_deref(), Some("42"));
+        assert_eq!(read.name.as_deref(), Some("Ada Lovelace"));
     }
 
     #[test]

@@ -881,7 +881,11 @@ impl AppState {
             }
         };
         let announcer_publish_streams = db.load_announcer_publish_streams().unwrap_or_default();
+        let intents = db.load_forwarder_intents().unwrap_or_default();
         drop(db);
+
+        let runtime_statuses = self.forwarder_runtime.lock().unwrap().clone();
+        let live_statuses = self.forwarder_live_status.lock().unwrap().clone();
 
         let cursor_map: HashMap<&str, &crate::db::StreamCursorRecord> =
             cursors.iter().map(|c| (c.stream_id.as_str(), c)).collect();
@@ -926,6 +930,21 @@ impl AppState {
             let cursor = cursor_map.get(sub.stream_id.as_str());
             let discovered_stream = discovered_streams
                 .get(&(sub.forwarder_endpoint_id.as_str(), sub.stream_id.as_str()));
+            let runtime = runtime_statuses
+                .get(&sub.forwarder_endpoint_id)
+                .copied()
+                .unwrap_or_default();
+            let intent = *intents.get(&sub.forwarder_endpoint_id).unwrap_or(&true);
+            let snapshot = derive_forwarder_state(runtime, intent);
+            let online = Some(matches!(
+                snapshot.state,
+                ForwarderConnState::Connected | ForwarderConnState::Subscribed
+            ));
+            let reader_connected = live_statuses
+                .get(&sub.forwarder_endpoint_id)
+                .and_then(|status| status.readers.get(&sub.stream_id))
+                .map(|reader| reader.connected)
+                .or_else(|| (snapshot.state == ForwarderConnState::Subscribed).then_some(true));
             streams.push(StreamEntry {
                 forwarder_endpoint_id: sub.forwarder_endpoint_id.clone(),
                 stream_id: sub.stream_id.clone(),
@@ -935,8 +954,8 @@ impl AppState {
                 local_port: port,
                 announcer_publish: announcer_publish_streams.contains(&sub.stream_id),
                 event_type: Some(sub.event_type),
-                online: None,
-                reader_connected: None,
+                online,
+                reader_connected,
                 display_alias: discovered_stream
                     .and_then(|(forwarder, _)| forwarder.display_name.clone()),
                 stream_epoch: discovered_stream.map(|(_, stream)| stream.epoch),
@@ -962,6 +981,21 @@ impl AppState {
                 if !seen.insert(key) {
                     continue;
                 }
+                let runtime = runtime_statuses
+                    .get(endpoint_id)
+                    .copied()
+                    .unwrap_or_default();
+                let intent = *intents.get(endpoint_id).unwrap_or(&true);
+                let snapshot = derive_forwarder_state(runtime, intent);
+                let online = Some(matches!(
+                    snapshot.state,
+                    ForwarderConnState::Connected | ForwarderConnState::Subscribed
+                ));
+                let reader_connected = live_statuses
+                    .get(endpoint_id)
+                    .and_then(|status| status.readers.get(&stream.stream_id))
+                    .map(|reader| reader.connected)
+                    .or_else(|| (snapshot.state == ForwarderConnState::Subscribed).then_some(true));
                 streams.push(StreamEntry {
                     forwarder_endpoint_id: endpoint_id.clone(),
                     stream_id: stream.stream_id.clone(),
@@ -971,8 +1005,8 @@ impl AppState {
                     local_port: None,
                     announcer_publish: false,
                     event_type: None,
-                    online: None,
-                    reader_connected: None,
+                    online,
+                    reader_connected,
                     display_alias: forwarder.display_name.clone(),
                     stream_epoch: Some(stream.epoch),
                     current_epoch_name: None,
@@ -3176,6 +3210,56 @@ mod tests {
             response.streams[0].display_alias.as_deref(),
             Some("Start Line")
         );
+    }
+
+    #[tokio::test]
+    async fn build_streams_response_marks_live_subscribed_stream_online() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[crate::db::StreamSubscription {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: "stream-a".to_owned(),
+            local_port_override: None,
+            event_type: crate::db::EventType::Finish,
+            forwarder_id: Some("fwd-1".to_owned()),
+            reader_ip: Some("10.0.0.1:10000".to_owned()),
+        }])
+        .unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        state.discovered_forwarders.write().await.insert(
+            "endpoint-1".to_owned(),
+            DiscoveredForwarder {
+                display_name: Some("Start Line".to_owned()),
+                direct_addrs: Vec::new(),
+                streams: vec![DiscoveredStream {
+                    stream_id: "stream-a".to_owned(),
+                    epoch: 7,
+                    next_seq: 42,
+                }],
+            },
+        );
+        state
+            .mark_forwarder_runtime("endpoint-1", |status| {
+                status.control_up = true;
+                status.data_sessions = 1;
+            })
+            .await;
+        state
+            .record_forwarder_reader_status(
+                "endpoint-1",
+                rt_p2p_protocol::ReaderStatus {
+                    stream_id: b"stream-a".to_vec(),
+                    connected: true,
+                    state: "connected".to_owned(),
+                    last_read_unix_ms: 1234,
+                },
+            )
+            .await;
+
+        let response = state.build_streams_response().await;
+
+        assert_eq!(response.streams.len(), 1);
+        assert_eq!(response.streams[0].online, Some(true));
+        assert_eq!(response.streams[0].reader_connected, Some(true));
     }
 
     #[tokio::test]
