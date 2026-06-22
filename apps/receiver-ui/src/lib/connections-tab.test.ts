@@ -222,6 +222,52 @@ describe("ConnectionsTab", () => {
     );
   });
 
+  it("places forwarder actions below the reader summary and above reader controls", () => {
+    mockState.store.connections.forwarders = [
+      {
+        endpoint_id: "endpoint-live",
+        display_name: "Live Forwarder",
+        state: "subscribed",
+        pending: false,
+        subscribed_count: 1,
+        available_count: 1,
+        readers: [
+          {
+            stream_id: "10.0.0.1:10000",
+            connected: true,
+            state: "online",
+            last_read_unix_ms: null,
+            hardware_reader_id: "reader-42",
+            firmware_version: "1.2.3",
+            model: "IPICO",
+          },
+        ],
+        ups: null,
+        restart_needed: null,
+        remote_config_available: true,
+        reader_control_available: true,
+      },
+    ] as import("./api").ForwarderConnectionStatus[];
+
+    render(ConnectionsTab);
+
+    const row = screen.getByTestId("forwarder-row-endpoint-live");
+    const readerSummary = screen.getByTestId(
+      "forwarder-reader-endpoint-live-10.0.0.1:10000",
+    );
+    const configure = screen.getByTestId("forwarder-configure-endpoint-live");
+    const banner = within(row).getByText("Banner:");
+
+    expect(
+      readerSummary.compareDocumentPosition(configure) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      configure.compareDocumentPosition(banner) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("shows configure only for forwarders that support remote config", () => {
     render(ConnectionsTab);
 

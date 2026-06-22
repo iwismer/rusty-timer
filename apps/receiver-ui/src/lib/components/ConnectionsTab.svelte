@@ -270,7 +270,7 @@
             {@const stateDisplay = forwarderStateDisplay(forwarder)}
             <div
               data-testid={`forwarder-row-${forwarder.endpoint_id}`}
-              class="flex items-center justify-between gap-4 px-4 py-3"
+              class="px-4 py-3"
             >
               <div class="min-w-0">
                 <div class="flex items-center gap-2">
@@ -320,6 +320,77 @@
                           charging={!forwarder.ups.on_battery}
                         />
                       </span>
+                    {/if}
+                  </div>
+                {/if}
+
+                {#if forwarder.remote_config_available === true || showConnect(forwarder) || showReconnectBeforeDisconnect(forwarder) || showDisconnect(forwarder) || (showReconnect(forwarder) && !showReconnectBeforeDisconnect(forwarder))}
+                  <div class="mt-3 flex flex-wrap items-center gap-2">
+                    {#if forwarder.remote_config_available === true}
+                      <button
+                        data-testid={`forwarder-configure-${forwarder.endpoint_id}`}
+                        class={btnSecondary}
+                        onclick={() =>
+                          (configEndpointId = forwarder.endpoint_id)}
+                      >
+                        Configure
+                      </button>
+                    {/if}
+                    {#if showConnect(forwarder)}
+                      <button
+                        data-testid={`forwarder-connect-${forwarder.endpoint_id}`}
+                        class={btnPrimary}
+                        onclick={() =>
+                          void runForwarderAction(
+                            forwarder.endpoint_id,
+                            connectForwarder,
+                          )}
+                        disabled={busyByEndpoint[forwarder.endpoint_id]}
+                      >
+                        Connect
+                      </button>
+                    {/if}
+                    {#if showReconnectBeforeDisconnect(forwarder)}
+                      <button
+                        data-testid={`forwarder-reconnect-${forwarder.endpoint_id}`}
+                        class={btnSecondary}
+                        onclick={() =>
+                          void runForwarderAction(
+                            forwarder.endpoint_id,
+                            reconnectForwarder,
+                          )}
+                        disabled={busyByEndpoint[forwarder.endpoint_id]}
+                      >
+                        Reconnect
+                      </button>
+                    {/if}
+                    {#if showDisconnect(forwarder)}
+                      <button
+                        data-testid={`forwarder-disconnect-${forwarder.endpoint_id}`}
+                        class={btnSecondary}
+                        onclick={() =>
+                          void runForwarderAction(
+                            forwarder.endpoint_id,
+                            disconnectForwarder,
+                          )}
+                        disabled={busyByEndpoint[forwarder.endpoint_id]}
+                      >
+                        Disconnect
+                      </button>
+                    {/if}
+                    {#if showReconnect(forwarder) && !showReconnectBeforeDisconnect(forwarder)}
+                      <button
+                        data-testid={`forwarder-reconnect-${forwarder.endpoint_id}`}
+                        class={btnSecondary}
+                        onclick={() =>
+                          void runForwarderAction(
+                            forwarder.endpoint_id,
+                            reconnectForwarder,
+                          )}
+                        disabled={busyByEndpoint[forwarder.endpoint_id]}
+                      >
+                        Reconnect
+                      </button>
                     {/if}
                   </div>
                 {/if}
@@ -404,74 +475,6 @@
                       />
                     {/each}
                   </div>
-                {/if}
-              </div>
-
-              <div class="flex shrink-0 items-center gap-2">
-                {#if forwarder.remote_config_available === true}
-                  <button
-                    data-testid={`forwarder-configure-${forwarder.endpoint_id}`}
-                    class={btnSecondary}
-                    onclick={() => (configEndpointId = forwarder.endpoint_id)}
-                  >
-                    Configure
-                  </button>
-                {/if}
-                {#if showConnect(forwarder)}
-                  <button
-                    data-testid={`forwarder-connect-${forwarder.endpoint_id}`}
-                    class={btnPrimary}
-                    onclick={() =>
-                      void runForwarderAction(
-                        forwarder.endpoint_id,
-                        connectForwarder,
-                      )}
-                    disabled={busyByEndpoint[forwarder.endpoint_id]}
-                  >
-                    Connect
-                  </button>
-                {/if}
-                {#if showReconnectBeforeDisconnect(forwarder)}
-                  <button
-                    data-testid={`forwarder-reconnect-${forwarder.endpoint_id}`}
-                    class={btnSecondary}
-                    onclick={() =>
-                      void runForwarderAction(
-                        forwarder.endpoint_id,
-                        reconnectForwarder,
-                      )}
-                    disabled={busyByEndpoint[forwarder.endpoint_id]}
-                  >
-                    Reconnect
-                  </button>
-                {/if}
-                {#if showDisconnect(forwarder)}
-                  <button
-                    data-testid={`forwarder-disconnect-${forwarder.endpoint_id}`}
-                    class={btnSecondary}
-                    onclick={() =>
-                      void runForwarderAction(
-                        forwarder.endpoint_id,
-                        disconnectForwarder,
-                      )}
-                    disabled={busyByEndpoint[forwarder.endpoint_id]}
-                  >
-                    Disconnect
-                  </button>
-                {/if}
-                {#if showReconnect(forwarder) && !showReconnectBeforeDisconnect(forwarder)}
-                  <button
-                    data-testid={`forwarder-reconnect-${forwarder.endpoint_id}`}
-                    class={btnSecondary}
-                    onclick={() =>
-                      void runForwarderAction(
-                        forwarder.endpoint_id,
-                        reconnectForwarder,
-                      )}
-                    disabled={busyByEndpoint[forwarder.endpoint_id]}
-                  >
-                    Reconnect
-                  </button>
                 {/if}
               </div>
             </div>
