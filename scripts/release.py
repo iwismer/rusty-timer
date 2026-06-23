@@ -32,10 +32,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VALID_SERVICES = ("forwarder", "receiver", "streamer", "emulator", "server")
-EMBED_UI_SERVICES = ("forwarder",)
+EMBED_UI_SERVICES = ("forwarder", "server")
 UI_WORKSPACES = {
     "forwarder": "apps/forwarder-ui",
     "receiver": "apps/receiver-ui",
+    "server": "apps/server-ui",
 }
 VERSION_FORMAT_RE = re.compile(r"^\d+\.\d+\.\d+$")
 TAURI_CONF_VERSION_RE = re.compile(
@@ -260,6 +261,8 @@ def run_release_workflow_checks(
         log_command(["npm", "run", "lint", "--workspace", ui_workspace], execute=True)
         log_command(["npm", "run", "check", "--workspace", ui_workspace], execute=True)
         log_command(["npm", "test", "--workspace", ui_workspace], execute=True)
+        if service_uses_embed_ui(service):
+            log_command(["npm", "run", "build", "--workspace", ui_workspace], execute=True)
         print(style("    UI checks passed", role="success"))
 
     build_cmd = [

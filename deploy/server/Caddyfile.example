@@ -1,0 +1,62 @@
+# Caddy reverse-proxy sample for the Rusty Timer server.
+#
+# Set RT_SERVER_SITE in deploy/server/.env, for example:
+#   RT_SERVER_SITE=timing.example.com
+# or for a local HTTP smoke test:
+#   RT_SERVER_SITE=http://localhost
+#
+# This sample assumes Authelia is reachable at AUTHELIA_UPSTREAM. The Compose
+# file does not run Authelia for you; point this at your existing Authelia
+# deployment or add Authelia to the same Docker network.
+
+{$RT_SERVER_SITE} {
+  encode zstd gzip
+
+  # Never pass a client-supplied admin identity to the app. `forward_auth`
+  # below re-adds Remote-User only after Authelia authenticates the request.
+  request_header -Remote-User
+  request_header -Remote-Groups
+  request_header -Remote-Name
+  request_header -Remote-Email
+
+  # Public read endpoints. These expose operational status but not secrets.
+  @public {
+    method GET
+    path /healthz /status
+  }
+  handle @public {
+    reverse_proxy server:8080
+  }
+
+  # Device/M2M endpoints. The Rust server enforces bearer-token auth and device
+  # kind/approval checks on these routes. Do not put browser session auth in
+  # front of them or field devices will fail to register and sync.
+  @device_m2m_post {
+    method POST
+    path /register /forwarder/catalog /announcer/rows /announcer/takeover
+  }
+  handle @device_m2m_post {
+    reverse_proxy server:8080
+  }
+
+  @device_m2m_get {
+    method GET
+    path /forwarders /allowlist/receivers
+  }
+  handle @device_m2m_get {
+    reverse_proxy server:8080
+  }
+
+  # Admin APIs and the embedded UI require a human admin session. Caddy strips
+  # spoofable Remote-* headers above, Authelia authenticates, then Caddy copies
+  # the trusted identity headers to the server. The server must run with
+  # SERVER_TRUSTED_PROXY=1 for /admin/* routes to accept Remote-User.
+  handle {
+    forward_auth {$AUTHELIA_UPSTREAM} {
+      uri /api/authz/forward-auth
+      copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+    }
+
+    reverse_proxy server:8080
+  }
+}

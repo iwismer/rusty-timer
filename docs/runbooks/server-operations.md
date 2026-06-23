@@ -10,20 +10,28 @@ status board.
 The server is a small Axum service backed by SQLite. It provides:
 
 - `GET /healthz` and `GET /status` public read endpoints.
-- TOFU device registration via `POST /register`.
+- Device bootstrap/recovery registration via `POST /register`.
+- Forwarder stream catalog updates via `POST /forwarder/catalog`.
+- Receiver discovery via `GET /forwarders`.
 - Receiver allow-list distribution via `GET /allowlist/receivers`.
 - Fenced announcer push via `POST /announcer/takeover` and `POST /announcer/rows`.
-- Admin approval via `POST /admin/devices/approve` and device rename via `POST
-  /admin/devices/rename`, expected to sit behind Caddy + Authelia.
-- Admin forwarder enrollment-token management via `/admin/enrollment-tokens`.
+- Admin approval via `POST /admin/devices/approve`, expected to sit behind
+  Caddy + Authelia.
+- Admin enrollment-token management via `/admin/enrollment-tokens`.
 
-The service does not use `EndpointId` over plain HTTP as an authenticator. Device
-routes use a provisioning bearer token or registered forwarder enrollment token;
-admin identity is delegated to the reverse proxy.
+The service does not use `EndpointId` over plain HTTP as an authenticator.
+Device routes use server-minted per-device bearer tokens. New or recovering
+devices first present an admin-issued enrollment voucher to `/register`; the
+server consumes the voucher and returns the minted token once. Admin identity is
+delegated to the reverse proxy.
 
 ## Startup and Installation
 
-Install an arm64 release artifact on the server host:
+For Docker deployments, see `deploy/server/`. The sample Compose deployment
+runs the server with an embedded UI behind Caddy and persists SQLite state in a
+Docker volume.
+
+For a binary install on a Linux server host:
 
 ```bash
 sudo install -m 0755 server /usr/local/bin/server
@@ -31,13 +39,14 @@ sudo useradd -r -s /bin/false -m -d /var/lib/rusty-timer-server rt-server || tru
 sudo install -d -o rt-server -g rt-server -m 0750 /var/lib/rusty-timer-server
 ```
 
-Set the required environment variables in the systemd unit or environment file:
+Set environment variables in the systemd unit or environment file:
 
 ```bash
 BIND_ADDR=127.0.0.1:8080
 SERVER_DB_PATH=/var/lib/rusty-timer-server/server.sqlite3
-SERVER_PROVISIONING_TOKEN=<long random provisioning token>
 LOG_LEVEL=info
+# Set only when a trusted header-stripping proxy injects Remote-User.
+SERVER_TRUSTED_PROXY=1
 ```
 
 Start manually for a smoke test:
@@ -46,7 +55,6 @@ Start manually for a smoke test:
 sudo -u rt-server \
   BIND_ADDR=127.0.0.1:8080 \
   SERVER_DB_PATH=/var/lib/rusty-timer-server/server.sqlite3 \
-  SERVER_PROVISIONING_TOKEN="$SERVER_PROVISIONING_TOKEN" \
   /usr/local/bin/server
 ```
 
@@ -64,17 +72,17 @@ Use Caddy + Authelia in front of the service for public deployments:
 | Route | Auth posture |
 | --- | --- |
 | `GET /healthz`, `GET /status` | Public read; no secrets returned. |
-| `POST /admin/devices/approve` | Admin only; Authelia must inject `Remote-User`. |
-| `POST /admin/devices/rename` | Admin only; Authelia must inject `Remote-User`. |
-| `/admin/enrollment-tokens*` | Admin only; Authelia must inject `Remote-User`. |
-| `POST /register` | M2M/device `Authorization: Bearer <SERVER_PROVISIONING_TOKEN>`, or non-revoked forwarder enrollment token for forwarders. |
-| `POST /forwarder/catalog` | M2M/device bearer token; accepts provisioning token or registered forwarder token. |
-| `GET /allowlist/receivers` | M2M/device bearer token; accepts provisioning token or registered forwarder token. |
-| `POST /announcer/takeover`, `POST /announcer/rows` | M2M/device bearer token; provisioning token only. |
+| `/admin/*` | Admin only; Authelia must inject `Remote-User`. |
+| `POST /register` | Enrollment voucher or the device's own minted bearer token. |
+| `POST /forwarder/catalog` | Matching forwarder minted bearer token; approval is not required so pending forwarders can publish catalog data for approval. |
+| `GET /allowlist/receivers` | Active forwarder minted bearer token. |
+| `GET /forwarders` | Active receiver minted bearer token. |
+| `POST /announcer/takeover`, `POST /announcer/rows` | Active receiver minted bearer token. |
 
 Caddy must strip any inbound client-supplied `Remote-User` header before proxying
-to the server. Only the trusted proxy may set that header after Authelia
-admin authentication.
+to the server. Only the trusted proxy may set that header after Authelia admin
+authentication. The server denies `/admin/*` unless `SERVER_TRUSTED_PROXY=1` is
+set.
 
 ## Provisioning and Device Approval
 
@@ -83,18 +91,10 @@ add a forwarder enrollment token, copy the one-time secret into the setup form,
 download `user-data` and `network-config`, then boot the SBC. Generated token
 secrets are shown only once; the token list exposes metadata only.
 
-Forwarders and receivers may also self-register with the provisioning token:
-
-```bash
-curl -fsS -X POST http://127.0.0.1:8080/register \
-  -H "Authorization: Bearer ${SERVER_PROVISIONING_TOKEN}" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "endpoint_id": "receiver-finish-line",
-    "device_kind": "receiver",
-    "device_token": "per-device-random-token"
-  }'
-```
+Receivers also need an enrollment voucher before first registration. After a
+device presents its voucher to `/register`, the server mints a per-device token
+and stores only its hash. Devices should persist the minted token and use it for
+steady-state server calls.
 
 New devices start as `pending`. An admin approves a device through the protected
 admin route:
@@ -103,37 +103,24 @@ admin route:
 curl -fsS -X POST http://127.0.0.1:8080/admin/devices/approve \
   -H 'Remote-User: admin@example.com' \
   -H 'Content-Type: application/json' \
-  -d '{"endpoint_id":"receiver-finish-line","display_name":"Finish Line"}'
-```
-
-An already-approved device can be renamed at any time through the protected admin
-route. The endpoint accepts the same body, leaves the approval state unchanged,
-and rejects a blank display name with `400`:
-
-```bash
-curl -fsS -X POST http://127.0.0.1:8080/admin/devices/rename \
-  -H 'Remote-User: admin@example.com' \
-  -H 'Content-Type: application/json' \
-  -d '{"endpoint_id":"receiver-finish-line","display_name":"Finish Tent"}'
+  -d '{"endpoint_id":"receiver-finish-line"}'
 ```
 
 ## Enrollment Token Revocation
 
 Revoking an unused enrollment token prevents first registration. Revoking a used
-forwarder token blocks future per-device forwarder registration, catalog push,
-and receiver allow-list requests that use that token. Revocation does not delete
-the approved device row or remove the latest pushed forwarder catalog/status
-snapshot; use separate device cleanup controls if the forwarder should be hidden
-or decommissioned.
+token blocks recovery/re-registration with that voucher; devices that already
+persisted a minted per-device token continue to authenticate with that minted
+token unless the device itself is deactivated or re-enrolled.
 
 ## Allow-list Distribution
 
-Forwarders fetch the active receiver allow-list with the provisioning bearer
-token or a registered non-revoked forwarder token:
+Forwarders fetch the active receiver allow-list with their minted forwarder
+bearer token:
 
 ```bash
 curl -fsS http://127.0.0.1:8080/allowlist/receivers \
-  -H "Authorization: Bearer ${SERVER_PROVISIONING_TOKEN}"
+  -H "Authorization: Bearer ${FORWARDER_DEVICE_TOKEN}"
 ```
 
 Only active receivers appear in the response. Pending devices and forwarders are
@@ -147,7 +134,7 @@ Receivers take over a fenced announcer source generation before pushing rows:
 
 ```bash
 curl -fsS -X POST http://127.0.0.1:8080/announcer/takeover \
-  -H "Authorization: Bearer ${SERVER_PROVISIONING_TOKEN}"
+  -H "Authorization: Bearer ${RECEIVER_DEVICE_TOKEN}"
 ```
 
 Each `POST /announcer/rows` request includes the returned
@@ -167,8 +154,8 @@ sudo systemctl restart rt-server
 curl -fsS http://127.0.0.1:8080/healthz
 ```
 
-Forwarders and receivers retry registration, allow-list fetches, and announcer
-pushes. No manual cursor migration is required.
+Forwarders and receivers retry registration, allow-list fetches, discovery, and
+announcer pushes. No manual cursor migration is required.
 
 ### Database backup and restore
 
@@ -181,27 +168,28 @@ sudo systemctl start rt-server
 ```
 
 To restore, stop the service, replace the SQLite file with the backup, then
-start the service. Devices may need to retry registration if the backup predates
-their registration.
+start the service. Devices may need a fresh enrollment voucher if the backup
+predates their minted device token.
 
-### Lost provisioning token
+### Lost device token
 
-Rotate the token by changing `SERVER_PROVISIONING_TOKEN` and restarting the
-service. Existing device registry records remain in SQLite, but devices must be
-configured with the new bearer token for future registration, allow-list fetch,
-and announcer push requests.
+Issue a new enrollment voucher from the protected admin UI/API and reconfigure
+the affected device with that voucher. The next `/register` call mints a fresh
+per-device token for the endpoint.
 
 ## Troubleshooting
 
-- `401 Unauthorized` on `/register`, `/forwarder/catalog`, or
-  `/allowlist/receivers`: check whether the request uses the provisioning token
-  or a registered non-revoked forwarder token. Receiver tokens do not authorize
-  forwarder routes.
-- `401 Unauthorized` on `/announcer/*`: check the `Authorization: Bearer` token
-  exactly matches `SERVER_PROVISIONING_TOKEN`.
+- `401 Unauthorized` on `/register`: check whether the bearer is an unused
+  enrollment voucher of the requested device kind or the device's own minted
+  token for the same endpoint.
+- `401 Unauthorized` on `/forwarder/catalog` or `/allowlist/receivers`: confirm
+  the request uses the matching forwarder's minted token.
+- `401 Unauthorized` on `/forwarders` or `/announcer/*`: confirm the request
+  uses an active receiver's minted token.
 - Empty allow-list: confirm the receiver registered and an admin approved it as
   active; pending receivers are intentionally excluded.
 - `409 Conflict` on announcer row push: the receiver has a stale generation;
   retry takeover and resend durable rows with the newer generation.
-- Admin approval does not work: verify Caddy + Authelia injected `Remote-User`
-  and stripped any untrusted client-supplied copy.
+- Admin approval does not work: verify Caddy + Authelia injected `Remote-User`,
+  stripped any untrusted client-supplied copy, and the server has
+  `SERVER_TRUSTED_PROXY=1`.

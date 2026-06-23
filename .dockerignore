@@ -1,0 +1,24 @@
+.git
+.github
+
+# Rust build output
+target
+
+# Node dependencies and generated frontend output
+node_modules
+apps/*/node_modules
+apps/*/.svelte-kit
+apps/*/build
+apps/*/dist
+
+# Local deployment/runtime state
+.env
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+
+# Editor and OS files
+.DS_Store
+.idea
+.vscode
