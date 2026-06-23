@@ -1,0 +1,66 @@
+# Sample Docker Compose deployment for the Rusty Timer server.
+#
+# Usage:
+#   cp deploy/server/.env.example deploy/server/.env
+#   # edit deploy/server/.env
+#   docker compose --env-file deploy/server/.env -f deploy/server/docker-compose.yml up -d
+#
+# The server is not published directly to the host. Caddy is the only public
+# entry point and is responsible for stripping spoofable admin identity headers.
+
+services:
+  server:
+    image: ${SERVER_IMAGE:-rt-server}:${SERVER_VERSION:-latest}
+    build:
+      context: ../..
+      dockerfile: services/server/Dockerfile
+    container_name: rt-server
+    restart: unless-stopped
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      SERVER_DB_PATH: /var/lib/rusty-timer-server/server.sqlite3
+      # Required for /admin/* routes to trust Caddy's stripped/injected
+      # Remote-User header. Do not expose this container directly.
+      SERVER_TRUSTED_PROXY: "1"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    expose:
+      - "8080"
+    volumes:
+      - server_data:/var/lib/rusty-timer-server
+    networks:
+      - rt-private
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  caddy:
+    image: caddy:2.8
+    container_name: rt-caddy
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      RT_SERVER_SITE: ${RT_SERVER_SITE:-http://localhost}
+      AUTHELIA_UPSTREAM: ${AUTHELIA_UPSTREAM:-http://authelia:9091}
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./Caddyfile.example:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - rt-private
+
+networks:
+  rt-private:
+    driver: bridge
+
+volumes:
+  server_data:
+  caddy_data:
+  caddy_config:

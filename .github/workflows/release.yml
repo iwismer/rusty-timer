@@ -20,6 +20,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  SERVER_DOCKER_IMAGE: iwismer/rt-server
 
 jobs:
   route:
@@ -156,7 +157,7 @@ jobs:
               MATRIX=$(jq -c . <<'JSON'
           {
             "include": [
-              { "os": "linux", "arch": "arm64", "runner": "ubuntu-24.04-arm", "target": "aarch64-unknown-linux-gnu", "use_cross": "false" }
+              { "os": "linux", "arch": "x86_64", "runner": "ubuntu-latest", "target": "x86_64-unknown-linux-gnu", "use_cross": "false" }
             ]
           }
           JSON
@@ -216,23 +217,23 @@ jobs:
           cross --version
 
       - name: Setup Node.js (UI-embedded services)
-        if: env.SERVICE == 'forwarder'
+        if: env.SERVICE == 'forwarder' || env.SERVICE == 'server'
         uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: package-lock.json
 
-      - name: UI checks (forwarder only)
-        if: env.SERVICE == 'forwarder'
+      - name: UI checks (embedded UI services)
+        if: env.SERVICE == 'forwarder' || env.SERVICE == 'server'
         run: |
           npm ci
           npm run lint --workspace "apps/${{ env.SERVICE }}-ui"
           npm run check --workspace "apps/${{ env.SERVICE }}-ui"
           npm test --workspace "apps/${{ env.SERVICE }}-ui"
 
-      - name: Pre-build UI for cross-compilation
-        if: matrix.use_cross == 'true' && env.SERVICE == 'forwarder'
+      - name: Build embedded UI assets
+        if: env.SERVICE == 'forwarder' || env.SERVICE == 'server'
         shell: bash
         run: |
           npm run build --workspace "apps/${{ env.SERVICE }}-ui"
@@ -245,6 +246,9 @@ jobs:
           case "${{ env.SERVICE }}" in
             forwarder)
               FEATURES="--features embed-ui,eink"
+              ;;
+            server)
+              FEATURES="--features embed-ui"
               ;;
           esac
           $BUILD_CMD build --release --target ${{ matrix.target }} --package ${{ env.SERVICE }} --bin ${{ env.SERVICE }} $FEATURES
@@ -299,13 +303,47 @@ jobs:
             ${{ env.ARCHIVE }}.sha256
           retention-days: 1
 
+  server-docker:
+    name: Build and Push Server Docker Image
+    needs: [resolve-matrix, build]
+    if: needs.resolve-matrix.outputs.service == 'server'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/server/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.SERVER_DOCKER_IMAGE }}:v${{ needs.resolve-matrix.outputs.version }}
+            ${{ env.SERVER_DOCKER_IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   release:
     name: Create GitHub Release
-    needs: [resolve-matrix, build]
+    needs: [resolve-matrix, build, server-docker]
     if: >
       always() &&
       needs.resolve-matrix.result == 'success' &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped')
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      (needs['server-docker'].result == 'success' || needs['server-docker'].result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts

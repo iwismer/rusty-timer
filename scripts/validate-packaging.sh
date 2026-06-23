@@ -114,6 +114,67 @@ if [[ -f "${REPO_ROOT}/${FORWARDER_DF}" ]]; then
 fi
 
 echo ""
+echo "=== Server Docker deployment ==="
+
+SERVER_DF="services/server/Dockerfile"
+SERVER_COMPOSE="deploy/server/docker-compose.yml"
+SERVER_CADDY="deploy/server/Caddyfile.example"
+SERVER_ENV="deploy/server/.env.example"
+SERVER_DEPLOY_README="deploy/server/README.md"
+
+check_file_exists "${SERVER_DF}" "Server Dockerfile exists"
+check_file_exists "${SERVER_COMPOSE}" "Server Docker Compose sample exists"
+check_file_exists "${SERVER_CADDY}" "Server Caddy config sample exists"
+check_file_exists "${SERVER_ENV}" "Server deploy env example exists"
+check_file_exists "${SERVER_DEPLOY_README}" "Server Docker deploy README exists"
+
+if [[ -f "${REPO_ROOT}/${SERVER_DF}" ]]; then
+    FROM_COUNT=$(grep -c '^FROM ' "${REPO_ROOT}/${SERVER_DF}" || true)
+    if [[ "${FROM_COUNT}" -ge 3 ]]; then
+        check_pass "Server Dockerfile is multi-stage (>= 3 FROM)"
+    else
+        check_fail "Server Dockerfile must build UI, Rust binary, and runtime stages (found ${FROM_COUNT} FROM)"
+    fi
+
+    check_file_contains "${SERVER_DF}" 'npm run build --workspace apps/server-ui' \
+        "Server Dockerfile builds server UI"
+    check_file_contains "${SERVER_DF}" 'cargo build.*--release.*--package server.*--bin server.*--features embed-ui' \
+        "Server Dockerfile builds server with embedded UI"
+    check_file_contains "${SERVER_DF}" 'SERVER_DB_PATH|/var/lib/rusty-timer-server' \
+        "Server Dockerfile uses SQLite data path"
+    check_file_contains "${SERVER_DF}" '(HEALTHCHECK|healthz)' \
+        "Server Dockerfile references health endpoint"
+    check_file_not_contains "${SERVER_DF}" 'Postgres|postgres|DATABASE_URL|DASHBOARD_DIR|rt-protocol|tokio-tungstenite' \
+        "Server Dockerfile has no legacy data-plane references"
+fi
+
+if [[ -f "${REPO_ROOT}/${SERVER_COMPOSE}" ]]; then
+    check_file_contains "${SERVER_COMPOSE}" 'caddy:' \
+        "Server Compose includes Caddy"
+    check_file_contains "${SERVER_COMPOSE}" 'SERVER_DB_PATH' \
+        "Server Compose configures SQLite path"
+    check_file_contains "${SERVER_COMPOSE}" 'SERVER_TRUSTED_PROXY' \
+        "Server Compose enables trusted proxy for admin routes"
+    check_file_contains "${SERVER_COMPOSE}" 'server_data:' \
+        "Server Compose persists server SQLite data"
+    check_file_not_contains "${SERVER_COMPOSE}" 'postgres|DATABASE_URL' \
+        "Server Compose has no Postgres dependency"
+fi
+
+if [[ -f "${REPO_ROOT}/${SERVER_CADDY}" ]]; then
+    check_file_contains "${SERVER_CADDY}" 'request_header -Remote-User' \
+        "Caddy sample strips spoofable Remote-User"
+    check_file_contains "${SERVER_CADDY}" 'path /healthz /status' \
+        "Caddy sample leaves health/status public"
+    check_file_contains "${SERVER_CADDY}" 'path /register /forwarder/catalog /forwarders /allowlist/receivers /announcer/rows /announcer/takeover' \
+        "Caddy sample leaves M2M bearer routes unproxied by Authelia"
+    check_file_contains "${SERVER_CADDY}" 'forward_auth' \
+        "Caddy sample protects admin/UI routes with forward_auth"
+    check_file_contains "${SERVER_CADDY}" 'copy_headers Remote-User' \
+        "Caddy sample forwards authenticated admin identity"
+fi
+
+echo ""
 echo "=== Systemd Unit: rt-forwarder.service ==="
 
 SYSTEMD_UNIT="deploy/systemd/rt-forwarder.service"
@@ -163,8 +224,10 @@ fi
 
 SERVER_RUNBOOK="docs/runbooks/server-operations.md"
 if [[ -f "${REPO_ROOT}/${SERVER_RUNBOOK}" ]]; then
-    check_file_contains "${SERVER_RUNBOOK}" '(SERVER_PROVISIONING_TOKEN|provisioning token)' \
-        "Server runbook: covers provisioning token"
+    check_file_contains "${SERVER_RUNBOOK}" '(enrollment token|enrollment voucher|minted.*device token)' \
+        "Server runbook: covers enrollment-token provisioning"
+    check_file_not_contains "${SERVER_RUNBOOK}" 'SERVER_PROVISIONING_TOKEN|shared provisioning token' \
+        "Server runbook: has no stale shared provisioning-token instructions"
     check_file_contains "${SERVER_RUNBOOK}" '(allow-list|allowlist|allow list)' \
         "Server runbook: covers allow-list distribution"
     check_file_contains "${SERVER_RUNBOOK}" '(announcer|generation|lease)' \
@@ -181,10 +244,32 @@ check_file_exists "${RELEASE_WF}" "Release workflow exists"
 if [[ -f "${REPO_ROOT}/${RELEASE_WF}" ]]; then
     check_file_contains "${RELEASE_WF}" 'server-v\*' \
         "Release workflow publishes server tags"
-    check_file_contains "${RELEASE_WF}" 'aarch64-unknown-linux-gnu' \
-        "Release workflow includes Linux arm64 target"
+    check_file_contains "${RELEASE_WF}" 'x86_64-unknown-linux-gnu' \
+        "Release workflow includes Linux amd64 server target"
+    check_file_contains "${RELEASE_WF}" 'services/server/Dockerfile' \
+        "Release workflow publishes server Docker image"
+    check_file_contains "${RELEASE_WF}" 'linux/amd64' \
+        "Release workflow builds server Docker image for amd64"
+    check_file_contains "${RELEASE_WF}" "env.SERVICE == 'forwarder' \|\| env.SERVICE == 'server'" \
+        "Release workflow builds/checks server UI"
+    check_file_contains "${RELEASE_WF}" 'embed-ui' \
+        "Release workflow embeds server UI"
     check_file_not_contains "${RELEASE_WF}" '(armv7)' \
         "Release workflow has no armv7 packaging"
+fi
+
+echo ""
+echo "=== Release helper ==="
+
+RELEASE_HELPER="scripts/release.py"
+check_file_exists "${RELEASE_HELPER}" "Release helper exists"
+if [[ -f "${REPO_ROOT}/${RELEASE_HELPER}" ]]; then
+    check_file_contains "${RELEASE_HELPER}" 'EMBED_UI_SERVICES = \("forwarder", "server"\)' \
+        "Release helper treats server as embedded-UI service"
+    check_file_contains "${RELEASE_HELPER}" '"server": "apps/server-ui"' \
+        "Release helper maps server UI workspace"
+    check_file_contains "${RELEASE_HELPER}" 'npm", "run", "build", "--workspace", ui_workspace' \
+        "Release helper builds embedded UI assets before cargo"
 fi
 
 echo ""
