@@ -233,9 +233,30 @@ fn now_unix_ms() -> i64 {
     .unwrap_or(i64::MAX)
 }
 
+/// Extra reconnect delay after server approval. Approval releases the receiver
+/// to dial immediately, but the forwarder may still be applying the updated
+/// receiver allow-list. One bounded follow-up reconnect resets the receiver's
+/// exponential dial backoff once that allow-list has usually propagated.
+const APPROVAL_FOLLOW_UP_RECONNECT_DELAY: Duration = Duration::from_millis(1_000);
+
 /// Returns true iff this is the rising edge into "active".
 fn approval_became_active(previous: Option<&str>, current: Option<&str>) -> bool {
     previous != Some("active") && current == Some("active")
+}
+
+fn receiver_pending_approval(status: &crate::control_api::ServerDeviceStatus) -> bool {
+    status.reachable == Some(true) && status.approval_state.as_deref() == Some("pending")
+}
+
+fn schedule_approval_follow_up_reconnect(state: Arc<AppState>, delay: Duration) {
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        if *state.connection_state.borrow() != ConnectionState::Connected {
+            info!("server approval follow-up reconnect requested");
+            state.request_connect().await;
+            state.emit_resync();
+        }
+    });
 }
 
 /// A running P2P receiver runtime. Dropping or [`shutdown`](Self::shutdown)ing
@@ -537,18 +558,23 @@ async fn run_reconcile_loop(
             } else {
                 thin
             };
-            tokio::select! {
-                biased;
-                changed = shutdown_rx.changed() => {
-                    if changed.is_err() || *shutdown_rx.borrow() { break; }
-                }
-                result = server_startup(thin, endpoint_id.clone(), receiver_id) => match result {
-                    Ok(generation) => {
-                        info!(generation, "server announcer startup succeeded");
-                        announcer_generation = Some(generation);
+            let status = server_device_status_for_url(&state, &thin.url).await;
+            if receiver_pending_approval(&status) {
+                tracing::trace!("server announcer startup waiting for receiver approval");
+            } else {
+                tokio::select! {
+                    biased;
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() { break; }
                     }
-                    Err(e) => {
-                        warn!(error = %e, "server announcer startup failed; will retry");
+                    result = server_startup(thin, endpoint_id.clone(), receiver_id) => match result {
+                        Ok(generation) => {
+                            info!(generation, "server announcer startup succeeded");
+                            announcer_generation = Some(generation);
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "server announcer startup failed; will retry");
+                        }
                     }
                 }
             }
@@ -821,7 +847,12 @@ async fn run_discovery_loop(
                 }
             }
             Err(e) => {
-                warn!(error = %e, "forwarder discovery fetch failed; will retry");
+                let status = server_device_status_for_url(&state, &thin.url).await;
+                if receiver_pending_approval(&status) {
+                    tracing::trace!(error = %e, "forwarder discovery waiting for receiver approval");
+                } else {
+                    warn!(error = %e, "forwarder discovery fetch failed; will retry");
+                }
             }
         }
 
@@ -861,6 +892,10 @@ async fn run_approval_watch_loop(
             // a connect so server recovery resets backoff and re-dials.
             state.request_connect().await;
             state.emit_resync();
+            schedule_approval_follow_up_reconnect(
+                Arc::clone(&state),
+                APPROVAL_FOLLOW_UP_RECONNECT_DELAY,
+            );
         }
         previous_approval = status.approval_state;
 
@@ -2082,6 +2117,76 @@ mod tests {
         assert!(!approval_became_active(Some("active"), Some("active")));
         assert!(!approval_became_active(Some("active"), Some("pending")));
         assert!(!approval_became_active(Some("pending"), Some("pending")));
+    }
+
+    #[test]
+    fn receiver_pending_approval_detects_only_registered_pending_receiver() {
+        let pending = crate::control_api::ServerDeviceStatus {
+            configured: true,
+            endpoint_id: Some("receiver-ep".to_owned()),
+            reachable: Some(true),
+            approval_state: Some("pending".to_owned()),
+            waiting_for_approval: true,
+            message: None,
+        };
+        assert!(receiver_pending_approval(&pending));
+
+        let unregistered = crate::control_api::ServerDeviceStatus {
+            configured: true,
+            endpoint_id: Some("receiver-ep".to_owned()),
+            reachable: Some(true),
+            approval_state: None,
+            waiting_for_approval: true,
+            message: None,
+        };
+        assert!(!receiver_pending_approval(&unregistered));
+
+        let active = crate::control_api::ServerDeviceStatus {
+            configured: true,
+            endpoint_id: Some("receiver-ep".to_owned()),
+            reachable: Some(true),
+            approval_state: Some("active".to_owned()),
+            waiting_for_approval: false,
+            message: None,
+        };
+        assert!(!receiver_pending_approval(&active));
+    }
+
+    #[tokio::test]
+    async fn approval_follow_up_reconnect_resets_backoff_when_still_not_connected() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _shutdown_rx) = crate::runtime::init_with_data_dir(None, dir.path())
+            .await
+            .expect("init receiver state");
+        let mut connect_rx = state.connect_attempt_rx();
+
+        schedule_approval_follow_up_reconnect(Arc::clone(&state), Duration::from_millis(10));
+
+        tokio::time::timeout(Duration::from_secs(2), connect_rx.changed())
+            .await
+            .expect("follow-up reconnect should fire while disconnected")
+            .expect("connect attempt sender should remain open");
+        assert_eq!(state.current_connect_attempt(), 1);
+    }
+
+    #[tokio::test]
+    async fn approval_follow_up_reconnect_does_not_restart_when_already_connected() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _shutdown_rx) = crate::runtime::init_with_data_dir(None, dir.path())
+            .await
+            .expect("init receiver state");
+        state.set_connection_state(ConnectionState::Connected).await;
+        let mut connect_rx = state.connect_attempt_rx();
+
+        schedule_approval_follow_up_reconnect(Arc::clone(&state), Duration::from_millis(10));
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), connect_rx.changed())
+                .await
+                .is_err(),
+            "follow-up reconnect should not fire after the receiver is connected"
+        );
+        assert_eq!(state.current_connect_attempt(), 0);
     }
 
     #[tokio::test]

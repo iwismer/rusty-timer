@@ -16,11 +16,11 @@ It starts, on loopback only:
 The flow mirrors production (no static allow-list, no preseeded subscription,
 no hand-fed node ids):
 
-1. The forwarder and receiver each **self-register** with the server (TOFU)
-   using a deterministic seeded identity, and the forwarder pushes its stream
-   catalog + direct addresses.
+1. The dev stack creates one forwarder enrollment voucher and one receiver
+   enrollment voucher through the server admin API. Each device presents its
+   voucher once to mint a server-side per-device token.
 2. You open the **server UI** and approve BOTH the forwarder and the receiver
-   (TOFU approve + name).
+   (approve + name).
 3. The forwarder fetches the receiver allow-list; the receiver discovers the
    approved forwarder (node id + direct addresses) from the server.
 4. You open the **receiver UI**, see the discovered (available) stream, and
@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import os
 import shutil
 import signal
@@ -65,6 +66,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -79,11 +81,10 @@ RECEIVER_UI_DIR = REPO_ROOT / "apps" / "receiver-ui"
 FORWARDER_SEED_HEX = "cd" * 32
 RECEIVER_SEED_HEX = "ab" * 32
 
-# Single dev provisioning token: the server accepts it for M2M device
-# endpoints (/register, /forwarder/catalog, /allowlist/receivers, /forwarders,
-# /announcer/*), and the forwarder + receiver present it as their device token.
-# Production uses per-device tokens; one shared token is fine for local dev.
-PROVISIONING_TOKEN = "dev-provisioning-token"
+# Enrollment vouchers (admin-issued, single-use) the devices present once to
+# /register to mint their per-device server tokens. Opaque dev-only secrets.
+FORWARDER_VOUCHER = "rt-dev-forwarder-voucher"
+RECEIVER_VOUCHER = "rt-dev-receiver-voucher"
 
 # Reads file shape (looped forever by the emulator). The generated chip IDs
 # intentionally match the first rows of test_assets/bibchip/large.txt so the
@@ -111,6 +112,26 @@ def build_frame(chip_index: int) -> str:
 # ---------------------------------------------------------------------------
 # Small utilities
 # ---------------------------------------------------------------------------
+def post_json(url: str, body: dict, *, headers: dict[str, str] | None = None) -> dict:
+    data = json.dumps(body).encode("utf-8")
+    request_headers = {"Content-Type": "application/json"}
+    if headers:
+        request_headers.update(headers)
+    request = urllib.request.Request(url, data=data, headers=request_headers, method="POST")
+    with urllib.request.urlopen(request, timeout=5) as resp:
+        payload = resp.read().decode()
+    return json.loads(payload) if payload else {}
+
+
+def server_create_enrollment_token(base_url: str, device_kind: str, token: str) -> dict:
+    """Create an enrollment voucher with a fixed secret via the admin route."""
+    return post_json(
+        f"{base_url}/admin/enrollment-tokens",
+        {"device_kind": device_kind, "token": token, "display_name": f"dev {device_kind}"},
+        headers={"Remote-User": "rt-dev-admin"},
+    )
+
+
 def free_tcp_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -290,6 +311,7 @@ def write_forwarder_config(
     p2p_port: int,
     server_url: str,
     server_token_file: Path,
+    device_token_file: Path,
 ) -> None:
     reader_blocks = "\n".join(
         f"""[[readers]]
@@ -322,6 +344,7 @@ discovery_disabled = true
 max_concurrent_bidi_streams = 256
 server_url = "{server_url}"
 server_token_file = "{server_token_file}"
+device_token_file = "{device_token_file}"
 """
     )
 
@@ -437,7 +460,8 @@ def main() -> int:
     auth_token_file = work_dir / "forwarder-auth-token"
     auth_token_file.write_text("dev-forwarder-auth-token\n")
     server_token_file = work_dir / "server-token"
-    server_token_file.write_text(PROVISIONING_TOKEN + "\n")
+    server_token_file.write_text(FORWARDER_VOUCHER + "\n")
+    forwarder_device_token_file = work_dir / "forwarder-device-token"
     journal_path = work_dir / "forwarder.sqlite3"
     thin_db_path = work_dir / "server.sqlite3"
     forwarder_config = work_dir / "forwarder.toml"
@@ -451,6 +475,7 @@ def main() -> int:
         p2p_port=forwarder_p2p_port,
         server_url=server_url,
         server_token_file=server_token_file,
+        device_token_file=forwarder_device_token_file,
     )
 
     # The RT_* env the desktop app / receiver-headless read to start P2P. No
@@ -464,7 +489,7 @@ def main() -> int:
         "RT_P2P_RELAY_DISABLED": "1",
         "RT_P2P_DISCOVERY_DISABLED": "1",
         "RT_P2P_SERVER_URL": server_url,
-        "RT_P2P_SERVER_TOKEN": PROVISIONING_TOKEN,
+        "RT_P2P_SERVER_TOKEN": RECEIVER_VOUCHER,
         "RT_P2P_RECONCILE_MS": "1000",
         "RUST_LOG": os.environ.get("RUST_LOG", "info,receiver=debug"),
     }
@@ -479,7 +504,6 @@ def main() -> int:
             env={
                 "SERVER_DB_PATH": str(thin_db_path),
                 "BIND_ADDR": f"127.0.0.1:{server_port}",
-                "SERVER_PROVISIONING_TOKEN": PROVISIONING_TOKEN,
                 # Trust the browser-supplied Remote-User header in dev so the
                 # admin /admin/* routes (device approve/rename) work without a
                 # Caddy/Authelia proxy in front. Never set this in production.
@@ -490,6 +514,11 @@ def main() -> int:
         thin.start()
         wait_tcp(server_port, timeout=20, what="server")
         thin.assert_alive()
+
+        # --- enrollment vouchers (single-use bootstrap secrets) ---
+        server_create_enrollment_token(server_url, "forwarder", FORWARDER_VOUCHER)
+        server_create_enrollment_token(server_url, "receiver", RECEIVER_VOUCHER)
+        print("[up] enrollment vouchers issued")
 
         # --- emulators (each loops the reads file forever) ---
         for index, reader in enumerate(reader_ports, start=1):
