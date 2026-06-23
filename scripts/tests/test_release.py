@@ -343,7 +343,7 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
     @patch("scripts.release.read_version")
     @patch("scripts.release.git_current_branch", return_value="main")
     @patch("scripts.release.git_is_dirty", return_value=False)
-    def test_server_runs_release_build_without_ui_checks(
+    def test_server_runs_ui_checks_and_embed_ui_release_build(
         self,
         _dirty_mock,
         _branch_mock,
@@ -377,7 +377,23 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
         ):
             release.main()
 
-        self.assertNotIn(["npm", "ci"], calls)
+        self.assertIn(["npm", "ci"], calls)
+        self.assertIn(
+            ["npm", "run", "lint", "--workspace", "apps/server-ui"],
+            calls,
+        )
+        self.assertIn(
+            ["npm", "run", "check", "--workspace", "apps/server-ui"],
+            calls,
+        )
+        self.assertIn(
+            ["npm", "test", "--workspace", "apps/server-ui"],
+            calls,
+        )
+        self.assertIn(
+            ["npm", "run", "build", "--workspace", "apps/server-ui"],
+            calls,
+        )
         self.assertIn(
             [
                 "cargo",
@@ -387,6 +403,8 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
                 "server",
                 "--bin",
                 "server",
+                "--features",
+                "embed-ui",
             ],
             calls,
         )
