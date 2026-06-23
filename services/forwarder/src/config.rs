@@ -104,6 +104,11 @@ pub struct P2pConfig {
     pub allowlist_cache_path: Option<String>,
     pub server_url: Option<String>,
     pub server_token_file: Option<String>,
+    /// Writable path where the server-minted per-device token is cached. The
+    /// `server_token_file` is the (read-only) bootstrap voucher; once a token is
+    /// minted it is persisted here and used for all server calls. Defaults to a
+    /// sibling of the secret-key path when unset.
+    pub device_token_file: Option<String>,
     pub allowlist_poll_interval_secs: u64,
     pub allowlist_request_timeout_secs: u64,
 }
@@ -195,6 +200,7 @@ pub struct RawP2pConfig {
     pub allowlist_cache_path: Option<String>,
     pub server_url: Option<String>,
     pub server_token_file: Option<String>,
+    pub device_token_file: Option<String>,
     pub allowlist_poll_interval_secs: Option<u64>,
     pub allowlist_request_timeout_secs: Option<u64>,
 }
@@ -430,6 +436,7 @@ pub fn load_config_from_str(
                 allowlist_cache_path: p.allowlist_cache_path,
                 server_url: p.server_url,
                 server_token_file: p.server_token_file,
+                device_token_file: p.device_token_file,
                 allowlist_poll_interval_secs,
                 allowlist_request_timeout_secs,
             }
@@ -446,6 +453,7 @@ pub fn load_config_from_str(
             allowlist_cache_path: None,
             server_url: None,
             server_token_file: None,
+            device_token_file: None,
             allowlist_poll_interval_secs: 60,
             allowlist_request_timeout_secs: 10,
         },

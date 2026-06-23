@@ -18,12 +18,14 @@
 //!   fail-closed guard, the node ignores [`ADMIN_HEADER`] entirely unless the
 //!   operator sets `SERVER_TRUSTED_PROXY` at startup to assert that such a
 //!   proxy is present; otherwise every `/admin/*` request is denied.
-//! - **M2M / device routes**: `POST /register`, `POST /forwarder/catalog`, and
-//!   `GET /allowlist/receivers` accept the shared provisioning bearer token for
-//!   legacy deployments. Enrolled forwarders may also use their non-revoked
-//!   forwarder token for idempotent registration, catalog pushes, and receiver
-//!   allow-list fetches. `POST /announcer/rows` and `POST /announcer/takeover`
-//!   still use the provisioning bearer token. These do not depend on the proxy.
+//! - **M2M / device routes**: every device route authenticates a server-minted
+//!   per-device bearer token (`rtk_<token_id>_<secret>`) and asserts kind +
+//!   approval per endpoint: `GET /allowlist/receivers` requires an active
+//!   forwarder; `GET /forwarders`, `POST /announcer/rows`, and `POST
+//!   /announcer/takeover` require an active receiver; `POST /forwarder/catalog`
+//!   requires the matching forwarder (any approval). `POST /register` accepts a
+//!   single-use enrollment voucher (admin-issued) or the device's own token.
+//!   There is no shared provisioning secret. These do not depend on the proxy.
 //!
 //! See `docs/network-architecture.md` for the deployment topology.
 
@@ -188,13 +190,11 @@ mod tests {
     use rusqlite::Connection;
     use tower::ServiceExt;
 
-    const PROV_TOKEN: &str = "prov-secret";
-
     fn test_state() -> AppState {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrate(&conn).unwrap();
         crate::registry::migrate(&conn).unwrap();
-        AppState::new(conn, PROV_TOKEN, true)
+        AppState::new(conn, true)
     }
 
     async fn response_json(resp: axum::response::Response) -> serde_json::Value {
@@ -233,12 +233,23 @@ mod tests {
     #[tokio::test]
     async fn forwarder_catalog_push_appears_in_status() {
         let state = test_state();
+        // The forwarder mints its token via /register before pushing a catalog.
+        let token = {
+            let conn = state.conn.lock().unwrap();
+            crate::registry::register_device_minted(
+                &conn,
+                "fwd-node-1",
+                crate::registry::DeviceKind::Forwarder,
+            )
+            .unwrap()
+            .device_token
+        };
         let app = router(state.clone());
 
         let resp = app
             .clone()
             .oneshot(catalog_request(
-                PROV_TOKEN,
+                &token,
                 &serde_json::json!({
                     "endpoint_id": "fwd-node-1",
                     "display_name": "Start Line",
@@ -451,7 +462,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrate(&conn).unwrap();
         crate::registry::migrate(&conn).unwrap();
-        let state = AppState::new(conn, PROV_TOKEN, false);
+        let state = AppState::new(conn, false);
         {
             let conn = state.conn.lock().unwrap();
             crate::registry::register_device(

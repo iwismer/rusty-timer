@@ -12,20 +12,20 @@ use std::sync::{Arc, Mutex};
 
 use axum::{
     Router,
+    http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
 use rusqlite::Connection;
 use tokio::sync::watch;
 
 use crate::announcer::AnnouncerRuntime;
+use crate::registry::{self, ApprovalState, DeviceKind};
 
 /// Shared application state for HTTP handlers.
 ///
 /// Holds the `SQLite` connection (guarded by a mutex, since rusqlite connections
-/// are single-threaded) and the hashed provisioning bearer token used by legacy
-/// device routes. Enrolled forwarders can also use their non-revoked forwarder
-/// token for `POST /register`, `POST /forwarder/catalog`, and `GET
-/// /allowlist/receivers`.
+/// are single-threaded). Devices authenticate with their server-minted
+/// per-device token (`authenticate_device`); there is no shared secret.
 ///
 /// `admin_proxy_trusted` is the fail-closed guard for `/admin/*` routes: those
 /// routes trust the upstream-injected [`status::ADMIN_HEADER`] only when this is
@@ -35,7 +35,6 @@ use crate::announcer::AnnouncerRuntime;
 #[derive(Clone)]
 pub struct AppState {
     pub conn: Arc<Mutex<Connection>>,
-    pub provisioning_token_hash: Arc<Vec<u8>>,
     pub announcer_runtime: Arc<Mutex<AnnouncerRuntime>>,
     pub admin_proxy_trusted: bool,
     /// Monotonic receiver allow-list version. Bumped whenever the set of active
@@ -49,10 +48,9 @@ pub struct AppState {
 
 impl AppState {
     #[must_use]
-    pub fn new(conn: Connection, provisioning_token: &str, admin_proxy_trusted: bool) -> Self {
+    pub fn new(conn: Connection, admin_proxy_trusted: bool) -> Self {
         Self {
             conn: Arc::new(Mutex::new(conn)),
-            provisioning_token_hash: Arc::new(crate::registry::hash_token(provisioning_token)),
             announcer_runtime: Arc::new(Mutex::new(AnnouncerRuntime::new())),
             admin_proxy_trusted,
             allowlist_version: watch::channel(0).0,
@@ -69,6 +67,62 @@ impl AppState {
     }
 }
 
+/// Authorize an M2M request that any **active** device of `kind` may make
+/// (receiver allow-list distribution, forwarder discovery, announcer push).
+///
+/// Authenticates the bearer as a minted per-device token of the right kind that
+/// is `active`; anything else (unknown, wrong kind, pending) is rejected.
+/// `Err(status)` carries the
+/// reject (`401`) or internal-error (`500`) code.
+pub(crate) fn authorize_active_device_kind(
+    state: &AppState,
+    headers: &HeaderMap,
+    kind: DeviceKind,
+) -> Result<(), StatusCode> {
+    let Some(raw) = register::bearer_token(headers) else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let conn = state.conn.lock().expect("registry mutex poisoned");
+    match registry::authenticate_device(&conn, raw) {
+        Ok(Some(record))
+            if record.device_kind == kind && record.approval_state == ApprovalState::Active =>
+        {
+            Ok(())
+        }
+        Ok(_) => Err(StatusCode::UNAUTHORIZED),
+        Err(err) => {
+            tracing::error!(error = %err, "device authentication failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// Authorize a forwarder catalog push for `endpoint_id`, regardless of approval
+/// state (a pending forwarder must publish its catalog so an admin can approve
+/// it). Requires the forwarder's own minted device token, bound to `endpoint_id`.
+pub(crate) fn authorize_forwarder_catalog(
+    state: &AppState,
+    headers: &HeaderMap,
+    endpoint_id: &str,
+) -> Result<(), StatusCode> {
+    let Some(raw) = register::bearer_token(headers) else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let conn = state.conn.lock().expect("registry mutex poisoned");
+    match registry::authenticate_device(&conn, raw) {
+        Ok(Some(record))
+            if record.device_kind == DeviceKind::Forwarder && record.endpoint_id == endpoint_id =>
+        {
+            Ok(())
+        }
+        Ok(_) => Err(StatusCode::UNAUTHORIZED),
+        Err(err) => {
+            tracing::error!(error = %err, "device authentication failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
 /// Build the server HTTP router.
 ///
 /// Routes are grouped by the auth posture documented in [`status`]:
@@ -77,10 +131,12 @@ impl AppState {
 /// - Admin (upstream [`status::ADMIN_HEADER`] required): `POST
 ///   /admin/devices/approve` and enrollment token management under
 ///   `/admin/enrollment-tokens`.
-/// - M2M/device: `POST /register`, `POST /forwarder/catalog`, and `GET
-///   /allowlist/receivers` accept the provisioning token or an enrolled
-///   forwarder's non-revoked token. Announcer push/takeover routes use the
-///   provisioning token.
+/// - M2M/device: every device route authenticates a server-minted per-device
+///   token (`authenticate_device`) and asserts kind/approval per endpoint
+///   (active forwarder for `/allowlist/receivers`; active receiver for
+///   `/forwarders` and `/announcer/*`; the matching forwarder for
+///   `/forwarder/catalog`). `/register` accepts an enrollment voucher or the
+///   device's own token.
 pub fn router(state: AppState) -> Router {
     Router::new()
         // Public, unauthenticated read endpoints.
@@ -95,7 +151,7 @@ pub fn router(state: AppState) -> Router {
             "/admin/enrollment-tokens/{token_id}/revoke",
             post(enrollment_tokens::revoke_token),
         )
-        // M2M/device endpoints — in-process provisioning bearer auth.
+        // M2M/device endpoints — per-device minted-token auth.
         .route("/register", post(register::register))
         .route("/forwarder/catalog", post(catalog::push_catalog))
         .route("/announcer/rows", post(announcer::push_row))

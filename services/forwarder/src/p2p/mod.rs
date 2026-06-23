@@ -24,7 +24,7 @@ mod remote_config;
 
 use std::net::SocketAddrV4;
 use std::num::TryFromIntError;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -140,40 +140,58 @@ pub async fn start_forwarder_p2p(
     let run_endpoint = endpoint.clone();
     let mut tasks = vec![tokio::spawn(async move { run_endpoint.run().await })];
 
-    if let Some((base_url, bearer_token)) = server_credentials(config)? {
-        // Allow-list freshness comes from two sources feeding the same channel:
-        // a long-poll push subscription (near-instant on approval) and the
-        // periodic poll backstop inside `run_allowlist_distribution` (covers any
-        // push gap, e.g. a proxy severing the held request). Both apply
-        // idempotent snapshots, so overlap is harmless.
-        let (push_tx, push_rx) = mpsc::channel(16);
+    if let Some((base_url, voucher)) = server_credentials(config)? {
         let request_timeout = Duration::from_secs(config.allowlist_request_timeout_secs);
         let poll_interval = Duration::from_secs(config.allowlist_poll_interval_secs);
-        let allow_list_client = ServerAllowListClient::with_timeout(
-            base_url.clone(),
-            bearer_token.clone(),
-            request_timeout,
-        );
-        tasks.push(tokio::spawn(run_allowlist_push_subscription(
-            allow_list_client.clone(),
-            push_tx,
-            ALLOWLIST_PUSH_HOLD,
-        )));
-        tasks.push(tokio::spawn(run_allowlist_distribution(
-            allow_list,
-            allow_list_client,
-            push_rx,
-            poll_interval,
-        )));
+        let endpoint_id = endpoint.node_id().to_string();
 
-        tasks.push(tokio::spawn(run_forwarder_catalog_distribution(
-            ServerCatalogClient::with_timeout(base_url, bearer_token, request_timeout),
-            endpoint.clone(),
-            display_name,
-            Arc::clone(&journal),
-            reader_streams.to_vec(),
-            DEFAULT_FORWARDER_CATALOG_PUSH_INTERVAL,
-        )));
+        // Resolve the minted per-device token (load persisted, else bootstrap
+        // via the voucher) BEFORE starting any server-facing task, so every
+        // request carries the device token rather than the bootstrap voucher.
+        let bootstrap_client =
+            ServerCatalogClient::with_timeout(base_url.clone(), voucher, request_timeout);
+        match resolve_device_token(config, &endpoint_id, &bootstrap_client).await? {
+            Some(device_token) => {
+                // Allow-list freshness comes from two sources feeding the same
+                // channel: a long-poll push subscription (near-instant on
+                // approval) and the periodic poll backstop inside
+                // `run_allowlist_distribution` (covers any push gap). Both apply
+                // idempotent snapshots, so overlap is harmless. A pending
+                // forwarder's 401 is logged and retried by those loops.
+                let (push_tx, push_rx) = mpsc::channel(16);
+                let allow_list_client = ServerAllowListClient::with_timeout(
+                    base_url.clone(),
+                    device_token.clone(),
+                    request_timeout,
+                );
+                tasks.push(tokio::spawn(run_allowlist_push_subscription(
+                    allow_list_client.clone(),
+                    push_tx,
+                    ALLOWLIST_PUSH_HOLD,
+                )));
+                tasks.push(tokio::spawn(run_allowlist_distribution(
+                    allow_list,
+                    allow_list_client,
+                    push_rx,
+                    poll_interval,
+                )));
+                tasks.push(tokio::spawn(run_forwarder_catalog_distribution(
+                    ServerCatalogClient::with_timeout(base_url, device_token, request_timeout),
+                    endpoint.clone(),
+                    display_name,
+                    Arc::clone(&journal),
+                    reader_streams.to_vec(),
+                    DEFAULT_FORWARDER_CATALOG_PUSH_INTERVAL,
+                )));
+            }
+            None => {
+                tracing::warn!(
+                    %endpoint_id,
+                    "forwarder has no minted device token yet (bootstrap unavailable); \
+                     server allow-list and catalog integration disabled until next start"
+                );
+            }
+        }
     }
 
     Ok(Some(P2pRuntime { endpoint, tasks }))
@@ -295,6 +313,92 @@ fn server_credentials(config: &P2pConfig) -> Result<Option<(String, String)>, P2
     }
 }
 
+/// Writable path for the minted per-device token: the configured
+/// `device_token_file`, else a `p2p-device-token` sibling of the secret-key path.
+fn device_token_path(config: &P2pConfig) -> PathBuf {
+    if let Some(path) = &config.device_token_file {
+        return PathBuf::from(path);
+    }
+    let key_path = config
+        .secret_key_path
+        .as_deref()
+        .unwrap_or(DEFAULT_P2P_SECRET_KEY_PATH);
+    Path::new(key_path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join("p2p-device-token")
+}
+
+/// Resolve the minted per-device token: return the persisted one if present,
+/// otherwise bootstrap via the voucher and persist the result.
+///
+/// Returns `Ok(None)` when no token is persisted and bootstrap fails (e.g. the
+/// server is unreachable at first boot); the caller then runs without server
+/// integration until the next start. A persist failure after a successful mint
+/// is logged loudly but the in-memory token is still used for this run.
+async fn resolve_device_token(
+    config: &P2pConfig,
+    endpoint_id: &str,
+    bootstrap_client: &ServerCatalogClient,
+) -> Result<Option<String>, P2pStartError> {
+    let path = device_token_path(config);
+    if let Some(existing) = read_device_token(&path)? {
+        return Ok(Some(existing));
+    }
+    match bootstrap_client.bootstrap(endpoint_id).await {
+        Ok(minted) => {
+            if let Err(error) = write_device_token(&path, &minted) {
+                tracing::error!(
+                    %endpoint_id, %error,
+                    "failed to persist minted device token; will re-bootstrap on next start"
+                );
+            }
+            Ok(Some(minted))
+        }
+        Err(error) => {
+            tracing::warn!(%endpoint_id, %error, "forwarder bootstrap failed");
+            Ok(None)
+        }
+    }
+}
+
+fn read_device_token(path: &Path) -> Result<Option<String>, P2pStartError> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => {
+            let trimmed = contents.trim();
+            Ok((!trimmed.is_empty()).then(|| trimmed.to_owned()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(P2pStartError::Io(error)),
+    }
+}
+
+/// Persist `token` to `path` via write-then-rename so a crash never leaves a
+/// partially written credential.
+fn write_device_token(path: &Path, token: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("tmp");
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp)?;
+        file.write_all(token.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.flush()?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
+}
+
 async fn run_forwarder_catalog_distribution(
     client: ServerCatalogClient,
     endpoint: P2pEndpoint,
@@ -342,10 +446,6 @@ async fn push_forwarder_catalog_once(
     reader_streams: &[String],
 ) {
     let endpoint_id = endpoint.node_id().to_string();
-    if let Err(error) = client.register_forwarder(&endpoint_id).await {
-        tracing::warn!(%endpoint_id, %error, "forwarder server registration failed");
-    }
-
     let node_addr = endpoint.node_addr().await;
     let direct_addrs = node_addr
         .direct_addresses
@@ -469,9 +569,51 @@ mod tests {
             allowlist_cache_path: None,
             server_url: None,
             server_token_file: None,
+            device_token_file: None,
             allowlist_poll_interval_secs: 60,
             allowlist_request_timeout_secs: 10,
         }
+    }
+
+    #[test]
+    fn device_token_path_prefers_explicit_then_secret_key_sibling() {
+        let mut config = p2p_config("a".repeat(64));
+        config.device_token_file = Some("/tmp/explicit-device-token".to_owned());
+        assert_eq!(
+            device_token_path(&config),
+            PathBuf::from("/tmp/explicit-device-token")
+        );
+
+        config.device_token_file = None;
+        config.secret_key_path = Some("/var/lib/rt/p2p-secret.key".to_owned());
+        assert_eq!(
+            device_token_path(&config),
+            PathBuf::from("/var/lib/rt/p2p-device-token")
+        );
+    }
+
+    #[test]
+    fn read_write_device_token_roundtrip() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("nested/p2p-device-token");
+        assert!(read_device_token(&path)?.is_none());
+        write_device_token(&path, "rtk_abc_def")?;
+        assert_eq!(read_device_token(&path)?.as_deref(), Some("rtk_abc_def"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resolve_device_token_returns_persisted_without_contacting_server() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("p2p-device-token");
+        write_device_token(&path, "rtk_persisted_token")?;
+        let mut config = p2p_config("b".repeat(64));
+        config.device_token_file = Some(path.to_string_lossy().into_owned());
+        // Unreachable server: a persisted token must short-circuit before any call.
+        let client = ServerCatalogClient::new("http://127.0.0.1:1", "unused-voucher");
+        let token = resolve_device_token(&config, "ep-1", &client).await?;
+        assert_eq!(token.as_deref(), Some("rtk_persisted_token"));
+        Ok(())
     }
 
     #[tokio::test]

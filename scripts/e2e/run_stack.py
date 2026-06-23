@@ -74,7 +74,10 @@ TARGET_DIR = REPO_ROOT / "target" / "debug"
 FORWARDER_SEED_HEX = "cd" * 32
 RECEIVER_SEED_HEX = "ab" * 32
 
-PROVISIONING_TOKEN = "e2e-provisioning-token"
+# Enrollment vouchers (admin-issued, single-use) the devices present once to
+# /register to mint their per-device tokens. Opaque secrets; any string works.
+FORWARDER_VOUCHER = "rte-e2e-forwarder-voucher"
+RECEIVER_VOUCHER = "rte-e2e-receiver-voucher"
 
 # Deterministic scenario shape.
 NUM_READS = 8
@@ -513,6 +516,15 @@ def server_approve_device(base_url: str, endpoint_id: str, display_name: str) ->
     )
 
 
+def server_create_enrollment_token(base_url: str, device_kind: str, token: str) -> dict:
+    """Create an enrollment voucher with a fixed secret via the admin route."""
+    return post_json(
+        f"{base_url}/admin/enrollment-tokens",
+        {"device_kind": device_kind, "token": token, "display_name": f"e2e {device_kind}"},
+        headers={"Remote-User": "rt-e2e-admin"},
+    )
+
+
 def bridge_invoke(base_url: str, cmd: str, args: dict | None = None) -> dict:
     return post_json(f"{base_url.rstrip('/')}/bridge/invoke/{cmd}", args or {})
 
@@ -671,8 +683,10 @@ def run_connection_scenarios(tmp: Path, results: Results, stack: Stack):
 
     token_file = tmp / "forwarder-token"
     token_file.write_text("e2e-forwarder-token\n")
+    # Bootstrap voucher the forwarder presents to /register to mint its token.
     server_token_file = tmp / "server-token"
-    server_token_file.write_text(f"{PROVISIONING_TOKEN}\n")
+    server_token_file.write_text(f"{FORWARDER_VOUCHER}\n")
+    forwarder_device_token_file = tmp / "forwarder-device-token"
 
     journal_path = tmp / "forwarder.sqlite3"
     thin_db_path = tmp / "server.sqlite3"
@@ -713,6 +727,7 @@ discovery_disabled = true
 max_concurrent_bidi_streams = 256
 server_url = "{server_url}"
 server_token_file = "{server_token_file}"
+device_token_file = "{forwarder_device_token_file}"
 allowlist_poll_interval_secs = 1
 allowlist_request_timeout_secs = 2
 """
@@ -726,7 +741,7 @@ allowlist_request_timeout_secs = 2
         proxy_port,
         dbf_path,
         server_url=server_url,
-        server_token=PROVISIONING_TOKEN,
+        server_token=RECEIVER_VOUCHER,
     )
 
     # --- 1. server (trusted proxy enabled only for loopback admin approval) ---
@@ -737,7 +752,6 @@ allowlist_request_timeout_secs = 2
         env={
             "SERVER_DB_PATH": str(thin_db_path),
             "BIND_ADDR": f"127.0.0.1:{server_port}",
-            "SERVER_PROVISIONING_TOKEN": PROVISIONING_TOKEN,
             "SERVER_TRUSTED_PROXY": "1",
             "LOG_LEVEL": "info",
         },
@@ -746,6 +760,11 @@ allowlist_request_timeout_secs = 2
     wait_until(lambda: server_healthy(server_url), timeout=20,
                what="server /healthz")
     print("[up] server healthy")
+
+    # Issue the single-use enrollment vouchers the devices bootstrap from.
+    server_create_enrollment_token(server_url, "forwarder", FORWARDER_VOUCHER)
+    server_create_enrollment_token(server_url, "receiver", RECEIVER_VOUCHER)
+    print("[up] enrollment vouchers issued")
 
     # --- 2. emulator (deterministic, verbatim, once) ---
     emulator = stack.add(Managed(
@@ -781,6 +800,13 @@ allowlist_request_timeout_secs = 2
     forwarder.assert_alive()
     print("[up] forwarder p2p serving")
 
+    # Approve the forwarder so it may fetch the receiver allow-list (an active
+    # forwarder is required; the receiver is approved later in the scenario).
+    wait_until(lambda: server_device_approval(server_url, forwarder_node_id) is not None,
+               timeout=15, what="forwarder self-registration")
+    server_approve_device(server_url, forwarder_node_id, "E2E Forwarder")
+    print("[up] forwarder approved")
+
     # --- 4. receiver-headless (bridge + P2P + server announcer) ---
     receiver = stack.add(Managed(
         name="receiver-headless[connections]",
@@ -793,7 +819,7 @@ allowlist_request_timeout_secs = 2
             "--p2p-forwarder-direct-addr", f"127.0.0.1:{forwarder_p2p_port}",
             "--p2p-secret-key-seed-hex", RECEIVER_SEED_HEX,
             "--p2p-server-url", server_url,
-            "--p2p-server-token", PROVISIONING_TOKEN,
+            "--p2p-server-token", RECEIVER_VOUCHER,
             "--p2p-reconcile-ms", str(RECONCILE_MS),
         ],
         log_path=tmp / "receiver.log",
@@ -1067,7 +1093,7 @@ static_allowed_receivers = ["{receiver_node_id}"]
         env={
             "SERVER_DB_PATH": str(thin_db_path),
             "BIND_ADDR": f"127.0.0.1:{server_port}",
-            "SERVER_PROVISIONING_TOKEN": PROVISIONING_TOKEN,
+            "SERVER_TRUSTED_PROXY": "1",
             "LOG_LEVEL": "info",
         },
     ))
@@ -1075,6 +1101,11 @@ static_allowed_receivers = ["{receiver_node_id}"]
     wait_until(lambda: server_healthy(server_url), timeout=20,
                what="server /healthz")
     print("[up] server healthy")
+
+    # The receiver bootstraps its device token from this voucher; the forwarder
+    # uses a static allow-list in this lane and never contacts the server.
+    server_create_enrollment_token(server_url, "receiver", RECEIVER_VOUCHER)
+    print("[up] receiver enrollment voucher issued")
 
     # --- 2. emulator (deterministic, verbatim, once) ---
     emulator_argv = [str(bin_path("emulator")),
@@ -1130,7 +1161,7 @@ static_allowed_receivers = ["{receiver_node_id}"]
         "--p2p-relay-disabled",
         "--p2p-discovery-disabled",
         "--p2p-server-url", server_url,
-        "--p2p-server-token", PROVISIONING_TOKEN,
+        "--p2p-server-token", RECEIVER_VOUCHER,
         "--p2p-reconcile-ms", str(RECONCILE_MS),
     ]
 
@@ -1147,6 +1178,14 @@ static_allowed_receivers = ["{receiver_node_id}"]
     wait_for_log(receiver.log_path, "p2p_node_id=", timeout=30,
                  what="receiver p2p startup")
     print("[up] receiver-headless p2p running")
+
+    # Approve the receiver so it can take over the announcer generation and push
+    # rows (an active receiver is required). The static forwarder allow-list
+    # admits it on the data plane regardless; this gates only the server plane.
+    wait_until(lambda: server_device_approval(server_url, receiver_node_id) is not None,
+               timeout=15, what="receiver self-registration")
+    server_approve_device(server_url, receiver_node_id, "E2E Receiver")
+    print("[up] receiver approved")
 
     # --- Power-loss lane: SIGKILL the target mid-stream, then restart ---
     active_receiver = receiver

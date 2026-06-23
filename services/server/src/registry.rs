@@ -257,6 +257,78 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
+/// Prefix that identifies a minted per-device bearer token.
+const DEVICE_TOKEN_PREFIX: &str = "rtk_";
+/// Byte length of the random per-device `token_id` (hex-encoded, ~128-bit).
+const DEVICE_TOKEN_ID_LEN: usize = 16;
+/// Byte length of the random per-device token secret.
+const DEVICE_TOKEN_SECRET_LEN: usize = 32;
+
+fn random_hex(len_bytes: usize) -> String {
+    let mut buf = vec![0u8; len_bytes];
+    rand::rng().fill_bytes(&mut buf);
+    encode_hex(&buf)
+}
+
+/// Format a minted device token as `rtk_<token_id>_<secret>`.
+fn format_device_token(token_id: &str, secret: &str) -> String {
+    format!("{DEVICE_TOKEN_PREFIX}{token_id}_{secret}")
+}
+
+/// Split a raw bearer into `(token_id, secret)` iff it is a well-formed device
+/// token. The `token_id` is the underscore-free hex segment after the prefix.
+fn parse_device_token(raw: &str) -> Option<(&str, &str)> {
+    let rest = raw.strip_prefix(DEVICE_TOKEN_PREFIX)?;
+    let (token_id, secret) = rest.split_once('_')?;
+    if token_id.is_empty() || secret.is_empty() {
+        return None;
+    }
+    Some((token_id, secret))
+}
+
+/// Resolve a raw bearer token to its device record via the indexed `token_id`,
+/// verifying the secret in constant time.
+///
+/// Returns `None` for any token that is not a well-formed device token, has no
+/// matching `devices` row, or fails verification — i.e. fail-closed. The caller
+/// asserts device kind / approval state per endpoint.
+pub fn authenticate_device(
+    conn: &Connection,
+    raw_token: &str,
+) -> rusqlite::Result<Option<DeviceRecord>> {
+    let Some((token_id, secret)) = parse_device_token(raw_token) else {
+        return Ok(None);
+    };
+    let row = conn
+        .query_row(
+            "SELECT endpoint_id, device_kind, approval_state, token_hash
+             FROM devices WHERE token_id = ?1",
+            [token_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((endpoint_id, kind_raw, approval_raw, token_hash)) = row else {
+        return Ok(None);
+    };
+    if !verify_token(secret, &token_hash) {
+        return Ok(None);
+    }
+    // Reject a corrupt row fail-closed (deny) rather than erroring the auth path.
+    if DeviceKind::parse(&kind_raw).is_none() || ApprovalState::parse(&approval_raw).is_none() {
+        return Ok(None);
+    }
+    // Return the canonical record so the resolved `display_name` is populated
+    // consistently with `get_device`/`list_devices`.
+    get_device(conn, &endpoint_id)
+}
+
 /// Create the registry tables. Idempotent and safe to call on every open.
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
@@ -302,6 +374,16 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
     if !devices_has_display_name_column(conn)? {
         conn.execute_batch("ALTER TABLE devices ADD COLUMN display_name TEXT")?;
+    }
+
+    // Per-device minted-token id (nullable until a device is minted). A UNIQUE
+    // index gives an indexed lookup in `authenticate_device`; SQLite treats
+    // NULLs as distinct, so pre-mint rows coexist freely.
+    if !column_exists(conn, "devices", "token_id")? {
+        conn.execute_batch(
+            "ALTER TABLE devices ADD COLUMN token_id TEXT;
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_token_id ON devices(token_id);",
+        )?;
     }
 
     Ok(())
@@ -462,200 +544,11 @@ pub fn revoke_enrollment_token(
     get_enrollment_token(conn, token_id)
 }
 
-pub fn consume_enrollment_token(
-    conn: &Connection,
-    raw_token: &str,
-    expected_device_kind: DeviceKind,
-    endpoint_id: &str,
-) -> rusqlite::Result<bool> {
-    let mut stmt = conn.prepare(
-        "SELECT token_id, token_hash
-         FROM enrollment_tokens
-         WHERE device_kind = ?1
-           AND used_unix_ms IS NULL
-           AND revoked_unix_ms IS NULL
-         ORDER BY created_unix_ms, token_id",
-    )?;
-    let rows = stmt.query_map([expected_device_kind.as_str()], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-    })?;
-
-    for row in rows {
-        let (token_id, token_hash) = row?;
-        if verify_token(raw_token, &token_hash) {
-            let now = Utc::now().timestamp_millis();
-            conn.execute(
-                "UPDATE enrollment_tokens
-                 SET used_unix_ms = ?2, used_endpoint_id = ?3
-                 WHERE token_id = ?1
-                   AND used_unix_ms IS NULL
-                   AND revoked_unix_ms IS NULL",
-                params![token_id, now, endpoint_id],
-            )?;
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
-pub fn register_device_with_enrollment_token(
-    conn: &Connection,
-    endpoint_id: &str,
-    device_kind: DeviceKind,
-    raw_token: &str,
-) -> rusqlite::Result<Option<DeviceRecord>> {
-    let tx = conn.unchecked_transaction()?;
-    let existing_endpoint = tx
-        .query_row(
-            "SELECT 1 FROM devices WHERE endpoint_id = ?1",
-            [endpoint_id],
-            |_| Ok(()),
-        )
-        .optional()?;
-    if existing_endpoint.is_some() {
-        return Ok(None);
-    }
-
-    let now = Utc::now().timestamp_millis();
-    let mut token = None;
-    {
-        let mut stmt = tx.prepare(
-            "SELECT token_id, token_hash
-             FROM enrollment_tokens
-             WHERE device_kind = ?1
-               AND used_unix_ms IS NULL
-               AND revoked_unix_ms IS NULL
-             ORDER BY created_unix_ms, token_id",
-        )?;
-        let rows = stmt.query_map([device_kind.as_str()], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })?;
-        for row in rows {
-            let (candidate_id, token_hash) = row?;
-            if verify_token(raw_token, &token_hash) {
-                token = Some(candidate_id);
-                break;
-            }
-        }
-    }
-
-    let Some(token_id) = token else {
-        return Ok(None);
-    };
-
-    tx.execute(
-        "UPDATE enrollment_tokens
-         SET used_unix_ms = ?2, used_endpoint_id = ?3
-         WHERE token_id = ?1
-           AND used_unix_ms IS NULL
-           AND revoked_unix_ms IS NULL",
-        params![token_id, now, endpoint_id],
-    )?;
-    tx.execute(
-        "INSERT INTO devices (
-             endpoint_id, device_kind, approval_state,
-             token_hash, created_unix_ms, updated_unix_ms
-         )
-         VALUES (?1, ?2, 'pending', ?3, ?4, ?4)
-         ON CONFLICT(endpoint_id) DO UPDATE SET
-             device_kind = excluded.device_kind,
-             token_hash = excluded.token_hash,
-             updated_unix_ms = excluded.updated_unix_ms",
-        params![
-            endpoint_id,
-            device_kind.as_str(),
-            hash_token(raw_token),
-            now
-        ],
-    )?;
-    tx.commit()?;
-
-    get_device(conn, endpoint_id)
-}
-
-pub fn device_token_authorized(
-    conn: &Connection,
-    endpoint_id: &str,
-    expected_device_kind: DeviceKind,
-    raw_token: &str,
-) -> rusqlite::Result<bool> {
-    let mut stmt = conn.prepare(
-        "SELECT token_hash, revoked_unix_ms
-         FROM enrollment_tokens
-         WHERE used_endpoint_id = ?1
-           AND device_kind = ?2",
-    )?;
-    let rows = stmt.query_map(params![endpoint_id, expected_device_kind.as_str()], |row| {
-        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<i64>>(1)?))
-    })?;
-    let mut saw_enrollment_token = false;
-    for row in rows {
-        let (token_hash, revoked_unix_ms) = row?;
-        saw_enrollment_token = true;
-        if revoked_unix_ms.is_none() && verify_token(raw_token, &token_hash) {
-            return Ok(true);
-        }
-    }
-    if saw_enrollment_token {
-        return Ok(false);
-    }
-
-    let device = conn
-        .query_row(
-            "SELECT device_kind, token_hash FROM devices WHERE endpoint_id = ?1",
-            [endpoint_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )
-        .optional()?;
-    let Some((device_kind_raw, token_hash)) = device else {
-        return Ok(false);
-    };
-    Ok(
-        DeviceKind::parse(&device_kind_raw) == Some(expected_device_kind)
-            && verify_token(raw_token, &token_hash),
-    )
-}
-
-pub fn any_device_token_authorized(
-    conn: &Connection,
-    expected_device_kind: DeviceKind,
-    raw_token: &str,
-) -> rusqlite::Result<bool> {
-    let mut stmt = conn.prepare(
-        "SELECT token_hash, revoked_unix_ms
-         FROM enrollment_tokens
-         WHERE device_kind = ?1
-           AND used_unix_ms IS NOT NULL",
-    )?;
-    let rows = stmt.query_map([expected_device_kind.as_str()], |row| {
-        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<i64>>(1)?))
-    })?;
-    for row in rows {
-        let (token_hash, revoked_unix_ms) = row?;
-        if verify_token(raw_token, &token_hash) {
-            return Ok(revoked_unix_ms.is_none());
-        }
-    }
-
-    let mut stmt = conn.prepare("SELECT token_hash FROM devices WHERE device_kind = ?1")?;
-    let rows = stmt.query_map([expected_device_kind.as_str()], |row| {
-        row.get::<_, Vec<u8>>(0)
-    })?;
-    for row in rows {
-        if verify_token(raw_token, &row?) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// Register (or re-register) a device under the TOFU model.
-///
-/// A brand-new endpoint is recorded as `pending`. Re-registration of an
-/// existing endpoint refreshes its kind and hashed token while preserving any
-/// existing approval state (idempotent for an already-approved device).
-pub fn register_device(
+/// Test-only: seed a device row with a hashed token (no `token_id`, so it does
+/// not authenticate via [`authenticate_device`]). Tests use it to populate the
+/// registry; production registration goes through [`register_device_with_voucher`].
+#[cfg(test)]
+pub(crate) fn register_device(
     conn: &Connection,
     endpoint_id: &str,
     device_kind: DeviceKind,
@@ -678,6 +571,241 @@ pub fn register_device(
     )?;
 
     get_device(conn, endpoint_id)?.ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
+}
+
+/// A freshly registered device plus its minted bearer token.
+///
+/// The token secret is returned exactly once; the server persists only its
+/// salted hash and the lookup `token_id`.
+#[derive(Clone)]
+pub struct MintedRegistration {
+    pub record: DeviceRecord,
+    pub device_token: String,
+}
+
+// Manual `Debug` so the minted secret is never leaked through formatting.
+impl std::fmt::Debug for MintedRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MintedRegistration")
+            .field("record", &self.record)
+            .field("device_token", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Mint (rotate) the per-device token for an existing `devices` row, setting its
+/// indexed `token_id` and the salted hash of a fresh secret. Returns the full
+/// raw token (`rtk_<token_id>_<secret>`). The row must already exist.
+fn mint_device_token_into(tx: &Connection, endpoint_id: &str) -> rusqlite::Result<String> {
+    let now = Utc::now().timestamp_millis();
+    let mut last_err = None;
+    // `token_id` collisions on the UNIQUE index are astronomically unlikely;
+    // retry a few times rather than surfacing a spurious constraint error.
+    for _ in 0..8 {
+        let token_id = random_hex(DEVICE_TOKEN_ID_LEN);
+        let secret = random_hex(DEVICE_TOKEN_SECRET_LEN);
+        let token_hash = hash_token(&secret);
+        match tx.execute(
+            "UPDATE devices
+             SET token_id = ?2, token_hash = ?3, updated_unix_ms = ?4
+             WHERE endpoint_id = ?1",
+            params![endpoint_id, token_id, token_hash, now],
+        ) {
+            // 0 rows means the device row does not exist; callers always create
+            // it first, so treat that as an error rather than minting a token
+            // for a non-existent device.
+            Ok(0) => return Err(rusqlite::Error::QueryReturnedNoRows),
+            Ok(_) => return Ok(format_device_token(&token_id, &secret)),
+            Err(err @ rusqlite::Error::SqliteFailure(failure, _))
+                if failure.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                last_err = Some(err);
+            }
+            Err(other) => return Err(other),
+        }
+    }
+    Err(last_err.unwrap_or(rusqlite::Error::QueryReturnedNoRows))
+}
+
+/// Test-only: register-or-keep a device and mint its bearer token, returning the
+/// raw token. Tests use it to obtain a working device token; production minting
+/// happens via [`register_device_with_voucher`] on the `/register` path.
+#[cfg(test)]
+pub(crate) fn register_device_minted(
+    conn: &Connection,
+    endpoint_id: &str,
+    device_kind: DeviceKind,
+) -> rusqlite::Result<MintedRegistration> {
+    let tx = conn.unchecked_transaction()?;
+    let now = Utc::now().timestamp_millis();
+    tx.execute(
+        "INSERT INTO devices (
+             endpoint_id, device_kind, approval_state,
+             token_hash, created_unix_ms, updated_unix_ms
+         )
+         VALUES (?1, ?2, 'pending', ?3, ?4, ?4)
+         ON CONFLICT(endpoint_id) DO UPDATE SET
+             device_kind = excluded.device_kind,
+             updated_unix_ms = excluded.updated_unix_ms",
+        params![endpoint_id, device_kind.as_str(), Vec::<u8>::new(), now],
+    )?;
+    let device_token = mint_device_token_into(&tx, endpoint_id)?;
+    tx.commit()?;
+    let record = get_device(conn, endpoint_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    Ok(MintedRegistration {
+        record,
+        device_token,
+    })
+}
+
+/// Register (or recover) a device by presenting an enrollment **voucher**, then
+/// mint its bearer token. Returns `None` (→ `401`) when no usable voucher of the
+/// matching kind verifies.
+///
+/// Recovery semantics (single atomic transaction so a voucher can't be
+/// double-spent across endpoints):
+/// - Same-`endpoint_id` re-presentation of its own already-used voucher rotates
+///   the token and **keeps** the existing approval state (covers a crash before
+///   the client persisted its first token).
+/// - A different, unused voucher rebinding an *existing* endpoint resets
+///   `approval_state` to `pending` and requires the existing `device_kind` to
+///   match, so a stolen voucher cannot silently take over an active device.
+/// - An unused voucher for an unknown endpoint creates a new `pending` device.
+pub fn register_device_with_voucher(
+    conn: &Connection,
+    endpoint_id: &str,
+    device_kind: DeviceKind,
+    raw_voucher: &str,
+) -> rusqlite::Result<Option<MintedRegistration>> {
+    let tx = conn.unchecked_transaction()?;
+
+    let existing_kind = tx
+        .query_row(
+            "SELECT device_kind FROM devices WHERE endpoint_id = ?1",
+            [endpoint_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|raw| DeviceKind::parse(&raw));
+    let device_exists = existing_kind.is_some();
+
+    // Find a non-revoked voucher of this kind whose secret verifies.
+    let mut matched: Option<(String, Option<String>, bool)> = None;
+    {
+        let mut stmt = tx.prepare(
+            "SELECT token_id, token_hash, used_unix_ms, used_endpoint_id
+             FROM enrollment_tokens
+             WHERE device_kind = ?1 AND revoked_unix_ms IS NULL
+             ORDER BY created_unix_ms, token_id",
+        )?;
+        let rows = stmt.query_map([device_kind.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (voucher_id, token_hash, used_unix_ms, used_endpoint_id) = row?;
+            if verify_token(raw_voucher, &token_hash) {
+                matched = Some((voucher_id, used_endpoint_id, used_unix_ms.is_some()));
+                break;
+            }
+        }
+    }
+    let Some((voucher_id, used_endpoint_id, used)) = matched else {
+        return Ok(None);
+    };
+
+    // A used voucher is acceptable only when re-presented by the same endpoint.
+    let same_endpoint_reuse = used && used_endpoint_id.as_deref() == Some(endpoint_id);
+    if used && !same_endpoint_reuse {
+        return Ok(None);
+    }
+
+    // A voucher kind must match an existing device's kind (no cross-kind rebind).
+    if let Some(existing_kind) = existing_kind
+        && existing_kind != device_kind
+    {
+        return Ok(None);
+    }
+
+    let now = Utc::now().timestamp_millis();
+
+    // Consume a fresh voucher (idempotent no-op for same-endpoint reuse).
+    if !used {
+        tx.execute(
+            "UPDATE enrollment_tokens
+             SET used_unix_ms = ?2, used_endpoint_id = ?3
+             WHERE token_id = ?1 AND used_unix_ms IS NULL AND revoked_unix_ms IS NULL",
+            params![voucher_id, now, endpoint_id],
+        )?;
+    }
+
+    if device_exists {
+        if same_endpoint_reuse {
+            // Rotate only: keep approval state.
+            tx.execute(
+                "UPDATE devices SET device_kind = ?2, updated_unix_ms = ?3 WHERE endpoint_id = ?1",
+                params![endpoint_id, device_kind.as_str(), now],
+            )?;
+        } else {
+            // Fresh-voucher rebind of an existing endpoint: reset to pending.
+            tx.execute(
+                "UPDATE devices
+                 SET device_kind = ?2, approval_state = 'pending', updated_unix_ms = ?3
+                 WHERE endpoint_id = ?1",
+                params![endpoint_id, device_kind.as_str(), now],
+            )?;
+        }
+    } else {
+        tx.execute(
+            "INSERT INTO devices (
+                 endpoint_id, device_kind, approval_state,
+                 token_hash, created_unix_ms, updated_unix_ms
+             )
+             VALUES (?1, ?2, 'pending', ?3, ?4, ?4)",
+            params![endpoint_id, device_kind.as_str(), Vec::<u8>::new(), now],
+        )?;
+    }
+
+    let device_token = mint_device_token_into(&tx, endpoint_id)?;
+    tx.commit()?;
+    let record = get_device(conn, endpoint_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    Ok(Some(MintedRegistration {
+        record,
+        device_token,
+    }))
+}
+
+/// Test-only: insert an `active` device with a caller-chosen `token_id`/secret
+/// so tests can authenticate with a deterministic `rtk_<token_id>_<secret>`
+/// bearer instead of a randomly minted one.
+#[cfg(test)]
+pub(crate) fn seed_active_device(
+    conn: &Connection,
+    endpoint_id: &str,
+    device_kind: DeviceKind,
+    token_id: &str,
+    secret: &str,
+) {
+    let now = Utc::now().timestamp_millis();
+    conn.execute(
+        "INSERT INTO devices (
+             endpoint_id, device_kind, approval_state,
+             token_hash, token_id, created_unix_ms, updated_unix_ms
+         )
+         VALUES (?1, ?2, 'active', ?3, ?4, ?5, ?5)",
+        params![
+            endpoint_id,
+            device_kind.as_str(),
+            hash_token(secret),
+            token_id,
+            now
+        ],
+    )
+    .expect("seed_active_device insert");
 }
 
 /// Approve a device, marking it `active`.
@@ -704,23 +832,26 @@ pub fn approve_device(
 
 /// Upsert one forwarder's pushed identity and replace its stream catalog.
 ///
-/// Forwarders are expected to pre-register via `POST /register`. For robustness,
-/// a catalog push from an unknown endpoint creates a pending forwarder device
-/// using the in-process provisioning token hash; existing approval state and
-/// admin-assigned device names are preserved.
+/// The forwarder device must already exist (it registers and mints its token
+/// via `POST /register` before pushing a catalog, and the catalog endpoint only
+/// authorizes an existing forwarder). Existing approval state and admin-assigned
+/// names are preserved; this only refreshes the pushed identity and streams.
 pub fn upsert_forwarder_catalog(
     conn: &Connection,
     endpoint_id: &str,
     display_name: Option<&str>,
     direct_addrs: &[String],
     streams: &[ForwarderCatalogStreamRecord],
-    pending_token_hash: &[u8],
 ) -> rusqlite::Result<()> {
     let now = Utc::now().timestamp_millis();
     let direct_addrs_json = serde_json::to_string(direct_addrs)
         .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
     let tx = conn.unchecked_transaction()?;
 
+    // Ensure a device row exists for the FK (it normally already does, since the
+    // catalog endpoint only authorizes an already-registered forwarder). A
+    // token-less `pending` row is a harmless backstop; it carries no `token_id`
+    // so it cannot authenticate until the forwarder mints one via `/register`.
     tx.execute(
         "INSERT INTO devices (
              endpoint_id, device_kind, approval_state,
@@ -730,7 +861,7 @@ pub fn upsert_forwarder_catalog(
          ON CONFLICT(endpoint_id) DO UPDATE SET
              device_kind = 'forwarder',
              updated_unix_ms = excluded.updated_unix_ms",
-        params![endpoint_id, pending_token_hash, now],
+        params![endpoint_id, Vec::<u8>::new(), now],
     )?;
 
     tx.execute(
@@ -1062,6 +1193,19 @@ fn sql_i64_to_u64(value: i64, index: usize) -> rusqlite::Result<u64> {
     })
 }
 
+/// Returns whether `table` has a column named `column`.
+fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn forwarder_streams_needs_composite_pk(conn: &Connection) -> rusqlite::Result<bool> {
     let mut stmt = conn.prepare("PRAGMA table_info(forwarder_streams)")?;
     let mut rows = stmt.query([])?;
@@ -1107,6 +1251,124 @@ mod tests {
     }
 
     #[test]
+    fn authenticate_device_roundtrips_and_fails_closed() {
+        let conn = test_conn();
+        let minted = register_device_minted(&conn, "ep-1", DeviceKind::Forwarder).unwrap();
+        assert!(minted.device_token.starts_with("rtk_"));
+        let record = authenticate_device(&conn, &minted.device_token)
+            .unwrap()
+            .expect("token resolves");
+        assert_eq!(record.endpoint_id, "ep-1");
+        assert_eq!(record.device_kind, DeviceKind::Forwarder);
+        assert_eq!(record.approval_state, ApprovalState::Pending);
+        // Tampered secret, and non-device-token shapes, fail closed.
+        assert!(
+            authenticate_device(&conn, &format!("{}x", minted.device_token))
+                .unwrap()
+                .is_none()
+        );
+        assert!(authenticate_device(&conn, "not-a-token").unwrap().is_none());
+        assert!(authenticate_device(&conn, "rtk_onlyid").unwrap().is_none());
+    }
+
+    #[test]
+    fn register_device_minted_preserves_approval_and_rotates() {
+        let conn = test_conn();
+        let first = register_device_minted(&conn, "ep-1", DeviceKind::Receiver).unwrap();
+        approve_device(&conn, "ep-1").unwrap().unwrap();
+        let second = register_device_minted(&conn, "ep-1", DeviceKind::Receiver).unwrap();
+        assert_eq!(second.record.approval_state, ApprovalState::Active);
+        // Re-mint rotates: the old token no longer authenticates.
+        assert!(
+            authenticate_device(&conn, &first.device_token)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            authenticate_device(&conn, &second.device_token)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn voucher_register_mints_and_consumes() {
+        let conn = test_conn();
+        create_enrollment_token(&conn, "tok-1", DeviceKind::Forwarder, None, "voucher").unwrap();
+        let minted = register_device_with_voucher(&conn, "ep-1", DeviceKind::Forwarder, "voucher")
+            .unwrap()
+            .expect("voucher accepted");
+        assert_eq!(minted.record.approval_state, ApprovalState::Pending);
+        assert!(
+            authenticate_device(&conn, &minted.device_token)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            list_enrollment_tokens(&conn).unwrap()[0].status,
+            EnrollmentTokenStatus::Used
+        );
+    }
+
+    #[test]
+    fn voucher_double_spend_by_second_endpoint_rejected() {
+        let conn = test_conn();
+        create_enrollment_token(&conn, "tok-1", DeviceKind::Forwarder, None, "voucher").unwrap();
+        register_device_with_voucher(&conn, "ep-1", DeviceKind::Forwarder, "voucher")
+            .unwrap()
+            .unwrap();
+        assert!(
+            register_device_with_voucher(&conn, "ep-2", DeviceKind::Forwarder, "voucher")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn same_endpoint_voucher_reuse_rotates_and_keeps_approval() {
+        let conn = test_conn();
+        create_enrollment_token(&conn, "tok-1", DeviceKind::Forwarder, None, "voucher").unwrap();
+        let first = register_device_with_voucher(&conn, "ep-1", DeviceKind::Forwarder, "voucher")
+            .unwrap()
+            .unwrap();
+        approve_device(&conn, "ep-1").unwrap().unwrap();
+        let second = register_device_with_voucher(&conn, "ep-1", DeviceKind::Forwarder, "voucher")
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.record.approval_state, ApprovalState::Active);
+        assert!(
+            authenticate_device(&conn, &first.device_token)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            authenticate_device(&conn, &second.device_token)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn fresh_voucher_rebind_resets_approval_and_requires_kind_match() {
+        let conn = test_conn();
+        register_device_minted(&conn, "ep-1", DeviceKind::Forwarder).unwrap();
+        approve_device(&conn, "ep-1").unwrap().unwrap();
+        create_enrollment_token(&conn, "tok-1", DeviceKind::Forwarder, None, "voucher-f").unwrap();
+        let rebound =
+            register_device_with_voucher(&conn, "ep-1", DeviceKind::Forwarder, "voucher-f")
+                .unwrap()
+                .unwrap();
+        assert_eq!(rebound.record.approval_state, ApprovalState::Pending);
+        // A receiver voucher must not rebind a forwarder endpoint.
+        create_enrollment_token(&conn, "tok-2", DeviceKind::Receiver, None, "voucher-r").unwrap();
+        assert!(
+            register_device_with_voucher(&conn, "ep-1", DeviceKind::Receiver, "voucher-r")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn reregistration_preserves_approval() {
         let conn = test_conn();
 
@@ -1126,7 +1388,6 @@ mod tests {
     #[test]
     fn forwarder_listings_use_pushed_catalog_name() {
         let conn = test_conn();
-        let token_hash = hash_token("prov-secret");
         upsert_forwarder_catalog(
             &conn,
             "ep-fwd",
@@ -1137,7 +1398,6 @@ mod tests {
                 epoch: 1,
                 next_seq: 10,
             }],
-            &token_hash,
         )
         .unwrap();
         approve_device(&conn, "ep-fwd").unwrap();
@@ -1177,8 +1437,7 @@ mod tests {
             "rx-token",
         )
         .unwrap();
-        register_device_with_enrollment_token(&conn, "ep-rx", DeviceKind::Receiver, "rx-token")
-            .unwrap();
+        register_device_with_voucher(&conn, "ep-rx", DeviceKind::Receiver, "rx-token").unwrap();
 
         // Forwarder with an admin token name AND a self-pushed catalog name:
         // the admin-assigned token name wins.
@@ -1190,15 +1449,13 @@ mod tests {
             "fwd-token",
         )
         .unwrap();
-        register_device_with_enrollment_token(&conn, "ep-fwd", DeviceKind::Forwarder, "fwd-token")
-            .unwrap();
+        register_device_with_voucher(&conn, "ep-fwd", DeviceKind::Forwarder, "fwd-token").unwrap();
         upsert_forwarder_catalog(
             &conn,
             "ep-fwd",
             Some("Pushed Name"),
             &["127.0.0.1:5000".to_owned()],
             &[],
-            &hash_token("prov-secret"),
         )
         .unwrap();
 
@@ -1215,7 +1472,6 @@ mod tests {
             Some("Pushed Only"),
             &["127.0.0.1:5001".to_owned()],
             &[],
-            &hash_token("prov-secret"),
         )
         .unwrap();
 
@@ -1271,7 +1527,6 @@ mod tests {
     #[test]
     fn upsert_forwarder_catalog_creates_pending_device_and_replaces_streams() {
         let conn = test_conn();
-        let token_hash = hash_token("prov-secret");
 
         upsert_forwarder_catalog(
             &conn,
@@ -1290,7 +1545,6 @@ mod tests {
                     next_seq: 20,
                 },
             ],
-            &token_hash,
         )
         .unwrap();
 
@@ -1316,7 +1570,6 @@ mod tests {
                 epoch: 3,
                 next_seq: 30,
             }],
-            &token_hash,
         )
         .unwrap();
 
@@ -1335,7 +1588,6 @@ mod tests {
     #[test]
     fn list_approved_forwarders_with_streams_joins_and_filters() {
         let conn = test_conn();
-        let token_hash = hash_token("prov-secret");
 
         // Approved forwarder with two streams.
         upsert_forwarder_catalog(
@@ -1355,7 +1607,6 @@ mod tests {
                     next_seq: 20,
                 },
             ],
-            &token_hash,
         )
         .unwrap();
         approve_device(&conn, "ep-approved").unwrap().unwrap();
@@ -1371,7 +1622,6 @@ mod tests {
                 epoch: 1,
                 next_seq: 1,
             }],
-            &token_hash,
         )
         .unwrap();
 
@@ -1438,205 +1688,6 @@ mod tests {
         assert_eq!(tokens[0].device_kind, DeviceKind::Forwarder);
         assert_eq!(tokens[0].display_name.as_deref(), Some("Start Line"));
         assert_eq!(tokens[0].status, EnrollmentTokenStatus::Active);
-    }
-
-    #[test]
-    fn consume_enrollment_token_marks_token_used() {
-        let conn = test_conn();
-        create_enrollment_token(&conn, "tok-1", DeviceKind::Forwarder, None, "secret").unwrap();
-
-        assert!(
-            consume_enrollment_token(&conn, "secret", DeviceKind::Forwarder, "ep-fwd").unwrap()
-        );
-
-        let tokens = list_enrollment_tokens(&conn).unwrap();
-        assert_eq!(tokens[0].status, EnrollmentTokenStatus::Used);
-        assert_eq!(tokens[0].used_endpoint_id.as_deref(), Some("ep-fwd"));
-        assert!(tokens[0].used_unix_ms.is_some());
-    }
-
-    #[test]
-    fn consume_enrollment_token_rejects_wrong_device_kind() {
-        let conn = test_conn();
-        create_enrollment_token(&conn, "tok-1", DeviceKind::Receiver, None, "secret").unwrap();
-
-        assert!(
-            !consume_enrollment_token(&conn, "secret", DeviceKind::Forwarder, "ep-fwd").unwrap()
-        );
-        assert_eq!(
-            list_enrollment_tokens(&conn).unwrap()[0].status,
-            EnrollmentTokenStatus::Active
-        );
-    }
-
-    #[test]
-    fn revoked_enrollment_token_cannot_be_consumed() {
-        let conn = test_conn();
-        create_enrollment_token(&conn, "tok-1", DeviceKind::Forwarder, None, "secret").unwrap();
-        revoke_enrollment_token(&conn, "tok-1").unwrap().unwrap();
-
-        assert!(
-            !consume_enrollment_token(&conn, "secret", DeviceKind::Forwarder, "ep-fwd").unwrap()
-        );
-        assert_eq!(
-            list_enrollment_tokens(&conn).unwrap()[0].status,
-            EnrollmentTokenStatus::Revoked
-        );
-    }
-
-    #[test]
-    fn register_device_with_enrollment_token_is_atomic() {
-        let conn = test_conn();
-        create_enrollment_token(
-            &conn,
-            "tok-1",
-            DeviceKind::Forwarder,
-            Some("Start Line"),
-            "secret",
-        )
-        .unwrap();
-
-        let registered =
-            register_device_with_enrollment_token(&conn, "ep-fwd", DeviceKind::Forwarder, "secret")
-                .unwrap()
-                .expect("token is active");
-
-        assert_eq!(registered.endpoint_id, "ep-fwd");
-        assert_eq!(registered.device_kind, DeviceKind::Forwarder);
-        assert_eq!(registered.approval_state, ApprovalState::Pending);
-        assert_eq!(
-            list_enrollment_tokens(&conn).unwrap()[0]
-                .used_endpoint_id
-                .as_deref(),
-            Some("ep-fwd")
-        );
-    }
-
-    #[test]
-    fn register_device_with_enrollment_token_rejects_existing_endpoint() {
-        let conn = test_conn();
-        register_device(&conn, "ep-fwd", DeviceKind::Forwarder, "existing-secret").unwrap();
-        approve_device(&conn, "ep-fwd").unwrap().unwrap();
-        create_enrollment_token(&conn, "tok-1", DeviceKind::Forwarder, None, "enroll-secret")
-            .unwrap();
-
-        assert!(
-            register_device_with_enrollment_token(
-                &conn,
-                "ep-fwd",
-                DeviceKind::Forwarder,
-                "enroll-secret",
-            )
-            .unwrap()
-            .is_none()
-        );
-
-        let device = get_device(&conn, "ep-fwd").unwrap().unwrap();
-        assert_eq!(device.approval_state, ApprovalState::Active);
-        assert!(
-            device_token_authorized(&conn, "ep-fwd", DeviceKind::Forwarder, "existing-secret")
-                .unwrap()
-        );
-        assert_eq!(
-            list_enrollment_tokens(&conn).unwrap()[0].status,
-            EnrollmentTokenStatus::Active
-        );
-    }
-
-    #[test]
-    fn device_token_authorized_rejects_revoked_used_token() {
-        let conn = test_conn();
-        create_enrollment_token(&conn, "tok-1", DeviceKind::Forwarder, None, "secret").unwrap();
-        register_device_with_enrollment_token(&conn, "ep-fwd", DeviceKind::Forwarder, "secret")
-            .unwrap()
-            .unwrap();
-        revoke_enrollment_token(&conn, "tok-1").unwrap().unwrap();
-
-        assert!(
-            !device_token_authorized(&conn, "ep-fwd", DeviceKind::Forwarder, "secret").unwrap()
-        );
-    }
-
-    #[test]
-    fn revoke_enrollment_token_does_not_delete_forwarder_catalog() {
-        let conn = test_conn();
-        create_enrollment_token(&conn, "tok-1", DeviceKind::Forwarder, None, "secret").unwrap();
-        register_device_with_enrollment_token(&conn, "ep-fwd", DeviceKind::Forwarder, "secret")
-            .unwrap()
-            .unwrap();
-        approve_device(&conn, "ep-fwd").unwrap().unwrap();
-        upsert_forwarder_catalog(
-            &conn,
-            "ep-fwd",
-            Some("Forwarder Catalog Name"),
-            &["127.0.0.1:5000".to_string()],
-            &[ForwarderCatalogStreamRecord {
-                stream_id: "reader-a".to_string(),
-                epoch: 1,
-                next_seq: 2,
-            }],
-            &hash_token("provisioning-secret"),
-        )
-        .unwrap();
-
-        revoke_enrollment_token(&conn, "tok-1").unwrap().unwrap();
-
-        let forwarders = list_forwarders(&conn).unwrap();
-        assert_eq!(forwarders.len(), 1);
-        assert_eq!(forwarders[0].endpoint_id, "ep-fwd");
-        assert_eq!(forwarders[0].approval_state, ApprovalState::Active);
-        assert!(
-            !device_token_authorized(&conn, "ep-fwd", DeviceKind::Forwarder, "secret").unwrap()
-        );
-    }
-
-    #[test]
-    fn device_token_authorized_rejects_wrong_device_kind() {
-        let conn = test_conn();
-        create_enrollment_token(&conn, "tok-1", DeviceKind::Forwarder, None, "secret").unwrap();
-        register_device_with_enrollment_token(&conn, "ep-fwd", DeviceKind::Forwarder, "secret")
-            .unwrap()
-            .unwrap();
-
-        assert!(!device_token_authorized(&conn, "ep-fwd", DeviceKind::Receiver, "secret").unwrap());
-    }
-
-    #[test]
-    fn device_token_authorized_allows_legacy_device_hash_when_no_enrollment_record_exists() {
-        let conn = test_conn();
-        register_device(&conn, "ep-fwd", DeviceKind::Forwarder, "legacy-secret").unwrap();
-
-        assert!(
-            device_token_authorized(&conn, "ep-fwd", DeviceKind::Forwarder, "legacy-secret")
-                .unwrap()
-        );
-        assert!(
-            !device_token_authorized(&conn, "ep-fwd", DeviceKind::Receiver, "legacy-secret")
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn any_device_token_authorized_rejects_wrong_device_kind() {
-        let conn = test_conn();
-        create_enrollment_token(&conn, "tok-1", DeviceKind::Forwarder, None, "secret").unwrap();
-        register_device_with_enrollment_token(&conn, "ep-fwd", DeviceKind::Forwarder, "secret")
-            .unwrap()
-            .unwrap();
-
-        assert!(!any_device_token_authorized(&conn, DeviceKind::Receiver, "secret").unwrap());
-    }
-
-    #[test]
-    fn any_device_token_authorized_rejects_revoked_token() {
-        let conn = test_conn();
-        create_enrollment_token(&conn, "tok-1", DeviceKind::Forwarder, None, "secret").unwrap();
-        register_device_with_enrollment_token(&conn, "ep-fwd", DeviceKind::Forwarder, "secret")
-            .unwrap()
-            .unwrap();
-        revoke_enrollment_token(&conn, "tok-1").unwrap().unwrap();
-
-        assert!(!any_device_token_authorized(&conn, DeviceKind::Forwarder, "secret").unwrap());
     }
 
     #[test]

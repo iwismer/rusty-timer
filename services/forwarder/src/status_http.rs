@@ -1477,6 +1477,9 @@ pub async fn apply_section_update(
                         .and_then(|cfg| cfg.allowlist_cache_path.clone()),
                     server_url,
                     server_token_file,
+                    device_token_file: previous
+                        .as_ref()
+                        .and_then(|cfg| cfg.device_token_file.clone()),
                     allowlist_poll_interval_secs: previous
                         .as_ref()
                         .and_then(|cfg| cfg.allowlist_poll_interval_secs),

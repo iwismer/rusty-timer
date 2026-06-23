@@ -27,13 +27,13 @@ async fn main() {
         );
     }
 
-    let mut router = Router::new().route("/healthz", get(healthz));
-    if let Ok(provisioning_token) = env::var("SERVER_PROVISIONING_TOKEN") {
-        let state = server::http::AppState::new(conn, &provisioning_token, admin_proxy_trusted);
-        router = router.merge(server::http::router(state));
-    } else {
-        warn!("SERVER_PROVISIONING_TOKEN not set; /register disabled");
-    }
+    // Devices authenticate with server-minted per-device tokens (bootstrapped
+    // from admin-issued enrollment vouchers); there is no shared provisioning
+    // secret. Admin routes are gated by the upstream Remote-User header.
+    let state = server::http::AppState::new(conn, admin_proxy_trusted);
+    let router = Router::new()
+        .route("/healthz", get(healthz))
+        .merge(server::http::router(state));
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
         .expect("failed to bind");

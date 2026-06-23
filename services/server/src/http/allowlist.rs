@@ -10,7 +10,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::http::{AppState, register};
+use crate::http::{AppState, authorize_active_device_kind};
 use crate::registry::{self, ApprovalState, DeviceKind};
 
 /// Upper bound on how long a long-poll request is held server-side before
@@ -50,10 +50,8 @@ pub async fn receiver_allowlist(
     headers: HeaderMap,
     Query(query): Query<AllowListQuery>,
 ) -> Response {
-    match authorize(&state, &headers) {
-        Ok(true) => {}
-        Ok(false) => return StatusCode::UNAUTHORIZED.into_response(),
-        Err(()) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    if let Err(status) = authorize_active_device_kind(&state, &headers, DeviceKind::Forwarder) {
+        return status.into_response();
     }
 
     // Hold the request while the caller is already up to date, so an approval
@@ -94,22 +92,6 @@ pub async fn receiver_allowlist(
         .into_response()
 }
 
-/// Authorize an allow-list request: the in-process provisioning token or any
-/// non-revoked enrolled *forwarder* device token. `Err(())` signals an internal
-/// lookup failure the caller maps to `500`.
-fn authorize(state: &AppState, headers: &HeaderMap) -> Result<bool, ()> {
-    if register::authorized(headers, &state.provisioning_token_hash) {
-        return Ok(true);
-    }
-    let Some(raw_bearer) = register::bearer_token(headers) else {
-        return Ok(false);
-    };
-    let conn = state.conn.lock().expect("registry mutex poisoned");
-    registry::any_device_token_authorized(&conn, DeviceKind::Forwarder, raw_bearer).map_err(|err| {
-        tracing::error!(error = %err, "allow-list token authorization failed");
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use crate::http::{AppState, router};
@@ -118,13 +100,21 @@ mod tests {
     use rusqlite::Connection;
     use tower::ServiceExt;
 
-    const PROV_TOKEN: &str = "prov-secret";
+    // Deterministic active-forwarder bearer seeded by `test_state`.
+    const FWD_TOKEN: &str = "rtk_fwdseed_fwdsecret";
 
     fn test_state() -> AppState {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrate(&conn).unwrap();
         crate::registry::migrate(&conn).unwrap();
-        AppState::new(conn, PROV_TOKEN, true)
+        crate::registry::seed_active_device(
+            &conn,
+            "fwd-seed",
+            crate::registry::DeviceKind::Forwarder,
+            "fwdseed",
+            "fwdsecret",
+        );
+        AppState::new(conn, true)
     }
 
     fn allowlist_request(token: &str) -> Request<Body> {
@@ -176,7 +166,7 @@ mod tests {
         }
 
         let resp = router(state)
-            .oneshot(allowlist_request(PROV_TOKEN))
+            .oneshot(allowlist_request(FWD_TOKEN))
             .await
             .unwrap();
 
@@ -186,93 +176,6 @@ mod tests {
             body["receiver_endpoint_ids"],
             serde_json::json!(["receiver-active"])
         );
-    }
-
-    #[tokio::test]
-    async fn allowlist_accepts_registered_forwarder_device_token() {
-        let state = test_state();
-        {
-            let conn = state.conn.lock().unwrap();
-            crate::registry::create_enrollment_token(
-                &conn,
-                "tok-1",
-                crate::registry::DeviceKind::Forwarder,
-                None,
-                "forwarder-secret",
-            )
-            .unwrap();
-            crate::registry::register_device_with_enrollment_token(
-                &conn,
-                "ep-fwd",
-                crate::registry::DeviceKind::Forwarder,
-                "forwarder-secret",
-            )
-            .unwrap()
-            .unwrap();
-        }
-
-        let resp = router(state)
-            .oneshot(allowlist_request("forwarder-secret"))
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn allowlist_rejects_receiver_device_token() {
-        let state = test_state();
-        {
-            let conn = state.conn.lock().unwrap();
-            crate::registry::register_device(
-                &conn,
-                "ep-receiver",
-                crate::registry::DeviceKind::Receiver,
-                "receiver-secret",
-            )
-            .unwrap();
-        }
-
-        let resp = router(state)
-            .oneshot(allowlist_request("receiver-secret"))
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn allowlist_rejects_revoked_forwarder_device_token() {
-        let state = test_state();
-        {
-            let conn = state.conn.lock().unwrap();
-            crate::registry::create_enrollment_token(
-                &conn,
-                "tok-1",
-                crate::registry::DeviceKind::Forwarder,
-                None,
-                "forwarder-secret",
-            )
-            .unwrap();
-            crate::registry::register_device_with_enrollment_token(
-                &conn,
-                "ep-fwd",
-                crate::registry::DeviceKind::Forwarder,
-                "forwarder-secret",
-            )
-            .unwrap()
-            .unwrap();
-            crate::registry::revoke_enrollment_token(&conn, "tok-1")
-                .unwrap()
-                .unwrap();
-        }
-
-        let resp = router(state)
-            .oneshot(allowlist_request("forwarder-secret"))
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -286,9 +189,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn allowlist_accepts_active_forwarder_minted_token_and_denies_pending() {
+        let state = test_state();
+        let (active, pending) = {
+            let conn = state.conn.lock().unwrap();
+            let a = crate::registry::register_device_minted(
+                &conn,
+                "fwd-active",
+                crate::registry::DeviceKind::Forwarder,
+            )
+            .unwrap();
+            crate::registry::approve_device(&conn, "fwd-active")
+                .unwrap()
+                .unwrap();
+            let p = crate::registry::register_device_minted(
+                &conn,
+                "fwd-pending",
+                crate::registry::DeviceKind::Forwarder,
+            )
+            .unwrap();
+            (a.device_token, p.device_token)
+        };
+        let resp = router(state.clone())
+            .oneshot(allowlist_request(&active))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = router(state)
+            .oneshot(allowlist_request(&pending))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn bare_request_returns_version_zero() {
         let resp = router(test_state())
-            .oneshot(allowlist_request(PROV_TOKEN))
+            .oneshot(allowlist_request(FWD_TOKEN))
             .await
             .unwrap();
 
@@ -306,7 +243,7 @@ mod tests {
             std::time::Duration::from_secs(2),
             super::receiver_allowlist(
                 axum::extract::State(state),
-                bearer_headers(PROV_TOKEN),
+                bearer_headers(FWD_TOKEN),
                 axum::extract::Query(super::AllowListQuery {
                     since: Some(99),
                     wait: Some(30),
@@ -339,7 +276,7 @@ mod tests {
             tokio::spawn(async move {
                 super::receiver_allowlist(
                     axum::extract::State(state),
-                    bearer_headers(PROV_TOKEN),
+                    bearer_headers(FWD_TOKEN),
                     axum::extract::Query(super::AllowListQuery {
                         since: Some(0),
                         wait: Some(30),

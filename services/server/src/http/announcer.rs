@@ -10,8 +10,8 @@ use chrono::{TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::announcer::{AnnouncerInputEvent, AnnouncerRuntime};
-use crate::http::{AppState, register};
-use crate::registry::{self, AnnouncerRowRecord, AnnouncerStorageError};
+use crate::http::{AppState, authorize_active_device_kind};
+use crate::registry::{self, AnnouncerRowRecord, AnnouncerStorageError, DeviceKind};
 
 /// Fallback visible-row cap when a pushing receiver does not send its own
 /// `max_list_size` (older receivers, or a malformed value). The announcer
@@ -51,8 +51,8 @@ pub async fn push_row(
     headers: HeaderMap,
     Json(req): Json<PushRowRequest>,
 ) -> Response {
-    if !register::authorized(&headers, &state.provisioning_token_hash) {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if let Err(status) = authorize_active_device_kind(&state, &headers, DeviceKind::Receiver) {
+        return status.into_response();
     }
 
     if Utc
@@ -116,8 +116,8 @@ pub async fn push_row(
 }
 
 pub async fn takeover(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !register::authorized(&headers, &state.provisioning_token_hash) {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if let Err(status) = authorize_active_device_kind(&state, &headers, DeviceKind::Receiver) {
+        return status.into_response();
     }
 
     let result = {
@@ -178,23 +178,25 @@ mod tests {
     use std::sync::TryLockError;
     use tower::ServiceExt;
 
-    const PROV_TOKEN: &str = "prov-secret";
+    // Deterministic active-receiver bearer seeded by `test_state`.
+    const RX_TOKEN: &str = "rtk_rxseed_rxsecret";
 
     fn test_state() -> AppState {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrate(&conn).unwrap();
         crate::registry::migrate(&conn).unwrap();
-        AppState::new(conn, PROV_TOKEN, true)
+        crate::registry::seed_active_device(
+            &conn,
+            "rx-seed",
+            crate::registry::DeviceKind::Receiver,
+            "rxseed",
+            "rxsecret",
+        );
+        AppState::new(conn, true)
     }
 
     fn json_request(uri: &str, body: &serde_json::Value) -> Request<Body> {
-        Request::builder()
-            .method("POST")
-            .uri(uri)
-            .header("Authorization", format!("Bearer {PROV_TOKEN}"))
-            .header("Content-Type", "application/json")
-            .body(Body::from(serde_json::to_vec(body).unwrap()))
-            .unwrap()
+        json_request_with_token(uri, RX_TOKEN, body)
     }
 
     async fn response_json(resp: axum::response::Response) -> serde_json::Value {
@@ -419,5 +421,59 @@ mod tests {
         assert_eq!(second.status(), StatusCode::OK);
         let second_body = response_json(second).await;
         assert_eq!(second_body["announcer_source_generation"], 2);
+    }
+
+    fn json_request_with_token(uri: &str, token: &str, body: &serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn announcer_accepts_active_receiver_token_and_denies_pending() {
+        let state = test_state();
+        let (active, pending) = {
+            let conn = state.conn.lock().unwrap();
+            let a = crate::registry::register_device_minted(
+                &conn,
+                "rx-active",
+                crate::registry::DeviceKind::Receiver,
+            )
+            .unwrap();
+            crate::registry::approve_device(&conn, "rx-active")
+                .unwrap()
+                .unwrap();
+            let p = crate::registry::register_device_minted(
+                &conn,
+                "rx-pending",
+                crate::registry::DeviceKind::Receiver,
+            )
+            .unwrap();
+            (a.device_token, p.device_token)
+        };
+
+        let ok = router(state.clone())
+            .oneshot(json_request_with_token(
+                "/announcer/rows",
+                &active,
+                &row_body(1, 0, 1_000),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        let denied = router(state)
+            .oneshot(json_request_with_token(
+                "/announcer/rows",
+                &pending,
+                &row_body(2, 0, 2_000),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
     }
 }
