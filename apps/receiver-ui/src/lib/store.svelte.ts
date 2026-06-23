@@ -85,6 +85,12 @@ export const store = $state({
   importBusy: false,
   importMessage: null as string | null,
   importError: null as string | null,
+  // Paths of the most recently selected import files (display only). The Tauri
+  // WebView may expose the absolute path; browser tests fall back to filename.
+  participantsFilePath: null as string | null,
+  chipsFilePath: null as string | null,
+  // Counts describing the imported participant/chip data.
+  dataStats: null as import("$lib/api").DataStats | null,
   saving: false,
   checkingUpdate: false,
   checkMessage: null as string | null,
@@ -1098,13 +1104,23 @@ export async function setStreamAnnouncerPublish(
   }
 }
 
-export async function importParticipantsText(contents: string): Promise<void> {
+export async function loadDataStats(): Promise<void> {
+  try {
+    store.dataStats = await api.getDataStats();
+  } catch (e) {
+    console.error("Failed to load data stats:", e);
+  }
+}
+
+export async function importParticipantsFile(filePath: string): Promise<void> {
   store.importBusy = true;
   store.importMessage = null;
   store.importError = null;
   try {
-    const summary = await api.importParticipants(contents);
-    store.importMessage = `Imported ${summary.imported} participant(s); ${summary.resolvable_chips} chip(s) now resolve.`;
+    const summary = await api.importParticipantsFile(filePath);
+    store.participantsFilePath = filePath;
+    store.importMessage = `Imported ${summary.imported} participant(s).`;
+    await loadDataStats();
   } catch (e) {
     store.importError = `Participant import failed: ${e}`;
   } finally {
@@ -1112,13 +1128,15 @@ export async function importParticipantsText(contents: string): Promise<void> {
   }
 }
 
-export async function importChipsText(contents: string): Promise<void> {
+export async function importChipsFile(filePath: string): Promise<void> {
   store.importBusy = true;
   store.importMessage = null;
   store.importError = null;
   try {
-    const summary = await api.importChips(contents);
-    store.importMessage = `Imported ${summary.imported} chip assignment(s); ${summary.resolvable_chips} chip(s) now resolve.`;
+    const summary = await api.importChipsFile(filePath);
+    store.chipsFilePath = filePath;
+    store.importMessage = `Imported ${summary.imported} chip assignment(s).`;
+    await loadDataStats();
   } catch (e) {
     store.importError = `Chip import failed: ${e}`;
   } finally {

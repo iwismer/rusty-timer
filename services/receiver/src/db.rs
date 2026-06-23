@@ -12,6 +12,23 @@ pub const DEFAULT_UPDATE_MODE: &str = "check-and-download";
 /// non-Windows environments should override it.
 pub const DEFAULT_DBF_PATH: &str = r"C:\winrace\Files\IPICO.DBF";
 
+/// Counts describing the imported participant/chip data and how they overlap.
+/// Surfaced to the UI so it can show participant/chip totals and how many
+/// participants are still missing a chip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataStats {
+    /// Total participant rows.
+    pub participants: usize,
+    /// Total bib->chip assignment rows.
+    pub chips: usize,
+    /// Participants that have at least one chip assignment.
+    pub matched_participants: usize,
+    /// Participants with no chip assignment (`participants - matched`).
+    pub participants_without_chips: usize,
+    /// Chip assignments whose bib resolves to a participant.
+    pub resolvable_chips: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EventType {
@@ -529,6 +546,40 @@ impl Db {
             map.insert(chip_id, value);
         }
         Ok(map)
+    }
+
+    /// Count participants, chip assignments, and how they overlap so the UI can
+    /// show the state of the imported data. `matched_participants` is the
+    /// number of participants that have at least one chip assignment; the
+    /// remainder (`participants - matched_participants`) are missing chips.
+    /// `resolvable_chips` is the chip-side count (chips whose bib matches a
+    /// participant), matching [`Self::load_chip_to_participant`].
+    pub fn data_stats(&self) -> DbResult<DataStats> {
+        let participants: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM participants", [], |r| r.get(0))?;
+        let chips: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM bib_chips", [], |r| r.get(0))?;
+        let matched_participants: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM participants p \
+             WHERE EXISTS (SELECT 1 FROM bib_chips c WHERE c.bib = p.bib)",
+            [],
+            |r| r.get(0),
+        )?;
+        let resolvable_chips: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM bib_chips c \
+             JOIN participants p ON p.bib = c.bib",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(DataStats {
+            participants: participants.max(0) as usize,
+            chips: chips.max(0) as usize,
+            matched_participants: matched_participants.max(0) as usize,
+            participants_without_chips: (participants - matched_participants).max(0) as usize,
+            resolvable_chips: resolvable_chips.max(0) as usize,
+        })
     }
 
     pub fn load_resume_cursors(&self) -> DbResult<Vec<ResumeCursor>> {

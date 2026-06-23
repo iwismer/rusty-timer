@@ -1579,6 +1579,56 @@ pub struct ImportSummary {
     pub resolvable_chips: usize,
 }
 
+fn decode_import_bytes(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(e) => decode_windows_1252(e.into_bytes()),
+    }
+}
+
+fn decode_windows_1252(bytes: Vec<u8>) -> String {
+    bytes
+        .into_iter()
+        .map(|b| match b {
+            0x80 => '\u{20ac}',
+            0x82 => '\u{201a}',
+            0x83 => '\u{0192}',
+            0x84 => '\u{201e}',
+            0x85 => '\u{2026}',
+            0x86 => '\u{2020}',
+            0x87 => '\u{2021}',
+            0x88 => '\u{02c6}',
+            0x89 => '\u{2030}',
+            0x8a => '\u{0160}',
+            0x8b => '\u{2039}',
+            0x8c => '\u{0152}',
+            0x8e => '\u{017d}',
+            0x91 => '\u{2018}',
+            0x92 => '\u{2019}',
+            0x93 => '\u{201c}',
+            0x94 => '\u{201d}',
+            0x95 => '\u{2022}',
+            0x96 => '\u{2013}',
+            0x97 => '\u{2014}',
+            0x98 => '\u{02dc}',
+            0x99 => '\u{2122}',
+            0x9a => '\u{0161}',
+            0x9b => '\u{203a}',
+            0x9c => '\u{0153}',
+            0x9e => '\u{017e}',
+            0x9f => '\u{0178}',
+            _ => char::from(b),
+        })
+        .collect()
+}
+
+async fn read_import_file(path: String) -> Result<String, ReceiverError> {
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| ReceiverError::BadRequest(format!("failed to read import file: {e}")))?;
+    Ok(decode_import_bytes(bytes))
+}
+
 /// Import participants from `.ppl` file contents. Strict: a parse error rejects
 /// the whole file and leaves the existing table untouched. On success the table
 /// is replaced wholesale and the chip lookup is rebuilt.
@@ -1601,6 +1651,22 @@ pub async fn import_participants(
     })
 }
 
+/// Import participants from a `.ppl` file path selected by the desktop UI.
+pub async fn import_participants_file(
+    state: &AppState,
+    path: String,
+) -> Result<ImportSummary, ReceiverError> {
+    import_participants(state, read_import_file(path).await?).await
+}
+
+/// Return current participant/chip counts and how they overlap, so the UI can
+/// show data state without an import round-trip.
+pub async fn get_data_stats(state: &AppState) -> Result<crate::db::DataStats, ReceiverError> {
+    let db = state.db.lock().await;
+    db.data_stats()
+        .map_err(|e| ReceiverError::Internal(e.to_string()))
+}
+
 /// Import bib->chip assignments from `.bibchip` file contents. Strict, like
 /// [`import_participants`].
 pub async fn import_chips(
@@ -1619,6 +1685,15 @@ pub async fn import_chips(
         imported,
         resolvable_chips,
     })
+}
+
+/// Import bib->chip assignments from a `.bibchip` file path selected by the
+/// desktop UI.
+pub async fn import_chips_file(
+    state: &AppState,
+    path: String,
+) -> Result<ImportSummary, ReceiverError> {
+    import_chips(state, read_import_file(path).await?).await
 }
 
 /// Enable or disable the global announcer publish toggle. The P2P reconcile
@@ -2927,6 +3002,9 @@ macro_rules! receiver_command_list {
             ) -> "()",
             import_participants(contents: "String") -> "ImportSummary",
             import_chips(contents: "String") -> "ImportSummary",
+            import_participants_file(path: "String") -> "ImportSummary",
+            import_chips_file(path: "String") -> "ImportSummary",
+            get_data_stats() -> "DataStats",
             set_announcer_enabled(enabled: "bool") -> "()",
             set_announcer_max_list_size(max_list_size: "u32") -> "()",
             set_stream_announcer_publish(
@@ -3128,12 +3206,70 @@ mod tests {
             .unwrap();
         assert_eq!(c.imported, 2);
         assert_eq!(c.resolvable_chips, 2);
+        let stats = get_data_stats(&state).await.unwrap();
+        assert_eq!(stats.participants, 2);
+        assert_eq!(stats.chips, 2);
+        assert_eq!(stats.matched_participants, 2);
+        assert_eq!(stats.participants_without_chips, 0);
+        assert_eq!(stats.resolvable_chips, 2);
         let lookup = state.chip_lookup.read().await;
         let resolved = lookup
             .values()
             .find_map(|chips| chips.get("0580"))
             .expect("chip resolves");
         assert_eq!(resolved, &("1".to_owned(), "John Smith".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn import_participants_file_reads_selected_path() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, b"1,Smith,John\n").unwrap();
+
+        let summary = import_participants_file(&state, file.path().to_string_lossy().into_owned())
+            .await
+            .unwrap();
+
+        assert_eq!(summary.imported, 1);
+        let stats = get_data_stats(&state).await.unwrap();
+        assert_eq!(stats.participants, 1);
+    }
+
+    #[tokio::test]
+    async fn import_participants_file_falls_back_to_windows_1252() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, b"1,Dupont,Ren\xE9\n").unwrap();
+
+        import_participants_file(&state, file.path().to_string_lossy().into_owned())
+            .await
+            .unwrap();
+        import_chips(&state, "1,aaaa\n".to_owned()).await.unwrap();
+
+        let lookup = state.chip_lookup.read().await;
+        let resolved = lookup
+            .values()
+            .find_map(|chips| chips.get("aaaa"))
+            .expect("chip resolves");
+        assert_eq!(resolved, &("1".to_owned(), "René Dupont".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn data_stats_reports_participants_missing_chips() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        import_participants(&state, "1,Smith,John\n2,Doe,Jane\n3,Roe,Rich\n".to_owned())
+            .await
+            .unwrap();
+        import_chips(&state, "1,aaa\n2,bbb\n99,deadbeef\n".to_owned())
+            .await
+            .unwrap();
+
+        let stats = get_data_stats(&state).await.unwrap();
+        assert_eq!(stats.participants, 3);
+        assert_eq!(stats.chips, 3);
+        assert_eq!(stats.matched_participants, 2);
+        assert_eq!(stats.participants_without_chips, 1);
+        assert_eq!(stats.resolvable_chips, 2);
     }
 
     #[tokio::test]
@@ -3158,6 +3294,12 @@ mod tests {
             summary.resolvable_chips, 1,
             "only bib 1 should resolve; the rejected import must not have added bib 2"
         );
+        let stats = get_data_stats(&state).await.unwrap();
+        assert_eq!(stats.participants, 1);
+        assert_eq!(stats.chips, 2);
+        assert_eq!(stats.matched_participants, 1);
+        assert_eq!(stats.participants_without_chips, 0);
+        assert_eq!(stats.resolvable_chips, 1);
     }
 
     #[tokio::test]

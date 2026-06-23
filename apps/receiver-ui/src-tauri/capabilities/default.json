@@ -5,6 +5,7 @@
   "permissions": [
     "core:default",
     "opener:default",
+    "dialog:default",
     "updater:default",
     "core:event:default"
   ]

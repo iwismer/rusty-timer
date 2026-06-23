@@ -13,11 +13,22 @@ const mockState = vi.hoisted(() => ({
     importBusy: false,
     importMessage: null as string | null,
     importError: null as string | null,
+    participantsFilePath: null as string | null,
+    chipsFilePath: null as string | null,
+    dataStats: null as {
+      participants: number;
+      chips: number;
+      matched_participants: number;
+      participants_without_chips: number;
+      resolvable_chips: number;
+    } | null,
   },
   setAnnouncerEnabled: vi.fn(),
   setAnnouncerMaxListSize: vi.fn(),
-  importParticipantsText: vi.fn(),
-  importChipsText: vi.fn(),
+  importParticipantsFile: vi.fn(),
+  importChipsFile: vi.fn(),
+  loadDataStats: vi.fn(),
+  openFileDialog: vi.fn(),
   openUrl: vi.fn(),
 }));
 
@@ -25,8 +36,13 @@ vi.mock("$lib/store.svelte", () => ({
   store: mockState.store,
   setAnnouncerEnabled: mockState.setAnnouncerEnabled,
   setAnnouncerMaxListSize: mockState.setAnnouncerMaxListSize,
-  importParticipantsText: mockState.importParticipantsText,
-  importChipsText: mockState.importChipsText,
+  importParticipantsFile: mockState.importParticipantsFile,
+  importChipsFile: mockState.importChipsFile,
+  loadDataStats: mockState.loadDataStats,
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: mockState.openFileDialog,
 }));
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
@@ -44,6 +60,9 @@ describe("AnnouncerTab", () => {
     mockState.store.importBusy = false;
     mockState.store.importMessage = null;
     mockState.store.importError = null;
+    mockState.store.participantsFilePath = null;
+    mockState.store.chipsFilePath = null;
+    mockState.store.dataStats = null;
   });
 
   it("toggling the announcer switch calls setAnnouncerEnabled", async () => {
@@ -75,6 +94,64 @@ describe("AnnouncerTab", () => {
     expect(screen.getByTestId("import-error")).toHaveTextContent(
       "Participant import failed",
     );
+  });
+
+  it("shows selected file paths next to explicit choose buttons", () => {
+    mockState.store.participantsFilePath = "C:\\race\\race.ppl";
+    mockState.store.chipsFilePath = "C:\\race\\race.bibchip";
+    render(AnnouncerTab);
+
+    expect(screen.getByTestId("participants-choose-btn")).toHaveTextContent(
+      "Choose file",
+    );
+    expect(screen.getByTestId("chips-choose-btn")).toHaveTextContent(
+      "Choose file",
+    );
+    expect(screen.getByTestId("participants-file-name")).toHaveTextContent(
+      "C:\\race\\race.ppl",
+    );
+    expect(screen.getByTestId("chips-file-name")).toHaveTextContent(
+      "C:\\race\\race.bibchip",
+    );
+  });
+
+  it("imports participant files with the selected full path", async () => {
+    mockState.openFileDialog.mockResolvedValue("C:\\race\\race.ppl");
+    render(AnnouncerTab);
+
+    await fireEvent.click(screen.getByTestId("participants-choose-btn"));
+
+    expect(mockState.importParticipantsFile).toHaveBeenCalledWith(
+      "C:\\race\\race.ppl",
+    );
+  });
+
+  it("imports chip files with the selected full path", async () => {
+    mockState.openFileDialog.mockResolvedValue("C:\\race\\race.bibchip");
+    render(AnnouncerTab);
+
+    await fireEvent.click(screen.getByTestId("chips-choose-btn"));
+
+    expect(mockState.importChipsFile).toHaveBeenCalledWith(
+      "C:\\race\\race.bibchip",
+    );
+  });
+
+  it("shows participant and chip data stats", () => {
+    mockState.store.dataStats = {
+      participants: 100,
+      chips: 95,
+      matched_participants: 92,
+      participants_without_chips: 8,
+      resolvable_chips: 92,
+    };
+    render(AnnouncerTab);
+
+    expect(screen.getByTestId("stat-participants")).toHaveTextContent("100");
+    expect(screen.getByTestId("stat-chips")).toHaveTextContent("95");
+    expect(screen.getByTestId("stat-matched")).toHaveTextContent("92");
+    expect(screen.getByTestId("stat-missing")).toHaveTextContent("8");
+    expect(screen.getByTestId("stat-unmatched-chips")).toHaveTextContent("3");
   });
 
   it("reflects the max list size from the store", () => {

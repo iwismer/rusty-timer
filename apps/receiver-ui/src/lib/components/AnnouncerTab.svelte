@@ -1,13 +1,20 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import {
     store,
     setAnnouncerEnabled,
     setAnnouncerMaxListSize,
-    importParticipantsText,
-    importChipsText,
+    importParticipantsFile,
+    importChipsFile,
+    loadDataStats,
   } from "$lib/store.svelte";
   import { inputClass, btnSecondary } from "$lib/ui-classes";
+
+  onMount(() => {
+    void loadDataStats();
+  });
 
   let maxListInput = $state(store.announcerMaxListSize);
 
@@ -32,34 +39,35 @@
     if (announcerUrl) await openUrl(announcerUrl);
   }
 
-  // Legacy Race Director `.ppl`/`.bibchip` files are frequently Windows-1252
-  // (accented names). `File.text()` assumes UTF-8 and would mangle them, so
-  // decode strict UTF-8 first and fall back to Windows-1252 on invalid bytes.
-  async function decodeFile(file: File): Promise<string> {
-    const buf = await file.arrayBuffer();
-    try {
-      return new TextDecoder("utf-8", { fatal: true }).decode(buf);
-    } catch {
-      return new TextDecoder("windows-1252").decode(buf);
-    }
+  function singlePath(path: string | string[] | null): string | null {
+    return typeof path === "string" ? path : null;
   }
 
-  async function onParticipantsFile(e: Event) {
-    const input = e.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
-    const text = await decodeFile(file);
-    await importParticipantsText(text);
-    input.value = "";
+  async function chooseParticipantsFile() {
+    const path = singlePath(
+      await openFileDialog({
+        multiple: false,
+        filters: [
+          { name: "Participant files", extensions: ["ppl", "csv", "txt"] },
+        ],
+      }),
+    );
+    if (path) await importParticipantsFile(path);
   }
 
-  async function onChipsFile(e: Event) {
-    const input = e.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
-    const text = await decodeFile(file);
-    await importChipsText(text);
-    input.value = "";
+  async function chooseChipsFile() {
+    const path = singlePath(
+      await openFileDialog({
+        multiple: false,
+        filters: [
+          {
+            name: "Chip assignment files",
+            extensions: ["bibchip", "csv", "txt"],
+          },
+        ],
+      }),
+    );
+    if (path) await importChipsFile(path);
   }
 </script>
 
@@ -130,30 +138,98 @@
     </p>
 
     <div class="mt-4 grid gap-4">
-      <label class="block text-xs font-medium text-text-muted">
-        Participants (.ppl)
-        <input
-          data-testid="participants-file-input"
-          class="{inputClass} mt-1"
-          type="file"
-          accept=".ppl,.csv,text/plain"
-          disabled={store.importBusy}
-          onchange={onParticipantsFile}
-        />
-      </label>
+      <div>
+        <p class="text-xs font-medium text-text-muted">Participants (.ppl)</p>
+        <div class="mt-1 flex items-center gap-3">
+          <button
+            data-testid="participants-choose-btn"
+            type="button"
+            class={btnSecondary}
+            disabled={store.importBusy}
+            onclick={chooseParticipantsFile}
+          >
+            Choose file…
+          </button>
+          <span
+            data-testid="participants-file-name"
+            class="truncate text-xs {store.participantsFilePath
+              ? 'text-text-primary'
+              : 'text-text-muted'}"
+            title={store.participantsFilePath ?? undefined}
+          >
+            {store.participantsFilePath ?? "No file selected"}
+          </span>
+        </div>
+      </div>
 
-      <label class="block text-xs font-medium text-text-muted">
-        Chip assignments (.bibchip)
-        <input
-          data-testid="chips-file-input"
-          class="{inputClass} mt-1"
-          type="file"
-          accept=".bibchip,.csv,text/plain"
-          disabled={store.importBusy}
-          onchange={onChipsFile}
-        />
-      </label>
+      <div>
+        <p class="text-xs font-medium text-text-muted">
+          Chip assignments (.bibchip)
+        </p>
+        <div class="mt-1 flex items-center gap-3">
+          <button
+            data-testid="chips-choose-btn"
+            type="button"
+            class={btnSecondary}
+            disabled={store.importBusy}
+            onclick={chooseChipsFile}
+          >
+            Choose file…
+          </button>
+          <span
+            data-testid="chips-file-name"
+            class="truncate text-xs {store.chipsFilePath
+              ? 'text-text-primary'
+              : 'text-text-muted'}"
+            title={store.chipsFilePath ?? undefined}
+          >
+            {store.chipsFilePath ?? "No file selected"}
+          </span>
+        </div>
+      </div>
     </div>
+
+    {#if store.dataStats}
+      {@const s = store.dataStats}
+      <dl
+        data-testid="data-stats"
+        class="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 rounded-md border border-border bg-surface-0 p-3 text-xs"
+      >
+        <dt class="text-text-muted">Participants</dt>
+        <dd
+          data-testid="stat-participants"
+          class="text-right text-text-primary"
+        >
+          {s.participants}
+        </dd>
+        <dt class="text-text-muted">Chips</dt>
+        <dd data-testid="stat-chips" class="text-right text-text-primary">
+          {s.chips}
+        </dd>
+        <dt class="text-text-muted">Matched (bib + chip)</dt>
+        <dd data-testid="stat-matched" class="text-right text-text-primary">
+          {s.matched_participants}
+        </dd>
+        <dt class="text-text-muted">Participants missing chips</dt>
+        <dd
+          data-testid="stat-missing"
+          class="text-right {s.participants_without_chips > 0
+            ? 'text-status-warn'
+            : 'text-text-primary'}"
+        >
+          {s.participants_without_chips}
+        </dd>
+        {#if s.chips - s.resolvable_chips > 0}
+          <dt class="text-text-muted">Chips with no participant</dt>
+          <dd
+            data-testid="stat-unmatched-chips"
+            class="text-right text-status-warn"
+          >
+            {s.chips - s.resolvable_chips}
+          </dd>
+        {/if}
+      </dl>
+    {/if}
 
     {#if store.importMessage}
       <p data-testid="import-message" class="mt-3 text-xs text-status-ok">

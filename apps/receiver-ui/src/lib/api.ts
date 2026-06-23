@@ -22,6 +22,18 @@ export interface ImportSummary {
   resolvable_chips: number;
 }
 
+// Counts describing imported participant/chip data and how they overlap.
+export interface DataStats {
+  participants: number;
+  chips: number;
+  // Participants that have at least one chip assignment.
+  matched_participants: number;
+  // Participants with no chip assignment.
+  participants_without_chips: number;
+  // Chip assignments whose bib resolves to a participant.
+  resolvable_chips: number;
+}
+
 export interface StreamEntry {
   // Canonical P2P stream identity (always present).
   forwarder_endpoint_id: string;
@@ -309,6 +321,20 @@ export async function importParticipants(
 
 export async function importChips(contents: string): Promise<ImportSummary> {
   return invoke<ImportSummary>("import_chips", { contents });
+}
+
+export async function importParticipantsFile(
+  path: string,
+): Promise<ImportSummary> {
+  return invoke<ImportSummary>("import_participants_file", { path });
+}
+
+export async function importChipsFile(path: string): Promise<ImportSummary> {
+  return invoke<ImportSummary>("import_chips_file", { path });
+}
+
+export async function getDataStats(): Promise<DataStats> {
+  return invoke<DataStats>("get_data_stats", {});
 }
 
 export async function setAnnouncerEnabled(enabled: boolean): Promise<void> {

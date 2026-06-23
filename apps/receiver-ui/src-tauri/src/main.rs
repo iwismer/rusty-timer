@@ -257,6 +257,33 @@ async fn import_chips(
 }
 
 #[tauri::command]
+async fn import_participants_file(
+    state: State<'_, Arc<AppState>>,
+    path: String,
+) -> CmdResult<control_api::ImportSummary> {
+    control_api::import_participants_file(&state, path)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn import_chips_file(
+    state: State<'_, Arc<AppState>>,
+    path: String,
+) -> CmdResult<control_api::ImportSummary> {
+    control_api::import_chips_file(&state, path)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_data_stats(state: State<'_, Arc<AppState>>) -> CmdResult<receiver::db::DataStats> {
+    control_api::get_data_stats(&state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn set_announcer_enabled(state: State<'_, Arc<AppState>>, enabled: bool) -> CmdResult<()> {
     control_api::set_announcer_enabled(&state, enabled)
         .await
@@ -709,6 +736,7 @@ fn main() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let handle = app.handle().clone();

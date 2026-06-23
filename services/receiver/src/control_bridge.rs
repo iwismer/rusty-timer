@@ -400,6 +400,11 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
             ok(control_api::import_participants(state, arg(args, "contents")?).await?)
         }
         "import_chips" => ok(control_api::import_chips(state, arg(args, "contents")?).await?),
+        "import_participants_file" => {
+            ok(control_api::import_participants_file(state, arg(args, "path")?).await?)
+        }
+        "import_chips_file" => ok(control_api::import_chips_file(state, arg(args, "path")?).await?),
+        "get_data_stats" => ok(control_api::get_data_stats(state).await?),
         "set_announcer_enabled" => {
             ok(control_api::set_announcer_enabled(state, arg(args, "enabled")?).await?)
         }
