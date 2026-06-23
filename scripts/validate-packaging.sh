@@ -244,8 +244,8 @@ check_file_exists "${RELEASE_WF}" "Release workflow exists"
 if [[ -f "${REPO_ROOT}/${RELEASE_WF}" ]]; then
     check_file_contains "${RELEASE_WF}" 'server-v\*' \
         "Release workflow publishes server tags"
-    check_file_contains "${RELEASE_WF}" 'x86_64-unknown-linux-gnu' \
-        "Release workflow includes Linux amd64 server target"
+    check_file_contains "${RELEASE_WF}" 'aarch64-unknown-linux-gnu' \
+        "Release workflow includes Linux arm64 server artifact target"
     check_file_contains "${RELEASE_WF}" 'services/server/Dockerfile' \
         "Release workflow publishes server Docker image"
     check_file_contains "${RELEASE_WF}" 'linux/amd64' \
