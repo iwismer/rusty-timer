@@ -12,6 +12,10 @@ The chip-read data plane remains direct forwarder-to-receiver P2P. The server
 coordinates registration, receiver allow-list distribution, forwarder discovery,
 and announcer/status state.
 
+Published server releases currently provide an `aarch64-unknown-linux-gnu`
+standalone binary and a `linux/amd64` Docker image. Use the Docker image for an
+x86_64/amd64 container host.
+
 ## Files
 
 - `docker-compose.yml` — sample server + Caddy deployment.
@@ -57,14 +61,18 @@ docker compose --env-file deploy/server/.env -f deploy/server/docker-compose.yml
 docker compose --env-file deploy/server/.env -f deploy/server/docker-compose.yml up -d
 ```
 
+Do not run `docker compose build server` for a published-image deployment; the
+Compose file includes a local `build:` stanza only for development builds from a
+checkout.
+
 ## Caddy route policy
 
 `Caddyfile.example` uses three route groups:
 
 | Routes | Auth at Caddy | Auth in server | Notes |
 | --- | --- | --- | --- |
-| `GET /healthz`, `GET /status` | none | none | Public health/status only. |
-| `/register`, `/forwarder/catalog`, `/forwarders`, `/allowlist/receivers`, `/announcer/rows`, `/announcer/takeover` | none | bearer device token | Devices must not need a browser session. |
+| `GET /healthz`, `GET /status` | none | none | Public health and operational status. `/status` includes device, forwarder, stream, and announcer metadata; protect it in Caddy if that should not be public for your deployment. |
+| `POST /register`, `POST /forwarder/catalog`, `GET /forwarders`, `GET /allowlist/receivers`, `POST /announcer/rows`, `POST /announcer/takeover` | none | bearer device token | Devices must not need a browser session. |
 | `/admin/*` and embedded UI fallback | Authelia `forward_auth` | `Remote-User` for `/admin/*` | Caddy strips spoofable `Remote-*` headers before auth. |
 
 The Compose file sets `SERVER_TRUSTED_PROXY=1` for the server container. Only do
@@ -75,8 +83,8 @@ directly to the host in this mode.
 ## Authelia
 
 This sample does not run Authelia. Point `AUTHELIA_UPSTREAM` at an existing
-Authelia deployment, or add Authelia to the same Docker network. Caddy must be
-able to call:
+Authelia base URL/origin, or add Authelia to the same Docker network. Caddy must
+be able to call:
 
 ```text
 ${AUTHELIA_UPSTREAM}/api/authz/forward-auth

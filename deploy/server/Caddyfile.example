@@ -19,8 +19,11 @@
   request_header -Remote-Name
   request_header -Remote-Email
 
-  # Public read endpoints. These expose health and status only, not secrets.
-  @public path /healthz /status
+  # Public read endpoints. These expose operational status but not secrets.
+  @public {
+    method GET
+    path /healthz /status
+  }
   handle @public {
     reverse_proxy server:8080
   }
@@ -28,8 +31,19 @@
   # Device/M2M endpoints. The Rust server enforces bearer-token auth and device
   # kind/approval checks on these routes. Do not put browser session auth in
   # front of them or field devices will fail to register and sync.
-  @device_m2m path /register /forwarder/catalog /forwarders /allowlist/receivers /announcer/rows /announcer/takeover
-  handle @device_m2m {
+  @device_m2m_post {
+    method POST
+    path /register /forwarder/catalog /announcer/rows /announcer/takeover
+  }
+  handle @device_m2m_post {
+    reverse_proxy server:8080
+  }
+
+  @device_m2m_get {
+    method GET
+    path /forwarders /allowlist/receivers
+  }
+  handle @device_m2m_get {
     reverse_proxy server:8080
   }
 

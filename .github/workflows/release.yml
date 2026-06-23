@@ -338,12 +338,11 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [resolve-matrix, build, server-docker]
+    needs: [resolve-matrix, build]
     if: >
       always() &&
       needs.resolve-matrix.result == 'success' &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
-      (needs['server-docker'].result == 'success' || needs['server-docker'].result == 'skipped')
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts

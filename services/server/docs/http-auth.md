@@ -8,7 +8,7 @@ protect. The in-code source of truth is the module doc on
 
 | Route | Method | Auth posture | Enforced by |
 | --- | --- | --- | --- |
-| `/status` | GET | Public | none; no secrets exposed |
+| `/status` | GET | Public | none; exposes operational device, forwarder, stream, and announcer metadata but no tokens/secrets |
 | `/healthz` | GET | Public | none |
 | `/admin/devices/approve` | POST | Admin | upstream `Remote-User` header; requires `SERVER_TRUSTED_PROXY=1` |
 | `/admin/enrollment-tokens` | GET | Admin | upstream `Remote-User` header; requires `SERVER_TRUSTED_PROXY=1` |
@@ -31,7 +31,9 @@ protect. The in-code source of truth is the module doc on
   client-supplied copy of the admin identity header before forwarding, so it
   cannot be spoofed.
 - **Public routes** (`/status`, `/healthz`) may be allow-listed without
-  authentication.
+  authentication. `/status` exposes operational metadata; protect it at the
+  proxy if device/forwarder/stream visibility should be private for a
+  deployment.
 - **M2M/device routes** authenticate in-process with `Authorization: Bearer ...`
   and do not depend on the proxy. The proxy should forward the `Authorization`
   header unchanged and should not require a browser session for these routes.

@@ -18,6 +18,8 @@ WORKDIR /build
 COPY package.json package-lock.json ./
 COPY .npmrc ./
 COPY apps/shared-ui/package.json apps/shared-ui/package.json
+COPY apps/forwarder-ui/package.json apps/forwarder-ui/package.json
+COPY apps/receiver-ui/package.json apps/receiver-ui/package.json
 COPY apps/server-ui/package.json apps/server-ui/package.json
 
 RUN npm ci --workspace apps/shared-ui --workspace apps/server-ui

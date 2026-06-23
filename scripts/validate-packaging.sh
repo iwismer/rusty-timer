@@ -121,12 +121,14 @@ SERVER_COMPOSE="deploy/server/docker-compose.yml"
 SERVER_CADDY="deploy/server/Caddyfile.example"
 SERVER_ENV="deploy/server/.env.example"
 SERVER_DEPLOY_README="deploy/server/README.md"
+DOCKERIGNORE=".dockerignore"
 
 check_file_exists "${SERVER_DF}" "Server Dockerfile exists"
 check_file_exists "${SERVER_COMPOSE}" "Server Docker Compose sample exists"
 check_file_exists "${SERVER_CADDY}" "Server Caddy config sample exists"
 check_file_exists "${SERVER_ENV}" "Server deploy env example exists"
 check_file_exists "${SERVER_DEPLOY_README}" "Server Docker deploy README exists"
+check_file_exists "${DOCKERIGNORE}" "Docker ignore file exists"
 
 if [[ -f "${REPO_ROOT}/${SERVER_DF}" ]]; then
     FROM_COUNT=$(grep -c '^FROM ' "${REPO_ROOT}/${SERVER_DF}" || true)
@@ -138,6 +140,10 @@ if [[ -f "${REPO_ROOT}/${SERVER_DF}" ]]; then
 
     check_file_contains "${SERVER_DF}" 'npm run build --workspace apps/server-ui' \
         "Server Dockerfile builds server UI"
+    check_file_contains "${SERVER_DF}" 'apps/forwarder-ui/package.json' \
+        "Server Dockerfile copies all npm workspace manifests"
+    check_file_contains "${SERVER_DF}" 'apps/receiver-ui/package.json' \
+        "Server Dockerfile copies all npm workspace manifests"
     check_file_contains "${SERVER_DF}" 'cargo build.*--release.*--package server.*--bin server.*--features embed-ui' \
         "Server Dockerfile builds server with embedded UI"
     check_file_contains "${SERVER_DF}" 'SERVER_DB_PATH|/var/lib/rusty-timer-server' \
@@ -164,14 +170,29 @@ fi
 if [[ -f "${REPO_ROOT}/${SERVER_CADDY}" ]]; then
     check_file_contains "${SERVER_CADDY}" 'request_header -Remote-User' \
         "Caddy sample strips spoofable Remote-User"
+    check_file_contains "${SERVER_CADDY}" 'method GET' \
+        "Caddy sample pins public/device read routes to GET"
     check_file_contains "${SERVER_CADDY}" 'path /healthz /status' \
         "Caddy sample leaves health/status public"
-    check_file_contains "${SERVER_CADDY}" 'path /register /forwarder/catalog /forwarders /allowlist/receivers /announcer/rows /announcer/takeover' \
-        "Caddy sample leaves M2M bearer routes unproxied by Authelia"
+    check_file_contains "${SERVER_CADDY}" 'method POST' \
+        "Caddy sample pins device write routes to POST"
+    check_file_contains "${SERVER_CADDY}" 'path /register /forwarder/catalog /announcer/rows /announcer/takeover' \
+        "Caddy sample leaves M2M POST bearer routes unproxied by Authelia"
+    check_file_contains "${SERVER_CADDY}" 'path /forwarders /allowlist/receivers' \
+        "Caddy sample leaves M2M GET bearer routes unproxied by Authelia"
     check_file_contains "${SERVER_CADDY}" 'forward_auth' \
         "Caddy sample protects admin/UI routes with forward_auth"
     check_file_contains "${SERVER_CADDY}" 'copy_headers Remote-User' \
         "Caddy sample forwards authenticated admin identity"
+fi
+
+if [[ -f "${REPO_ROOT}/${DOCKERIGNORE}" ]]; then
+    check_file_contains "${DOCKERIGNORE}" '^target$' \
+        "Docker ignore excludes Rust build output"
+    check_file_contains "${DOCKERIGNORE}" 'apps/\*/node_modules' \
+        "Docker ignore excludes frontend dependencies"
+    check_file_contains "${DOCKERIGNORE}" 'apps/\*/build' \
+        "Docker ignore excludes stale frontend build output"
 fi
 
 echo ""
@@ -250,6 +271,8 @@ if [[ -f "${REPO_ROOT}/${RELEASE_WF}" ]]; then
         "Release workflow publishes server Docker image"
     check_file_contains "${RELEASE_WF}" 'linux/amd64' \
         "Release workflow builds server Docker image for amd64"
+    check_file_contains "${RELEASE_WF}" 'needs: \[resolve-matrix, build\]' \
+        "Release workflow creates GitHub release independent of Docker Hub push"
     check_file_contains "${RELEASE_WF}" "env.SERVICE == 'forwarder' \|\| env.SERVICE == 'server'" \
         "Release workflow builds/checks server UI"
     check_file_contains "${RELEASE_WF}" 'embed-ui' \
