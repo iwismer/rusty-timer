@@ -168,6 +168,44 @@ describe("server api client", () => {
     );
   });
 
+  it("createEnrollmentToken posts a receiver token and returns the one-time secret", async () => {
+    const { createEnrollmentToken } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, {
+        token_id: "et_2",
+        device_kind: "receiver",
+        display_name: "Finish Line",
+        token: "rtfwd_receiver_secret",
+        created_unix_ms: 11,
+      }),
+    );
+
+    const response = await createEnrollmentToken(
+      {
+        device_kind: "receiver",
+        display_name: "Finish Line",
+      },
+      "alice",
+    );
+
+    expect(response.device_kind).toBe("receiver");
+    expect(response.token).toBe("rtfwd_receiver_secret");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/admin/enrollment-tokens",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          "Content-Type": "application/json",
+          "Remote-User": "alice",
+        }),
+        body: JSON.stringify({
+          device_kind: "receiver",
+          display_name: "Finish Line",
+        }),
+      }),
+    );
+  });
+
   it("revokeEnrollmentToken posts to the revoke endpoint", async () => {
     const { revokeEnrollmentToken } = await import("./api");
     mockFetch.mockResolvedValue(

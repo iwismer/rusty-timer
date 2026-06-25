@@ -91,10 +91,17 @@ add a forwarder enrollment token, copy the one-time secret into the setup form,
 download `user-data` and `network-config`, then boot the SBC. Generated token
 secrets are shown only once; the token list exposes metadata only.
 
-Receivers also need an enrollment voucher before first registration. After a
-device presents its voucher to `/register`, the server mints a per-device token
-and stores only its hash. Devices should persist the minted token and use it for
-steady-state server calls.
+Receivers also need an enrollment voucher before first registration. Create a
+receiver token from the Server UI `Admin` tab: under **Receiver enrollment
+tokens**, generate (or add a manual) token and copy the one-time secret. Enter
+that secret as the token, along with the server URL and receiver ID, in the
+receiver app's `Config` tab to register the receiver as `pending`. As with
+forwarder tokens, generated receiver secrets are shown only once and the token
+list exposes metadata only.
+
+After a device presents its voucher to `/register`, the server mints a
+per-device token and stores only its hash. Devices should persist the minted
+token and use it for steady-state server calls.
 
 New devices start as `pending`. An admin approves a device through the protected
 admin route:

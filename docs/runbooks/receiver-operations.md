@@ -20,7 +20,9 @@ The receiver:
 
 1. Confirm the receiver data directory is writable.
 2. Configure the server URL, receiver ID, and token in the receiver UI or
-   control API.
+   control API. The token is a receiver enrollment voucher created from the
+   Server UI `Admin` tab (**Receiver enrollment tokens**); its one-time secret
+   is shown only once at creation.
 3. Select streams by `forwarder_endpoint_id` and `stream_id`.
 4. Start the desktop app or headless binary:
 

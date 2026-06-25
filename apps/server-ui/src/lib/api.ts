@@ -62,7 +62,7 @@ export interface EnrollmentTokensResponse {
 }
 
 export interface CreateEnrollmentTokenRequest {
-  device_kind: "forwarder";
+  device_kind: DeviceKind;
   display_name?: string;
   token?: string;
 }

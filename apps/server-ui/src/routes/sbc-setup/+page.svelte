@@ -53,6 +53,11 @@
   };
 
   let tokens = $state<EnrollmentTokenRecord[]>([]);
+  // SBC Setup only provisions forwarders; show only forwarder tokens so receiver
+  // tokens (created from the Admin page) do not bleed into this table.
+  let forwarderTokens = $derived(
+    tokens.filter((token) => token.device_kind === "forwarder"),
+  );
   let tokensLoading = $state(true);
   let tokenBusy = $state<string | null>(null);
   let tokenError = $state<string | null>(null);
@@ -397,7 +402,7 @@
 
       {#if tokensLoading}
         <p class="text-sm text-text-muted m-0">Loading tokens…</p>
-      {:else if tokens.length === 0}
+      {:else if forwarderTokens.length === 0}
         <p class="text-sm text-text-muted m-0">No enrollment tokens yet.</p>
       {:else}
         <div class="overflow-x-auto rounded-md border border-border">
@@ -415,7 +420,7 @@
               </tr>
             </thead>
             <tbody>
-              {#each tokens as token (token.token_id)}
+              {#each forwarderTokens as token (token.token_id)}
                 <tr class="border-t border-border">
                   <td class="px-3 py-2 text-text-primary"
                     >{token.display_name ?? "—"}</td
