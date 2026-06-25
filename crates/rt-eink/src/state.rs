@@ -97,13 +97,19 @@ fn default_true() -> bool {
     true
 }
 fn default_full_refresh_interval() -> u32 {
+    // Force a full refresh after every 10 partial refreshes to clear ghosting; Waveshare
+    // warns that refreshing only partially, indefinitely, can permanently damage the panel.
     10
 }
 fn default_min_refresh_interval_ms() -> u64 {
-    1000
+    // Waveshare recommends a refresh interval of at least 180s. This debounce floor coalesces
+    // bursts of state changes so the panel is never refreshed more often than every 3 minutes.
+    180_000
 }
 fn default_telemetry_interval_secs() -> u64 {
-    30
+    // Periodic redraw to refresh telemetry (CPU temp / battery) and satisfy Waveshare's
+    // "refresh at least once every 24 hours" guidance, kept well above the 180s minimum.
+    900
 }
 
 #[cfg(test)]
@@ -133,8 +139,8 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.refresh_mode, RefreshMode::Hybrid);
         assert_eq!(config.full_refresh_interval, 10);
-        assert_eq!(config.min_refresh_interval_ms, 1000);
-        assert_eq!(config.telemetry_interval_secs, 30);
+        assert_eq!(config.min_refresh_interval_ms, 180_000);
+        assert_eq!(config.telemetry_interval_secs, 900);
     }
 
     #[test]

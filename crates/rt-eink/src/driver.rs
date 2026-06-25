@@ -41,11 +41,24 @@ impl std::fmt::Display for DriverError {
 impl std::error::Error for DriverError {}
 
 /// Wraps the initialized SPI, GPIO pins, and e-ink display driver.
+///
+/// Per Waveshare's panel guidance, the controller is put into deep sleep after every
+/// refresh and woken (re-initialized) immediately before the next one. Leaving the panel
+/// powered/active between refreshes holds it at high voltage, which Waveshare warns causes
+/// permanent damage. Because waking issues a hardware reset that clears the controller RAM
+/// (including the partial-refresh base image), the last displayed frame is cached in
+/// `last_frame` and restored as the partial base after each wake so partial refreshes stay
+/// correct across sleep cycles.
 pub struct EinkDriver {
     spi: SimpleHalSpiDevice,
     epd: Epd2in13<SimpleHalSpiDevice, InputPin, OutputPin, OutputPin, Delay>,
     delay: Delay,
     display: Display2in13,
+    /// Whether the controller is currently in deep sleep.
+    asleep: bool,
+    /// Copy of the most recently displayed framebuffer, used to restore the partial-refresh
+    /// base image after a wake (which clears controller RAM). Empty until the first refresh.
+    last_frame: Vec<u8>,
 }
 
 impl EinkDriver {
@@ -117,7 +130,28 @@ impl EinkDriver {
             epd,
             delay,
             display,
+            // `Epd2in13::new` runs the init sequence, so the controller starts awake.
+            asleep: false,
+            last_frame: Vec::new(),
         })
+    }
+
+    /// Wake the controller from deep sleep by re-initializing it.
+    ///
+    /// A no-op if the controller is already awake. Waking performs a hardware reset, so the
+    /// controller RAM (and the partial-refresh base image) is cleared afterward.
+    fn wake_if_asleep(&mut self) -> Result<(), DriverError> {
+        if self.asleep {
+            self.epd
+                .wake_up(&mut self.spi, &mut self.delay)
+                .map_err(|e| {
+                    warn!(error = ?e, "e-ink driver: failed to wake display from deep sleep");
+                    DriverError::Display(format!("wake: {e:?}"))
+                })?;
+            self.asleep = false;
+            debug!("e-ink driver: woke from deep sleep (re-initialized)");
+        }
+        Ok(())
     }
 
     /// Get a mutable reference to the display framebuffer for drawing.
@@ -126,7 +160,11 @@ impl EinkDriver {
     }
 
     /// Perform a full display refresh (slow, clears ghosting).
+    ///
+    /// Wakes the controller, refreshes, then returns it to deep sleep so the panel is never
+    /// held at high voltage between refreshes (Waveshare longevity guidance).
     pub fn full_refresh(&mut self) -> Result<(), DriverError> {
+        self.wake_if_asleep()?;
         self.epd
             .set_refresh(&mut self.spi, &mut self.delay, RefreshLut::Full)
             .map_err(|e| {
@@ -139,37 +177,61 @@ impl EinkDriver {
                 warn!(error = ?e, "e-ink driver: full refresh frame update failed");
                 DriverError::Display(format!("full refresh: {e:?}"))
             })?;
+        self.last_frame = self.display.buffer().to_vec();
         debug!("e-ink driver: full refresh complete");
+        self.sleep()?;
         Ok(())
     }
 
     /// Perform a partial display refresh (fast, may accumulate ghosting).
+    ///
+    /// Wakes the controller, restores the partial-refresh base image (cleared by the wake
+    /// hardware reset), refreshes, then returns the controller to deep sleep.
     pub fn partial_refresh(&mut self) -> Result<(), DriverError> {
+        self.wake_if_asleep()?;
         self.epd
             .set_refresh(&mut self.spi, &mut self.delay, RefreshLut::Quick)
             .map_err(|e| {
                 warn!(error = ?e, "e-ink driver: failed to set partial refresh LUT");
                 DriverError::Display(format!("set partial LUT: {e:?}"))
             })?;
+        // Waking re-initializes the controller and clears its RAM, so the differential base
+        // for partial refresh is gone. Restore the last displayed frame as the base; without
+        // this the partial refresh would diff against blank RAM and corrupt the image.
+        if self.last_frame.len() == self.display.buffer().len() {
+            self.epd
+                .set_partial_base_buffer(&mut self.spi, &mut self.delay, &self.last_frame)
+                .map_err(|e| {
+                    warn!(error = ?e, "e-ink driver: failed to restore partial base buffer");
+                    DriverError::Display(format!("restore partial base: {e:?}"))
+                })?;
+        }
         self.epd
             .update_and_display_frame(&mut self.spi, self.display.buffer(), &mut self.delay)
             .map_err(|e| {
                 warn!(error = ?e, "e-ink driver: partial refresh frame update failed");
                 DriverError::Display(format!("partial refresh: {e:?}"))
             })?;
+        self.last_frame = self.display.buffer().to_vec();
         debug!("e-ink driver: partial refresh complete");
+        self.sleep()?;
         Ok(())
     }
 
-    /// Put the display controller to sleep to reduce idle power draw.
+    /// Put the display controller into deep sleep to reduce idle power draw and avoid holding
+    /// the panel at high voltage between refreshes. Idempotent: a no-op if already asleep.
     pub fn sleep(&mut self) -> Result<(), DriverError> {
+        if self.asleep {
+            return Ok(());
+        }
         self.epd
             .sleep(&mut self.spi, &mut self.delay)
             .map_err(|e| {
                 warn!(error = ?e, "e-ink driver: failed to put display to sleep");
                 DriverError::Display(format!("sleep: {e:?}"))
             })?;
-        info!("e-ink display sleeping");
+        self.asleep = true;
+        debug!("e-ink display sleeping (deep sleep until next refresh)");
         Ok(())
     }
 }
