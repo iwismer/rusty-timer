@@ -10,6 +10,7 @@ import {
   computeElapsedSecondsSince,
   formatWallClock,
   computeTickingClock,
+  parseWallClock,
 } from "./reader-view-model";
 
 describe("formatReadMode", () => {
@@ -174,6 +175,27 @@ describe("computeElapsedSecondsSince", () => {
   });
   it("never goes negative", () => {
     expect(computeElapsedSecondsSince(4000, 1000)).toBe(0);
+  });
+});
+
+describe("parseWallClock", () => {
+  it("parses a space-separated wall clock as UTC", () => {
+    expect(parseWallClock("2026-07-01 20:31:13")).toBe(
+      Date.UTC(2026, 6, 1, 20, 31, 13),
+    );
+  });
+  it("parses an ISO wall clock with milliseconds as UTC", () => {
+    expect(parseWallClock("2026-07-01T20:31:13.500")).toBe(
+      Date.UTC(2026, 6, 1, 20, 31, 13, 500),
+    );
+  });
+  it("round-trips through formatWallClock", () => {
+    expect(formatWallClock(parseWallClock("2026-07-01 20:31:13"))).toBe(
+      "2026-07-01 20:31:13",
+    );
+  });
+  it("returns NaN for unparseable input", () => {
+    expect(Number.isNaN(parseWallClock("not a clock"))).toBe(true);
   });
 });
 

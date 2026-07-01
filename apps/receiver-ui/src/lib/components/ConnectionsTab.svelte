@@ -1,6 +1,12 @@
 <script lang="ts">
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { BatteryIndicator, ReaderControlPanel } from "@rusty-timer/shared-ui";
+  import { onMount, onDestroy, untrack } from "svelte";
+  import {
+    BatteryIndicator,
+    ReaderControlPanel,
+    computeTickingClock,
+    parseWallClock,
+  } from "@rusty-timer/shared-ui";
   import { loadConnections, store } from "$lib/store.svelte";
   import type {
     ForwarderConnectionStatus,
@@ -34,6 +40,74 @@
   let busyByEndpoint = $state<Record<string, boolean>>({});
   let actionError = $state<string | null>(null);
   let configEndpointId = $state<string | null>(null);
+
+  // Reader/forwarder clock display. The reader clock arrives on status refresh;
+  // we anchor it (baseTs) to the wall time it was captured (baseLocal) and tick
+  // it forward locally so the display advances smoothly between refreshes, the
+  // same way the forwarder UI does. The forwarder-host clock is derived from the
+  // reader clock plus the measured reader->forwarder drift so both render in the
+  // same wall-clock frame and line up when in sync.
+  let clockNow = $state(Date.now());
+  let readerClockBaseTs = $state<Record<string, number>>({});
+  let readerClockBaseLocal = $state<Record<string, number>>({});
+  const readerClockLastStr: Record<string, string> = {};
+  let clockInterval: ReturnType<typeof setInterval> | undefined;
+
+  onMount(() => {
+    clockInterval = setInterval(() => {
+      clockNow = Date.now();
+    }, 1000);
+  });
+
+  onDestroy(() => {
+    if (clockInterval !== undefined) clearInterval(clockInterval);
+  });
+
+  // Re-anchor a reader's clock base whenever its reported reader_clock changes.
+  $effect(() => {
+    const connections = store.connections;
+    if (!connections) return;
+    for (const forwarder of connections.forwarders) {
+      for (const reader of forwarder.readers) {
+        const clockStr = reader.reader_info?.clock?.reader_clock;
+        if (!clockStr) continue;
+        const key = reader.stream_id;
+        if (readerClockLastStr[key] === clockStr) continue;
+        const ts = parseWallClock(clockStr);
+        if (Number.isNaN(ts)) continue;
+        readerClockLastStr[key] = clockStr;
+        untrack(() => {
+          readerClockBaseTs = { ...readerClockBaseTs, [key]: ts };
+          readerClockBaseLocal = { ...readerClockBaseLocal, [key]: Date.now() };
+        });
+      }
+    }
+  });
+
+  function readerClockDisplay(reader: ReaderLiveStatus): string | undefined {
+    const key = reader.stream_id;
+    return (
+      computeTickingClock(
+        readerClockBaseTs[key],
+        readerClockBaseLocal[key],
+        clockNow,
+      ) ?? undefined
+    );
+  }
+
+  function forwarderClockDisplay(reader: ReaderLiveStatus): string | undefined {
+    const driftMs = reader.reader_info?.clock?.drift_ms;
+    if (driftMs == null) return undefined;
+    const key = reader.stream_id;
+    return (
+      computeTickingClock(
+        readerClockBaseTs[key],
+        readerClockBaseLocal[key],
+        clockNow,
+        driftMs,
+      ) ?? undefined
+    );
+  }
 
   function approvalLabel(server: ServerDeviceStatus): string | null {
     if (!server.configured) return "Server not configured";
@@ -386,6 +460,8 @@
                       <ReaderControlPanel
                         readerIp={readerLabel(reader)}
                         readerInfo={readerInfoForPanel(reader)}
+                        readerClockDisplay={readerClockDisplay(reader)}
+                        forwarderClockDisplay={forwarderClockDisplay(reader)}
                         readerState={readerConnectionState(reader)}
                         readerStateLabel={readerForwarderStateLabel(reader)}
                         localProxyPort={reader.local_port ?? null}

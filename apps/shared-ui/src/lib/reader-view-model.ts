@@ -103,6 +103,18 @@ export function formatWallClock(ms: number): string {
 }
 
 /**
+ * Parse a reader/forwarder wall-clock string into a millisecond timestamp,
+ * anchoring the naive (zoneless) value to UTC so it round-trips with
+ * {@link formatWallClock}. Accepts `YYYY-MM-DD HH:MM:SS[.mmm]` and ISO forms.
+ * Returns `NaN` for unparseable input.
+ */
+export function parseWallClock(iso: string): number {
+  const normalized = iso.replace(" ", "T");
+  const withZ = normalized.endsWith("Z") ? normalized : normalized + "Z";
+  return new Date(withZ).getTime();
+}
+
+/**
  * Advance a clock captured at `baseTs` (a naive wall time anchored to UTC) by
  * the real time elapsed since it was captured (`now - baseLocal`), then render
  * it. `offsetMs` shifts the result — used to derive the forwarder clock from the

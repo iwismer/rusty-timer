@@ -43,7 +43,7 @@
     downloadProgress = null,
     disabled = false,
     readerClockDisplay = undefined,
-    localClockDisplay = undefined,
+    forwarderClockDisplay = undefined,
     lastRefreshDisplay = undefined,
     helpContext = "forwarder" as HelpContextName,
     onOpenHelpModal = undefined,
@@ -75,8 +75,8 @@
     disabled: boolean;
     /** Pre-formatted reader clock string (ticking display managed by parent) */
     readerClockDisplay?: string;
-    /** Pre-formatted local clock string */
-    localClockDisplay?: string;
+    /** Pre-formatted forwarder-host clock string (ticking display managed by parent) */
+    forwarderClockDisplay?: string;
     /** Pre-formatted "last refresh" string (e.g. "5s ago") */
     lastRefreshDisplay?: string;
     /** Help context for HelpTip components */
@@ -322,10 +322,10 @@
           >{formatClockDrift(readerInfo?.clock?.drift_ms)}</span
         >
       </div>
-      {#if localClockDisplay !== undefined}
+      {#if forwarderClockDisplay !== undefined}
         <div>
-          <span class="text-text-muted">Local Clock:</span>
-          <span class="font-mono ml-2">{localClockDisplay}</span>
+          <span class="text-text-muted">Forwarder Clock:</span>
+          <span class="font-mono ml-2">{forwarderClockDisplay}</span>
         </div>
       {/if}
       {#if lastRefreshDisplay !== undefined}
