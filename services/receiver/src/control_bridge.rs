@@ -477,12 +477,9 @@ mod tests {
     /// for required arguments or `Handler` errors for unmet preconditions).
     ///
     /// The seeded DB keeps the dispatch side-effect-free: an unparseable
-    /// `server_url` makes network-backed commands fail fast with no I/O, and a
-    /// temp DBF path keeps `clear_dbf` writes inside a tempdir.
+    /// `server_url` makes network-backed commands fail fast with no I/O.
     #[tokio::test]
     async fn dispatch_table_covers_registry() {
-        let dir = tempfile::tempdir().unwrap();
-        let dbf_path = dir.path().join("out.dbf").to_string_lossy().into_owned();
         for name in control_api::bridge_command_names() {
             let mut db = Db::open_in_memory().unwrap();
             db.save_profile(
@@ -492,11 +489,8 @@ mod tests {
                 Some("recv-test"),
             )
             .unwrap();
-            db.save_dbf_config(&crate::db::DbfConfig {
-                enabled: false,
-                path: dbf_path.clone(),
-            })
-            .unwrap();
+            db.save_dbf_config(&crate::db::DbfConfig { enabled: false })
+                .unwrap();
             let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
             let args = Value::Object(serde_json::Map::new());
             if let Err(BridgeError::Unknown(cmd)) = dispatch(state.as_ref(), name, &args).await {

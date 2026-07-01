@@ -1216,9 +1216,19 @@ async fn start_stream_worker(
         let db = state.db.lock().await;
         db.load_dbf_config().ok()
     };
-    if let Some(dbf) = dbf_config.filter(|c| c.enabled) {
+    if dbf_config.is_some_and(|c| c.enabled) {
         let db = Arc::clone(&state.db);
-        let dbf_path = dbf.path.clone();
+        let dbf_path = {
+            let db = state.db.lock().await;
+            db.load_rd_import_config()
+                .ok()
+                .map(|cfg| std::path::Path::new(&cfg.dir).join("IPICO.DBF"))
+                .unwrap_or_else(|| {
+                    std::path::Path::new(crate::db::DEFAULT_RD_IMPORT_DIR).join("IPICO.DBF")
+                })
+                .to_string_lossy()
+                .into_owned()
+        };
         let stream_id = stream_id.clone();
         let forwarder_endpoint_id = sub.forwarder_endpoint_id.clone();
         let hint_rx = hint_tx.subscribe();

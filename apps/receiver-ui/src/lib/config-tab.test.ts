@@ -30,10 +30,15 @@ const mockState = vi.hoisted(() => {
       status: defaultStatus(),
       editDbfEnabled: false,
       dbfEnabled: false,
-      editDbfPath: "C:\\winrace\\Files\\IPICO.DBF",
-      dbfPath: "C:\\winrace\\Files\\IPICO.DBF",
       dbfSaving: false,
       dbfClearing: false,
+      editRdImportEnabled: false,
+      rdImportEnabled: false,
+      editRdImportDir: "C:\\Winrace\\Files",
+      rdImportDir: "C:\\Winrace\\Files",
+      editRdImportIntervalSecs: 15,
+      rdImportIntervalSecs: 15,
+      rdImportSaving: false,
       modeDraft: "live",
       modeBusy: false,
     },
@@ -42,6 +47,7 @@ const mockState = vi.hoisted(() => {
     saveProfile: vi.fn(),
     saveDbfConfig: vi.fn(),
     clearDbfFile: vi.fn(),
+    saveRdImportConfig: vi.fn(),
     applyMode: vi.fn(),
     markModeEdited: vi.fn(),
     setModeDraft: vi.fn(),
@@ -58,6 +64,7 @@ vi.mock("$lib/store.svelte", () => ({
   saveProfile: mockState.saveProfile,
   saveDbfConfig: mockState.saveDbfConfig,
   clearDbfFile: mockState.clearDbfFile,
+  saveRdImportConfig: mockState.saveRdImportConfig,
   applyMode: mockState.applyMode,
   markModeEdited: mockState.markModeEdited,
   setModeDraft: mockState.setModeDraft,
@@ -84,10 +91,15 @@ describe("ConfigTab", () => {
     mockState.store.status = mockState.defaultStatus();
     mockState.store.editDbfEnabled = false;
     mockState.store.dbfEnabled = false;
-    mockState.store.editDbfPath = "C:\\winrace\\Files\\IPICO.DBF";
-    mockState.store.dbfPath = "C:\\winrace\\Files\\IPICO.DBF";
     mockState.store.dbfSaving = false;
     mockState.store.dbfClearing = false;
+    mockState.store.editRdImportEnabled = false;
+    mockState.store.rdImportEnabled = false;
+    mockState.store.editRdImportDir = "C:\\Winrace\\Files";
+    mockState.store.rdImportDir = "C:\\Winrace\\Files";
+    mockState.store.editRdImportIntervalSecs = 15;
+    mockState.store.rdImportIntervalSecs = 15;
+    mockState.store.rdImportSaving = false;
     mockState.store.modeDraft = "live";
     mockState.store.modeBusy = false;
     mockState.getConfigDirty.mockReturnValue(false);
@@ -159,15 +171,37 @@ describe("ConfigTab", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("renders Race Director output config controls", () => {
+  it("renders Race Director import and output config controls", () => {
     render(ConfigTab);
 
-    expect(screen.getByTestId("dbf-enabled-toggle")).not.toBeChecked();
-    expect(screen.getByTestId("dbf-path-input")).toHaveValue(
-      "C:\\winrace\\Files\\IPICO.DBF",
+    expect(screen.getByText("Race Director")).toBeInTheDocument();
+    expect(screen.getByTestId("rd-import-enabled-toggle")).not.toBeChecked();
+    expect(screen.getByTestId("rd-import-dir-input")).toHaveValue(
+      "C:\\Winrace\\Files",
     );
+    expect(screen.getByTestId("rd-import-interval-input")).toHaveValue(15);
+    expect(screen.getByTestId("save-rd-import-btn")).toBeDisabled();
+
+    expect(screen.getByTestId("dbf-enabled-toggle")).not.toBeChecked();
+    expect(screen.queryByTestId("dbf-path-input")).not.toBeInTheDocument();
     expect(screen.getByTestId("save-dbf-btn")).toBeDisabled();
     expect(screen.getByTestId("clear-dbf-btn")).toBeEnabled();
+  });
+
+  it("saves Race Director import config separately from DBF output", async () => {
+    render(ConfigTab);
+
+    await fireEvent.click(screen.getByTestId("rd-import-enabled-toggle"));
+    await fireEvent.input(screen.getByTestId("rd-import-dir-input"), {
+      target: { value: "D:\\Race\\Files" },
+    });
+    await fireEvent.input(screen.getByTestId("rd-import-interval-input"), {
+      target: { value: "30" },
+    });
+    await fireEvent.click(screen.getByTestId("save-rd-import-btn"));
+
+    expect(mockState.saveRdImportConfig).toHaveBeenCalledOnce();
+    expect(mockState.saveDbfConfig).not.toHaveBeenCalled();
   });
 
   it("renders receiver mode controls with a separate apply button", () => {

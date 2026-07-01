@@ -20,13 +20,12 @@ CREATE TABLE IF NOT EXISTS profile (
     receiver_mode_json TEXT,
     receiver_id TEXT,
     dbf_enabled INTEGER NOT NULL DEFAULT 0,
-    dbf_path    TEXT NOT NULL DEFAULT 'C:\winrace\Files\IPICO.DBF',
     -- Global announcer publish on/off (opt-in; default off).
     announcer_enabled INTEGER NOT NULL DEFAULT 0,
     -- Race Director DBF participant/chip import (background poll). Opt-in;
     -- default off. The manual import action ignores `rd_import_enabled`.
     rd_import_enabled INTEGER NOT NULL DEFAULT 0,
-    rd_import_dir     TEXT NOT NULL DEFAULT '',
+    rd_import_dir     TEXT NOT NULL DEFAULT 'C:\Winrace\Files',
     rd_import_interval_secs INTEGER NOT NULL DEFAULT 15
 );
 

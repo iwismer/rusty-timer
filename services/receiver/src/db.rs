@@ -7,11 +7,6 @@ use thiserror::Error;
 const SCHEMA_SQL: &str = include_str!("storage/schema.sql");
 pub const DEFAULT_UPDATE_MODE: &str = "check-and-download";
 
-/// The default path for DBF output files (Race Director convention on Windows).
-/// This path is only meaningful on the target Windows deployment; tests and
-/// non-Windows environments should override it.
-pub const DEFAULT_DBF_PATH: &str = r"C:\winrace\Files\IPICO.DBF";
-
 /// Counts describing the imported participant/chip data and how they overlap.
 /// Surfaced to the UI so it can show participant/chip totals and how many
 /// participants are still missing a chip.
@@ -122,22 +117,10 @@ pub struct StreamCursorRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DbfConfig {
     pub enabled: bool,
-    /// Filesystem path for DBF output. Uses `String` rather than `PathBuf`
-    /// for cross-platform serde compatibility (receiver targets Windows but
-    /// tests run on macOS/Linux).
-    pub path: String,
 }
 
-impl DbfConfig {
-    /// Validate that the config is usable. Returns an error message if not.
-    pub fn validate(&self) -> Result<(), String> {
-        let trimmed = self.path.trim();
-        if trimmed.is_empty() {
-            return Err("DBF path must not be empty".to_owned());
-        }
-        Ok(())
-    }
-}
+/// Default Race Director working directory containing participant/chip DBF files.
+pub const DEFAULT_RD_IMPORT_DIR: &str = r"C:\Winrace\Files";
 
 /// Default poll cadence for the Race Director background import (seconds).
 pub const DEFAULT_RD_IMPORT_INTERVAL_SECS: u32 = 15;
@@ -289,8 +272,8 @@ impl Db {
         let tx = self.conn.transaction()?;
         tx.execute_batch("DELETE FROM profile")?;
         tx.execute(
-            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, dbf_path, announcer_enabled, announcer_max_list_size, rd_import_enabled, rd_import_dir, rd_import_interval_secs) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, &dbf_config.path, i64::from(announcer_enabled), i64::from(announcer_max_list_size), i64::from(rd_import.enabled), &rd_import.dir, i64::from(rd_import.interval_secs)],
+            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, announcer_enabled, announcer_max_list_size, rd_import_enabled, rd_import_dir, rd_import_interval_secs) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, i64::from(announcer_enabled), i64::from(announcer_max_list_size), i64::from(rd_import.enabled), &rd_import.dir, i64::from(rd_import.interval_secs)],
         )?;
         tx.commit()?;
         Ok(())
@@ -1144,11 +1127,6 @@ impl Db {
         )?;
         apply_add_column_migration(
             &self.conn,
-            r"ALTER TABLE profile ADD COLUMN dbf_path TEXT NOT NULL DEFAULT 'C:\winrace\Files\IPICO.DBF';",
-            "dbf_path",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
             "ALTER TABLE profile ADD COLUMN announcer_enabled INTEGER NOT NULL DEFAULT 0;",
             "announcer_enabled",
         )?;
@@ -1254,7 +1232,7 @@ impl Db {
         )?;
         apply_add_column_migration(
             &self.conn,
-            "ALTER TABLE profile ADD COLUMN rd_import_dir TEXT NOT NULL DEFAULT '';",
+            "ALTER TABLE profile ADD COLUMN rd_import_dir TEXT NOT NULL DEFAULT 'C:\\Winrace\\Files';",
             "rd_import_dir",
         )?;
         apply_add_column_migration(
@@ -1370,7 +1348,7 @@ impl Db {
         tx.execute_batch("DELETE FROM subscriptions")?;
         tx.execute_batch("DELETE FROM announcer_publish_streams")?;
         tx.execute(
-            "UPDATE profile SET update_mode = ?1, receiver_mode_json = NULL, dbf_enabled = 0, dbf_path = 'C:\\winrace\\Files\\IPICO.DBF', announcer_enabled = 0",
+            "UPDATE profile SET update_mode = ?1, receiver_mode_json = NULL, dbf_enabled = 0, announcer_enabled = 0",
             rusqlite::params![DEFAULT_UPDATE_MODE],
         )?;
         tx.commit()?;
@@ -1399,36 +1377,21 @@ impl Db {
     }
 
     pub fn load_dbf_config(&self) -> DbResult<DbfConfig> {
-        let result: Option<(i64, String)> = self
+        let enabled: Option<i64> = self
             .conn
-            .query_row(
-                "SELECT dbf_enabled, dbf_path FROM profile LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+            .query_row("SELECT dbf_enabled FROM profile LIMIT 1", [], |row| {
+                row.get(0)
+            })
             .optional()?;
-        Ok(match result {
-            Some((enabled, path)) => DbfConfig {
-                enabled: enabled != 0,
-                path,
-            },
-            None => DbfConfig {
-                enabled: false,
-                path: DEFAULT_DBF_PATH.to_owned(),
-            },
+        Ok(DbfConfig {
+            enabled: enabled.unwrap_or(0) != 0,
         })
     }
 
     pub fn save_dbf_config(&self, config: &DbfConfig) -> DbResult<()> {
-        if let Err(msg) = config.validate() {
-            return Err(DbError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                msg,
-            )));
-        }
         let changed = self.conn.execute(
-            "UPDATE profile SET dbf_enabled = ?1, dbf_path = ?2",
-            rusqlite::params![config.enabled as i64, config.path],
+            "UPDATE profile SET dbf_enabled = ?1",
+            rusqlite::params![config.enabled as i64],
         )?;
         if changed == 0 {
             return Err(DbError::ProfileMissing);
@@ -1449,14 +1412,18 @@ impl Db {
         Ok(match result {
             Some((enabled, dir, interval)) => RdImportConfig {
                 enabled: enabled != 0,
-                dir,
+                dir: if dir.trim().is_empty() {
+                    DEFAULT_RD_IMPORT_DIR.to_owned()
+                } else {
+                    dir
+                },
                 interval_secs: u32::try_from(interval)
                     .unwrap_or(DEFAULT_RD_IMPORT_INTERVAL_SECS)
                     .max(1),
             },
             None => RdImportConfig {
                 enabled: false,
-                dir: String::new(),
+                dir: DEFAULT_RD_IMPORT_DIR.to_owned(),
                 interval_secs: DEFAULT_RD_IMPORT_INTERVAL_SECS,
             },
         })
@@ -2490,11 +2457,7 @@ mod tests {
         let mut db = Db::open_in_memory().unwrap();
         db.save_profile("https://example.com", "tok", "check-only", Some("recv-1"))
             .unwrap();
-        db.save_dbf_config(&DbfConfig {
-            enabled: true,
-            path: r"D:\race\output.dbf".to_owned(),
-        })
-        .unwrap();
+        db.save_dbf_config(&DbfConfig { enabled: true }).unwrap();
         db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
         db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
         db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
@@ -2506,7 +2469,6 @@ mod tests {
         // Non-profile fields should be reset
         let dbf = db.load_dbf_config().unwrap();
         assert!(!dbf.enabled);
-        assert_eq!(dbf.path, DEFAULT_DBF_PATH);
         assert!(db.load_subscriptions().unwrap().is_empty());
         assert!(db.load_cursors().unwrap().is_empty());
         assert!(db.load_earliest_epochs().unwrap().is_empty());
@@ -2713,6 +2675,19 @@ mod tests {
     }
 
     #[test]
+    fn rd_import_config_defaults_to_race_director_files_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Db::open(dir.path().join("test.db").as_path()).unwrap();
+        db.save_profile("https://example.com", "tok", "check-and-download", None)
+            .unwrap();
+
+        let config = db.load_rd_import_config().unwrap();
+        assert!(!config.enabled);
+        assert_eq!(config.dir, r"C:\Winrace\Files");
+        assert_eq!(config.interval_secs, DEFAULT_RD_IMPORT_INTERVAL_SECS);
+    }
+
+    #[test]
     fn dbf_config_defaults_and_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = Db::open(dir.path().join("test.db").as_path()).unwrap();
@@ -2720,20 +2695,13 @@ mod tests {
             .unwrap();
         let config = db.load_dbf_config().unwrap();
         assert!(!config.enabled);
-        assert_eq!(config.path, r"C:\winrace\Files\IPICO.DBF");
-        db.save_dbf_config(&DbfConfig {
-            enabled: true,
-            path: r"D:\race\output.dbf".to_owned(),
-        })
-        .unwrap();
+        db.save_dbf_config(&DbfConfig { enabled: true }).unwrap();
         let config = db.load_dbf_config().unwrap();
         assert!(config.enabled);
-        assert_eq!(config.path, r"D:\race\output.dbf");
         db.save_profile("https://new.com", "tok2", "check-and-download", None)
             .unwrap();
         let config = db.load_dbf_config().unwrap();
         assert!(config.enabled);
-        assert_eq!(config.path, r"D:\race\output.dbf");
     }
 
     #[test]

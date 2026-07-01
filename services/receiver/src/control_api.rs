@@ -2695,33 +2695,20 @@ pub async fn put_dbf_config(
     state: &AppState,
     body: crate::db::DbfConfig,
 ) -> Result<(), ReceiverError> {
-    let trimmed = body.path.trim();
-    if trimmed.is_empty() {
-        return Err(ReceiverError::BadRequest(
-            "DBF path must not be empty".to_owned(),
-        ));
-    }
-    let p = std::path::Path::new(trimmed);
-    if let Some(ext) = p.extension()
-        && !ext.eq_ignore_ascii_case("dbf")
-    {
-        return Err(ReceiverError::BadRequest(
-            "DBF path should have a .dbf extension for Race Director compatibility".to_owned(),
-        ));
-    }
-    if body.enabled
-        && let Some(parent) = p.parent()
-        && !parent.as_os_str().is_empty()
-        && !parent.exists()
-    {
-        return Err(ReceiverError::BadRequest(format!(
-            "parent directory does not exist: {}",
-            parent.display()
-        )));
+    if body.enabled {
+        let dbf_path = shared_race_director_dbf_path(state).await?;
+        if let Some(parent) = dbf_path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            return Err(ReceiverError::BadRequest(format!(
+                "Race Director directory does not exist: {}",
+                parent.display()
+            )));
+        }
     }
     let config = crate::db::DbfConfig {
         enabled: body.enabled,
-        path: trimmed.to_owned(),
     };
     let db = state.db.lock().await;
     match db.save_dbf_config(&config) {
@@ -2734,15 +2721,19 @@ pub async fn put_dbf_config(
     }
 }
 
-pub async fn clear_dbf(state: &AppState) -> Result<(), ReceiverError> {
+async fn shared_race_director_dbf_path(
+    state: &AppState,
+) -> Result<std::path::PathBuf, ReceiverError> {
     let db = state.db.lock().await;
-    let config = db
-        .load_dbf_config()
+    let rd_config = db
+        .load_rd_import_config()
         .map_err(|e| ReceiverError::Internal(e.to_string()))?;
-    drop(db);
-    let path = config.path.clone();
-    let p = std::path::Path::new(&path);
-    if let Some(parent) = p.parent()
+    Ok(std::path::Path::new(&rd_config.dir).join("IPICO.DBF"))
+}
+
+pub async fn clear_dbf(state: &AppState) -> Result<(), ReceiverError> {
+    let path = shared_race_director_dbf_path(state).await?;
+    if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
         && !parent.exists()
     {
@@ -2751,7 +2742,7 @@ pub async fn clear_dbf(state: &AppState) -> Result<(), ReceiverError> {
             parent.display()
         )));
     }
-    tokio::task::spawn_blocking(move || crate::dbf_writer::clear_dbf(std::path::Path::new(&path)))
+    tokio::task::spawn_blocking(move || crate::dbf_writer::clear_dbf(&path))
         .await
         .map_err(|e| ReceiverError::Internal(format!("Failed to clear DBF: {e}")))?
         .map_err(|e| ReceiverError::Internal(format!("Failed to clear DBF: {e}")))
@@ -4536,11 +4527,8 @@ mod tests {
             Some("recv-1"),
         )
         .unwrap();
-        db.save_dbf_config(&crate::db::DbfConfig {
-            enabled: true,
-            path: r"D:\race\output.dbf".to_owned(),
-        })
-        .unwrap();
+        db.save_dbf_config(&crate::db::DbfConfig { enabled: true })
+            .unwrap();
         db.save_receiver_mode(&ReceiverMode::Race {
             race_id: "11111111-1111-1111-1111-111111111111".to_owned(),
         })

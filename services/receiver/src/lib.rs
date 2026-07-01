@@ -18,6 +18,6 @@ pub mod rd_poll;
 pub mod runtime;
 pub mod ui_events;
 pub use cache::{EventBus, StreamCounts, StreamKey};
-pub use db::{DEFAULT_DBF_PATH, Db, DbError, DbResult, EventType, Profile, Subscription};
+pub use db::{Db, DbError, DbResult, EventType, Profile, Subscription};
 pub use error::ReceiverError;
 pub use ui_events::ReceiverUiEvent;

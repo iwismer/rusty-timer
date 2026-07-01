@@ -95,13 +95,20 @@ export const store = $state({
   checkingUpdate: false,
   checkMessage: null as string | null,
 
-  // DBF config
+  // Race Director output DBF config
   dbfEnabled: false,
-  dbfPath: "C:\\winrace\\Files\\IPICO.DBF",
   editDbfEnabled: false,
-  editDbfPath: "C:\\winrace\\Files\\IPICO.DBF",
   dbfSaving: false,
   dbfClearing: false,
+
+  // Race Director participant/chip import config
+  rdImportEnabled: false,
+  rdImportDir: "C:\\Winrace\\Files",
+  rdImportIntervalSecs: 15,
+  editRdImportEnabled: false,
+  editRdImportDir: "C:\\Winrace\\Files",
+  editRdImportIntervalSecs: 15,
+  rdImportSaving: false,
 
   // Update
   updateModalOpen: false,
@@ -760,7 +767,7 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
       }),
     ]);
 
-    await loadDbfConfig();
+    await Promise.all([loadDbfConfig(), loadRdImportConfig()]);
 
     store.status = nextStatus;
     if (nextConnections) {
@@ -1148,9 +1155,7 @@ export async function loadDbfConfig() {
   try {
     const config = await api.getDbfConfig();
     store.dbfEnabled = config.enabled;
-    store.dbfPath = config.path;
     store.editDbfEnabled = config.enabled;
-    store.editDbfPath = config.path;
   } catch (e) {
     console.error("Failed to load DBF config:", e);
     store.error = `Failed to load DBF config: ${e}`;
@@ -1162,14 +1167,45 @@ export async function saveDbfConfig() {
   try {
     await api.putDbfConfig({
       enabled: store.editDbfEnabled,
-      path: store.editDbfPath,
     });
     store.dbfEnabled = store.editDbfEnabled;
-    store.dbfPath = store.editDbfPath;
   } catch (e) {
     store.error = `Failed to save DBF config: ${e}`;
   } finally {
     store.dbfSaving = false;
+  }
+}
+
+export async function loadRdImportConfig() {
+  try {
+    const config = await api.getRdImportConfig();
+    store.rdImportEnabled = config.enabled;
+    store.rdImportDir = config.dir;
+    store.rdImportIntervalSecs = config.interval_secs;
+    store.editRdImportEnabled = config.enabled;
+    store.editRdImportDir = config.dir;
+    store.editRdImportIntervalSecs = config.interval_secs;
+  } catch (e) {
+    console.error("Failed to load Race Director import config:", e);
+    store.error = `Failed to load Race Director import config: ${e}`;
+  }
+}
+
+export async function saveRdImportConfig() {
+  store.rdImportSaving = true;
+  try {
+    await api.putRdImportConfig({
+      enabled: store.editRdImportEnabled,
+      dir: store.editRdImportDir,
+      interval_secs: store.editRdImportIntervalSecs,
+    });
+    store.rdImportEnabled = store.editRdImportEnabled;
+    store.rdImportDir = store.editRdImportDir;
+    store.rdImportIntervalSecs = store.editRdImportIntervalSecs;
+  } catch (e) {
+    store.error = `Failed to save Race Director import config: ${e}`;
+  } finally {
+    store.rdImportSaving = false;
   }
 }
 

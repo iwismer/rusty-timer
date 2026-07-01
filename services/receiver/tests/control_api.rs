@@ -573,28 +573,25 @@ async fn streams_response_includes_cursor_data() {
 }
 
 #[tokio::test]
-async fn put_dbf_config_allows_disabling_when_parent_directory_is_missing() {
+async fn put_dbf_config_updates_enabled_flag_only() {
     let state = setup();
+    let dir = tempfile::tempdir().unwrap();
     {
         let mut db = state.db.lock().await;
         db.save_profile("https://thin.test", "tok", "check-only", Some("recv-1"))
             .unwrap();
+        db.save_rd_import_config(&receiver::db::RdImportConfig {
+            enabled: false,
+            dir: dir.path().to_string_lossy().into_owned(),
+            interval_secs: 15,
+        })
+        .unwrap();
     }
 
-    let base_dir = tempfile::tempdir().unwrap();
-    let missing_path = base_dir.path().join("missing").join("output.dbf");
-
-    control_api::put_dbf_config(
-        &state,
-        receiver::db::DbfConfig {
-            enabled: false,
-            path: missing_path.display().to_string(),
-        },
-    )
-    .await
-    .unwrap();
+    control_api::put_dbf_config(&state, receiver::db::DbfConfig { enabled: true })
+        .await
+        .unwrap();
 
     let config = control_api::get_dbf_config(&state).await.unwrap();
-    assert!(!config.enabled);
-    assert_eq!(config.path, missing_path.display().to_string());
+    assert!(config.enabled);
 }

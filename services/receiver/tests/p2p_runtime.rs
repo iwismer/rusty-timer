@@ -390,15 +390,17 @@ async fn dbf_feed_delivers_from_received_events_without_duplicates() {
         let (node_id, direct) = forwarder_config(&forwarder);
 
         let dir = tempfile::tempdir().unwrap();
-        let dbf_path = dir.path().join("out.dbf");
+        let dbf_path = dir.path().join("IPICO.DBF");
         let state = init_state(dir.path()).await;
         {
             let mut db = state.db.lock().await;
-            db.save_dbf_config(&DbfConfig {
-                enabled: true,
-                path: dbf_path.to_string_lossy().into_owned(),
+            db.save_rd_import_config(&receiver::db::RdImportConfig {
+                enabled: false,
+                dir: dir.path().to_string_lossy().into_owned(),
+                interval_secs: 15,
             })
             .unwrap();
+            db.save_dbf_config(&DbfConfig { enabled: true }).unwrap();
             db.replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
                 .unwrap();
         }

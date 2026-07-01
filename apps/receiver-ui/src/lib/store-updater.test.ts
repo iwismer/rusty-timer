@@ -43,9 +43,15 @@ const apiMocks = vi.hoisted(() => ({
   checkForUpdate: vi.fn().mockResolvedValue({ status: "up_to_date" }),
   downloadUpdate: vi.fn().mockResolvedValue({ status: "downloaded" }),
   applyUpdate: vi.fn().mockResolvedValue(undefined),
-  getDbfConfig: vi.fn().mockResolvedValue({ enabled: false, path: "" }),
+  getDbfConfig: vi.fn().mockResolvedValue({ enabled: false }),
   putDbfConfig: vi.fn().mockResolvedValue(undefined),
   clearDbf: vi.fn().mockResolvedValue(undefined),
+  getRdImportConfig: vi.fn().mockResolvedValue({
+    enabled: false,
+    dir: "C:\\Winrace\\Files",
+    interval_secs: 15,
+  }),
+  putRdImportConfig: vi.fn().mockResolvedValue(undefined),
   updateSubscriptionEventType: vi.fn().mockResolvedValue(undefined),
   getStreamMetrics: vi.fn().mockResolvedValue([]),
   reconnectServer: vi.fn().mockResolvedValue(undefined),
@@ -199,6 +205,26 @@ describe("receiver updater store", () => {
     expect(store.savedServerUrl).toBe("https://receiver.example");
     expect(store.savedToken).toBe("secret-token");
     expect(store.savedReceiverId).toBe("recv-live");
+  });
+
+  it("hydrates Race Director import config on initial load", async () => {
+    apiMocks.getRdImportConfig.mockResolvedValueOnce({
+      enabled: true,
+      dir: "D:\\Race\\Files",
+      interval_secs: 30,
+    });
+
+    const { initStore, store } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    expect(store.rdImportEnabled).toBe(true);
+    expect(store.rdImportDir).toBe("D:\\Race\\Files");
+    expect(store.rdImportIntervalSecs).toBe(30);
+    expect(store.editRdImportEnabled).toBe(true);
+    expect(store.editRdImportDir).toBe("D:\\Race\\Files");
+    expect(store.editRdImportIntervalSecs).toBe(30);
   });
 
   it("keeps loading status, streams, and logs when connections fail to load", async () => {

@@ -333,6 +333,20 @@ export async function importChipsFile(path: string): Promise<ImportSummary> {
   return invoke<ImportSummary>("import_chips_file", { path });
 }
 
+export interface RdImportConfig {
+  enabled: boolean;
+  dir: string;
+  interval_secs: number;
+}
+
+export async function getRdImportConfig(): Promise<RdImportConfig> {
+  return invoke<RdImportConfig>("get_rd_import_config");
+}
+
+export async function putRdImportConfig(config: RdImportConfig): Promise<void> {
+  await invoke("put_rd_import_config", { body: config });
+}
+
 export async function getDataStats(): Promise<DataStats> {
   return invoke<DataStats>("get_data_stats", {});
 }
@@ -634,7 +648,6 @@ export async function getSubscriptions(): Promise<{
 
 export interface DbfConfig {
   enabled: boolean;
-  path: string;
 }
 
 export async function getDbfConfig(): Promise<DbfConfig> {

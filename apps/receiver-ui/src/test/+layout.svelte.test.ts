@@ -53,9 +53,15 @@ const apiMocks = vi.hoisted(() => ({
   putMode: vi.fn().mockResolvedValue(undefined),
   putProfile: vi.fn().mockResolvedValue(undefined),
   putEarliestEpoch: vi.fn().mockResolvedValue(undefined),
-  getDbfConfig: vi.fn().mockResolvedValue({ enabled: false, path: "" }),
+  getDbfConfig: vi.fn().mockResolvedValue({ enabled: false }),
   putDbfConfig: vi.fn().mockResolvedValue(undefined),
   clearDbf: vi.fn().mockResolvedValue(undefined),
+  getRdImportConfig: vi.fn().mockResolvedValue({
+    enabled: false,
+    dir: "C:\\Winrace\\Files",
+    interval_secs: 15,
+  }),
+  putRdImportConfig: vi.fn().mockResolvedValue(undefined),
   getStreamMetrics: vi.fn().mockResolvedValue([]),
 }));
 

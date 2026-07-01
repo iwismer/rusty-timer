@@ -6,6 +6,7 @@
     saveProfile,
     saveDbfConfig,
     clearDbfFile,
+    saveRdImportConfig,
     setEditServerUrl,
     setEditToken,
     setEditReceiverId,
@@ -14,9 +15,14 @@
   import ReceiverModeConfig from "$lib/components/ReceiverModeConfig.svelte";
 
   function getDbfDirty(): boolean {
+    return store.editDbfEnabled !== store.dbfEnabled;
+  }
+
+  function getRdImportDirty(): boolean {
     return (
-      store.editDbfEnabled !== store.dbfEnabled ||
-      store.editDbfPath !== store.dbfPath
+      store.editRdImportEnabled !== store.rdImportEnabled ||
+      store.editRdImportDir !== store.rdImportDir ||
+      store.editRdImportIntervalSecs !== store.rdImportIntervalSecs
     );
   }
 </script>
@@ -87,49 +93,104 @@
   <ReceiverModeConfig />
 
   <section class="mt-6 rounded-lg border border-border bg-surface-1 p-4">
-    <p class="text-xs font-medium text-text-muted mb-3">Race Director Output</p>
+    <p class="text-xs font-medium text-text-muted mb-3">Race Director</p>
 
-    <label
-      class="flex items-center gap-2 text-xs text-text-primary cursor-pointer"
-    >
-      <input
-        data-testid="dbf-enabled-toggle"
-        type="checkbox"
-        checked={store.editDbfEnabled}
-        onchange={(e) => (store.editDbfEnabled = e.currentTarget.checked)}
-        class="accent-accent"
-      />
-      Write reads to Ipico Direct file for Race Director
-    </label>
+    <div>
+      <p class="text-xs font-medium text-text-muted mb-3">
+        Pull participant/chip data from Race Director
+      </p>
 
-    <label class="block text-xs font-medium text-text-muted mt-3">
-      File path
-      <input
-        data-testid="dbf-path-input"
-        class="{inputClass} mt-1"
-        value={store.editDbfPath}
-        oninput={(e) => (store.editDbfPath = e.currentTarget.value)}
-        placeholder="C:\winrace\Files\IPICO.DBF"
-      />
-    </label>
-
-    <div class="mt-3 flex items-center gap-2">
-      <button
-        data-testid="save-dbf-btn"
-        class={btnPrimary}
-        onclick={() => saveDbfConfig()}
-        disabled={!getDbfDirty() || store.dbfSaving}
+      <label
+        class="flex items-center gap-2 text-xs text-text-primary cursor-pointer"
       >
-        {store.dbfSaving ? "Saving\u2026" : "Save DBF Config"}
-      </button>
-      <button
-        data-testid="clear-dbf-btn"
-        class={btnSecondary}
-        onclick={() => clearDbfFile()}
-        disabled={store.dbfClearing}
+        <input
+          data-testid="rd-import-enabled-toggle"
+          type="checkbox"
+          checked={store.editRdImportEnabled}
+          onchange={(e) =>
+            (store.editRdImportEnabled = e.currentTarget.checked)}
+          class="accent-accent"
+        />
+        Poll Race Director DBF files for participant and chip data
+      </label>
+
+      <label class="block text-xs font-medium text-text-muted mt-3">
+        Folder
+        <input
+          data-testid="rd-import-dir-input"
+          class="{inputClass} mt-1"
+          value={store.editRdImportDir}
+          oninput={(e) => (store.editRdImportDir = e.currentTarget.value)}
+          placeholder="C:\Winrace\Files"
+        />
+      </label>
+
+      <label class="block text-xs font-medium text-text-muted mt-3">
+        Poll interval (seconds)
+        <input
+          data-testid="rd-import-interval-input"
+          type="number"
+          min="1"
+          step="1"
+          class="{inputClass} mt-1"
+          value={store.editRdImportIntervalSecs}
+          oninput={(e) =>
+            (store.editRdImportIntervalSecs = Number(e.currentTarget.value))}
+        />
+      </label>
+
+      <div class="mt-3 flex items-center gap-2">
+        <button
+          data-testid="save-rd-import-btn"
+          class={btnPrimary}
+          onclick={() => saveRdImportConfig()}
+          disabled={!getRdImportDirty() || store.rdImportSaving}
+        >
+          {store.rdImportSaving ? "Saving\u2026" : "Save Import Config"}
+        </button>
+      </div>
+    </div>
+
+    <div class="mt-5 border-t border-border pt-4">
+      <p class="text-xs font-medium text-text-muted mb-3">
+        Send reads to Race Director
+      </p>
+
+      <label
+        class="flex items-center gap-2 text-xs text-text-primary cursor-pointer"
       >
-        {store.dbfClearing ? "Clearing\u2026" : "Clear DBF File"}
-      </button>
+        <input
+          data-testid="dbf-enabled-toggle"
+          type="checkbox"
+          checked={store.editDbfEnabled}
+          onchange={(e) => (store.editDbfEnabled = e.currentTarget.checked)}
+          class="accent-accent"
+        />
+        Write reads to Ipico Direct file for Race Director
+      </label>
+
+      <p class="mt-3 text-xs text-text-muted">
+        Writes to <code>{store.editRdImportDir}\IPICO.DBF</code>.
+      </p>
+
+      <div class="mt-3 flex items-center gap-2">
+        <button
+          data-testid="save-dbf-btn"
+          class={btnPrimary}
+          onclick={() => saveDbfConfig()}
+          disabled={!getDbfDirty() || store.dbfSaving}
+        >
+          {store.dbfSaving ? "Saving\u2026" : "Save DBF Config"}
+        </button>
+        <button
+          data-testid="clear-dbf-btn"
+          class={btnSecondary}
+          onclick={() => clearDbfFile()}
+          disabled={store.dbfClearing}
+        >
+          {store.dbfClearing ? "Clearing\u2026" : "Clear DBF File"}
+        </button>
+      </div>
     </div>
   </section>
 </div>
