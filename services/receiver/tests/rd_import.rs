@@ -39,7 +39,7 @@ async fn rd_dir_import_resolves_known_chip_with_division() {
         .find_map(|chips| chips.get("058003799177"))
         .expect("known chip resolves");
     assert_eq!(entry.bib, "1");
-    assert_eq!(entry.name, "John Smith");
+    assert_eq!(entry.name.as_deref(), Some("John Smith"));
     assert_eq!(entry.division.as_deref(), Some("5k"));
 
     // Latin1 + division 2 for the accented participant.
@@ -48,7 +48,7 @@ async fn rd_dir_import_resolves_known_chip_with_division() {
         .find_map(|chips| chips.get("058003799abc"))
         .expect("second chip resolves");
     assert_eq!(renee.bib, "2");
-    assert_eq!(renee.name, "Renée Dupont");
+    assert_eq!(renee.name.as_deref(), Some("Renée Dupont"));
     assert_eq!(renee.division.as_deref(), Some("10k"));
 
     // Unknown chip → no lookup entry, so the resolver returns None and the read
@@ -60,14 +60,15 @@ async fn rd_dir_import_resolves_known_chip_with_division() {
         "an unknown chip must not resolve"
     );
 
-    // Spare chip whose bib (900) has no participant row also resolves to
-    // nothing (inner join drops it).
-    assert!(
-        lookup
-            .values()
-            .all(|chips| !chips.contains_key("aaaaaaaaaaaa")),
-        "a chip whose bib has no participant must not resolve"
-    );
+    // Spare chip whose bib (900) has no participant row still resolves to the
+    // bib so the UI/announcer can show an unknown-participant label.
+    let spare = lookup
+        .values()
+        .find_map(|chips| chips.get("aaaaaaaaaaaa"))
+        .expect("chip whose bib has no participant resolves to bib only");
+    assert_eq!(spare.bib, "900");
+    assert_eq!(spare.name, None);
+    assert_eq!(spare.division, None);
 }
 
 #[tokio::test]

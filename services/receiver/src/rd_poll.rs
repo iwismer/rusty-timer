@@ -262,15 +262,17 @@ mod tests {
                 .find_map(|chips| chips.get(chip))
                 .unwrap_or_else(|| panic!("chip {chip} resolves"));
             assert_eq!(entry.bib, "1");
-            assert_eq!(entry.name, "John Smith");
+            assert_eq!(entry.name.as_deref(), Some("John Smith"));
             assert_eq!(entry.division.as_deref(), Some("5k"));
         }
-        // Spare chip (bib 900, no participant) resolves to nothing.
-        assert!(
-            lookup
-                .values()
-                .all(|chips| !chips.contains_key("aaaaaaaaaaaa"))
-        );
+        // Spare chip (bib 900, no participant) still resolves to the bib.
+        let spare = lookup
+            .values()
+            .find_map(|chips| chips.get("aaaaaaaaaaaa"))
+            .expect("spare chip resolves to bib only");
+        assert_eq!(spare.bib, "900");
+        assert_eq!(spare.name, None);
+        assert_eq!(spare.division, None);
     }
 
     #[test]

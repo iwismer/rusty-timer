@@ -587,28 +587,29 @@ impl Db {
         Ok(())
     }
 
-    /// Build the chip-id -> participant-entry lookup by joining `bib_chips` to
-    /// `participants`. Chips with no matching participant are skipped (inner
-    /// join), matching the legacy behavior. The bib is rendered as a canonical
-    /// decimal string via its i64 value. The participant's division code (if
-    /// any) is left-joined to `divisions` for a display name; a missing name
-    /// (or a `.ppl` import with no division) yields `None`.
+    /// Build the chip-id -> participant-entry lookup from `bib_chips`, keeping
+    /// chip assignments even when the bib has no participant row. The bib is
+    /// rendered as a canonical decimal string via its i64 value. Participant
+    /// name and division are populated only when the bib joins to a participant.
     pub fn load_chip_to_participant(
         &self,
     ) -> DbResult<std::collections::HashMap<String, crate::control_api::ChipEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT c.chip_id, c.bib, p.first, p.last, d.name
              FROM bib_chips c
-             JOIN participants p ON p.bib = c.bib
+             LEFT JOIN participants p ON p.bib = c.bib
              LEFT JOIN divisions d ON d.divno = p.division",
         )?;
         let rows = stmt.query_map([], |r| {
             let chip_id: String = r.get(0)?;
             let bib: i64 = r.get(1)?;
-            let first: String = r.get(2)?;
-            let last: String = r.get(3)?;
+            let first: Option<String> = r.get(2)?;
+            let last: Option<String> = r.get(3)?;
             let division: Option<String> = r.get(4)?;
-            let name = format!("{first} {last}").trim().to_owned();
+            let name = match (first, last) {
+                (Some(first), Some(last)) => Some(format!("{first} {last}").trim().to_owned()),
+                _ => None,
+            };
             Ok((
                 chip_id,
                 crate::control_api::ChipEntry {
@@ -1956,17 +1957,20 @@ mod tests {
         let map = db.load_chip_to_participant().unwrap();
         let entry = map.get("0580").unwrap();
         assert_eq!(entry.bib, "1");
-        assert_eq!(entry.name, "B A");
+        assert_eq!(entry.name.as_deref(), Some("B A"));
         assert_eq!(entry.division, None);
     }
 
     #[test]
-    fn unmatched_chip_is_skipped_and_replace_clears() {
+    fn unmatched_chip_resolves_to_bib_without_participant_and_replace_clears() {
         let mut db = Db::open_in_memory().unwrap();
         db.replace_bib_chips(&[(99, "deadbeef".to_owned())])
             .unwrap();
-        // No participant for bib 99 -> chip is not resolvable.
-        assert!(db.load_chip_to_participant().unwrap().is_empty());
+        let map = db.load_chip_to_participant().unwrap();
+        let entry = map.get("deadbeef").expect("bib-only chip resolves");
+        assert_eq!(entry.bib, "99");
+        assert_eq!(entry.name, None);
+        assert_eq!(entry.division, None);
         // Re-import replaces wholesale.
         db.replace_participants(&[crate::participants::Participant {
             bib: 5,
@@ -1980,9 +1984,10 @@ mod tests {
         db.replace_bib_chips(&[(5, "abc".to_owned())]).unwrap();
         let map = db.load_chip_to_participant().unwrap();
         assert_eq!(map.len(), 1);
+        assert!(!map.contains_key("deadbeef"));
         let entry = map.get("abc").unwrap();
         assert_eq!(entry.bib, "5");
-        assert_eq!(entry.name, "First Last");
+        assert_eq!(entry.name.as_deref(), Some("First Last"));
     }
 
     #[test]

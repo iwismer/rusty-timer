@@ -200,6 +200,29 @@ describe("StreamsTab", () => {
     );
   });
 
+  it("renders a bib-only last read as an unknown participant with bib", () => {
+    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    store.lastReads = new Map([
+      [
+        key,
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          chip_id: "058000120e38",
+          timestamp: "2026-03-20T14:23:05.123Z",
+          bib: "1488",
+          name: null,
+        },
+      ],
+    ]);
+
+    render(StreamsTab);
+
+    const row = screen.getByText("10.0.0.1:10000").closest("tr")!;
+    expect(row).toHaveTextContent("Unknown Participant 1488");
+    expect(row).not.toHaveTextContent("Unknown Chip 058000120e38");
+  });
+
   it("renders discovered streams by stream id and subscribes by canonical identity", async () => {
     store.streams = {
       streams: [

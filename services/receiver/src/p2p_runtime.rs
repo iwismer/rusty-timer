@@ -1396,7 +1396,7 @@ async fn project_stream_ui_state(state: &Arc<AppState>, stream_id: &str, ui_key:
                 bib: resolved.as_ref().map(|participant| participant.bib.clone()),
                 name: resolved
                     .as_ref()
-                    .map(|participant| participant.name.clone()),
+                    .and_then(|participant| participant.name.clone()),
                 division: resolved.and_then(|participant| participant.division),
             }));
     }
@@ -2381,6 +2381,23 @@ mod tests {
         .unwrap();
     }
 
+    async fn projected_last_read(
+        state: &Arc<AppState>,
+        stream_id: &str,
+    ) -> crate::ui_events::LastRead {
+        let mut ui_rx = state.ui_tx.subscribe();
+        project_stream_ui_state(state, stream_id, &StreamKey::new("fwd-1", "10.0.0.1:10000")).await;
+
+        while let Ok(Ok(event)) =
+            tokio::time::timeout(Duration::from_millis(25), ui_rx.recv()).await
+        {
+            if let ReceiverUiEvent::LastRead(read) = event {
+                return read;
+            }
+        }
+        panic!("last read event");
+    }
+
     #[tokio::test]
     async fn stream_ui_projection_resolves_last_read_participant_names() {
         let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
@@ -2394,28 +2411,28 @@ mod tests {
             let db = state.db.lock().await;
             insert_chip_event(&db, "stream-a", 1, 1_700_000_000_123);
         }
-        let mut ui_rx = state.ui_tx.subscribe();
 
-        project_stream_ui_state(
-            &state,
-            "stream-a",
-            &StreamKey::new("fwd-1", "10.0.0.1:10000"),
-        )
-        .await;
-
-        let mut resolved = None;
-        while let Ok(Ok(event)) =
-            tokio::time::timeout(Duration::from_millis(25), ui_rx.recv()).await
-        {
-            if let ReceiverUiEvent::LastRead(read) = event {
-                resolved = Some(read);
-                break;
-            }
-        }
-        let read = resolved.expect("last read event");
+        let read = projected_last_read(&state, "stream-a").await;
         assert_eq!(read.chip_id, "000000012345");
         assert_eq!(read.bib.as_deref(), Some("42"));
         assert_eq!(read.name.as_deref(), Some("Ada Lovelace"));
+    }
+
+    #[tokio::test]
+    async fn stream_ui_projection_includes_bib_when_chip_has_no_participant() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        crate::control_api::import_chips(&state, "1488,000000012345\n".to_owned())
+            .await
+            .unwrap();
+        {
+            let db = state.db.lock().await;
+            insert_chip_event(&db, "stream-a", 1, 1_700_000_000_123);
+        }
+
+        let read = projected_last_read(&state, "stream-a").await;
+        assert_eq!(read.chip_id, "000000012345");
+        assert_eq!(read.bib.as_deref(), Some("1488"));
+        assert_eq!(read.name, None);
     }
 
     #[test]

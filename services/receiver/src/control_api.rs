@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChipEntry {
     pub bib: String,
-    pub name: String,
+    pub name: Option<String>,
     pub division: Option<String>,
 }
 
@@ -1811,16 +1811,18 @@ pub async fn set_stream_announcer_publish(
 }
 
 /// Rebuild the in-memory chip->participant lookup from the durable
-/// participant/chip tables. Called at startup and after each import. Returns
-/// the number of resolvable chips. The lookup uses a single outer key
-/// (`"default"`); the announcer resolver searches across all outer maps.
+/// participant/chip tables. Called at startup and after each import. Bib-only
+/// chip assignments are included in the lookup; the returned count preserves
+/// the import-summary meaning of chips with a participant name. The lookup uses
+/// a single outer key (`"default"`); the announcer resolver searches across all
+/// outer maps.
 pub async fn reload_chip_lookup(state: &AppState) -> Result<usize, ReceiverError> {
     let map = {
         let db = state.db.lock().await;
         db.load_chip_to_participant()
             .map_err(|e| ReceiverError::Internal(e.to_string()))?
     };
-    let count = map.len();
+    let count = map.values().filter(|entry| entry.name.is_some()).count();
     let mut lookup = state.chip_lookup.write().await;
     lookup.clear();
     lookup.insert("default".to_owned(), map);
@@ -3318,7 +3320,7 @@ mod tests {
             .find_map(|chips| chips.get("0580"))
             .expect("chip resolves");
         assert_eq!(resolved.bib, "1");
-        assert_eq!(resolved.name, "John Smith");
+        assert_eq!(resolved.name.as_deref(), Some("John Smith"));
     }
 
     #[tokio::test]
@@ -3383,7 +3385,7 @@ mod tests {
             .find_map(|chips| chips.get("aaaa"))
             .expect("chip resolves");
         assert_eq!(resolved.bib, "1");
-        assert_eq!(resolved.name, "René Dupont");
+        assert_eq!(resolved.name.as_deref(), Some("René Dupont"));
     }
 
     #[tokio::test]
@@ -3458,7 +3460,7 @@ mod tests {
             .find_map(|chips| chips.get("chip-12"))
             .expect("chip resolves");
         assert_eq!(resolved.bib, "12");
-        assert_eq!(resolved.name, "Fast Runner");
+        assert_eq!(resolved.name.as_deref(), Some("Fast Runner"));
     }
 
     #[tokio::test]

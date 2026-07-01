@@ -166,22 +166,20 @@
       return "\u2014";
     }
 
-    // Bib
-    if (read.bib && used + BIB_W <= avail) {
-      parts.push(`#${read.bib}`);
-      used += BIB_W;
-    }
-
     if (read.name) {
-      // Has participant name → show name, no chip ID
+      // Has participant name → show bib + name, no chip ID
+      if (read.bib && used + BIB_W <= avail) {
+        parts.push(`#${read.bib}`);
+        used += BIB_W;
+      }
       if (used + NAME_W <= avail) {
         parts.push(read.name);
         used += NAME_W;
       }
     } else if (read.bib) {
-      // Has bib but no name → show "Unknown Participant"
+      // Has bib but no name → show an explicit unknown-participant label.
       if (used + NAME_W <= avail) {
-        parts.push("Unknown Participant");
+        parts.push(`Unknown Participant ${read.bib}`);
         used += NAME_W;
       }
     } else {

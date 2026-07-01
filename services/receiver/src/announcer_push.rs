@@ -38,7 +38,7 @@ use crate::ui_events::chip_id_from_raw_frame;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedParticipant {
     pub bib: String,
-    pub name: String,
+    pub name: Option<String>,
     /// Division display name, when the participant has a known division.
     pub division: Option<String>,
 }
@@ -128,7 +128,11 @@ fn announcer_row_request_body(row: &AnnouncerRow, max_list_size: u32) -> serde_j
         "seq": row.seq,
         "chip_id": row.chip_id,
         "bib": bib,
-        "display_name": row.name.clone().unwrap_or_default(),
+        "display_name": row.name.clone().unwrap_or_else(|| {
+            row.bib
+                .as_deref()
+                .map_or_else(String::new, |bib| format!("Unknown Participant {bib}"))
+        }),
         "division": row.division,
         "reader_timestamp": serde_json::Value::Null,
         "received_unix_ms": row.received_unix_ms,
@@ -395,7 +399,7 @@ pub fn push_announcer_rows(
                 announcer_source_generation: generation,
                 chip_id,
                 bib: resolved.as_ref().map(|p| p.bib.clone()),
-                name: resolved.as_ref().map(|p| p.name.clone()),
+                name: resolved.as_ref().and_then(|p| p.name.clone()),
                 division: resolved.and_then(|p| p.division),
             }
         })
@@ -492,7 +496,7 @@ mod tests {
                     (*chip).to_owned(),
                     ResolvedParticipant {
                         bib: (*bib).to_owned(),
-                        name: (*name).to_owned(),
+                        name: Some((*name).to_owned()),
                         division: None,
                     },
                 )
@@ -557,6 +561,23 @@ mod tests {
     }
 
     #[test]
+    fn announcer_row_request_body_labels_bib_without_participant() {
+        let row = AnnouncerRow {
+            stream_id: "finish-line".to_owned(),
+            seq: 7,
+            received_unix_ms: 1_700_000_000_100,
+            announcer_source_generation: 3,
+            chip_id: "000000012345".to_owned(),
+            bib: Some("1488".to_owned()),
+            name: None,
+            division: None,
+        };
+        let body = announcer_row_request_body(&row, 25);
+        assert_eq!(body["bib"], 1488);
+        assert_eq!(body["display_name"], "Unknown Participant 1488");
+    }
+
+    #[test]
     fn pushes_division_into_announcer_row_payload() {
         let db = Db::open_in_memory().unwrap();
         let stream_id = "127.0.0.1:10000";
@@ -568,7 +589,7 @@ mod tests {
         let resolver = |chip_id: &str| {
             (chip_id == "000000012345").then(|| ResolvedParticipant {
                 bib: "42".to_owned(),
-                name: "Ada Lovelace".to_owned(),
+                name: Some("Ada Lovelace".to_owned()),
                 division: Some("5k".to_owned()),
             })
         };
@@ -585,7 +606,34 @@ mod tests {
     }
 
     #[test]
-    fn pushes_rows_without_name_when_unresolved() {
+    fn pushes_rows_with_bib_and_without_name_when_participant_is_unknown() {
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        let raw = sample_raw_frame();
+        insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
+
+        let client = RecordingClient::default();
+        let resolver = |chip_id: &str| {
+            (chip_id == "000000012345").then(|| ResolvedParticipant {
+                bib: "1488".to_owned(),
+                name: None,
+                division: None,
+            })
+        };
+
+        let outcome =
+            push_announcer_rows(&db, &client, &resolver, stream_id, 1, 1_700_000_010_000).unwrap();
+        assert_eq!(outcome, PushOutcome::Pushed { rows: 1 });
+
+        let rows = client.all_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].bib.as_deref(), Some("1488"));
+        assert_eq!(rows[0].name, None);
+        assert_eq!(rows[0].chip_id, "000000012345");
+    }
+
+    #[test]
+    fn pushes_rows_without_bib_or_name_when_unresolved() {
         let db = Db::open_in_memory().unwrap();
         let stream_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
         let raw = sample_raw_frame();
