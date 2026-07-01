@@ -236,7 +236,7 @@ def service_uses_embed_ui(service: str) -> bool:
 
 def service_build_features(service: str) -> list[str]:
     if service == "forwarder":
-        return ["embed-ui", "eink"]
+        return ["embed-ui", "lcd"]
     if service_uses_embed_ui(service):
         return ["embed-ui"]
     return []

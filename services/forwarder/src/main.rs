@@ -51,7 +51,7 @@ fn detect_local_ip(target_ip: &str) -> Option<String> {
 /// Read CPU temperature from the Linux thermal zone.
 ///
 /// Returns `None` on non-Linux platforms or if the file cannot be read.
-#[cfg(feature = "eink")]
+#[cfg(any(feature = "eink", feature = "lcd"))]
 fn read_cpu_temp() -> Option<f32> {
     let content = std::fs::read_to_string("/sys/class/thermal/thermal_zone0/temp").ok()?;
     let millidegrees: f32 = content.trim().parse().ok()?;
@@ -292,28 +292,32 @@ async fn main() {
         }
     };
 
-    // --- E-ink display (optional, compile-time gated) ---
-    #[cfg(feature = "eink")]
+    // --- Screen display (optional, compile-time gated) ---
+    // Backend-neutral: the effective `cfg.screen` selects e-ink or LCD at
+    // runtime; the compiled backend features gate which hardware drivers exist.
+    #[cfg(any(feature = "eink", feature = "lcd"))]
     {
-        if let Some(ref eink_config) = cfg.eink {
-            if eink_config.enabled {
+        if let Some(ref screen) = cfg.screen {
+            if screen.enabled {
                 info!(
-                    refresh_mode = ?eink_config.refresh_mode,
-                    full_refresh_interval = eink_config.full_refresh_interval,
-                    min_refresh_interval_ms = eink_config.min_refresh_interval_ms,
-                    telemetry_interval_secs = eink_config.telemetry_interval_secs,
-                    "e-ink display enabled, initializing"
+                    backend = ?screen.backend,
+                    source = "screen config",
+                    "screen display enabled, initializing"
                 );
                 let (display_tx, display_rx) =
-                    tokio::sync::watch::channel(rt_eink::state::DisplayState::initial());
+                    tokio::sync::watch::channel(rt_screen::state::DisplayState::initial());
 
                 status_server.set_display_sender(display_tx);
                 status_server
                     .set_display_name(cfg.display_name.clone())
                     .await;
 
-                // Spawn CPU temperature polling task.
-                let temp_interval_secs = eink_config.telemetry_interval_secs;
+                // Spawn CPU temperature polling task. The polling interval comes
+                // from the active backend's telemetry cadence.
+                let temp_interval_secs = match screen.backend {
+                    rt_screen::state::ScreenBackend::Lcd => screen.lcd.telemetry_interval_secs,
+                    rt_screen::state::ScreenBackend::Eink => screen.eink.telemetry_interval_secs,
+                };
                 let ss_temp = status_server.clone();
                 tokio::spawn(async move {
                     let mut tick = tokio::time::interval(Duration::from_secs(temp_interval_secs));
@@ -325,113 +329,217 @@ async fn main() {
                     }
                 });
 
-                // Spawn the e-ink display task.
-                let eink_cfg = eink_config.clone();
-                let eink_shutdown_rx = shutdown_rx.clone();
-                #[cfg(target_os = "linux")]
-                {
-                    tokio::spawn(async move {
-                        match rt_eink::driver::EinkDriver::new() {
-                            Ok(mut driver) => {
-                                tracing::info!("e-ink driver initialized, starting display task");
-                                let mut consecutive_errors: u32 = 0;
-                                rt_eink::task::run_eink_task(
-                                    display_rx,
-                                    eink_shutdown_rx,
-                                    eink_cfg,
-                                    |state, full| {
-                                        use embedded_graphics::pixelcolor::BinaryColor;
-                                        use embedded_graphics::prelude::*;
-                                        let refresh_type = if full { "full" } else { "partial" };
-                                        let mut display = driver.display_mut().color_converted();
-                                        display.clear(BinaryColor::Off).ok();
-                                        if let Err(e) =
-                                            rt_eink::render::render_display(&mut display, state)
-                                        {
-                                            consecutive_errors += 1;
-                                            tracing::warn!(
-                                                error = %e,
-                                                refresh_type,
-                                                consecutive_errors,
-                                                total_reads = state.total_reads,
-                                                "eink: render failed, skipping refresh"
-                                            );
-                                            return;
-                                        }
-                                        let result = if full {
-                                            driver.full_refresh()
-                                        } else {
-                                            driver.partial_refresh()
-                                        };
-                                        match result {
-                                            Ok(()) => {
-                                                if consecutive_errors > 0 {
-                                                    tracing::info!(
-                                                        previous_errors = consecutive_errors,
-                                                        "eink: refresh succeeded after previous errors"
+                match screen.backend {
+                    rt_screen::state::ScreenBackend::Eink => {
+                        #[cfg(all(feature = "eink", target_os = "linux"))]
+                        {
+                            let eink_cfg = screen.eink.clone();
+                            let eink_shutdown_rx = shutdown_rx.clone();
+                            tokio::spawn(async move {
+                                match rt_screen::eink::driver::EinkDriver::new() {
+                                    Ok(mut driver) => {
+                                        tracing::info!(
+                                            "e-ink driver initialized, starting display task"
+                                        );
+                                        let mut consecutive_errors: u32 = 0;
+                                        rt_screen::task::run_screen_task(
+                                            display_rx,
+                                            eink_shutdown_rx,
+                                            rt_screen::task::ScreenTaskConfig::from(eink_cfg),
+                                            |state, full| {
+                                                use embedded_graphics::pixelcolor::BinaryColor;
+                                                use embedded_graphics::prelude::*;
+                                                let refresh_type = if full { "full" } else { "partial" };
+                                                let mut display = driver.display_mut().color_converted();
+                                                display.clear(BinaryColor::Off).ok();
+                                                if let Err(e) =
+                                                    rt_screen::eink::render::render_display(&mut display, state)
+                                                {
+                                                    consecutive_errors += 1;
+                                                    tracing::warn!(
+                                                        error = %e,
+                                                        refresh_type,
+                                                        consecutive_errors,
+                                                        total_reads = state.total_reads,
+                                                        "eink: render failed, skipping refresh"
                                                     );
+                                                    return;
                                                 }
-                                                consecutive_errors = 0;
-                                            }
-                                            Err(e) => {
-                                                consecutive_errors += 1;
-                                                tracing::warn!(
-                                                    error = %e,
-                                                    refresh_type,
-                                                    consecutive_errors,
-                                                    "eink: refresh failed"
-                                                );
+                                                let result = if full {
+                                                    driver.full_refresh()
+                                                } else {
+                                                    driver.partial_refresh()
+                                                };
+                                                match result {
+                                                    Ok(()) => {
+                                                        if consecutive_errors > 0 {
+                                                            tracing::info!(
+                                                                previous_errors = consecutive_errors,
+                                                                "eink: refresh succeeded after previous errors"
+                                                            );
+                                                        }
+                                                        consecutive_errors = 0;
+                                                    }
+                                                    Err(e) => {
+                                                        consecutive_errors += 1;
+                                                        tracing::warn!(
+                                                            error = %e,
+                                                            refresh_type,
+                                                            consecutive_errors,
+                                                            "eink: refresh failed"
+                                                        );
+                                                    }
+                                                }
+                                            },
+                                        )
+                                        .await;
+                                        // Show "Powered Off" on the display before sleeping.
+                                        {
+                                            use embedded_graphics::pixelcolor::BinaryColor;
+                                            use embedded_graphics::prelude::*;
+                                            let mut display =
+                                                driver.display_mut().color_converted();
+                                            display.clear(BinaryColor::Off).ok();
+                                            if let Err(e) = rt_screen::eink::render::render_shutdown(
+                                                &mut display,
+                                            ) {
+                                                tracing::warn!(error = %e, "eink: failed to render shutdown screen");
+                                            } else if let Err(e) = driver.full_refresh() {
+                                                tracing::warn!(error = %e, "eink: failed to refresh shutdown screen");
                                             }
                                         }
-                                    },
-                                )
-                                .await;
-                                // Show "Powered Off" on the display before sleeping.
-                                {
-                                    use embedded_graphics::pixelcolor::BinaryColor;
-                                    use embedded_graphics::prelude::*;
-                                    let mut display = driver.display_mut().color_converted();
-                                    display.clear(BinaryColor::Off).ok();
-                                    if let Err(e) = rt_eink::render::render_shutdown(&mut display) {
-                                        tracing::warn!(error = %e, "eink: failed to render shutdown screen");
-                                    } else if let Err(e) = driver.full_refresh() {
-                                        tracing::warn!(error = %e, "eink: failed to refresh shutdown screen");
+                                        if let Err(e) = driver.sleep() {
+                                            tracing::warn!(error = %e, "eink: failed to sleep display on shutdown");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "e-ink display init failed (continuing without display) — \
+                                             check SPI enabled, HAT seated, and pin wiring"
+                                        );
                                     }
                                 }
-                                if let Err(e) = driver.sleep() {
-                                    tracing::warn!(error = %e, "eink: failed to sleep display on shutdown");
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    "e-ink display init failed (continuing without display) — \
-                                     check SPI enabled, HAT seated, and pin wiring"
-                                );
-                            }
+                            });
+                            info!("e-ink display task spawned");
                         }
-                    });
-                }
 
-                #[cfg(not(target_os = "linux"))]
-                {
-                    tokio::spawn(async move {
-                        rt_eink::task::run_eink_task(
-                            display_rx,
-                            eink_shutdown_rx,
-                            eink_cfg,
-                            |_state, _full| {},
-                        )
-                        .await;
-                    });
-                    warn!(
-                        "e-ink hardware updates are only supported on Linux; using no-op renderer"
-                    );
-                }
+                        #[cfg(all(feature = "eink", not(target_os = "linux")))]
+                        {
+                            let eink_cfg = screen.eink.clone();
+                            let eink_shutdown_rx = shutdown_rx.clone();
+                            tokio::spawn(async move {
+                                rt_screen::task::run_screen_task(
+                                    display_rx,
+                                    eink_shutdown_rx,
+                                    rt_screen::task::ScreenTaskConfig::from(eink_cfg),
+                                    |_state, _full| {},
+                                )
+                                .await;
+                            });
+                            warn!(
+                                "e-ink hardware updates are only supported on Linux; using no-op renderer"
+                            );
+                        }
 
-                info!("e-ink display task spawned");
+                        #[cfg(not(feature = "eink"))]
+                        {
+                            let _ = display_rx;
+                            warn!(
+                                "screen.backend = \"eink\" but this build was not compiled with the `eink` feature; continuing without a display"
+                            );
+                        }
+                    }
+                    rt_screen::state::ScreenBackend::Lcd => {
+                        #[cfg(all(feature = "lcd", target_os = "linux"))]
+                        {
+                            let lcd_cfg = screen.lcd.clone();
+                            let shutdown = shutdown_rx.clone();
+                            tokio::spawn(async move {
+                                match rt_screen::lcd::driver::LcdDriver::new(&lcd_cfg) {
+                                    Ok(mut driver) => {
+                                        tracing::info!(
+                                            "lcd driver initialized, starting display task"
+                                        );
+                                        let mut consecutive_errors: u32 = 0;
+                                        let mut backlight_on = false;
+                                        rt_screen::task::run_screen_task(
+                                            display_rx,
+                                            shutdown,
+                                            rt_screen::task::ScreenTaskConfig::from(lcd_cfg.clone()),
+                                            |state, _full| {
+                                                let start = std::time::Instant::now();
+                                                // Compose the whole frame in RAM (infallible), then
+                                                // blit it to the panel in one pass via `flush` so the
+                                                // operator never sees the clear-to-black + redraw.
+                                                let _ = rt_screen::lcd::render::render_display(
+                                                    driver.framebuffer_mut(),
+                                                    state,
+                                                );
+                                                if let Err(e) = driver.flush() {
+                                                    consecutive_errors += 1;
+                                                    tracing::warn!(error = ?e, consecutive_errors, "lcd: flush failed");
+                                                    return;
+                                                }
+                                                if !backlight_on {
+                                                    driver.set_backlight(true);
+                                                    backlight_on = true;
+                                                }
+                                                if consecutive_errors > 0 {
+                                                    tracing::info!(previous_errors = consecutive_errors, "lcd: refresh recovered");
+                                                }
+                                                consecutive_errors = 0;
+                                                tracing::debug!(
+                                                    refresh_latency_ms = start.elapsed().as_millis() as u64,
+                                                    total_reads = state.total_reads,
+                                                    "lcd: rendered"
+                                                );
+                                            },
+                                        )
+                                        .await;
+                                        // On shutdown, turn the backlight off and sleep the panel.
+                                        // (Unlike e-ink, an LCD shows nothing with the backlight
+                                        // off, so there is no "Powered Off" screen to render.)
+                                        driver.set_backlight(false);
+                                        if let Err(e) = driver.sleep() {
+                                            tracing::warn!(error = ?e, "lcd: failed to sleep display on shutdown");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "lcd display init failed (continuing without display)");
+                                    }
+                                }
+                            });
+                            info!("lcd display task spawned");
+                        }
+
+                        #[cfg(all(feature = "lcd", not(target_os = "linux")))]
+                        {
+                            let lcd_cfg = screen.lcd.clone();
+                            let shutdown = shutdown_rx.clone();
+                            tokio::spawn(async move {
+                                rt_screen::task::run_screen_task(
+                                    display_rx,
+                                    shutdown,
+                                    rt_screen::task::ScreenTaskConfig::from(lcd_cfg),
+                                    |_state, _full| {},
+                                )
+                                .await;
+                            });
+                            warn!("lcd hardware only on Linux; using no-op renderer");
+                        }
+
+                        #[cfg(not(feature = "lcd"))]
+                        {
+                            let _ = display_rx;
+                            warn!(
+                                "screen.backend = \"lcd\" but this build was not compiled with the `lcd` feature; continuing without a display"
+                            );
+                        }
+                    }
+                }
             } else {
-                info!("e-ink display configured but disabled");
+                info!("screen display configured but disabled");
             }
         }
     }

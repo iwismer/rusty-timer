@@ -2,3 +2,12 @@
 rustflags = ["-Ctarget-feature=+crt-static"]
 [target.i686-pc-windows-msvc]
 rustflags = ["-Ctarget-feature=+crt-static"]
+
+# The `simulator-bundled` feature compiles SDL2 from source (sdl2-sys `bundled`).
+# That vendored SDL2 ships an old CMakeLists, and CMake >= 4 dropped
+# compatibility with `cmake_minimum_required` < 3.5. This lets it configure
+# anyway. It is set for every cargo invocation but is inert unless a cmake-based
+# build runs (i.e. `simulator-bundled`); default/CI/release builds never enable
+# the simulator features, so it has no effect there.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

@@ -2126,9 +2126,9 @@ dependencies = [
  "prost",
  "reqwest 0.13.2",
  "rt-domain",
- "rt-eink",
  "rt-iroh",
  "rt-p2p-protocol",
+ "rt-screen",
  "rt-test-utils",
  "rt-ui-http",
  "rt-ui-log",
@@ -2698,6 +2698,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hash32"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2742,10 +2751,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdc6457c0eb62c71aac4bc17216026d8410337c4126773b9c5daba343f17964f"
 dependencies = [
  "atomic-polyfill",
- "hash32",
+ "hash32 0.2.1",
  "rustc_version",
  "serde",
  "spin 0.9.8",
+ "stable_deref_trait",
+]
+
+[[package]]
+name = "heapless"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bfb9eb618601c89945a70e254898da93b13be0388091d42117462b265bb3fad"
+dependencies = [
+ "hash32 0.3.1",
  "stable_deref_trait",
 ]
 
@@ -3920,6 +3939,18 @@ dependencies = [
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mipidsi"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ba34dcbf61182ffa6992b5a4d9b566d5a99df127fd93f6d314213347329e92f"
+dependencies = [
+ "embedded-graphics-core",
+ "embedded-hal 1.0.0",
+ "heapless 0.8.0",
+ "nb 1.1.0",
 ]
 
 [[package]]
@@ -5183,7 +5214,7 @@ dependencies = [
  "cobs",
  "embedded-io 0.4.0",
  "embedded-io 0.6.1",
- "heapless",
+ "heapless 0.7.17",
  "postcard-derive",
  "serde",
 ]
@@ -5968,22 +5999,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rt-eink"
-version = "0.1.0"
-dependencies = [
- "embedded-graphics",
- "embedded-graphics-simulator",
- "epd-waveshare",
- "reqwest 0.13.2",
- "rppal",
- "serde",
- "serde_json",
- "tokio",
- "toml 1.0.7+spec-1.1.0",
- "tracing",
-]
-
-[[package]]
 name = "rt-emulator"
 version = "2.0.0"
 dependencies = [
@@ -6019,6 +6034,24 @@ dependencies = [
  "rt-iroh",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "rt-screen"
+version = "0.1.0"
+dependencies = [
+ "embedded-graphics",
+ "embedded-graphics-simulator",
+ "epd-waveshare",
+ "mipidsi",
+ "reqwest 0.13.2",
+ "rppal",
+ "sdl2",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 1.0.7+spec-1.1.0",
+ "tracing",
 ]
 
 [[package]]
@@ -6437,6 +6470,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "951deab27af08ed9c6068b7b0d05a93c91f0a8eb16b6b816a5e73452a43521d3"
 dependencies = [
  "cfg-if",
+ "cmake",
  "libc",
  "version-compare 0.1.1",
 ]

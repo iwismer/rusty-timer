@@ -1,0 +1,40 @@
+[package]
+name = "rt-screen"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+eink-hardware = ["dep:epd-waveshare", "dep:rppal"]
+lcd-hardware = ["dep:mipidsi", "dep:rppal"]
+simulator = ["dep:embedded-graphics-simulator", "dep:reqwest"]
+# Desktop simulator that bundles + statically links a real SDL2 (compiled from
+# source via cmake) instead of using the system libSDL2. Use this on machines
+# where Homebrew's `sdl2` is actually `sdl2-compat` (SDL2 API on an SDL3 engine),
+# which makes the `sdl2` crate abort on unrecognized events in the live window.
+# Dev-only: SDL is never pulled into the forwarder or hardware builds.
+simulator-bundled = ["simulator", "dep:sdl2", "sdl2/bundled", "sdl2/static-link"]
+
+[dependencies]
+embedded-graphics = "0.8"
+embedded-graphics-simulator = { version = "0.7", optional = true }
+# Direct (optional) handle on the same sdl2 the simulator uses transitively, so
+# the `simulator-bundled` feature can turn on bundled/static-link. Version must
+# match embedded-graphics-simulator's sdl2 requirement (0.37).
+sdl2 = { version = "0.37", optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "blocking"], optional = true }
+tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+toml = "1.0"
+tokio = { version = "1", features = ["sync", "time", "macros", "rt", "rt-multi-thread"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+epd-waveshare = { version = "0.6", default-features = false, features = ["graphics", "epd2in13_v3"], optional = true }
+rppal = { version = "0.22", features = ["hal"], optional = true }
+mipidsi = { version = "0.9", optional = true }
+
+[lints]
+workspace = true

@@ -1,10 +1,14 @@
 //! Desktop simulator for the e-ink display layout.
 //!
 //! Static mode (default): renders hardcoded sample data.
-//!   cargo run -p rt-eink --example eink_sim --features simulator
+//! ```text
+//! cargo run -p rt-screen --example eink_sim --features simulator
+//! ```
 //!
 //! Live mode: polls a running forwarder for real display state.
-//!   cargo run -p rt-eink --example eink_sim --features simulator -- --url http://127.0.0.1:8081
+//! ```text
+//! cargo run -p rt-screen --example eink_sim --features simulator -- --url http://127.0.0.1:8081
+//! ```
 
 #[cfg(not(feature = "simulator"))]
 fn main() {
@@ -17,8 +21,8 @@ fn main() {
     use embedded_graphics_simulator::{
         BinaryColorTheme, OutputSettingsBuilder, SimulatorDisplay, SimulatorEvent, Window,
     };
-    use rt_eink::render::render_display;
-    use rt_eink::state::{BatteryState, DisplayState, ReaderConnectionState, ReaderDisplayState};
+    use rt_screen::eink::render::render_display;
+    use rt_screen::state::{BatteryState, DisplayState, ReaderConnectionState, ReaderDisplayState};
 
     let args: Vec<String> = std::env::args().collect();
     let url = args
@@ -48,7 +52,7 @@ fn main() {
             match client
                 .get(&url)
                 .send()
-                .and_then(|r| r.json::<DisplayState>())
+                .and_then(reqwest::blocking::Response::json::<DisplayState>)
             {
                 Ok(state) => {
                     display.clear(BinaryColor::Off).unwrap();

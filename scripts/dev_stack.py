@@ -268,6 +268,15 @@ def wait_tcp(port: int, timeout: float, what: str) -> None:
 # Build
 # ---------------------------------------------------------------------------
 def cargo_build() -> None:
+    # Install workspace npm deps first so the SvelteKit/Vite toolchain
+    # (svelte-kit, vite, esbuild) is present before building the web UIs.
+    # Idempotent: a fast no-op when node_modules is already populated.
+    print("[build] npm install (workspace deps) ...")
+    subprocess.run(
+        ["npm", "install"],
+        cwd=str(REPO_ROOT),
+        check=True,
+    )
     # Build both web UIs so the forwarder and server can embed them (each
     # serves its UI only when built with `--features embed-ui`, which embeds the
     # SvelteKit `build/` output at compile time).
@@ -411,6 +420,11 @@ def build_parser() -> argparse.ArgumentParser:
             f"(default: {DEFAULT_SERVER_PORT}; "
             "falls back to a free port if taken)"
         ),
+    )
+    parser.add_argument(
+        "--lcd-sim",
+        action="store_true",
+        help="launch the LCD simulator against the forwarder status endpoint",
     )
     return parser
 
@@ -558,6 +572,23 @@ def main() -> int:
         wait_for_log(forwarder.log_path, "p2p iroh server started", timeout=30,
                      what="forwarder p2p startup")
         forwarder.assert_alive()
+
+        if args.lcd_sim:
+            lcd_sim = stack.add(Managed(
+                name="lcd-sim",
+                # `simulator-bundled` compiles/statically links a real SDL2 so
+                # the live window works even where the system `sdl2` is actually
+                # `sdl2-compat` (SDL3-backed), which crashes the sdl2 crate.
+                argv=[
+                    "cargo", "run", "-p", "rt-screen", "--example", "lcd_sim",
+                    "--features", "simulator-bundled", "--", "--url",
+                    f"http://127.0.0.1:{forwarder_status_port}",
+                ],
+                # Bundled SDL2's cmake policy override lives in .cargo/config.toml
+                # ([env] CMAKE_POLICY_VERSION_MINIMUM) so it applies to every build.
+                log_path=work_dir / "lcd-sim.log",
+            ))
+            lcd_sim.start()
 
         print_summary(
             work_dir=work_dir,

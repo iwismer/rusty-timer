@@ -245,7 +245,7 @@ jobs:
           FEATURES=""
           case "${{ env.SERVICE }}" in
             forwarder)
-              FEATURES="--features embed-ui,eink"
+              FEATURES="--features embed-ui,lcd"
               ;;
             server)
               FEATURES="--features embed-ui"

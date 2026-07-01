@@ -10,7 +10,8 @@
 //!   — set epoch name for a reader stream
 //! - `GET /api/v1/config` — current config as JSON
 //! - `POST /api/v1/config/{section}` — update a config section
-//!   (general, auth, journal, status_http, control, update, p2p, ups, readers)
+//!   (general, auth, journal, status_http, control, update, p2p, ups, readers, screen);
+//!   screen config changes require a restart to apply
 //! - `POST /api/v1/restart` — trigger graceful restart; 404 if config editing not enabled;
 //!   501 on non-Unix platforms
 //! - `POST /api/v1/control/restart-service` — trigger graceful service restart
@@ -330,12 +331,12 @@ impl SubsystemStatus {
     }
 }
 
-#[cfg(feature = "eink")]
+#[cfg(any(feature = "eink", feature = "lcd"))]
 fn subsystem_to_display_state(
     ss: &SubsystemStatus,
     forwarder_name: Option<String>,
     cpu_temp: Option<f32>,
-) -> rt_eink::state::DisplayState {
+) -> rt_screen::state::DisplayState {
     let readers = ss
         .readers()
         .iter()
@@ -345,17 +346,17 @@ fn subsystem_to_display_state(
                 .rsplit_once(':')
                 .map_or(addr.as_str(), |(ip, _)| ip)
                 .to_owned();
-            rt_eink::state::ReaderDisplayState {
+            rt_screen::state::ReaderDisplayState {
                 ip,
                 state: match r.state {
                     ReaderConnectionState::Connected => {
-                        rt_eink::state::ReaderConnectionState::Connected
+                        rt_screen::state::ReaderConnectionState::Connected
                     }
                     ReaderConnectionState::Connecting => {
-                        rt_eink::state::ReaderConnectionState::Connecting
+                        rt_screen::state::ReaderConnectionState::Connecting
                     }
                     ReaderConnectionState::Disconnected => {
-                        rt_eink::state::ReaderConnectionState::Disconnected
+                        rt_screen::state::ReaderConnectionState::Disconnected
                     }
                 },
                 drift_ms: r
@@ -370,7 +371,7 @@ fn subsystem_to_display_state(
 
     let total_reads: u64 = ss.readers().values().map(|r| r.reads_since_restart).sum();
 
-    rt_eink::state::DisplayState {
+    rt_screen::state::DisplayState {
         forwarder_name,
         local_ip: ss.local_ip.clone(),
         p2p_connected: ss.p2p_connected(),
@@ -378,7 +379,7 @@ fn subsystem_to_display_state(
         total_reads,
         cpu_temp_celsius: cpu_temp,
         battery: ss.ups_status().and_then(|u| {
-            u.status.as_ref().map(|s| rt_eink::state::BatteryState {
+            u.status.as_ref().map(|s| rt_screen::state::BatteryState {
                 percent: s.battery_percent,
                 charging: s.charging,
             })
@@ -406,11 +407,11 @@ pub struct StatusServer {
         >,
     >,
     reconnect_notifies: Arc<std::sync::RwLock<HashMap<String, Arc<Notify>>>>,
-    #[cfg(feature = "eink")]
-    display_tx: Option<tokio::sync::watch::Sender<rt_eink::state::DisplayState>>,
-    #[cfg(feature = "eink")]
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    display_tx: Option<tokio::sync::watch::Sender<rt_screen::state::DisplayState>>,
+    #[cfg(any(feature = "eink", feature = "lcd"))]
     display_name: Arc<Mutex<Option<String>>>,
-    #[cfg(feature = "eink")]
+    #[cfg(any(feature = "eink", feature = "lcd"))]
     cpu_temp: Arc<Mutex<Option<f32>>>,
 }
 
@@ -446,9 +447,9 @@ struct AppState<J: JournalAccess + Send + 'static> {
         >,
     >,
     reconnect_notifies: Arc<std::sync::RwLock<HashMap<String, Arc<Notify>>>>,
-    #[cfg(feature = "eink")]
+    #[cfg(any(feature = "eink", feature = "lcd"))]
     display_name: Arc<Mutex<Option<String>>>,
-    #[cfg(feature = "eink")]
+    #[cfg(any(feature = "eink", feature = "lcd"))]
     cpu_temp: Arc<Mutex<Option<f32>>>,
 }
 
@@ -480,9 +481,9 @@ impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
             control_clients: self.control_clients.clone(),
             download_trackers: self.download_trackers.clone(),
             reconnect_notifies: self.reconnect_notifies.clone(),
-            #[cfg(feature = "eink")]
+            #[cfg(any(feature = "eink", feature = "lcd"))]
             display_name: self.display_name.clone(),
-            #[cfg(feature = "eink")]
+            #[cfg(any(feature = "eink", feature = "lcd"))]
             cpu_temp: self.cpu_temp.clone(),
         }
     }
@@ -586,7 +587,7 @@ impl StatusServer {
                     restart_needed: ss.restart_needed(),
                 });
         }
-        #[cfg(feature = "eink")]
+        #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
@@ -618,7 +619,7 @@ impl StatusServer {
                     restart_needed: ss.restart_needed(),
                 });
         }
-        #[cfg(feature = "eink")]
+        #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
@@ -630,7 +631,7 @@ impl StatusServer {
     /// Set the detected local IP (call once at startup).
     pub async fn set_local_ip(&self, ip: Option<String>) {
         self.subsystem.lock().await.local_ip = ip;
-        #[cfg(feature = "eink")]
+        #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
@@ -671,7 +672,7 @@ impl StatusServer {
                     .send(ForwarderStatusEvent::UpsStatus(state));
             }
         }
-        #[cfg(feature = "eink")]
+        #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
@@ -733,7 +734,7 @@ impl StatusServer {
         &self.reconnect_notifies
     }
 
-    #[cfg(feature = "eink")]
+    #[cfg(any(feature = "eink", feature = "lcd"))]
     async fn publish_display_state(&self) {
         if let Some(ref tx) = self.display_tx {
             let ss = self.subsystem.lock().await;
@@ -744,27 +745,27 @@ impl StatusServer {
         }
     }
 
-    #[cfg(feature = "eink")]
+    #[cfg(any(feature = "eink", feature = "lcd"))]
     pub fn set_display_sender(
         &mut self,
-        tx: tokio::sync::watch::Sender<rt_eink::state::DisplayState>,
+        tx: tokio::sync::watch::Sender<rt_screen::state::DisplayState>,
     ) {
         self.display_tx = Some(tx);
     }
 
-    #[cfg(feature = "eink")]
+    #[cfg(any(feature = "eink", feature = "lcd"))]
     pub async fn set_display_name(&self, name: Option<String>) {
         *self.display_name.lock().await = name;
         self.publish_display_state().await;
     }
 
-    #[cfg(feature = "eink")]
+    #[cfg(any(feature = "eink", feature = "lcd"))]
     pub async fn set_cpu_temp(&self, temp: Option<f32>) {
         self.set_cpu_temp_cached(temp).await;
         self.publish_display_state().await;
     }
 
-    #[cfg(feature = "eink")]
+    #[cfg(any(feature = "eink", feature = "lcd"))]
     pub async fn set_cpu_temp_cached(&self, temp: Option<f32>) {
         *self.cpu_temp.lock().await = temp;
     }
@@ -803,7 +804,7 @@ impl StatusServer {
                 info,
             });
         }
-        #[cfg(feature = "eink")]
+        #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
@@ -847,7 +848,7 @@ impl StatusServer {
                 info,
             });
         }
-        #[cfg(feature = "eink")]
+        #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
@@ -888,7 +889,7 @@ impl StatusServer {
                 });
             }
         }
-        #[cfg(feature = "eink")]
+        #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
@@ -900,7 +901,7 @@ impl StatusServer {
                 r.reads_total = total;
             }
         }
-        #[cfg(feature = "eink")]
+        #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
@@ -923,7 +924,7 @@ impl StatusServer {
                     });
             }
         }
-        #[cfg(feature = "eink")]
+        #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
@@ -962,7 +963,7 @@ impl StatusServer {
                 }
             }
         }
-        #[cfg(feature = "eink")]
+        #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
@@ -987,7 +988,7 @@ impl StatusServer {
                     });
             }
         }
-        #[cfg(feature = "eink")]
+        #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
@@ -1019,9 +1020,9 @@ impl StatusServer {
         let control_clients = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let download_trackers = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let reconnect_notifies = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        #[cfg(feature = "eink")]
+        #[cfg(any(feature = "eink", feature = "lcd"))]
         let display_name = Arc::new(Mutex::new(None));
-        #[cfg(feature = "eink")]
+        #[cfg(any(feature = "eink", feature = "lcd"))]
         let cpu_temp = Arc::new(Mutex::new(None));
         let state = AppState {
             subsystem: subsystem.clone(),
@@ -1035,9 +1036,9 @@ impl StatusServer {
             control_clients: control_clients.clone(),
             download_trackers: download_trackers.clone(),
             reconnect_notifies: reconnect_notifies.clone(),
-            #[cfg(feature = "eink")]
+            #[cfg(any(feature = "eink", feature = "lcd"))]
             display_name: display_name.clone(),
-            #[cfg(feature = "eink")]
+            #[cfg(any(feature = "eink", feature = "lcd"))]
             cpu_temp: cpu_temp.clone(),
         };
 
@@ -1057,11 +1058,11 @@ impl StatusServer {
             control_clients,
             download_trackers,
             reconnect_notifies,
-            #[cfg(feature = "eink")]
+            #[cfg(any(feature = "eink", feature = "lcd"))]
             display_tx: None,
-            #[cfg(feature = "eink")]
+            #[cfg(any(feature = "eink", feature = "lcd"))]
             display_name,
-            #[cfg(feature = "eink")]
+            #[cfg(any(feature = "eink", feature = "lcd"))]
             cpu_temp,
         })
     }
@@ -1088,9 +1089,9 @@ impl StatusServer {
         let control_clients = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let download_trackers = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let reconnect_notifies = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        #[cfg(feature = "eink")]
+        #[cfg(any(feature = "eink", feature = "lcd"))]
         let display_name = Arc::new(Mutex::new(None));
-        #[cfg(feature = "eink")]
+        #[cfg(any(feature = "eink", feature = "lcd"))]
         let cpu_temp = Arc::new(Mutex::new(None));
         let state = AppState {
             subsystem: subsystem.clone(),
@@ -1104,9 +1105,9 @@ impl StatusServer {
             control_clients: control_clients.clone(),
             download_trackers: download_trackers.clone(),
             reconnect_notifies: reconnect_notifies.clone(),
-            #[cfg(feature = "eink")]
+            #[cfg(any(feature = "eink", feature = "lcd"))]
             display_name: display_name.clone(),
-            #[cfg(feature = "eink")]
+            #[cfg(any(feature = "eink", feature = "lcd"))]
             cpu_temp: cpu_temp.clone(),
         };
 
@@ -1126,11 +1127,11 @@ impl StatusServer {
             control_clients,
             download_trackers,
             reconnect_notifies,
-            #[cfg(feature = "eink")]
+            #[cfg(any(feature = "eink", feature = "lcd"))]
             display_tx: None,
-            #[cfg(feature = "eink")]
+            #[cfg(any(feature = "eink", feature = "lcd"))]
             display_name,
-            #[cfg(feature = "eink")]
+            #[cfg(any(feature = "eink", feature = "lcd"))]
             cpu_temp,
         })
     }
@@ -1328,7 +1329,8 @@ async fn mark_restart_needed_and_emit(
 /// payload, and calls `update_config_file` to persist the change.
 ///
 /// Recognised sections: `"general"`, `"auth"`, `"journal"`, `"status_http"`,
-/// `"control"`, `"update"`, `"p2p"`, `"ups"`, `"readers"`.
+/// `"control"`, `"update"`, `"p2p"`, `"ups"`, `"readers"`, and `"screen"`.
+/// Screen config changes require a restart to apply.
 pub async fn apply_section_update(
     section: &str,
     payload: &serde_json::Value,
@@ -1618,6 +1620,21 @@ pub async fn apply_section_update(
 
             update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.readers = Some(raw_readers);
+                Ok(())
+            })
+            .await
+        }
+        #[cfg(any(feature = "eink", feature = "lcd"))]
+        "screen" => {
+            let parsed = serde_json::from_value::<rt_screen::state::ScreenConfig>(payload.clone())
+                .map_err(|e| bad_request_error(e.to_string()))?;
+            // Validate before persisting so the endpoint can't accept values the
+            // loader would later reject (which would make the forwarder fail to
+            // boot on the very restart this change requests).
+            crate::config::validate_screen_config(&parsed)
+                .map_err(|e| bad_request_error(e.to_string()))?;
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
+                raw.screen = Some(parsed);
                 Ok(())
             })
             .await
@@ -2492,12 +2509,15 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
 }
 
 /// Returns the current display state as JSON, matching the `DisplayState` schema
-/// from `rt-eink`. Used by the desktop e-ink simulator to render live forwarder data.
+/// from `rt-screen`. Used by the desktop display simulator to render live forwarder data.
+// The `return` in the backend-enabled branch is required because the
+// `#[cfg(not(any(...)))]` fallback block follows it; only one is compiled.
+#[allow(clippy::needless_return)]
 async fn display_state_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> axum::Json<serde_json::Value> {
     let ss = state.subsystem.lock().await;
-    #[cfg(feature = "eink")]
+    #[cfg(any(feature = "eink", feature = "lcd"))]
     {
         let forwarder_name = state.display_name.lock().await.clone();
         let cpu_temp = *state.cpu_temp.lock().await;
@@ -2507,7 +2527,7 @@ async fn display_state_handler<J: JournalAccess + Send + 'static>(
         );
     }
 
-    #[cfg(not(feature = "eink"))]
+    #[cfg(not(any(feature = "eink", feature = "lcd")))]
     {
         let readers: Vec<serde_json::Value> = ss
             .readers
@@ -3074,7 +3094,7 @@ async fn download_progress_handler<J: JournalAccess + Send + 'static>(
 }
 
 fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/healthz", get(healthz_handler))
         .route("/readyz", get(readyz_handler::<J>))
         .route(
@@ -3116,7 +3136,15 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
         .route(
             "/api/v1/config/readers",
             post(post_config_readers_handler::<J>),
-        )
+        );
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    let router = router.route(
+        "/api/v1/config/screen",
+        post(post_config_screen_handler::<J>),
+    );
+
+    router
         .route("/api/v1/restart", post(restart_handler::<J>))
         .route(
             "/api/v1/control/restart-service",
@@ -3578,6 +3606,16 @@ async fn post_config_p2p_handler<J: JournalAccess + Send + 'static>(
     body: Bytes,
 ) -> Response {
     post_config_section_handler("p2p", state, body, None).await
+}
+
+#[cfg(any(feature = "eink", feature = "lcd"))]
+async fn post_config_screen_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    // This endpoint can change hardware GPIO/SPI pins; keep the unauthenticated
+    // status HTTP server bound to a trusted interface.
+    post_config_section_handler("screen", state, body, None).await
 }
 
 fn apply_via_restart_enabled() -> bool {
@@ -4095,9 +4133,9 @@ mod tests {
             control_clients: server.control_clients.clone(),
             download_trackers: server.download_trackers.clone(),
             reconnect_notifies: server.reconnect_notifies.clone(),
-            #[cfg(feature = "eink")]
+            #[cfg(any(feature = "eink", feature = "lcd"))]
             display_name: server.display_name.clone(),
-            #[cfg(feature = "eink")]
+            #[cfg(any(feature = "eink", feature = "lcd"))]
             cpu_temp: server.cpu_temp.clone(),
         };
         update_cached_reader_info(
@@ -5329,6 +5367,122 @@ target = "192.168.1.100:10000"
         );
     }
 
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    #[tokio::test]
+    async fn config_screen_endpoint_updates_screen_and_sets_restart_needed() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut config_file = NamedTempFile::new().expect("create temp config");
+        write!(
+            config_file,
+            r#"schema_version = 1
+[p2p]
+server_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+        )
+        .expect("write config");
+
+        let restart_signal = Arc::new(Notify::new());
+        let server = StatusServer::start_with_config(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            Arc::new(Mutex::new(NoJournal)),
+            Arc::new(ConfigState::new(config_file.path().to_path_buf())),
+            restart_signal,
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/config/screen",
+                server.local_addr()
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"backend":"lcd","lcd":{"rotation":"portrait"}}"#)
+            .send()
+            .await
+            .expect("post config screen");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            server.restart_needed().await,
+            "restart_needed must be true after screen config change"
+        );
+
+        let updated = std::fs::read_to_string(config_file.path()).expect("read config file");
+        assert!(updated.contains("[screen]"), "updated config: {updated}");
+        assert!(
+            updated.contains("backend = \"lcd\""),
+            "updated config: {updated}"
+        );
+    }
+
+    // The screen config endpoint must reject values the loader would reject, so a
+    // 200-OK change can't make the forwarder fail to boot on the requested restart.
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    #[tokio::test]
+    async fn config_screen_endpoint_rejects_invalid_lcd_config() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut config_file = NamedTempFile::new().expect("create temp config");
+        write!(
+            config_file,
+            r#"schema_version = 1
+[p2p]
+server_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+        )
+        .expect("write config");
+        let original = std::fs::read_to_string(config_file.path()).expect("read config file");
+
+        let server = StatusServer::start_with_config(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            Arc::new(Mutex::new(NoJournal)),
+            Arc::new(ConfigState::new(config_file.path().to_path_buf())),
+            Arc::new(Notify::new()),
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        // Landscape is a valid enum value but unsupported by the portrait renderer.
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/config/screen",
+                server.local_addr()
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"backend":"lcd","lcd":{"rotation":"landscape"}}"#)
+            .send()
+            .await
+            .expect("post config screen");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            !server.restart_needed().await,
+            "restart must not be flagged for a rejected config"
+        );
+        let after = std::fs::read_to_string(config_file.path()).expect("read config file");
+        assert_eq!(after, original, "rejected config must not be persisted");
+    }
+
     #[tokio::test]
     async fn update_check_skips_download_in_check_only_mode() {
         let server = StatusServer::start(
@@ -5892,7 +6046,7 @@ target = "192.168.1.100:10000"
         assert_eq!(body["readers"][0]["current_epoch_name"], "Race Day");
     }
 
-    #[cfg(feature = "eink")]
+    #[cfg(any(feature = "eink", feature = "lcd"))]
     #[tokio::test]
     async fn display_state_includes_forwarder_name_and_cpu_temp() {
         let server = StatusServer::start(
@@ -5922,7 +6076,7 @@ target = "192.168.1.100:10000"
         assert_eq!(body["cpu_temp_celsius"], 48.5);
     }
 
-    #[cfg(feature = "eink")]
+    #[cfg(any(feature = "eink", feature = "lcd"))]
     #[tokio::test]
     async fn set_ready_with_display_sender_does_not_deadlock() {
         let mut server = StatusServer::start(
@@ -5936,7 +6090,7 @@ target = "192.168.1.100:10000"
         .expect("start status server");
 
         let (display_tx, mut display_rx) =
-            tokio::sync::watch::channel(rt_eink::state::DisplayState::initial());
+            tokio::sync::watch::channel(rt_screen::state::DisplayState::initial());
         server.set_display_sender(display_tx);
 
         tokio::time::timeout(Duration::from_millis(100), server.set_ready())
@@ -5948,7 +6102,7 @@ target = "192.168.1.100:10000"
             .expect("display state sender dropped");
     }
 
-    #[cfg(feature = "eink")]
+    #[cfg(any(feature = "eink", feature = "lcd"))]
     #[tokio::test]
     async fn cpu_temp_cache_update_does_not_publish_display_state() {
         let mut server = StatusServer::start(
@@ -5962,7 +6116,7 @@ target = "192.168.1.100:10000"
         .expect("start status server");
 
         let (display_tx, mut display_rx) =
-            tokio::sync::watch::channel(rt_eink::state::DisplayState::initial());
+            tokio::sync::watch::channel(rt_screen::state::DisplayState::initial());
         server.set_display_sender(display_tx);
 
         server.set_cpu_temp_cached(Some(41.0)).await;

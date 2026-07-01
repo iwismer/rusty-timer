@@ -249,7 +249,7 @@ class Stack:
 # ---------------------------------------------------------------------------
 # Build + node-id derivation
 # ---------------------------------------------------------------------------
-def cargo_build(*, agent_ui: bool = False):
+def cargo_build(*, agent_ui: bool = False, lcd_sim: bool = False):
     del agent_ui  # The bridge is now required by first-class E2E assertions.
     print("[build] cargo build -p emulator -p forwarder -p server ...")
     subprocess.run(
@@ -263,6 +263,16 @@ def cargo_build(*, agent_ui: bool = False):
         cwd=str(REPO_ROOT),
         check=True,
     )
+    if lcd_sim:
+        print("[build] cargo build -p rt-screen --example lcd_sim --features simulator ...")
+        subprocess.run(
+            [
+                "cargo", "build", "-p", "rt-screen", "--example", "lcd_sim",
+                "--features", "simulator",
+            ],
+            cwd=str(REPO_ROOT),
+            check=True,
+        )
 
 
 def bin_path(name: str) -> Path:
@@ -658,7 +668,13 @@ def server_announcer_ready(base_url: str):
     return False
 
 
-def run_connection_scenarios(tmp: Path, results: Results, stack: Stack):
+def run_connection_scenarios(
+    tmp: Path,
+    results: Results,
+    stack: Stack,
+    *,
+    lcd_sim: bool = False,
+):
     print("\n########## connections + remote-config scenarios ##########")
 
     # --- Ports (loopback only) ---
@@ -896,6 +912,39 @@ allowlist_request_timeout_secs = 2
                            "received_events (approval auto-connect)", stream_id)
     results.expect_eq(f"connections: server finisher_count == {NUM_READS}",
                       status.get("finisher_count"), NUM_READS)
+
+    if lcd_sim:
+        lcd_sim_bin = TARGET_DIR / "examples" / "lcd_sim"
+        if not lcd_sim_bin.exists():
+            raise FileNotFoundError(
+                f"missing built example {lcd_sim_bin}; run without --no-build or build it first"
+            )
+        png_path = tmp / "lcd-status.png"
+        env = {**os.environ, "EG_SIMULATOR_DUMP_RAW": str(png_path)}
+        proc = subprocess.run(
+            [
+                str(lcd_sim_bin),
+                "--once",
+                "--require-live",
+                "--url",
+                f"http://127.0.0.1:{forwarder_status_port}",
+            ],
+            cwd=str(REPO_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        ok = proc.returncode == 0 and png_path.exists() and png_path.stat().st_size > 0
+        if not ok:
+            print(
+                f"[lcd-sim] rc={proc.returncode} "
+                f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+            )
+        results.check(
+            "lcd-sim: PNG rendered from live /api/v1/display-state (exit 0 + non-empty PNG)",
+            ok,
+        )
 
     bridge_invoke(bridge_url, "disconnect_forwarder", {"endpoint_id": forwarder_node_id})
 
@@ -1298,6 +1347,14 @@ def main() -> int:
     parser.add_argument("--no-build", action="store_true", help="skip cargo build")
     parser.add_argument("--keep", action="store_true",
                         help="keep the temp working dir on exit")
+    parser.add_argument(
+        "--lcd-sim",
+        action="store_true",
+        help=(
+            "build+run the LCD simulator once against the live forwarder and "
+            "assert a PNG is rendered from /api/v1/display-state"
+        ),
+    )
     parser.add_argument("--power-loss-target", choices=("both", *POWER_LOSS_TARGETS),
                         default="both",
                         help="which SIGKILL+restart lane(s) to run "
@@ -1312,7 +1369,7 @@ def main() -> int:
         parser.error("--agent-ui-scenario and --agent-ui-artifacts-dir must be supplied together")
 
     if not args.no_build:
-        cargo_build(agent_ui=args.agent_ui_scenario is not None)
+        cargo_build(agent_ui=args.agent_ui_scenario is not None, lcd_sim=args.lcd_sim)
 
     targets = resolve_power_loss_targets(args.power_loss_target)
     # The bridge-agent artifacts are emitted once, on the final lane only, so
@@ -1326,7 +1383,12 @@ def main() -> int:
     connections_results = Results()
     connections_stack = Stack()
     try:
-        run_connection_scenarios(connections_tmp, connections_results, connections_stack)
+        run_connection_scenarios(
+            connections_tmp,
+            connections_results,
+            connections_stack,
+            lcd_sim=args.lcd_sim,
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"\n[error] {type(exc).__name__}: {exc}", file=sys.stderr)
         connections_results.check("orchestration completed (connections scenario)", False, str(exc))

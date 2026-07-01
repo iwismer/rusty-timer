@@ -783,21 +783,31 @@ enabled = true
 EOF
   done
 
-  # Append e-ink display config if SPI is available or was just enabled (pending reboot).
+  # Append LCD display config if SPI is available or was just enabled (pending reboot).
+  # The Waveshare 2-inch ST7789 LCD is the default status screen; the e-ink backend
+  # remains available by setting backend = "eink" plus a legacy [eink] block.
   if [[ -e /dev/spidev0.0 ]] || [[ "${SPI_REBOOT_NEEDED}" == "1" ]]; then
     cat >> "${CONFIG_DIR}/forwarder.toml" <<EOF
 
-[eink]
+[screen]
 enabled = true
-refresh_mode = "hybrid"
-full_refresh_interval = 10
-min_refresh_interval_ms = 1000
-telemetry_interval_secs = 30
+backend = "lcd"
+
+[screen.lcd]
+rotation = "portrait"
+min_refresh_interval_ms = 250
+telemetry_interval_secs = 10
+spi_bus = 0
+spi_chip_select = 0
+dc_pin = 25
+rst_pin = 27
+backlight_pin = 18
+spi_clock_hz = 32000000
 EOF
     if [[ "${SPI_REBOOT_NEEDED}" == "1" ]]; then
-      echo "E-ink display config added (SPI enabled, reboot needed)"
+      echo "LCD display config added (SPI enabled, reboot needed)"
     else
-      echo "E-ink display config added (SPI detected)"
+      echo "LCD display config added (SPI detected)"
     fi
   fi
 

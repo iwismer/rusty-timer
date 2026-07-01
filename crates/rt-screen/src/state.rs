@@ -84,6 +84,76 @@ impl Default for EinkConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScreenConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub backend: ScreenBackend,
+    #[serde(default)]
+    pub lcd: LcdConfig,
+    #[serde(default)]
+    pub eink: EinkConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenBackend {
+    #[default]
+    Lcd,
+    Eink,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LcdRotation {
+    #[default]
+    Portrait,
+    Landscape,
+    PortraitInverted,
+    LandscapeInverted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LcdConfig {
+    #[serde(default)]
+    pub rotation: LcdRotation,
+    #[serde(default = "default_lcd_min_refresh_interval_ms")]
+    pub min_refresh_interval_ms: u64,
+    #[serde(default = "default_lcd_telemetry_interval_secs")]
+    pub telemetry_interval_secs: u64,
+    #[serde(default = "default_spi_bus")]
+    pub spi_bus: u8,
+    #[serde(default = "default_spi_chip_select")]
+    pub spi_chip_select: u8,
+    #[serde(default = "default_dc_pin")]
+    pub dc_pin: u8,
+    #[serde(default = "default_rst_pin")]
+    pub rst_pin: u8,
+    #[serde(default = "default_backlight_pin")]
+    pub backlight_pin: u8,
+    #[serde(default = "default_spi_clock_hz")]
+    pub spi_clock_hz: u32,
+}
+
+impl Default for LcdConfig {
+    fn default() -> Self {
+        Self {
+            rotation: LcdRotation::default(),
+            min_refresh_interval_ms: default_lcd_min_refresh_interval_ms(),
+            telemetry_interval_secs: default_lcd_telemetry_interval_secs(),
+            spi_bus: default_spi_bus(),
+            spi_chip_select: default_spi_chip_select(),
+            dc_pin: default_dc_pin(),
+            rst_pin: default_rst_pin(),
+            backlight_pin: default_backlight_pin(),
+            spi_clock_hz: default_spi_clock_hz(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RefreshMode {
@@ -110,6 +180,30 @@ fn default_telemetry_interval_secs() -> u64 {
     // Periodic redraw to refresh telemetry (CPU temp / battery) and satisfy Waveshare's
     // "refresh at least once every 24 hours" guidance, kept well above the 180s minimum.
     900
+}
+fn default_lcd_min_refresh_interval_ms() -> u64 {
+    250
+}
+fn default_lcd_telemetry_interval_secs() -> u64 {
+    10
+}
+fn default_spi_bus() -> u8 {
+    0
+}
+fn default_spi_chip_select() -> u8 {
+    0
+}
+fn default_dc_pin() -> u8 {
+    25
+}
+fn default_rst_pin() -> u8 {
+    27
+}
+fn default_backlight_pin() -> u8 {
+    18
+}
+fn default_spi_clock_hz() -> u32 {
+    32_000_000
 }
 
 #[cfg(test)]
@@ -173,5 +267,47 @@ mod tests {
         let err = toml::from_str::<EinkConfig>(toml_str).unwrap_err();
         assert!(err.to_string().contains("unknown field"), "error: {err}");
         assert!(err.to_string().contains("model"), "error: {err}");
+    }
+
+    #[test]
+    fn screen_config_deserializes_defaults() {
+        let config: ScreenConfig = toml::from_str("").unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.backend, ScreenBackend::Lcd);
+    }
+
+    #[test]
+    fn screen_lcd_config_deserializes_default_hardware_values() {
+        let config: ScreenConfig = toml::from_str("[lcd]").unwrap();
+        assert_eq!(config.lcd.dc_pin, 25);
+        assert_eq!(config.lcd.rst_pin, 27);
+        assert_eq!(config.lcd.backlight_pin, 18);
+        assert_eq!(config.lcd.spi_bus, 0);
+        assert_eq!(config.lcd.spi_chip_select, 0);
+        assert_eq!(config.lcd.spi_clock_hz, 32_000_000);
+        assert_eq!(config.lcd.min_refresh_interval_ms, 250);
+        assert_eq!(config.lcd.telemetry_interval_secs, 10);
+    }
+
+    #[test]
+    fn screen_lcd_rotation_defaults_to_portrait() {
+        let config: ScreenConfig = toml::from_str("[lcd]").unwrap();
+        assert_eq!(config.lcd.rotation, LcdRotation::Portrait);
+    }
+
+    #[test]
+    fn screen_config_rejects_invalid_backend() {
+        let err = toml::from_str::<ScreenConfig>(r#"backend = "oled""#).unwrap_err();
+        assert!(err.to_string().contains("backend"), "error: {err}");
+    }
+
+    #[test]
+    fn screen_lcd_config_rejects_invalid_rotation() {
+        let err = toml::from_str::<ScreenConfig>(
+            r#"[lcd]
+rotation = "sideways""#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("rotation"), "error: {err}");
     }
 }

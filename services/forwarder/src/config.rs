@@ -39,8 +39,8 @@ pub struct ForwarderConfig {
     pub ups: UpsConfig,
     pub p2p: P2pConfig,
     pub readers: Vec<ReaderConfig>,
-    #[cfg(feature = "eink")]
-    pub eink: Option<rt_eink::state::EinkConfig>,
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    pub screen: Option<rt_screen::state::ScreenConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,8 +137,10 @@ pub struct RawConfig {
     pub ups: Option<RawUpsConfig>,
     pub p2p: Option<RawP2pConfig>,
     pub readers: Option<Vec<RawReaderConfig>>,
-    #[cfg(feature = "eink")]
-    pub eink: Option<rt_eink::state::EinkConfig>,
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    pub eink: Option<rt_screen::state::EinkConfig>,
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    pub screen: Option<rt_screen::state::ScreenConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -480,18 +482,30 @@ pub fn load_config_from_str(
         });
     }
 
-    #[cfg(feature = "eink")]
-    let eink = raw
-        .eink
-        .map(|config| {
-            if config.telemetry_interval_secs == 0 {
-                return Err(ConfigError::InvalidValue(
-                    "eink.telemetry_interval_secs must be at least 1".to_owned(),
-                ));
+    // Route both the new `[screen]` block and the legacy `[eink]` block through
+    // the effective `screen` config. `[screen]` wins when both are present; a
+    // lone `[eink]` migrates to a screen config with the e-ink backend.
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    let screen = {
+        let screen = match (raw.screen.clone(), raw.eink.clone()) {
+            (Some(screen), Some(_legacy)) => {
+                tracing::warn!("legacy [eink] config ignored because [screen] is present");
+                Some(screen)
             }
-            Ok(config)
-        })
-        .transpose()?;
+            (Some(screen), None) => Some(screen),
+            (None, Some(legacy)) => Some(rt_screen::state::ScreenConfig {
+                enabled: legacy.enabled,
+                backend: rt_screen::state::ScreenBackend::Eink,
+                eink: legacy,
+                lcd: rt_screen::state::LcdConfig::default(),
+            }),
+            (None, None) => None,
+        };
+        if let Some(ref screen) = screen {
+            validate_screen_config(screen)?;
+        }
+        screen
+    };
 
     Ok(ForwarderConfig {
         schema_version,
@@ -504,9 +518,75 @@ pub fn load_config_from_str(
         ups,
         p2p,
         readers,
-        #[cfg(feature = "eink")]
-        eink,
+        #[cfg(any(feature = "eink", feature = "lcd"))]
+        screen,
     })
+}
+
+/// Validate an effective `[screen]` config. Shared by the config loader and the
+/// `POST /api/v1/config/screen` endpoint so the endpoint cannot persist values
+/// that would later make the forwarder fail to boot.
+#[cfg(any(feature = "eink", feature = "lcd"))]
+pub(crate) fn validate_screen_config(
+    screen: &rt_screen::state::ScreenConfig,
+) -> Result<(), ConfigError> {
+    validate_lcd_config(&screen.lcd)?;
+    // The e-ink telemetry check fires for an explicit `backend = "eink"` as well
+    // as a migrated legacy `[eink]` block (which always selects the e-ink backend).
+    if screen.backend == rt_screen::state::ScreenBackend::Eink
+        && screen.eink.telemetry_interval_secs == 0
+    {
+        return Err(ConfigError::InvalidValue(
+            "screen.eink.telemetry_interval_secs must be at least 1".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "eink", feature = "lcd"))]
+fn validate_lcd_config(lcd: &rt_screen::state::LcdConfig) -> Result<(), ConfigError> {
+    if lcd.telemetry_interval_secs == 0 {
+        return Err(ConfigError::InvalidValue(
+            "screen.lcd.telemetry_interval_secs must be at least 1".to_owned(),
+        ));
+    }
+    if lcd.spi_clock_hz == 0 {
+        return Err(ConfigError::InvalidValue(
+            "screen.lcd.spi_clock_hz must be greater than 0".to_owned(),
+        ));
+    }
+    if lcd.dc_pin == lcd.rst_pin
+        || lcd.dc_pin == lcd.backlight_pin
+        || lcd.rst_pin == lcd.backlight_pin
+    {
+        return Err(ConfigError::InvalidValue(
+            "screen.lcd dc_pin/rst_pin/backlight_pin must be distinct".to_owned(),
+        ));
+    }
+    if lcd.spi_bus != 0 {
+        return Err(ConfigError::InvalidValue(
+            "screen.lcd only SPI bus 0 is supported".to_owned(),
+        ));
+    }
+    if lcd.spi_chip_select > 1 {
+        return Err(ConfigError::InvalidValue(
+            "screen.lcd spi_chip_select must be 0 or 1".to_owned(),
+        ));
+    }
+    // The LCD renderer is a fixed 240x320 portrait layout. A landscape rotation
+    // makes the effective draw target 320x240, which would clip the layout, so
+    // reject it until the renderer is rotation-aware.
+    if matches!(
+        lcd.rotation,
+        rt_screen::state::LcdRotation::Landscape | rt_screen::state::LcdRotation::LandscapeInverted
+    ) {
+        return Err(ConfigError::InvalidValue(
+            "screen.lcd.rotation: landscape is not supported; the layout is portrait \
+             (240x320) — use \"portrait\" or \"portrait_inverted\""
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -892,18 +972,164 @@ max_concurrent_bidi_streams = 2
     fn eink_section_absent_parses_ok() {
         let (toml, _dir) = minimal_toml("");
         let _cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
-        #[cfg(feature = "eink")]
-        assert!(_cfg.eink.is_none());
+        #[cfg(any(feature = "eink", feature = "lcd"))]
+        assert!(_cfg.screen.is_none());
     }
 
-    #[cfg(feature = "eink")]
+    #[cfg(any(feature = "eink", feature = "lcd"))]
     #[test]
     fn eink_telemetry_interval_zero_rejected() {
         let (toml, _dir) = minimal_toml("[eink]\ntelemetry_interval_secs = 0");
         let err = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap_err();
         assert!(
-            err.to_string().contains("eink.telemetry_interval_secs"),
+            err.to_string().contains("telemetry_interval_secs"),
             "error: {err}"
         );
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    #[test]
+    fn screen_section_absent_parses_none() {
+        let (toml, _dir) = minimal_toml("");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert!(cfg.screen.is_none());
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    #[test]
+    fn screen_section_present_defaults_to_lcd_enabled() {
+        let (toml, _dir) = minimal_toml("[screen]");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        let screen = cfg.screen.expect("screen config");
+        assert!(screen.enabled);
+        assert_eq!(screen.backend, rt_screen::state::ScreenBackend::Lcd);
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    #[test]
+    fn screen_lcd_section_parses_default_pins() {
+        let (toml, _dir) = minimal_toml("[screen.lcd]");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        let lcd = cfg.screen.expect("screen config").lcd;
+        assert_eq!(lcd.dc_pin, 25);
+        assert_eq!(lcd.rst_pin, 27);
+        assert_eq!(lcd.backlight_pin, 18);
+        assert_eq!(lcd.spi_bus, 0);
+        assert_eq!(lcd.spi_chip_select, 0);
+        assert_eq!(lcd.spi_clock_hz, 32_000_000);
+        assert_eq!(lcd.min_refresh_interval_ms, 250);
+        assert_eq!(lcd.telemetry_interval_secs, 10);
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    #[test]
+    fn legacy_eink_only_migrates_to_screen_eink_backend() {
+        let (toml, _dir) = minimal_toml("[eink]");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert_eq!(
+            cfg.screen.expect("screen config").backend,
+            rt_screen::state::ScreenBackend::Eink
+        );
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    #[test]
+    fn legacy_eink_disabled_preserves_screen_enabled_false() {
+        let (toml, _dir) = minimal_toml("[eink]\nenabled = false");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert!(!cfg.screen.expect("screen config").enabled);
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    #[test]
+    fn screen_section_wins_over_legacy_eink() {
+        let (toml, _dir) = minimal_toml(
+            r#"
+[screen]
+backend = "lcd"
+[eink]
+enabled = false
+"#,
+        );
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        let screen = cfg.screen.expect("screen config");
+        assert!(screen.enabled);
+        assert_eq!(screen.backend, rt_screen::state::ScreenBackend::Lcd);
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    #[test]
+    fn screen_lcd_telemetry_interval_zero_rejected() {
+        let (toml, _dir) = minimal_toml("[screen.lcd]\ntelemetry_interval_secs = 0");
+        let err = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("screen.lcd.telemetry_interval_secs"),
+            "error: {err}"
+        );
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    #[test]
+    fn screen_lcd_spi_clock_zero_rejected() {
+        let (toml, _dir) = minimal_toml("[screen.lcd]\nspi_clock_hz = 0");
+        let err = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap_err();
+        assert!(
+            err.to_string().contains("screen.lcd.spi_clock_hz"),
+            "error: {err}"
+        );
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    #[test]
+    fn screen_lcd_duplicate_pins_rejected() {
+        let (toml, _dir) = minimal_toml("[screen.lcd]\ndc_pin = 25\nrst_pin = 25");
+        let err = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap_err();
+        assert!(
+            err.to_string().contains("dc_pin/rst_pin/backlight_pin"),
+            "error: {err}"
+        );
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    #[test]
+    fn screen_invalid_backend_string_rejected() {
+        let (toml, _dir) = minimal_toml("[screen]\nbackend = \"oled\"");
+        let err = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap_err();
+        assert!(err.to_string().contains("backend"), "error: {err}");
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    #[test]
+    fn screen_invalid_rotation_string_rejected() {
+        let (toml, _dir) = minimal_toml("[screen.lcd]\nrotation = \"sideways\"");
+        let err = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap_err();
+        assert!(err.to_string().contains("rotation"), "error: {err}");
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    #[test]
+    fn screen_lcd_landscape_rotation_rejected() {
+        // Landscape is a valid enum value but unsupported by the portrait renderer.
+        for rot in ["landscape", "landscape_inverted"] {
+            let (toml, _dir) = minimal_toml(&format!("[screen.lcd]\nrotation = \"{rot}\""));
+            let err = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap_err();
+            assert!(
+                err.to_string().contains("landscape"),
+                "expected landscape rejection for {rot}, got: {err}"
+            );
+        }
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    #[test]
+    fn screen_lcd_portrait_rotations_accepted() {
+        for rot in ["portrait", "portrait_inverted"] {
+            let (toml, _dir) = minimal_toml(&format!("[screen.lcd]\nrotation = \"{rot}\""));
+            assert!(
+                load_config_from_str(&toml, Path::new("/tmp/test.toml")).is_ok(),
+                "expected {rot} to be accepted"
+            );
+        }
     }
 }

@@ -12,7 +12,7 @@ use embedded_graphics::{
 };
 
 use crate::{
-    layout::{DISPLAY_HEIGHT, DISPLAY_WIDTH, DIVIDER_X, compute_layout, filter_readers},
+    eink::layout::{DISPLAY_HEIGHT, DISPLAY_WIDTH, DIVIDER_X, compute_layout, filter_readers},
     state::{DisplayState, ReaderConnectionState, ReaderDisplayState},
 };
 
@@ -134,7 +134,7 @@ pub fn render_shutdown<D>(target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = BinaryColor>,
 {
-    use crate::layout::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
+    use crate::eink::layout::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 
     target.clear(BinaryColor::Off)?;
 

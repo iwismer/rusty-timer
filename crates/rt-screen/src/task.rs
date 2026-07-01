@@ -1,35 +1,78 @@
 use tokio::sync::watch;
-use tokio::time::{Duration, Instant, interval};
+use tokio::time::{Instant, interval};
 use tracing::{debug, info};
 
-use crate::state::{DisplayState, EinkConfig, RefreshMode};
+use crate::state::{DisplayState, EinkConfig, LcdConfig, RefreshMode};
 
-/// Run the e-ink display task.
+/// Backend-neutral configuration for the display task.
+#[derive(Debug, Clone)]
+pub struct ScreenTaskConfig {
+    pub min_refresh_interval: std::time::Duration,
+    pub telemetry_interval: std::time::Duration,
+    pub refresh_policy: RefreshPolicy,
+}
+
+/// How the task decides between full and partial refreshes.
+#[derive(Debug, Clone)]
+pub enum RefreshPolicy {
+    /// E-ink panels: alternate partial/full per the configured mode and interval.
+    Eink {
+        mode: RefreshMode,
+        full_refresh_interval: u64,
+    },
+    /// LCD panels: every draw is a full draw.
+    Lcd,
+}
+
+impl From<EinkConfig> for ScreenTaskConfig {
+    fn from(cfg: EinkConfig) -> Self {
+        Self {
+            min_refresh_interval: std::time::Duration::from_millis(cfg.min_refresh_interval_ms),
+            telemetry_interval: std::time::Duration::from_secs(cfg.telemetry_interval_secs),
+            refresh_policy: RefreshPolicy::Eink {
+                mode: cfg.refresh_mode,
+                full_refresh_interval: u64::from(cfg.full_refresh_interval),
+            },
+        }
+    }
+}
+
+impl From<LcdConfig> for ScreenTaskConfig {
+    fn from(cfg: LcdConfig) -> Self {
+        Self {
+            min_refresh_interval: std::time::Duration::from_millis(cfg.min_refresh_interval_ms),
+            telemetry_interval: std::time::Duration::from_secs(cfg.telemetry_interval_secs),
+            refresh_policy: RefreshPolicy::Lcd,
+        }
+    }
+}
+
+/// Run the display task.
 ///
 /// - `state_rx`: watch receiver; yields a new value whenever the display state changes.
-/// - `config`: e-ink configuration (refresh mode, intervals, etc.).
+/// - `config`: backend-neutral display configuration (refresh policy, intervals, etc.).
 /// - `draw_fn`: closure called with `(&DisplayState, bool)` where the bool is `true` for a full
 ///   refresh and `false` for a partial refresh.
-pub async fn run_eink_task<F>(
+#[allow(clippy::too_many_lines)]
+pub async fn run_screen_task<F>(
     mut state_rx: watch::Receiver<DisplayState>,
     mut shutdown_rx: watch::Receiver<bool>,
-    config: EinkConfig,
+    config: ScreenTaskConfig,
     mut draw_fn: F,
 ) where
     F: FnMut(&DisplayState, bool),
 {
     info!(
-        refresh_mode = ?config.refresh_mode,
-        full_refresh_interval = config.full_refresh_interval,
-        min_refresh_interval_ms = config.min_refresh_interval_ms,
-        telemetry_interval_secs = config.telemetry_interval_secs,
-        "eink task started"
+        refresh_policy = ?config.refresh_policy,
+        min_refresh_interval_ms = config.min_refresh_interval.as_millis(),
+        telemetry_interval_secs = config.telemetry_interval.as_secs(),
+        "screen task started"
     );
 
-    let min_refresh = Duration::from_millis(config.min_refresh_interval_ms);
+    let min_refresh = config.min_refresh_interval;
     let mut partial_count: u32 = 0;
     let mut refresh_count: u64 = 0;
-    let mut telemetry_tick = interval(Duration::from_secs(config.telemetry_interval_secs));
+    let mut telemetry_tick = interval(config.telemetry_interval);
     // Consume the first (immediate) tick so the interval fires after the full period.
     telemetry_tick.tick().await;
 
@@ -40,7 +83,7 @@ pub async fn run_eink_task<F>(
             total_reads = state.total_reads,
             readers = state.readers.len(),
             p2p_connected = state.p2p_connected,
-            "eink: performing initial full refresh"
+            "screen: performing initial full refresh"
         );
         draw_fn(&state, true);
         refresh_count += 1;
@@ -52,13 +95,13 @@ pub async fn run_eink_task<F>(
         tokio::select! {
             result = shutdown_rx.changed() => {
                 if result.is_err() || *shutdown_rx.borrow() {
-                    info!("eink task: shutdown requested, stopping");
+                    info!("screen task: shutdown requested, stopping");
                     break;
                 }
             }
             result = state_rx.changed() => {
                 if result.is_err() {
-                    info!("eink task: watch sender dropped, stopping");
+                    info!("screen task: watch sender dropped, stopping");
                     break;
                 }
 
@@ -68,10 +111,10 @@ pub async fn run_eink_task<F>(
                     let sleep = tokio::time::sleep(min_refresh.checked_sub(elapsed).unwrap());
                     tokio::pin!(sleep);
                     tokio::select! {
-                        _ = &mut sleep => {}
+                        () = &mut sleep => {}
                         result = shutdown_rx.changed() => {
                             if result.is_err() || *shutdown_rx.borrow() {
-                                info!("eink task: shutdown requested during debounce, stopping");
+                                info!("screen task: shutdown requested during debounce, stopping");
                                 break;
                             }
                         }
@@ -79,14 +122,14 @@ pub async fn run_eink_task<F>(
                 }
 
                 let state = state_rx.borrow_and_update().clone();
-                let full = decide_full(&config, partial_count);
+                let full = decide_full(&config.refresh_policy, partial_count);
                 debug!(
                     full,
                     partial_count,
                     refresh_count,
                     total_reads = state.total_reads,
                     readers = state.readers.len(),
-                    "eink: refresh on state change"
+                    "screen: refresh on state change"
                 );
                 draw_fn(&state, full);
                 refresh_count += 1;
@@ -104,23 +147,23 @@ pub async fn run_eink_task<F>(
                     let sleep = tokio::time::sleep(min_refresh.checked_sub(elapsed).unwrap());
                     tokio::pin!(sleep);
                     tokio::select! {
-                        _ = &mut sleep => {}
+                        () = &mut sleep => {}
                         result = shutdown_rx.changed() => {
                             if result.is_err() || *shutdown_rx.borrow() {
-                                info!("eink task: shutdown requested during debounce, stopping");
+                                info!("screen task: shutdown requested during debounce, stopping");
                                 break;
                             }
                         }
                     }
                 }
                 let state = state_rx.borrow_and_update().clone();
-                let full = decide_full(&config, partial_count);
+                let full = decide_full(&config.refresh_policy, partial_count);
                 debug!(
                     full,
                     partial_count,
                     refresh_count,
                     total_reads = state.total_reads,
-                    "eink: refresh on telemetry tick"
+                    "screen: refresh on telemetry tick"
                 );
                 draw_fn(&state, full);
                 refresh_count += 1;
@@ -134,15 +177,22 @@ pub async fn run_eink_task<F>(
         }
     }
 
-    info!(refresh_count, "eink task stopped");
+    info!(refresh_count, "screen task stopped");
 }
 
 /// Determine whether the next refresh should be full or partial.
-fn decide_full(config: &EinkConfig, partial_count: u32) -> bool {
-    match config.refresh_mode {
-        RefreshMode::FullOnly => true,
-        RefreshMode::PartialOnly => false,
-        RefreshMode::Hybrid => partial_count >= config.full_refresh_interval,
+fn decide_full(policy: &RefreshPolicy, partial_count: u32) -> bool {
+    match policy {
+        RefreshPolicy::Eink {
+            mode,
+            full_refresh_interval,
+        } => match mode {
+            RefreshMode::FullOnly => true,
+            RefreshMode::PartialOnly => false,
+            RefreshMode::Hybrid => u64::from(partial_count) >= *full_refresh_interval,
+        },
+        // LCD panels have no partial-refresh concept: every draw is full.
+        RefreshPolicy::Lcd => true,
     }
 }
 
@@ -155,15 +205,17 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     use tokio::sync::watch;
+    use tokio::time::Duration;
 
     /// Build a minimal test config with no debounce and a long telemetry interval so tests are
     /// fast and deterministic.
-    fn test_config() -> EinkConfig {
+    fn test_config() -> ScreenTaskConfig {
         EinkConfig {
             min_refresh_interval_ms: 0,
             telemetry_interval_secs: 3600,
             ..EinkConfig::default()
         }
+        .into()
     }
 
     /// Returns a `DisplayState` with `total_reads` set to `n`.
@@ -192,7 +244,7 @@ mod tests {
         let log: DrawLog = Arc::new(Mutex::new(vec![]));
         let log_clone = log.clone();
 
-        let handle = tokio::spawn(run_eink_task(
+        let handle = tokio::spawn(run_screen_task(
             rx,
             shutdown_rx,
             test_config(),
@@ -216,7 +268,7 @@ mod tests {
         let log: DrawLog = Arc::new(Mutex::new(vec![]));
         let log_clone = log.clone();
 
-        let handle = tokio::spawn(run_eink_task(
+        let handle = tokio::spawn(run_screen_task(
             rx,
             shutdown_rx,
             test_config(),
@@ -253,7 +305,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let log: DrawLog = Arc::new(Mutex::new(vec![]));
 
-        let handle = tokio::spawn(run_eink_task(
+        let handle = tokio::spawn(run_screen_task(
             rx,
             shutdown_rx,
             test_config(),
@@ -278,7 +330,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let log: DrawLog = Arc::new(Mutex::new(vec![]));
 
-        let handle = tokio::spawn(run_eink_task(
+        let handle = tokio::spawn(run_screen_task(
             state_rx,
             shutdown_rx,
             test_config(),
@@ -310,10 +362,10 @@ mod tests {
         let log: DrawLog = Arc::new(Mutex::new(vec![]));
         let log_clone = log.clone();
 
-        let handle = tokio::spawn(run_eink_task(
+        let handle = tokio::spawn(run_screen_task(
             rx,
             shutdown_rx,
-            config,
+            config.into(),
             make_draw_fn(log_clone),
         ));
 
