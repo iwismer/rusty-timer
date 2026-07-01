@@ -29,6 +29,10 @@ pub struct PushRowRequest {
     pub display_name: String,
     pub reader_timestamp: Option<String>,
     pub received_unix_ms: i64,
+    /// Division display name resolved by the receiver, when known. Optional for
+    /// backward compatibility with receivers that predate division support.
+    #[serde(default)]
+    pub division: Option<String>,
     /// Receiver-configured cap on visible announcer rows. Absent or zero falls
     /// back to [`DEFAULT_MAX_ANNOUNCER_ROWS`].
     #[serde(default)]
@@ -77,6 +81,7 @@ pub async fn push_row(
         display_name: req.display_name,
         reader_timestamp: req.reader_timestamp,
         received_unix_ms: req.received_unix_ms,
+        division: req.division,
     };
 
     let result = {
@@ -163,6 +168,7 @@ fn rebuild_runtime(
             display_name: row.display_name,
             reader_timestamp: row.reader_timestamp,
             received_at,
+            division: row.division,
         };
         runtime.ingest(event, max_list_size);
     }
@@ -245,6 +251,51 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn division_round_trips_through_push_into_runtime_row() {
+        let state = test_state();
+        let app = router(state.clone());
+        let mut body = row_body(7, 0, 1_000);
+        body["division"] = serde_json::json!("5k");
+
+        let resp = app
+            .oneshot(json_request("/announcer/rows", &body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Persisted to the row table...
+        {
+            let conn = state.conn.lock().unwrap();
+            let division: Option<String> = conn
+                .query_row(
+                    "SELECT division FROM announcer_rows WHERE stream_id = 'finish-line' AND seq = 7",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(division.as_deref(), Some("5k"));
+        }
+        // ...and surfaced on the rebuilt runtime row (the public feed source).
+        let runtime = state.announcer_runtime.lock().unwrap();
+        assert_eq!(runtime.rows()[0].division.as_deref(), Some("5k"));
+    }
+
+    #[tokio::test]
+    async fn push_without_division_defaults_to_none() {
+        let state = test_state();
+        let app = router(state.clone());
+        // row_body omits `division`; the request must still deserialize (serde
+        // default) and store NULL.
+        let resp = app
+            .oneshot(json_request("/announcer/rows", &row_body(3, 0, 1_000)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let runtime = state.announcer_runtime.lock().unwrap();
+        assert_eq!(runtime.rows()[0].division, None);
     }
 
     #[tokio::test]

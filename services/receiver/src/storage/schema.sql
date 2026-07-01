@@ -22,7 +22,12 @@ CREATE TABLE IF NOT EXISTS profile (
     dbf_enabled INTEGER NOT NULL DEFAULT 0,
     dbf_path    TEXT NOT NULL DEFAULT 'C:\winrace\Files\IPICO.DBF',
     -- Global announcer publish on/off (opt-in; default off).
-    announcer_enabled INTEGER NOT NULL DEFAULT 0
+    announcer_enabled INTEGER NOT NULL DEFAULT 0,
+    -- Race Director DBF participant/chip import (background poll). Opt-in;
+    -- default off. The manual import action ignores `rd_import_enabled`.
+    rd_import_enabled INTEGER NOT NULL DEFAULT 0,
+    rd_import_dir     TEXT NOT NULL DEFAULT '',
+    rd_import_interval_secs INTEGER NOT NULL DEFAULT 15
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -106,7 +111,18 @@ CREATE TABLE IF NOT EXISTS participants (
     last        TEXT NOT NULL,
     first       TEXT NOT NULL,
     affiliation TEXT NOT NULL,
-    gender      TEXT NOT NULL
+    gender      TEXT NOT NULL,
+    -- Division code (Race Director RUNDIV). NULL for .ppl imports. Joined to
+    -- `divisions` for a display name on resolve.
+    division    INTEGER
+);
+
+-- Division code -> display name, imported from Race Director DIVISION.DBF.
+-- Replaced wholesale on import like `participants`. Additive: only RD imports
+-- populate it; .ppl/.bibchip imports leave it empty (division resolves to NULL).
+CREATE TABLE IF NOT EXISTS divisions (
+    divno INTEGER PRIMARY KEY,
+    name  TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS bib_chips (

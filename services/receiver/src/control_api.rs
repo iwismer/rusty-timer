@@ -18,7 +18,17 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-pub type ChipLookup = HashMap<String, HashMap<String, (String, String)>>;
+/// A chip's resolved participant identity, held in the in-memory chip lookup.
+/// `division` is the RD division display name (`None` for `.ppl` imports or
+/// when the division code has no name).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChipEntry {
+    pub bib: String,
+    pub name: String,
+    pub division: Option<String>,
+}
+
+pub type ChipLookup = HashMap<String, HashMap<String, ChipEntry>>;
 
 /// One stream a discovered forwarder exposes, learned from the server
 /// `GET /forwarders` discovery feed.
@@ -320,6 +330,11 @@ pub struct AppState {
     /// Keepalive receiver to prevent the watch channel from being dropped
     /// when no external subscribers exist.
     _dbf_config_keepalive: watch::Receiver<u64>,
+    /// Monotonic counter incremented when the Race Director import config
+    /// changes; the background poller (runtime.rs) uses this to pick up a new
+    /// directory/interval/toggle without waiting a full interval.
+    rd_import_config_version: watch::Sender<u64>,
+    _rd_import_config_keepalive: watch::Receiver<u64>,
     /// Monotonic counter incremented when the server URL+token changes (e.g. a
     /// profile save); the P2P reconcile loop uses this to rebind server-bound
     /// tasks. Use `notify_server_config_changed()` and `server_config_rx()`.
@@ -355,6 +370,7 @@ impl AppState {
                 restart: false,
             });
         let (dbf_config_version, _dbf_config_keepalive) = watch::channel(0u64);
+        let (rd_import_config_version, _rd_import_config_keepalive) = watch::channel(0u64);
         let (server_config_version, _server_config_keepalive) = watch::channel(0u64);
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3))
@@ -390,6 +406,8 @@ impl AppState {
             retry_streak: AtomicU64::new(0),
             dbf_config_version,
             _dbf_config_keepalive,
+            rd_import_config_version,
+            _rd_import_config_keepalive,
             server_config_version,
             _server_config_keepalive,
             server_override: tokio::sync::RwLock::new((None, None)),
@@ -419,6 +437,14 @@ impl AppState {
 
     pub fn dbf_config_rx(&self) -> watch::Receiver<u64> {
         self.dbf_config_version.subscribe()
+    }
+
+    pub fn notify_rd_import_config_changed(&self) {
+        self.rd_import_config_version.send_modify(|v| *v += 1);
+    }
+
+    pub fn rd_import_config_rx(&self) -> watch::Receiver<u64> {
+        self.rd_import_config_version.subscribe()
     }
 
     /// Signal that the server URL+token configuration changed so the P2P
@@ -1696,6 +1722,45 @@ pub async fn import_chips_file(
     import_chips(state, read_import_file(path).await?).await
 }
 
+/// Import participants + chip assignments + division names directly from a Race
+/// Director working directory of `.DBF` files. This is the manual "Import from
+/// Race Director" action (spec §5 step D); it works regardless of the
+/// background-poll toggle and reuses the same replace-all path as the file
+/// imports. Like the other imports it is all-or-nothing: a parse failure of any
+/// of the three files leaves every table untouched.
+pub async fn import_participants_from_rd(
+    state: &AppState,
+    dir: String,
+) -> Result<ImportSummary, ReceiverError> {
+    let import = tokio::task::spawn_blocking(move || crate::rd_dbf::load_from_dir(&dir))
+        .await
+        .map_err(|e| ReceiverError::Internal(e.to_string()))?
+        .map_err(|e| ReceiverError::BadRequest(e.to_string()))?;
+    apply_rd_import(state, import).await
+}
+
+/// Replace the participant/chip/division tables from an already-parsed RD
+/// import and rebuild the chip lookup. Shared by the manual action and the
+/// background poller so both honor the same replace-all + reload contract. All
+/// three replacements happen under a single DB lock so the tables swap together.
+pub(crate) async fn apply_rd_import(
+    state: &AppState,
+    import: crate::rd_dbf::RdImport,
+) -> Result<ImportSummary, ReceiverError> {
+    let imported = import.participants.len();
+    let divisions: Vec<(i32, String)> = import.divisions.into_iter().collect();
+    {
+        let mut db = state.db.lock().await;
+        db.replace_rd_data(&import.participants, &import.chips, &divisions)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    }
+    let resolvable_chips = reload_chip_lookup(state).await?;
+    Ok(ImportSummary {
+        imported,
+        resolvable_chips,
+    })
+}
+
 /// Enable or disable the global announcer publish toggle. The P2P reconcile
 /// loop picks up the change on its next pass (within one reconcile interval).
 pub async fn set_announcer_enabled(state: &AppState, enabled: bool) -> Result<(), ReceiverError> {
@@ -2692,6 +2757,46 @@ pub async fn clear_dbf(state: &AppState) -> Result<(), ReceiverError> {
         .map_err(|e| ReceiverError::Internal(format!("Failed to clear DBF: {e}")))
 }
 
+pub async fn get_rd_import_config(
+    state: &AppState,
+) -> Result<crate::db::RdImportConfig, ReceiverError> {
+    let db = state.db.lock().await;
+    db.load_rd_import_config()
+        .map_err(|e| ReceiverError::Internal(e.to_string()))
+}
+
+pub async fn put_rd_import_config(
+    state: &AppState,
+    body: crate::db::RdImportConfig,
+) -> Result<(), ReceiverError> {
+    let config = crate::db::RdImportConfig {
+        enabled: body.enabled,
+        dir: body.dir.trim().to_owned(),
+        interval_secs: body.interval_secs,
+    };
+    if let Err(msg) = config.validate() {
+        return Err(ReceiverError::BadRequest(msg));
+    }
+    // When enabled, the directory must exist so the poller has something to
+    // read (mirrors the DBF-writer parent-dir check).
+    if config.enabled {
+        let dir = std::path::Path::new(&config.dir);
+        if !dir.is_dir() {
+            return Err(ReceiverError::BadRequest(format!(
+                "Race Director import directory does not exist: {}",
+                dir.display()
+            )));
+        }
+    }
+    {
+        let db = state.db.lock().await;
+        db.save_rd_import_config(&config)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    }
+    state.notify_rd_import_config_changed();
+    Ok(())
+}
+
 pub async fn update_subscription_event_type(
     state: &AppState,
     forwarder_endpoint_id: &str,
@@ -3004,6 +3109,9 @@ macro_rules! receiver_command_list {
             import_chips(contents: "String") -> "ImportSummary",
             import_participants_file(path: "String") -> "ImportSummary",
             import_chips_file(path: "String") -> "ImportSummary",
+            import_participants_from_rd(dir: "String") -> "ImportSummary",
+            get_rd_import_config() -> "RdImportConfig",
+            put_rd_import_config(body: "RdImportConfig") -> "()",
             get_data_stats() -> "DataStats",
             set_announcer_enabled(enabled: "bool") -> "()",
             set_announcer_max_list_size(max_list_size: "u32") -> "()",
@@ -3217,7 +3325,8 @@ mod tests {
             .values()
             .find_map(|chips| chips.get("0580"))
             .expect("chip resolves");
-        assert_eq!(resolved, &("1".to_owned(), "John Smith".to_owned()));
+        assert_eq!(resolved.bib, "1");
+        assert_eq!(resolved.name, "John Smith");
     }
 
     #[tokio::test]
@@ -3251,7 +3360,8 @@ mod tests {
             .values()
             .find_map(|chips| chips.get("aaaa"))
             .expect("chip resolves");
-        assert_eq!(resolved, &("1".to_owned(), "René Dupont".to_owned()));
+        assert_eq!(resolved.bib, "1");
+        assert_eq!(resolved.name, "René Dupont");
     }
 
     #[tokio::test]
@@ -3313,6 +3423,7 @@ mod tests {
                 first: "Fast".to_owned(),
                 affiliation: String::new(),
                 gender: "X".to_owned(),
+                division: None,
             }])
             .unwrap();
             db.replace_bib_chips(&[(12, "chip-12".to_owned())]).unwrap();
@@ -3324,7 +3435,8 @@ mod tests {
             .values()
             .find_map(|chips| chips.get("chip-12"))
             .expect("chip resolves");
-        assert_eq!(resolved, &("12".to_owned(), "Fast Runner".to_owned()));
+        assert_eq!(resolved.bib, "12");
+        assert_eq!(resolved.name, "Fast Runner");
     }
 
     #[tokio::test]

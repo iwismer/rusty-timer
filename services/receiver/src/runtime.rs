@@ -142,6 +142,10 @@ pub async fn init_with_data_dir(
 /// event delivery, local TCP proxy replay, DBF writes, and server announcer
 /// pushes are driven by `p2p_runtime` when a P2P config is present.
 pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<ShutdownSignal>) {
+    // Race Director DBF import poller (spec §5 step B). Config-gated at runtime
+    // (it no-ops while disabled) and observes the same shutdown signal.
+    let rd_poller = tokio::spawn(crate::rd_poll::run(Arc::clone(&state), shutdown_rx.clone()));
+
     loop {
         if !matches!(*shutdown_rx.borrow(), ShutdownSignal::None) {
             break;
@@ -151,6 +155,7 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
         }
     }
 
+    rd_poller.abort();
     state.clear_stream_metrics_cache().await;
     state
         .set_connection_state(ConnectionState::Disconnected)

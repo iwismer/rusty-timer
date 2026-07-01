@@ -27,6 +27,10 @@ pub struct Participant {
     pub first: String,
     pub affiliation: String,
     pub gender: String,
+    /// Division code (from the Race Director `RUNDIV` column). `None` for the
+    /// `.ppl` format, which has no division field. Joined to a display name via
+    /// the `divisions` table on resolve.
+    pub division: Option<i32>,
 }
 
 /// Parse a single `.ppl` line.
@@ -68,6 +72,7 @@ pub fn parse_ppl_line(line: &str) -> Result<Option<Participant>, String> {
         first,
         affiliation,
         gender,
+        division: None,
     }))
 }
 

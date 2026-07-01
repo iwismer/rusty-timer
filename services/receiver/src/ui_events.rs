@@ -17,6 +17,8 @@ pub struct LastRead {
     pub timestamp: String,
     pub bib: Option<String>,
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub division: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -223,6 +225,7 @@ mod tests {
             timestamp: "14:23:05.123".to_owned(),
             bib: None,
             name: None,
+            division: None,
         });
         let json: serde_json::Value = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "last_read");
@@ -231,6 +234,26 @@ mod tests {
         assert_eq!(json["timestamp"], "14:23:05.123");
         assert!(json["bib"].is_null());
         assert!(json["name"].is_null());
+        // Division is omitted from the payload when absent.
+        assert!(json.get("division").is_none());
+    }
+
+    #[test]
+    fn last_read_carries_division_when_present() {
+        let event = ReceiverUiEvent::LastRead(LastRead {
+            forwarder_id: "fwd-01".to_owned(),
+            reader_ip: "192.168.1.10".to_owned(),
+            chip_id: "000000012345".to_owned(),
+            timestamp: "14:23:05.123".to_owned(),
+            bib: Some("42".to_owned()),
+            name: Some("Ada Lovelace".to_owned()),
+            division: Some("5k".to_owned()),
+        });
+        let json: serde_json::Value = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "last_read");
+        assert_eq!(json["bib"], "42");
+        assert_eq!(json["name"], "Ada Lovelace");
+        assert_eq!(json["division"], "5k");
     }
 
     #[test]

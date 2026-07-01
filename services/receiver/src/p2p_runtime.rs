@@ -1384,7 +1384,10 @@ async fn project_stream_ui_state(state: &Arc<AppState>, stream_id: &str, ui_key:
                 timestamp: unix_ms_to_rfc3339(last.received_unix_ms)
                     .unwrap_or_else(|| last.received_unix_ms.to_string()),
                 bib: resolved.as_ref().map(|participant| participant.bib.clone()),
-                name: resolved.map(|participant| participant.name),
+                name: resolved
+                    .as_ref()
+                    .map(|participant| participant.name.clone()),
+                division: resolved.and_then(|participant| participant.division),
             }));
     }
 
@@ -1631,10 +1634,11 @@ struct SnapshotResolver {
 impl ParticipantResolver for SnapshotResolver {
     fn resolve(&self, chip_id: &str) -> Option<ResolvedParticipant> {
         for chips in self.snapshot.values() {
-            if let Some((bib, name)) = chips.get(chip_id) {
+            if let Some(entry) = chips.get(chip_id) {
                 return Some(ResolvedParticipant {
-                    bib: bib.clone(),
-                    name: name.clone(),
+                    bib: entry.bib.clone(),
+                    name: entry.name.clone(),
+                    division: entry.division.clone(),
                 });
             }
         }

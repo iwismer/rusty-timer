@@ -157,6 +157,8 @@ pub struct AnnouncerRowRecord {
     pub display_name: String,
     pub reader_timestamp: Option<String>,
     pub received_unix_ms: i64,
+    /// Division display name resolved by the receiver, when known.
+    pub division: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1122,16 +1124,17 @@ pub fn upsert_announcer_row(
     conn.execute(
         "INSERT INTO announcer_rows (
              stream_id, seq, source_generation, chip_id, bib, display_name,
-             reader_timestamp, received_unix_ms
+             reader_timestamp, received_unix_ms, division
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(stream_id, seq) DO UPDATE SET
              source_generation = excluded.source_generation,
              chip_id = excluded.chip_id,
              bib = excluded.bib,
              display_name = excluded.display_name,
              reader_timestamp = excluded.reader_timestamp,
-             received_unix_ms = excluded.received_unix_ms",
+             received_unix_ms = excluded.received_unix_ms,
+             division = excluded.division",
         params![
             &row.stream_id,
             u64_to_i64(row.seq, "seq")?,
@@ -1144,6 +1147,7 @@ pub fn upsert_announcer_row(
             &row.display_name,
             &row.reader_timestamp,
             row.received_unix_ms,
+            &row.division,
         ],
     )?;
     Ok(())
@@ -1154,7 +1158,7 @@ pub fn list_announcer_rows_ordered(
 ) -> Result<Vec<AnnouncerRowRecord>, AnnouncerStorageError> {
     let mut stmt = conn.prepare(
         "SELECT source_generation, stream_id, seq, chip_id, bib, display_name,
-                reader_timestamp, received_unix_ms
+                reader_timestamp, received_unix_ms, division
          FROM announcer_rows
          ORDER BY received_unix_ms, stream_id, seq",
     )?;
@@ -1168,6 +1172,7 @@ pub fn list_announcer_rows_ordered(
             display_name: row.get(5)?,
             reader_timestamp: row.get(6)?,
             received_unix_ms: row.get(7)?,
+            division: row.get(8)?,
         })
     })?;
 

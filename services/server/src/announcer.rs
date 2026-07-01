@@ -12,6 +12,7 @@ pub struct AnnouncerInputEvent {
     pub display_name: String,
     pub reader_timestamp: Option<String>,
     pub received_at: DateTime<Utc>,
+    pub division: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -23,6 +24,7 @@ pub struct AnnouncerRow {
     pub display_name: String,
     pub reader_timestamp: Option<String>,
     pub received_at: DateTime<Utc>,
+    pub division: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -85,6 +87,7 @@ impl AnnouncerRuntime {
             display_name: event.display_name,
             reader_timestamp: event.reader_timestamp,
             received_at: event.received_at,
+            division: event.division,
         };
 
         self.rows.push_front(row.clone());
@@ -122,6 +125,7 @@ mod tests {
             reader_timestamp: Some("10:00:00".to_owned()),
             received_at: Utc.with_ymd_and_hms(2026, 1, 1, 10, 0, 0).unwrap()
                 + chrono::Duration::seconds(secs),
+            division: None,
         }
     }
 

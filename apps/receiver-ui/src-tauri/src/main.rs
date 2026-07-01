@@ -277,6 +277,35 @@ async fn import_chips_file(
 }
 
 #[tauri::command]
+async fn import_participants_from_rd(
+    state: State<'_, Arc<AppState>>,
+    dir: String,
+) -> CmdResult<control_api::ImportSummary> {
+    control_api::import_participants_from_rd(&state, dir)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_rd_import_config(
+    state: State<'_, Arc<AppState>>,
+) -> CmdResult<receiver::db::RdImportConfig> {
+    control_api::get_rd_import_config(&state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn put_rd_import_config(
+    state: State<'_, Arc<AppState>>,
+    body: receiver::db::RdImportConfig,
+) -> CmdResult<()> {
+    control_api::put_rd_import_config(&state, body)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_data_stats(state: State<'_, Arc<AppState>>) -> CmdResult<receiver::db::DataStats> {
     control_api::get_data_stats(&state)
         .await
@@ -1129,6 +1158,7 @@ mod tests {
                 timestamp: "t".to_owned(),
                 bib: None,
                 name: None,
+                division: None,
             }),
             ReceiverUiEvent::StreamMetricsUpdated(StreamMetricsPayload {
                 forwarder_id: "f".to_owned(),

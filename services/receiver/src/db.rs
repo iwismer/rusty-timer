@@ -138,6 +138,38 @@ impl DbfConfig {
         Ok(())
     }
 }
+
+/// Default poll cadence for the Race Director background import (seconds).
+pub const DEFAULT_RD_IMPORT_INTERVAL_SECS: u32 = 15;
+
+/// Configuration for the Race Director DBF participant/chip import. Parallels
+/// [`DbfConfig`] (which drives the `IPICO.DBF` *writer*); this drives the
+/// *reader* / import poller. Persisted in the `profile` row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RdImportConfig {
+    /// Enables the background poll. The manual import action ignores this.
+    pub enabled: bool,
+    /// RD working directory containing `checkchip.dbf` / `RACE.DBF` /
+    /// `DIVISION.DBF`. Uses `String` (not `PathBuf`) for serde/cross-platform
+    /// parity with [`DbfConfig`].
+    pub dir: String,
+    /// Poll cadence in seconds.
+    pub interval_secs: u32,
+}
+
+impl RdImportConfig {
+    /// Validate the config. A non-empty directory is required when enabled and
+    /// the interval must be at least one second.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.enabled && self.dir.trim().is_empty() {
+            return Err("Race Director import directory must not be empty when enabled".to_owned());
+        }
+        if self.interval_secs == 0 {
+            return Err("Race Director import interval must be at least 1 second".to_owned());
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CursorRecord {
     pub forwarder_id: String,
@@ -253,11 +285,12 @@ impl Db {
         // delete+insert (mirrors dbf handling).
         let announcer_enabled = self.load_announcer_enabled()?;
         let announcer_max_list_size = self.load_announcer_max_list_size()?;
+        let rd_import = self.load_rd_import_config()?;
         let tx = self.conn.transaction()?;
         tx.execute_batch("DELETE FROM profile")?;
         tx.execute(
-            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, dbf_path, announcer_enabled, announcer_max_list_size) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, &dbf_config.path, i64::from(announcer_enabled), i64::from(announcer_max_list_size)],
+            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, dbf_path, announcer_enabled, announcer_max_list_size, rd_import_enabled, rd_import_dir, rd_import_interval_secs) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, &dbf_config.path, i64::from(announcer_enabled), i64::from(announcer_max_list_size), i64::from(rd_import.enabled), &rd_import.dir, i64::from(rd_import.interval_secs)],
         )?;
         tx.commit()?;
         Ok(())
@@ -497,9 +530,60 @@ impl Db {
         tx.execute_batch("DELETE FROM participants")?;
         for p in participants {
             tx.execute(
-                "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![p.bib, &p.last, &p.first, &p.affiliation, &p.gender],
+                "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender, division)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![p.bib, &p.last, &p.first, &p.affiliation, &p.gender, p.division],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Replace all division-code -> name entries (upload-replaces-all). Only
+    /// Race Director imports populate this; other import sources clear it.
+    pub fn replace_divisions(&mut self, divisions: &[(i32, String)]) -> DbResult<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute_batch("DELETE FROM divisions")?;
+        for (divno, name) in divisions {
+            tx.execute(
+                "INSERT OR REPLACE INTO divisions (divno, name) VALUES (?1, ?2)",
+                rusqlite::params![divno, name],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Replace participants, bib->chip assignments, and divisions together in a
+    /// single transaction (upload-replaces-all across all three tables). Used
+    /// by the Race Director import so the three tables swap atomically: a write
+    /// error rolls the whole set back rather than leaving a partially-updated
+    /// mix of old and new data.
+    pub fn replace_rd_data(
+        &mut self,
+        participants: &[crate::participants::Participant],
+        chips: &[(i64, String)],
+        divisions: &[(i32, String)],
+    ) -> DbResult<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute_batch("DELETE FROM participants; DELETE FROM bib_chips; DELETE FROM divisions")?;
+        for p in participants {
+            tx.execute(
+                "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender, division)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![p.bib, &p.last, &p.first, &p.affiliation, &p.gender, p.division],
+            )?;
+        }
+        for (bib, chip_id) in chips {
+            tx.execute(
+                "INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES (?1, ?2)",
+                rusqlite::params![chip_id, bib],
+            )?;
+        }
+        for (divno, name) in divisions {
+            tx.execute(
+                "INSERT OR REPLACE INTO divisions (divno, name) VALUES (?1, ?2)",
+                rusqlite::params![divno, name],
             )?;
         }
         tx.commit()?;
@@ -520,25 +604,36 @@ impl Db {
         Ok(())
     }
 
-    /// Build the chip-id -> (bib, "first last") lookup by joining `bib_chips`
-    /// to `participants`. Chips with no matching participant are skipped
-    /// (inner join), matching the legacy behavior. The bib is rendered as a
-    /// canonical decimal string via its i64 value.
+    /// Build the chip-id -> participant-entry lookup by joining `bib_chips` to
+    /// `participants`. Chips with no matching participant are skipped (inner
+    /// join), matching the legacy behavior. The bib is rendered as a canonical
+    /// decimal string via its i64 value. The participant's division code (if
+    /// any) is left-joined to `divisions` for a display name; a missing name
+    /// (or a `.ppl` import with no division) yields `None`.
     pub fn load_chip_to_participant(
         &self,
-    ) -> DbResult<std::collections::HashMap<String, (String, String)>> {
+    ) -> DbResult<std::collections::HashMap<String, crate::control_api::ChipEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT c.chip_id, c.bib, p.first, p.last
+            "SELECT c.chip_id, c.bib, p.first, p.last, d.name
              FROM bib_chips c
-             JOIN participants p ON p.bib = c.bib",
+             JOIN participants p ON p.bib = c.bib
+             LEFT JOIN divisions d ON d.divno = p.division",
         )?;
         let rows = stmt.query_map([], |r| {
             let chip_id: String = r.get(0)?;
             let bib: i64 = r.get(1)?;
             let first: String = r.get(2)?;
             let last: String = r.get(3)?;
+            let division: Option<String> = r.get(4)?;
             let name = format!("{first} {last}").trim().to_owned();
-            Ok((chip_id, (bib.to_string(), name)))
+            Ok((
+                chip_id,
+                crate::control_api::ChipEntry {
+                    bib: bib.to_string(),
+                    name,
+                    division,
+                },
+            ))
         })?;
         let mut map = std::collections::HashMap::new();
         for row in rows {
@@ -1147,6 +1242,26 @@ impl Db {
             "ALTER TABLE earliest_epochs ADD COLUMN reader_ip TEXT;",
             "reader_ip",
         )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE participants ADD COLUMN division INTEGER;",
+            "division",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE profile ADD COLUMN rd_import_enabled INTEGER NOT NULL DEFAULT 0;",
+            "rd_import_enabled",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE profile ADD COLUMN rd_import_dir TEXT NOT NULL DEFAULT '';",
+            "rd_import_dir",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE profile ADD COLUMN rd_import_interval_secs INTEGER NOT NULL DEFAULT 15;",
+            "rd_import_interval_secs",
+        )?;
         migrate_subscriptions_to_endpoint_stream_shape(&self.conn)?;
         migrate_cursors_to_stream_id_shape(&self.conn)?;
         migrate_earliest_epochs_to_stream_id_shape(&self.conn)?;
@@ -1314,6 +1429,54 @@ impl Db {
         let changed = self.conn.execute(
             "UPDATE profile SET dbf_enabled = ?1, dbf_path = ?2",
             rusqlite::params![config.enabled as i64, config.path],
+        )?;
+        if changed == 0 {
+            return Err(DbError::ProfileMissing);
+        }
+        Ok(())
+    }
+
+    pub fn load_rd_import_config(&self) -> DbResult<RdImportConfig> {
+        let result: Option<(i64, String, i64)> = self
+            .conn
+            .query_row(
+                "SELECT rd_import_enabled, rd_import_dir, rd_import_interval_secs \
+                 FROM profile LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        Ok(match result {
+            Some((enabled, dir, interval)) => RdImportConfig {
+                enabled: enabled != 0,
+                dir,
+                interval_secs: u32::try_from(interval)
+                    .unwrap_or(DEFAULT_RD_IMPORT_INTERVAL_SECS)
+                    .max(1),
+            },
+            None => RdImportConfig {
+                enabled: false,
+                dir: String::new(),
+                interval_secs: DEFAULT_RD_IMPORT_INTERVAL_SECS,
+            },
+        })
+    }
+
+    pub fn save_rd_import_config(&self, config: &RdImportConfig) -> DbResult<()> {
+        if let Err(msg) = config.validate() {
+            return Err(DbError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                msg,
+            )));
+        }
+        let changed = self.conn.execute(
+            "UPDATE profile SET rd_import_enabled = ?1, rd_import_dir = ?2, \
+             rd_import_interval_secs = ?3",
+            rusqlite::params![
+                i64::from(config.enabled),
+                config.dir,
+                i64::from(config.interval_secs),
+            ],
         )?;
         if changed == 0 {
             return Err(DbError::ProfileMissing);
@@ -1819,11 +1982,15 @@ mod tests {
             first: "B".to_owned(),
             affiliation: String::new(),
             gender: "M".to_owned(),
+            division: None,
         }])
         .unwrap();
         db.replace_bib_chips(&[(1i64, "0580".to_owned())]).unwrap();
         let map = db.load_chip_to_participant().unwrap();
-        assert_eq!(map.get("0580"), Some(&("1".to_owned(), "B A".to_owned())));
+        let entry = map.get("0580").unwrap();
+        assert_eq!(entry.bib, "1");
+        assert_eq!(entry.name, "B A");
+        assert_eq!(entry.division, None);
     }
 
     #[test]
@@ -1840,15 +2007,15 @@ mod tests {
             first: "First".to_owned(),
             affiliation: "Team".to_owned(),
             gender: "X".to_owned(),
+            division: None,
         }])
         .unwrap();
         db.replace_bib_chips(&[(5, "abc".to_owned())]).unwrap();
         let map = db.load_chip_to_participant().unwrap();
         assert_eq!(map.len(), 1);
-        assert_eq!(
-            map.get("abc"),
-            Some(&("5".to_owned(), "First Last".to_owned()))
-        );
+        let entry = map.get("abc").unwrap();
+        assert_eq!(entry.bib, "5");
+        assert_eq!(entry.name, "First Last");
     }
 
     #[test]
@@ -2277,6 +2444,7 @@ mod tests {
             first: "First".to_owned(),
             affiliation: String::new(),
             gender: "X".to_owned(),
+            division: None,
         }])
         .unwrap();
         db.replace_bib_chips(&[(1, "0a1b".to_owned())]).unwrap();

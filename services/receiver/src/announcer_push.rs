@@ -39,6 +39,8 @@ use crate::ui_events::chip_id_from_raw_frame;
 pub struct ResolvedParticipant {
     pub bib: String,
     pub name: String,
+    /// Division display name, when the participant has a known division.
+    pub division: Option<String>,
 }
 
 /// Narrow resolver from a chip ID to a participant identity.
@@ -75,6 +77,8 @@ pub struct AnnouncerRow {
     pub bib: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub division: Option<String>,
 }
 
 /// Transport abstraction for delivering announcer rows downstream.
@@ -112,6 +116,26 @@ impl ServerAnnouncerClient {
     }
 }
 
+/// Build the JSON body posted to the server `/announcer/rows` endpoint for one
+/// row. Extracted so the wire shape (including the `division` field) is unit
+/// testable without a live server. Server `bib` is an optional integer; a
+/// non-numeric bib is sent as null rather than failing the whole push.
+fn announcer_row_request_body(row: &AnnouncerRow, max_list_size: u32) -> serde_json::Value {
+    let bib = row.bib.as_deref().and_then(|b| b.parse::<i32>().ok());
+    serde_json::json!({
+        "announcer_source_generation": row.announcer_source_generation,
+        "stream_id": row.stream_id,
+        "seq": row.seq,
+        "chip_id": row.chip_id,
+        "bib": bib,
+        "display_name": row.name.clone().unwrap_or_default(),
+        "division": row.division,
+        "reader_timestamp": serde_json::Value::Null,
+        "received_unix_ms": row.received_unix_ms,
+        "max_list_size": max_list_size,
+    })
+}
+
 impl AnnouncerPushClient for ServerAnnouncerClient {
     fn push(&self, rows: &[AnnouncerRow], max_list_size: u32) -> Result<(), AnnouncerPushError> {
         if rows.is_empty() {
@@ -123,20 +147,7 @@ impl AnnouncerPushClient for ServerAnnouncerClient {
             .build()
             .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
         for row in rows {
-            // Server `bib` is an optional integer; a non-numeric bib is sent
-            // as null rather than failing the whole push.
-            let bib = row.bib.as_deref().and_then(|b| b.parse::<i32>().ok());
-            let body = serde_json::json!({
-                "announcer_source_generation": row.announcer_source_generation,
-                "stream_id": row.stream_id,
-                "seq": row.seq,
-                "chip_id": row.chip_id,
-                "bib": bib,
-                "display_name": row.name.clone().unwrap_or_default(),
-                "reader_timestamp": serde_json::Value::Null,
-                "received_unix_ms": row.received_unix_ms,
-                "max_list_size": max_list_size,
-            });
+            let body = announcer_row_request_body(row, max_list_size);
             let response = client
                 .post(&self.rows_url)
                 .bearer_auth(&self.token)
@@ -384,7 +395,8 @@ pub fn push_announcer_rows(
                 announcer_source_generation: generation,
                 chip_id,
                 bib: resolved.as_ref().map(|p| p.bib.clone()),
-                name: resolved.map(|p| p.name),
+                name: resolved.as_ref().map(|p| p.name.clone()),
+                division: resolved.and_then(|p| p.division),
             }
         })
         .collect();
@@ -481,6 +493,7 @@ mod tests {
                     ResolvedParticipant {
                         bib: (*bib).to_owned(),
                         name: (*name).to_owned(),
+                        division: None,
                     },
                 )
             })
@@ -518,6 +531,57 @@ mod tests {
         }
         assert_eq!(rows[0].received_unix_ms, 1_700_000_000_100);
         assert_eq!(rows[1].received_unix_ms, 1_700_000_000_200);
+    }
+
+    #[test]
+    fn announcer_row_request_body_includes_division() {
+        let row = AnnouncerRow {
+            stream_id: "finish-line".to_owned(),
+            seq: 7,
+            received_unix_ms: 1_700_000_000_100,
+            announcer_source_generation: 3,
+            chip_id: "000000012345".to_owned(),
+            bib: Some("42".to_owned()),
+            name: Some("Ada Lovelace".to_owned()),
+            division: Some("5k".to_owned()),
+        };
+        let body = announcer_row_request_body(&row, 25);
+        assert_eq!(body["division"], "5k");
+        assert_eq!(body["bib"], 42);
+        assert_eq!(body["display_name"], "Ada Lovelace");
+        // A non-numeric/absent division serializes as null rather than being dropped.
+        let mut row_no_div = row;
+        row_no_div.division = None;
+        let body = announcer_row_request_body(&row_no_div, 25);
+        assert!(body["division"].is_null());
+    }
+
+    #[test]
+    fn pushes_division_into_announcer_row_payload() {
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = "127.0.0.1:10000";
+        let raw = sample_raw_frame();
+        insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
+
+        let client = RecordingClient::default();
+        // A resolver that carries a division display name through resolve.
+        let resolver = |chip_id: &str| {
+            (chip_id == "000000012345").then(|| ResolvedParticipant {
+                bib: "42".to_owned(),
+                name: "Ada Lovelace".to_owned(),
+                division: Some("5k".to_owned()),
+            })
+        };
+
+        push_announcer_rows(&db, &client, &resolver, stream_id, 7, 1_700_000_010_000).unwrap();
+        let rows = client.all_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].division.as_deref(), Some("5k"));
+        // And it survives serialization to the wire payload.
+        let json = serde_json::to_value(&rows[0]).unwrap();
+        assert_eq!(json["division"], "5k");
+        assert_eq!(json["bib"], "42");
+        assert_eq!(json["name"], "Ada Lovelace");
     }
 
     #[test]
