@@ -52,6 +52,13 @@ const apiMocks = vi.hoisted(() => ({
     interval_secs: 15,
   }),
   putRdImportConfig: vi.fn().mockResolvedValue(undefined),
+  getDataStats: vi.fn().mockResolvedValue({
+    participants: 0,
+    chips: 0,
+    matched_participants: 0,
+    participants_without_chips: 0,
+    resolvable_chips: 0,
+  }),
   updateSubscriptionEventType: vi.fn().mockResolvedValue(undefined),
   getStreamMetrics: vi.fn().mockResolvedValue([]),
   reconnectServer: vi.fn().mockResolvedValue(undefined),
@@ -225,6 +232,29 @@ describe("receiver updater store", () => {
     expect(store.editRdImportEnabled).toBe(true);
     expect(store.editRdImportDir).toBe("D:\\Race\\Files");
     expect(store.editRdImportIntervalSecs).toBe(30);
+  });
+
+  it("hydrates participant and chip data stats on initial load", async () => {
+    apiMocks.getDataStats.mockResolvedValueOnce({
+      participants: 120,
+      chips: 118,
+      matched_participants: 117,
+      participants_without_chips: 3,
+      resolvable_chips: 117,
+    });
+
+    const { initStore, store } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    expect(store.dataStats).toEqual({
+      participants: 120,
+      chips: 118,
+      matched_participants: 117,
+      participants_without_chips: 3,
+      resolvable_chips: 117,
+    });
   });
 
   it("keeps loading status, streams, and logs when connections fail to load", async () => {

@@ -63,6 +63,13 @@ const apiMocks = vi.hoisted(() => ({
   }),
   putRdImportConfig: vi.fn().mockResolvedValue(undefined),
   getStreamMetrics: vi.fn().mockResolvedValue([]),
+  getDataStats: vi.fn().mockResolvedValue({
+    participants: 0,
+    chips: 0,
+    matched_participants: 0,
+    participants_without_chips: 0,
+    resolvable_chips: 0,
+  }),
 }));
 
 vi.mock("$lib/api", () => apiMocks);

@@ -137,6 +137,17 @@
       data of that type.
     </p>
 
+    {#if store.rdImportEnabled}
+      <p
+        data-testid="rd-auto-import-warning"
+        class="mt-3 rounded-md border border-status-warn/40 bg-status-warn/10 px-3 py-2 text-xs text-status-warn"
+      >
+        Race Director auto import is enabled for {store.rdImportDir}. You do not
+        need to manually import participant or chip files unless you want to
+        replace the auto-imported data.
+      </p>
+    {/if}
+
     <div class="mt-4 grid gap-4">
       <div>
         <p class="text-xs font-medium text-text-muted">Participants (.ppl)</p>

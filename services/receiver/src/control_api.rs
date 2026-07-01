@@ -1755,6 +1755,7 @@ pub(crate) async fn apply_rd_import(
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     }
     let resolvable_chips = reload_chip_lookup(state).await?;
+    state.emit_resync();
     Ok(ImportSummary {
         imported,
         resolvable_chips,
@@ -3318,6 +3319,36 @@ mod tests {
             .expect("chip resolves");
         assert_eq!(resolved.bib, "1");
         assert_eq!(resolved.name, "John Smith");
+    }
+
+    #[tokio::test]
+    async fn rd_import_updates_stats_and_requests_ui_resync() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let mut ui_rx = state.ui_tx.subscribe();
+        let import = crate::rd_dbf::RdImport {
+            participants: vec![crate::participants::Participant {
+                bib: 7,
+                last: "Runner".to_owned(),
+                first: "Road".to_owned(),
+                affiliation: String::new(),
+                gender: "X".to_owned(),
+                division: None,
+            }],
+            chips: vec![(7, "058003799177".to_owned())],
+            divisions: std::collections::HashMap::new(),
+        };
+
+        apply_rd_import(&state, import).await.unwrap();
+
+        let stats = get_data_stats(&state).await.unwrap();
+        assert_eq!(stats.participants, 1);
+        assert_eq!(stats.chips, 1);
+        assert_eq!(stats.resolvable_chips, 1);
+        let event = tokio::time::timeout(std::time::Duration::from_millis(100), ui_rx.recv())
+            .await
+            .expect("RD import should request a UI resync")
+            .expect("UI event channel should stay open");
+        assert!(matches!(event, ReceiverUiEvent::Resync));
     }
 
     #[tokio::test]

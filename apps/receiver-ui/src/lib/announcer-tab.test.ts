@@ -15,6 +15,8 @@ const mockState = vi.hoisted(() => ({
     importError: null as string | null,
     participantsFilePath: null as string | null,
     chipsFilePath: null as string | null,
+    rdImportEnabled: false,
+    rdImportDir: "C:\\Winrace\\Files",
     dataStats: null as {
       participants: number;
       chips: number;
@@ -62,6 +64,8 @@ describe("AnnouncerTab", () => {
     mockState.store.importError = null;
     mockState.store.participantsFilePath = null;
     mockState.store.chipsFilePath = null;
+    mockState.store.rdImportEnabled = false;
+    mockState.store.rdImportDir = "C:\\Winrace\\Files";
     mockState.store.dataStats = null;
   });
 
@@ -123,6 +127,20 @@ describe("AnnouncerTab", () => {
 
     expect(mockState.importParticipantsFile).toHaveBeenCalledWith(
       "C:\\race\\race.ppl",
+    );
+  });
+
+  it("warns that manual import is not needed when Race Director auto import is enabled", () => {
+    mockState.store.rdImportEnabled = true;
+    mockState.store.rdImportDir = "D:\\Race\\Files";
+
+    render(AnnouncerTab);
+
+    expect(screen.getByTestId("rd-auto-import-warning")).toHaveTextContent(
+      "Race Director auto import is enabled",
+    );
+    expect(screen.getByTestId("rd-auto-import-warning")).toHaveTextContent(
+      "D:\\Race\\Files",
     );
   });
 

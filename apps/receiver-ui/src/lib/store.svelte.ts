@@ -752,6 +752,7 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
       nextLogs,
       nextMode,
       nextMetrics,
+      nextDataStats,
     ] = await Promise.all([
       api.getStatus(),
       api.getConnections().catch(() => null),
@@ -764,6 +765,10 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
           e,
         );
         return [] as api.StreamMetrics[];
+      }),
+      api.getDataStats().catch((e: unknown) => {
+        console.warn("getDataStats failed, leaving cached data stats:", e);
+        return null;
       }),
     ]);
 
@@ -787,6 +792,9 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
         merged.set(streamKey(m.forwarder_id, m.reader_ip), m);
       }
       store.streamMetrics = merged;
+    }
+    if (nextDataStats) {
+      store.dataStats = nextDataStats;
     }
     store.logEntries = nextLogs.entries;
     store.forwarders = null;
