@@ -2,7 +2,7 @@
   "productName": "Rusty Timer Receiver",
   "identifier": "com.rusty-timer.receiver",
   "mainBinaryName": "receiver",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
