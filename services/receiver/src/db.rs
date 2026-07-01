@@ -70,6 +70,8 @@ pub enum DbError {
     Json(#[from] serde_json::Error),
     #[error("Profile missing")]
     ProfileMissing,
+    #[error("conflicting duplicate for seq {seq}")]
+    ConflictingDuplicate { seq: i64 },
 }
 pub type DbResult<T> = Result<T, DbError>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +175,18 @@ pub struct ReceivedEventInsert<'a> {
     pub reader_timestamp: Option<&'a str>,
     pub received_unix_ms: i64,
     pub dbf_delivered_unix_ms: Option<i64>,
+}
+
+/// One record for [`Db::persist_received_batch`], pairing the row to insert
+/// with whether the sender supplied an authoritative `received_unix_ms`.
+pub struct ReceivedBatchRecord<'a> {
+    /// The row to insert (idempotent on `(stream_id, seq)`).
+    pub insert: ReceivedEventInsert<'a>,
+    /// True when the wire `received_unix_ms` was non-zero (sender-originated),
+    /// so it participates in conflicting-duplicate detection. When false the
+    /// receiver supplied a local default that must not trigger a false conflict
+    /// against a differently-defaulted stored row.
+    pub received_unix_ms_authoritative: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1060,6 +1074,93 @@ impl Db {
         Ok(last_seq)
     }
 
+    /// Persist a whole batch of received events and advance the contiguous
+    /// cursor in a single `IMMEDIATE` transaction, returning the durable
+    /// contiguous cursor.
+    ///
+    /// This collapses what autocommit [`Db::insert_received_event`] calls would
+    /// otherwise cost as one fsync per row into a single fsync per batch — the
+    /// dominant throughput ceiling on spinning disks. The cursor advance runs
+    /// in the same transaction so the rows and the cursor commit atomically
+    /// (one consistent crash-recovery point) under that single fsync, which is
+    /// what lets the caller uphold the insert-before-ack contract: the returned
+    /// cursor is durable before any ack is sent.
+    ///
+    /// Idempotent on `(stream_id, seq)`. A duplicate whose immutable payload
+    /// differs from the stored row rolls the entire batch back and returns
+    /// [`DbError::ConflictingDuplicate`]; the caller must not ack past it.
+    pub fn persist_received_batch(
+        &mut self,
+        stream_id: &str,
+        records: &[ReceivedBatchRecord<'_>],
+    ) -> DbResult<i64> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        {
+            let mut insert_stmt = tx.prepare_cached(
+                "INSERT INTO received_events
+                 (stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT (stream_id, seq) DO NOTHING",
+            )?;
+            let mut load_stmt = tx.prepare_cached(
+                "SELECT epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms
+                 FROM received_events WHERE stream_id = ?1 AND seq = ?2",
+            )?;
+            for record in records {
+                let insert = &record.insert;
+                let changed = insert_stmt.execute(rusqlite::params![
+                    insert.stream_id,
+                    insert.seq,
+                    insert.epoch,
+                    insert.raw_frame,
+                    insert.read_kind,
+                    insert.reader_timestamp,
+                    insert.received_unix_ms,
+                    insert.dbf_delivered_unix_ms,
+                ])?;
+                if changed > 0 {
+                    continue;
+                }
+                // Duplicate (stream_id, seq): read the stored row back within
+                // this same transaction (read-your-writes also covers rows
+                // inserted earlier in this batch) and reject only if an
+                // immutable field diverges. A locally-defaulted received_unix_ms
+                // (non-authoritative) is excluded so a benign resend never
+                // conflicts against a differently-defaulted stored row.
+                let existing = load_stmt
+                    .query_row(rusqlite::params![insert.stream_id, insert.seq], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    })
+                    .optional()?;
+                if let Some((epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms)) =
+                    existing
+                {
+                    let received_conflicts = record.received_unix_ms_authoritative
+                        && received_unix_ms != insert.received_unix_ms;
+                    let conflicts = epoch != insert.epoch
+                        || raw_frame != insert.raw_frame
+                        || read_kind != insert.read_kind
+                        || reader_timestamp.as_deref() != insert.reader_timestamp
+                        || received_conflicts;
+                    if conflicts {
+                        return Err(DbError::ConflictingDuplicate { seq: insert.seq });
+                    }
+                }
+            }
+        }
+        let cursor = advance_cursor_contiguous_prefix_tx(&tx, stream_id)?;
+        tx.commit()?;
+        Ok(cursor)
+    }
+
     pub fn save_gap_marker(&self, marker: &GapMarkerInsert<'_>) -> DbResult<()> {
         self.conn.execute(
             "INSERT INTO gap_markers
@@ -1098,7 +1199,14 @@ impl Db {
     }
 
     fn apply_pragmas(&self) -> DbResult<()> {
-        self.conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=1000; PRAGMA foreign_keys=ON;")?;
+        // synchronous=NORMAL (not FULL) in WAL mode: WAL is only fsynced at
+        // checkpoints, not on every commit. This is crash-safe (power loss can
+        // lose at most the last few commits, never corrupt the DB) and the
+        // delivery model tolerates a lost tail: events are at-least-once and
+        // the receiver resumes from its persisted contiguous cursor, so the
+        // forwarder resends anything not durably committed (it retains acked
+        // events for min_retention_ms rather than pruning on ack).
+        self.conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=1000; PRAGMA foreign_keys=ON;")?;
         Ok(())
     }
     fn apply_schema(&self) -> DbResult<()> {
@@ -1675,6 +1783,55 @@ fn parse_event_type_column(raw: String, column: usize) -> rusqlite::Result<Event
 /// two user-provided strings while keeping the value human-readable in SQLite.
 fn legacy_cursor_stream_id(fwd: &str, ip: &str) -> String {
     format!("legacy:{fwd}\u{1f}{ip}")
+}
+
+/// Advance the contiguous cursor for `stream_id` within an open transaction,
+/// returning the resulting `last_seq`.
+///
+/// Walks `received_events` lazily from the current cursor and stops at the
+/// first gap: because the query filters `seq > last_seq` and orders ascending,
+/// the first row that is not exactly `last_seq + 1` ends the contiguous prefix.
+/// The walk therefore touches only the contiguous run being advanced (never
+/// the whole backlog behind a persistent gap), keeping per-batch work bounded.
+fn advance_cursor_contiguous_prefix_tx(
+    tx: &rusqlite::Transaction<'_>,
+    stream_id: &str,
+) -> DbResult<i64> {
+    let current: Option<i64> = tx
+        .query_row(
+            "SELECT last_seq FROM cursors WHERE stream_id = ?1",
+            rusqlite::params![stream_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let mut last_seq = current.unwrap_or(0);
+
+    {
+        let mut stmt = tx.prepare_cached(
+            "SELECT seq FROM received_events WHERE stream_id = ?1 AND seq > ?2 ORDER BY seq",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![stream_id, last_seq])?;
+        while let Some(row) = rows.next()? {
+            let seq: i64 = row.get(0)?;
+            if seq == last_seq + 1 {
+                last_seq = seq;
+            } else {
+                break;
+            }
+        }
+    }
+
+    let updated = tx.execute(
+        "UPDATE cursors SET last_seq = ?2 WHERE stream_id = ?1 AND last_seq < ?2",
+        rusqlite::params![stream_id, last_seq],
+    )?;
+    if updated == 0 && current.is_none() {
+        tx.execute(
+            "INSERT INTO cursors (stream_id, last_seq) VALUES (?1, ?2)",
+            rusqlite::params![stream_id, last_seq],
+        )?;
+    }
+    Ok(last_seq)
 }
 
 fn received_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReceivedEvent> {
@@ -3054,6 +3211,154 @@ mod tests {
         assert!(db.insert_received_event(&event).unwrap());
 
         assert_eq!(db.advance_cursor_contiguous_prefix(stream_id).unwrap(), 4);
+    }
+
+    fn batch_record<'a>(
+        stream_id: &'a str,
+        seq: i64,
+        raw_frame: &'a [u8],
+        received_unix_ms: i64,
+    ) -> ReceivedBatchRecord<'a> {
+        ReceivedBatchRecord {
+            insert: ReceivedEventInsert {
+                stream_id,
+                seq,
+                epoch: 1,
+                raw_frame,
+                read_kind: "chip",
+                reader_timestamp: None,
+                received_unix_ms,
+                dbf_delivered_unix_ms: None,
+            },
+            received_unix_ms_authoritative: received_unix_ms != 0,
+        }
+    }
+
+    #[test]
+    fn persist_received_batch_inserts_all_and_advances_cursor() {
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_id = "10.0.0.5:10000";
+        // A contiguous batch persists every row in one transaction and returns
+        // the advanced contiguous cursor.
+        let cursor = db
+            .persist_received_batch(
+                stream_id,
+                &[
+                    batch_record(stream_id, 1, b"a", 101),
+                    batch_record(stream_id, 2, b"b", 102),
+                    batch_record(stream_id, 3, b"c", 103),
+                ],
+            )
+            .unwrap();
+        assert_eq!(cursor, 3);
+        assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 3);
+        let seqs: Vec<i64> = db
+            .load_received_events(stream_id)
+            .unwrap()
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        assert_eq!(seqs, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn persist_received_batch_stops_cursor_at_gap() {
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_id = "10.0.0.5:10000";
+        // seq 3 is missing: rows persist but the cursor only advances over the
+        // contiguous prefix (1..=2).
+        let cursor = db
+            .persist_received_batch(
+                stream_id,
+                &[
+                    batch_record(stream_id, 1, b"a", 101),
+                    batch_record(stream_id, 2, b"b", 102),
+                    batch_record(stream_id, 4, b"d", 104),
+                ],
+            )
+            .unwrap();
+        assert_eq!(cursor, 2);
+        let seqs: Vec<i64> = db
+            .load_received_events(stream_id)
+            .unwrap()
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        assert_eq!(seqs, vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn persist_received_batch_is_atomic_on_conflict() {
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_id = "10.0.0.5:10000";
+        // Pre-store seq 5 with a known payload (gap at 1..4 keeps cursor at 0).
+        db.persist_received_batch(stream_id, &[batch_record(stream_id, 5, b"orig", 105)])
+            .unwrap();
+        assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 0);
+
+        // A batch with two new rows followed by a conflicting duplicate of seq
+        // 5 must roll the WHOLE batch back: the new rows are not persisted and
+        // the cursor does not advance. This is the deliberate all-or-nothing
+        // change from per-row autocommit to one transaction per batch.
+        let err = db
+            .persist_received_batch(
+                stream_id,
+                &[
+                    batch_record(stream_id, 1, b"a", 101),
+                    batch_record(stream_id, 2, b"b", 102),
+                    batch_record(stream_id, 5, b"tampered", 105),
+                ],
+            )
+            .unwrap_err();
+        assert!(matches!(err, DbError::ConflictingDuplicate { seq: 5 }));
+
+        let seqs: Vec<i64> = db
+            .load_received_events(stream_id)
+            .unwrap()
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        assert_eq!(
+            seqs,
+            vec![5],
+            "rolled back: only the pre-stored row remains"
+        );
+        assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 0);
+    }
+
+    #[test]
+    fn persist_received_batch_benign_resend_is_idempotent() {
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_id = "10.0.0.5:10000";
+        let first = db
+            .persist_received_batch(
+                stream_id,
+                &[
+                    batch_record(stream_id, 1, b"a", 101),
+                    batch_record(stream_id, 2, b"b", 102),
+                ],
+            )
+            .unwrap();
+        assert_eq!(first, 2);
+        // Replaying an overlapping batch with identical payloads collapses to
+        // the existing rows and keeps advancing the cursor without error.
+        let second = db
+            .persist_received_batch(
+                stream_id,
+                &[
+                    batch_record(stream_id, 2, b"b", 102),
+                    batch_record(stream_id, 3, b"c", 103),
+                ],
+            )
+            .unwrap();
+        assert_eq!(second, 3);
+        let seqs: Vec<i64> = db
+            .load_received_events(stream_id)
+            .unwrap()
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        assert_eq!(seqs, vec![1, 2, 3]);
     }
 
     #[test]

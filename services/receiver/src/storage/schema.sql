@@ -2,7 +2,7 @@
 -- Authority: receiver durable store schema.
 -- Required PRAGMAs (set at connection open, not in this file):
 --   PRAGMA journal_mode=WAL;
---   PRAGMA synchronous=FULL;
+--   PRAGMA synchronous=NORMAL;
 --   PRAGMA wal_autocheckpoint=1000;
 --   PRAGMA foreign_keys=ON;
 -- At startup, run PRAGMA integrity_check; exit if result != 'ok'.

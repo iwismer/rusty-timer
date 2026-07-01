@@ -69,6 +69,13 @@ use crate::ui_events::ReceiverUiEvent;
 /// Capacity of each per-stream durable-hint broadcast channel.
 const HINT_CHANNEL_CAPACITY: usize = 1024;
 
+/// Debounce window for coalescing a burst of per-batch durable hints into one
+/// downstream pass. The forwarder pipelines many small live batches, so without
+/// coalescing every hint would trigger a full DBF/announcer/UI-projection pass
+/// over the shared DB lock — the dominant per-batch tax during catch-up. One
+/// short wait lets a burst accumulate so each worker runs a single pass for it.
+const HINT_DEBOUNCE: Duration = Duration::from_millis(50);
+
 /// Minimum allowed reconcile interval. Intervals below this are rejected by the
 /// parser and by [`start_receiver_p2p`] to avoid hot-polling subscriptions. The
 /// per-stream delivery retry timer (DBF + announcer) reuses the reconcile
@@ -1316,6 +1323,15 @@ fn resolve_local_port(sub: &StreamSubscription) -> Option<u16> {
         .or_else(|| ui_reader_ip(sub).as_deref().and_then(default_port))
 }
 
+/// After a first durable hint, wait one [`HINT_DEBOUNCE`] window and drain any
+/// hints that piled up during it, so the caller runs exactly one downstream
+/// pass for a whole burst of per-batch hints instead of one pass per batch.
+async fn coalesce_hint_burst(hint_rx: &mut broadcast::Receiver<i64>) {
+    tokio::time::sleep(HINT_DEBOUNCE).await;
+    // Drain everything queued during the debounce window; stop on Empty/Closed.
+    while let Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) = hint_rx.try_recv() {}
+}
+
 async fn run_ui_projection_worker(
     state: Arc<AppState>,
     stream_id: String,
@@ -1333,6 +1349,7 @@ async fn run_ui_projection_worker(
             recv = hint_rx.recv() => {
                 match recv {
                     Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                        coalesce_hint_burst(&mut hint_rx).await;
                         project_stream_ui_state(&state, &stream_id, &ui_key).await;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -1477,6 +1494,7 @@ async fn run_dbf_worker(
             recv = hint_rx.recv() => {
                 match recv {
                     Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                        coalesce_hint_burst(&mut hint_rx).await;
                         needs_retry =
                             !deliver_dbf(&db, &stream_id, &forwarder_endpoint_id, &dbf_path).await;
                     }
@@ -1578,6 +1596,7 @@ async fn run_announcer_worker(
             recv = hint_rx.recv() => {
                 match recv {
                     Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                        coalesce_hint_burst(&mut hint_rx).await;
                         needs_retry =
                             !push_announcer(&db, &chip_lookup, &stream_id, &client, generation).await;
                     }

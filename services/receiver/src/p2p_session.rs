@@ -39,7 +39,7 @@ use rt_p2p_protocol::{
 use tokio::sync::{Mutex, broadcast};
 
 use crate::control_api::AppState;
-use crate::db::{Db, GapMarkerInsert, ReceivedEventInsert};
+use crate::db::{Db, GapMarkerInsert, ReceivedBatchRecord, ReceivedEventInsert};
 
 /// Aggregates live control/data connectivity per forwarder and reflects it
 /// into the shared [`AppState`] connection state.
@@ -407,63 +407,82 @@ pub async fn wait_control_stream_closed(recv: &mut RecvStream) -> Result<(), P2p
 /// *before* any insertion, so a batch carrying a foreign record persists
 /// nothing. A duplicate `(stream_id, seq)` whose immutable payload differs from
 /// the stored row is rejected as [`P2pSessionError::ConflictingDuplicate`].
-fn persist_batch(db: &Db, stream_id: &str, batch: &EventBatch) -> Result<i64, P2pSessionError> {
-    let mut records = Vec::with_capacity(batch.records.len());
+///
+/// All inserts and the cursor advance run in one SQLite transaction (a single
+/// fsync per batch instead of one per row); a mid-batch conflict rolls the
+/// whole batch back and persists nothing. The returned cursor is durable
+/// before the caller sends its ack, preserving the insert-before-ack contract.
+fn persist_batch(db: &mut Db, stream_id: &str, batch: &EventBatch) -> Result<i64, P2pSessionError> {
+    // Validate every record's stream_id up front so a batch carrying a foreign
+    // record opens no write transaction and persists nothing.
     for record in &batch.records {
         check_stream_id(stream_id, &record.stream_id)?;
-        let seq = u64_to_i64(record.seq, "record.seq")?;
-        let epoch = u64_to_i64(record.epoch, "record.epoch")?;
-        records.push((record, seq, epoch));
     }
 
+    // Resolve wire values into owned intermediates that the borrowed
+    // `ReceivedEventInsert`s reference. A numeric-range failure here aborts
+    // before any transaction opens, so nothing is persisted.
     let received_default = now_unix_ms();
-    for (record, seq, epoch) in records {
+    let mut resolved = Vec::with_capacity(batch.records.len());
+    for record in &batch.records {
+        let seq = u64_to_i64(record.seq, "record.seq")?;
+        let epoch = u64_to_i64(record.epoch, "record.epoch")?;
         let reader_timestamp = if record.reader_timestamp == 0 {
             None
         } else {
             Some(record.reader_timestamp.to_string())
         };
-        let received_unix_ms = if record.received_unix_ms == 0 {
-            received_default
-        } else {
+        // A non-zero received_unix_ms is sender-originated (stable across
+        // resends) and participates in conflict detection; zero means the
+        // forwarder omitted it and the receiver supplies a local default that
+        // must not trigger a false conflict.
+        let authoritative = record.received_unix_ms != 0;
+        let received_unix_ms = if authoritative {
             record.received_unix_ms
+        } else {
+            received_default
         };
-        let insert = ReceivedEventInsert {
-            stream_id,
+        resolved.push((
+            record,
             seq,
             epoch,
-            raw_frame: &record.raw_frame,
-            read_kind: &record.read_kind,
-            reader_timestamp: reader_timestamp.as_deref(),
+            reader_timestamp,
             received_unix_ms,
-            dbf_delivered_unix_ms: None,
-        };
-        if !db.insert_received_event(&insert)? {
-            // Idempotent dedup: a row already exists for this (stream_id, seq).
-            // The immutable payload must match — a divergent duplicate means the
-            // forwarder re-sent a conflicting record under the same seq, which
-            // is a data-integrity violation we must not silently ack past. A
-            // non-zero received_unix_ms is part of that payload because it is
-            // persisted and used as the announcer ordering key; zero means the
-            // forwarder omitted it and the receiver supplied a local default.
-            if let Some(existing) = db.load_received_event(stream_id, insert.seq)? {
-                let received_unix_ms_conflicts = record.received_unix_ms != 0
-                    && existing.received_unix_ms != insert.received_unix_ms;
-                let conflicts = existing.epoch != insert.epoch
-                    || existing.raw_frame != insert.raw_frame
-                    || existing.read_kind != insert.read_kind
-                    || existing.reader_timestamp.as_deref() != insert.reader_timestamp
-                    || received_unix_ms_conflicts;
-                if conflicts {
-                    return Err(P2pSessionError::ConflictingDuplicate {
-                        stream_id: stream_id.to_owned(),
-                        seq: insert.seq,
-                    });
-                }
-            }
-        }
+            authoritative,
+        ));
     }
-    Ok(db.advance_cursor_contiguous_prefix(stream_id)?)
+
+    let records: Vec<ReceivedBatchRecord<'_>> = resolved
+        .iter()
+        .map(
+            |(record, seq, epoch, reader_timestamp, received_unix_ms, authoritative)| {
+                ReceivedBatchRecord {
+                    insert: ReceivedEventInsert {
+                        stream_id,
+                        seq: *seq,
+                        epoch: *epoch,
+                        raw_frame: &record.raw_frame,
+                        read_kind: &record.read_kind,
+                        reader_timestamp: reader_timestamp.as_deref(),
+                        received_unix_ms: *received_unix_ms,
+                        dbf_delivered_unix_ms: None,
+                    },
+                    received_unix_ms_authoritative: *authoritative,
+                }
+            },
+        )
+        .collect();
+
+    match db.persist_received_batch(stream_id, &records) {
+        Ok(cursor) => Ok(cursor),
+        Err(crate::db::DbError::ConflictingDuplicate { seq }) => {
+            Err(P2pSessionError::ConflictingDuplicate {
+                stream_id: stream_id.to_owned(),
+                seq,
+            })
+        }
+        Err(other) => Err(P2pSessionError::Db(other)),
+    }
 }
 
 /// Record a gap marker and jump the cursor past the unavailable history,
@@ -586,8 +605,8 @@ pub async fn run_data_subscription_with_hint(
                 // cursor, then ack only through that durable cursor. The lock is
                 // released before the ack await.
                 let through_seq = {
-                    let db = db.lock().await;
-                    persist_batch(&db, stream_id, &batch)
+                    let mut db = db.lock().await;
+                    persist_batch(&mut db, stream_id, &batch)
                 }?;
                 // Post-commit durable hint: rows are durable before the ack.
                 if let Some(tx) = durable_hint_tx {
