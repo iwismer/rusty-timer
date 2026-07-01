@@ -25,6 +25,7 @@
     readerControlDisabled,
     computeDownloadPercent,
     computeTickingLastSeen,
+    computeTickingClock,
     driftColorClass,
   } from "$lib/status-view-model";
   import { pushLogEntry } from "$lib/log-buffer";
@@ -78,7 +79,6 @@
     status: any | null;
   } | null>(null);
   let downloadHandles: Record<string, DownloadProgressHandle> = {};
-  let localClockStr = $state("");
   let readerInfoReceivedAt = $state<Record<string, number>>({});
   let clockTickNow = $state(Date.now());
   let readerClockBaseTs = $state<Record<string, number>>({});
@@ -571,14 +571,6 @@
   let clockInterval: ReturnType<typeof setInterval>;
 
   function updateLocalClock() {
-    const now = new Date();
-    const y = now.getFullYear();
-    const mo = String(now.getMonth() + 1).padStart(2, "0");
-    const d = String(now.getDate()).padStart(2, "0");
-    const h = String(now.getHours()).padStart(2, "0");
-    const mi = String(now.getMinutes()).padStart(2, "0");
-    const s = String(now.getSeconds()).padStart(2, "0");
-    localClockStr = `${y}-${mo}-${d} ${h}:${mi}:${s}`;
     clockTickNow = Date.now();
   }
 
@@ -606,18 +598,30 @@
   }
 
   function tickingReaderClock(ip: string): string {
-    const baseTs = readerClockBaseTs[ip];
-    const baseLocal = readerClockBaseLocal[ip];
-    if (baseTs == null || baseLocal == null) return "\u2014";
-    const elapsed = clockTickNow - baseLocal;
-    const now = new Date(baseTs + elapsed);
-    const y = now.getUTCFullYear();
-    const mo = String(now.getUTCMonth() + 1).padStart(2, "0");
-    const d = String(now.getUTCDate()).padStart(2, "0");
-    const h = String(now.getUTCHours()).padStart(2, "0");
-    const mi = String(now.getUTCMinutes()).padStart(2, "0");
-    const s = String(now.getUTCSeconds()).padStart(2, "0");
-    return `${y}-${mo}-${d} ${h}:${mi}:${s}`;
+    return (
+      computeTickingClock(
+        readerClockBaseTs[ip],
+        readerClockBaseLocal[ip],
+        clockTickNow,
+      ) ?? "\u2014"
+    );
+  }
+
+  // Forwarder host clock, derived from the reader clock plus the measured
+  // reader→forwarder drift (drift = forwarder_local − reader). Rendered in the
+  // same wall-clock frame as the reader clock so the two line up when synced,
+  // instead of comparing the reader clock against the viewing browser's zone.
+  function tickingForwarderClock(ip: string): string {
+    const driftMs = readerInfoMap[ip]?.clock?.drift_ms;
+    if (driftMs == null) return "\u2014";
+    return (
+      computeTickingClock(
+        readerClockBaseTs[ip],
+        readerClockBaseLocal[ip],
+        clockTickNow,
+        driftMs,
+      ) ?? "\u2014"
+    );
   }
 
   onMount(() => {
@@ -1116,8 +1120,10 @@
                       >
                     </div>
                     <div>
-                      <span class="text-text-muted">Local Clock:</span>
-                      <span class="font-mono ml-2">{localClockStr}</span>
+                      <span class="text-text-muted">Forwarder Clock:</span>
+                      <span class="font-mono ml-2"
+                        >{tickingForwarderClock(reader.ip)}</span
+                      >
                     </div>
                     <div>
                       <span class="text-text-muted">Last Refresh:</span>

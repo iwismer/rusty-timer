@@ -8,6 +8,8 @@ import {
   formatLastSeen,
   computeTickingLastSeen,
   computeElapsedSecondsSince,
+  formatWallClock,
+  computeTickingClock,
 } from "./reader-view-model";
 
 describe("formatReadMode", () => {
@@ -172,5 +174,45 @@ describe("computeElapsedSecondsSince", () => {
   });
   it("never goes negative", () => {
     expect(computeElapsedSecondsSince(4000, 1000)).toBe(0);
+  });
+});
+
+describe("formatWallClock", () => {
+  it("renders UTC wall-clock fields, not the local timezone", () => {
+    // 2026-07-01T20:31:13Z regardless of the machine's timezone.
+    const ms = Date.UTC(2026, 6, 1, 20, 31, 13);
+    expect(formatWallClock(ms)).toBe("2026-07-01 20:31:13");
+  });
+});
+
+describe("computeTickingClock", () => {
+  const readerBase = Date.UTC(2026, 6, 1, 20, 31, 13);
+
+  it("returns null when the base is unavailable", () => {
+    expect(computeTickingClock(null, 1000, 2000)).toBeNull();
+    expect(computeTickingClock(readerBase, null, 2000)).toBeNull();
+  });
+
+  it("advances the clock by real time elapsed since capture", () => {
+    // Captured at baseLocal=1000, now=6000 => +5s.
+    expect(computeTickingClock(readerBase, 1000, 6000)).toBe(
+      "2026-07-01 20:31:18",
+    );
+  });
+
+  it("applies the drift offset so the forwarder clock matches when in sync", () => {
+    // Reader clock and forwarder clock (offset by +45ms drift) render the
+    // same second: proving they line up in the same displayed timezone.
+    const reader = computeTickingClock(readerBase, 1000, 1000);
+    const forwarder = computeTickingClock(readerBase, 1000, 1000, 45);
+    expect(reader).toBe("2026-07-01 20:31:13");
+    expect(forwarder).toBe("2026-07-01 20:31:13");
+  });
+
+  it("reflects a real drift offset in the derived forwarder clock", () => {
+    // +120000ms drift => forwarder clock reads 2 minutes ahead of the reader.
+    expect(computeTickingClock(readerBase, 1000, 1000, 120000)).toBe(
+      "2026-07-01 20:33:13",
+    );
   });
 });

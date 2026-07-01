@@ -8,6 +8,7 @@ export {
   computeDownloadPercent,
   computeTickingLastSeen,
   computeElapsedSecondsSince,
+  computeTickingClock,
   driftColorClass,
   formatLastSeen,
 } from "@rusty-timer/shared-ui/lib/reader-view-model";

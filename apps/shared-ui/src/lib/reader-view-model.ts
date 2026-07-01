@@ -84,6 +84,42 @@ export function computeElapsedSecondsSince(
   return Math.max(0, Math.round((now - receivedAt) / 1000));
 }
 
+/**
+ * Format a millisecond timestamp as `YYYY-MM-DD HH:MM:SS` using its UTC fields.
+ *
+ * Reader/forwarder wall clocks are naive (zoneless) values that we anchor to a
+ * consistent UTC instant, so both clocks must be rendered with the same UTC
+ * fields to stay in the same displayed timezone.
+ */
+export function formatWallClock(ms: number): string {
+  const d = new Date(ms);
+  const y = d.getUTCFullYear();
+  const mo = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  const h = String(d.getUTCHours()).padStart(2, "0");
+  const mi = String(d.getUTCMinutes()).padStart(2, "0");
+  const s = String(d.getUTCSeconds()).padStart(2, "0");
+  return `${y}-${mo}-${day} ${h}:${mi}:${s}`;
+}
+
+/**
+ * Advance a clock captured at `baseTs` (a naive wall time anchored to UTC) by
+ * the real time elapsed since it was captured (`now - baseLocal`), then render
+ * it. `offsetMs` shifts the result — used to derive the forwarder clock from the
+ * reader clock plus the measured reader/forwarder drift. Returns `null` when the
+ * base is unavailable so callers can render a placeholder.
+ */
+export function computeTickingClock(
+  baseTs: number | null | undefined,
+  baseLocal: number | null | undefined,
+  now: number,
+  offsetMs = 0,
+): string | null {
+  if (baseTs == null || baseLocal == null) return null;
+  const elapsed = now - baseLocal;
+  return formatWallClock(baseTs + offsetMs + elapsed);
+}
+
 export function driftColorClass(ms: number | null | undefined): string {
   if (ms == null) return "";
   const abs = Math.abs(ms);
