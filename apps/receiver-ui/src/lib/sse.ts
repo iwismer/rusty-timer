@@ -1,6 +1,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   ForwarderMetricsUpdate,
+  ForwarderReaderCountsUpdate,
   LastRead,
   ReceiverMode,
   StatusResponse,
@@ -27,6 +28,7 @@ type StreamsSnapshotPayload = {
 type LogEntryPayload = { entry: string };
 type StreamCountsUpdatedPayload = { updates?: StreamCountUpdate[] };
 type ForwarderMetricsUpdatedPayload = ForwarderMetricsUpdate;
+type ForwarderReaderCountsUpdatedPayload = ForwarderReaderCountsUpdate;
 type ModeChangedPayload = { mode: ReceiverMode };
 type LastReadPayload = {
   forwarder_id: string;
@@ -63,6 +65,7 @@ export type SseCallbacks = {
   onConnectionChange: (connected: boolean) => void;
   onStreamCountsUpdated: (updates: StreamCountUpdate[]) => void;
   onForwarderMetricsUpdated: (update: ForwarderMetricsUpdate) => void;
+  onForwarderReaderCountsUpdated: (update: ForwarderReaderCountsUpdate) => void;
   onModeChanged: (mode: ReceiverMode) => void;
   onLastRead: (read: LastRead) => void;
   onStreamMetricsUpdated: (metrics: StreamMetrics) => void;
@@ -110,6 +113,19 @@ export async function initSSE(callbacks: SseCallbacks): Promise<void> {
       "forwarder_metrics_updated",
       (event) => {
         callbacks.onForwarderMetricsUpdated(event.payload);
+      },
+    ),
+    listen<ForwarderReaderCountsUpdatedPayload>(
+      "forwarder_reader_counts_updated",
+      (event) => {
+        callbacks.onForwarderReaderCountsUpdated({
+          forwarder_id: event.payload.forwarder_id,
+          stream_id: event.payload.stream_id,
+          reads_session: event.payload.reads_session,
+          reads_total: event.payload.reads_total,
+          last_read_unix_ms: event.payload.last_read_unix_ms ?? null,
+          last_seen_secs: event.payload.last_seen_secs ?? null,
+        });
       },
     ),
     listen<ModeChangedPayload>("mode_changed", (event) => {

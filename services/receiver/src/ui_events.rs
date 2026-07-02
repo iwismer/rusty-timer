@@ -9,6 +9,21 @@ pub struct StreamCountUpdate {
     pub reads_epoch: u64,
 }
 
+/// Volatile per-reader counters from a forwarder `ReaderStatus` frame.
+///
+/// Delivered as a targeted UI event so read-count refreshes patch the
+/// Connections tab in place instead of triggering a full connections reload
+/// (`ConnectionsChanged` fires only on structural changes).
+#[derive(Clone, Debug, Serialize)]
+pub struct ForwarderReaderCounts {
+    pub forwarder_id: String,
+    pub stream_id: String,
+    pub reads_session: u64,
+    pub reads_total: i64,
+    pub last_read_unix_ms: Option<i64>,
+    pub last_seen_secs: Option<u64>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct LastRead {
     pub forwarder_id: String,
@@ -112,6 +127,7 @@ pub enum ReceiverUiEvent {
         updates: Vec<StreamCountUpdate>,
     },
     ForwarderMetricsUpdated(ForwarderMetricsUpdate),
+    ForwarderReaderCountsUpdated(ForwarderReaderCounts),
     ModeChanged {
         mode: rt_domain::ReceiverMode,
     },
@@ -244,6 +260,26 @@ mod tests {
         assert_eq!(json["unique_chips"], 4);
         assert_eq!(json["total_reads"], 15);
         assert_eq!(json["last_read_at"], "2026-03-21T12:34:56.000Z");
+    }
+
+    #[test]
+    fn forwarder_reader_counts_updated_serializes_with_type_tag() {
+        let event = ReceiverUiEvent::ForwarderReaderCountsUpdated(ForwarderReaderCounts {
+            forwarder_id: "fwd-01".to_owned(),
+            stream_id: "192.168.1.10:10000".to_owned(),
+            reads_session: 12,
+            reads_total: 345,
+            last_read_unix_ms: Some(1_711_929_600_000),
+            last_seen_secs: Some(3),
+        });
+        let json: serde_json::Value = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "forwarder_reader_counts_updated");
+        assert_eq!(json["forwarder_id"], "fwd-01");
+        assert_eq!(json["stream_id"], "192.168.1.10:10000");
+        assert_eq!(json["reads_session"], 12);
+        assert_eq!(json["reads_total"], 345);
+        assert_eq!(json["last_read_unix_ms"], 1_711_929_600_000_i64);
+        assert_eq!(json["last_seen_secs"], 3);
     }
 
     #[test]

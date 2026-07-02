@@ -396,6 +396,7 @@ describe("sse client", () => {
       onConnectionChange: vi.fn(),
       onStreamCountsUpdated: vi.fn(),
       onForwarderMetricsUpdated: vi.fn(),
+      onForwarderReaderCountsUpdated: vi.fn(),
       onModeChanged: vi.fn(),
       onLastRead: vi.fn(),
       onStreamMetricsUpdated: vi.fn(),
@@ -418,6 +419,7 @@ describe("sse client", () => {
     expect(registeredEvents).toContain("connections_changed");
     expect(registeredEvents).toContain("stream_counts_updated");
     expect(registeredEvents).toContain("forwarder_metrics_updated");
+    expect(registeredEvents).toContain("forwarder_reader_counts_updated");
     expect(registeredEvents).toContain("mode_changed");
     expect(registeredEvents).toContain("last_read");
 
@@ -458,6 +460,7 @@ describe("sse client", () => {
       onConnectionChange: vi.fn(),
       onStreamCountsUpdated: vi.fn(),
       onForwarderMetricsUpdated: vi.fn(),
+      onForwarderReaderCountsUpdated: vi.fn(),
       onModeChanged: vi.fn(),
       onLastRead: vi.fn(),
       onStreamMetricsUpdated: vi.fn(),
@@ -510,6 +513,7 @@ describe("sse client", () => {
       onConnectionChange: vi.fn(),
       onStreamCountsUpdated: vi.fn(),
       onForwarderMetricsUpdated: vi.fn(),
+      onForwarderReaderCountsUpdated: vi.fn(),
       onStreamMetricsUpdated: vi.fn(),
       onStreamDeltas: vi.fn(),
       onModeChanged: vi.fn(),
@@ -555,6 +559,7 @@ describe("sse client", () => {
       onConnectionChange: vi.fn(),
       onStreamCountsUpdated: vi.fn(),
       onForwarderMetricsUpdated: vi.fn(),
+      onForwarderReaderCountsUpdated: vi.fn(),
       onModeChanged: vi.fn(),
       onLastRead: vi.fn(),
       onStreamMetricsUpdated: vi.fn(),

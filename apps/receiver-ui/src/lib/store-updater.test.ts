@@ -353,6 +353,91 @@ describe("receiver updater store", () => {
     );
   });
 
+  it("patches reader counts in place on forwarder_reader_counts_updated without reloading connections", async () => {
+    const sseState = mockSseInitWithCallbacks();
+    const { initStore, store } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    const reader = (stream_id: string) => ({
+      stream_id,
+      connected: true,
+      state: "online",
+      last_read_unix_ms: 1000,
+      reads_session: 1,
+      reads_total: 10,
+      last_seen_secs: 60,
+      current_epoch_name: null,
+      hardware_reader_id: null,
+      firmware_version: null,
+      model: null,
+      reader_info: null,
+      download_progress: null,
+      local_port: null,
+    });
+    store.connections = {
+      server: {
+        configured: true,
+        endpoint_id: "server-node-1",
+        reachable: true,
+        approval_state: "active",
+        waiting_for_approval: false,
+        message: null,
+      },
+      forwarders: [
+        {
+          endpoint_id: "endpoint-a",
+          display_name: "Finish Line",
+          state: "connected",
+          pending: false,
+          subscribed_count: 1,
+          available_count: 2,
+          readers: [reader("10.0.0.1:10000"), reader("10.0.0.2:10000")],
+          ups: null,
+          restart_needed: null,
+          remote_config_available: false,
+        },
+      ],
+    };
+    apiMocks.getConnections.mockClear();
+
+    sseState.callbacks?.onForwarderReaderCountsUpdated({
+      forwarder_id: "endpoint-a",
+      stream_id: "10.0.0.2:10000",
+      reads_session: 7,
+      reads_total: 42,
+      last_read_unix_ms: 2000,
+      last_seen_secs: 1,
+    });
+
+    const readers = store.connections?.forwarders[0]?.readers ?? [];
+    expect(readers[1]).toMatchObject({
+      reads_session: 7,
+      reads_total: 42,
+      last_read_unix_ms: 2000,
+      last_seen_secs: 1,
+    });
+    // The other reader and structural fields are untouched, and no full
+    // connections reload is triggered.
+    expect(readers[0]).toMatchObject({ reads_session: 1, reads_total: 10 });
+    expect(readers[1]?.connected).toBe(true);
+    expect(apiMocks.getConnections).not.toHaveBeenCalled();
+
+    // Updates for unknown forwarders/readers are ignored (structural changes
+    // still arrive via connections_changed).
+    const before = store.connections;
+    sseState.callbacks?.onForwarderReaderCountsUpdated({
+      forwarder_id: "endpoint-unknown",
+      stream_id: "10.0.0.1:10000",
+      reads_session: 99,
+      reads_total: 999,
+      last_read_unix_ms: null,
+      last_seen_secs: null,
+    });
+    expect(store.connections).toBe(before);
+  });
+
   it("preserves server status across incremental status events", async () => {
     const sseState = mockSseInitWithCallbacks();
     const { initStore, store } = await import("./store.svelte");
