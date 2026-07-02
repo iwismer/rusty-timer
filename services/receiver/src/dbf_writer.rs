@@ -348,11 +348,18 @@ fn append_record_if_active(
 /// Append many records in one pass: **record bytes first, header count
 /// last**, one `flush`, **no fsync**.
 ///
-/// Ordering matters because Race Director opens `IPICO.DBF` directly and
-/// trusts the header record count — it does not honor our advisory sidecar
-/// lock. A reader catching us mid-append sees the old count, so the partial
-/// trailing bytes are invisible; only the final header update publishes the
-/// new rows.
+/// An exclusive lock on the DBF file itself is held for the whole append.
+/// On Windows this is a mandatory `LockFileEx` lock, so a concurrent Race
+/// Director "Import Times" read fails cleanly with a lock violation instead
+/// of observing partial state — the same lock → write → unlock exposure RD
+/// already has with IPICO Direct (observed via procmon, see
+/// `docs/race-director/ipico-direct-dbf-format.md`; RD's import is a one-shot
+/// user action, not a poll).
+///
+/// The write ordering — record bytes first, header count last — is
+/// defense-in-depth on top of the lock: a reader that opens the file between
+/// locked writes (or after a crash mid-append) sees the old count, so partial
+/// trailing bytes stay invisible until the final header update publishes them.
 ///
 /// No `sync_all`: the durable source of truth is `received_events` plus the
 /// delivery markers — a crash between append and mark is healed by the
@@ -362,10 +369,14 @@ pub fn append_records(path: &Path, records: &[DbfRecord]) -> std::io::Result<()>
     append_records_inner(path, records, None)
 }
 
+/// The `between_writes` test hook runs after the record bytes are flushed and
+/// before the header count update, and receives the **lock-owning handle**:
+/// on Windows the exclusive lock is mandatory, so reads through any other
+/// handle would fail with `ERROR_LOCK_VIOLATION`.
 fn append_records_inner(
     path: &Path,
     records: &[DbfRecord],
-    between_writes: Option<&dyn Fn(&Path)>,
+    between_writes: Option<&dyn Fn(&mut std::fs::File)>,
 ) -> std::io::Result<()> {
     if records.is_empty() {
         return Ok(());
@@ -377,7 +388,7 @@ fn append_records_inner(
         .truncate(false)
         .open(path)?;
     file.lock_exclusive()?;
-    let result = append_records_locked(&mut file, records, between_writes, path);
+    let result = append_records_locked(&mut file, records, between_writes);
     file.unlock()?;
     result
 }
@@ -385,8 +396,7 @@ fn append_records_inner(
 fn append_records_locked(
     file: &mut std::fs::File,
     records: &[DbfRecord],
-    between_writes: Option<&dyn Fn(&Path)>,
-    path: &Path,
+    between_writes: Option<&dyn Fn(&mut std::fs::File)>,
 ) -> std::io::Result<()> {
     if file.metadata()?.len() == 0 {
         write_empty_header(file)?;
@@ -417,7 +427,7 @@ fn append_records_locked(
     file.flush()?;
 
     if let Some(hook) = between_writes {
-        hook(path);
+        hook(file);
     }
 
     // Header record count last: publishes the appended rows to readers.
@@ -1317,14 +1327,19 @@ mod tests {
         let record = map_to_dbf_fields(&sample_raw_frame(), EventType::Finish, 0).unwrap();
 
         // The hook runs after the record bytes are flushed but before the
-        // header count is updated: a concurrent reader (Race Director) at
-        // that instant must still see the old count, hiding the partial tail.
+        // header count is updated: a reader at that instant must still see
+        // the old count, hiding the partial tail. Read through the
+        // lock-owning handle — the exclusive lock is mandatory on Windows,
+        // so a separate handle would fail with ERROR_LOCK_VIOLATION (which
+        // is itself the intended concurrent-reader behavior there).
         let observed = std::cell::RefCell::new(None);
         append_records_inner(
             &dbf_path,
             std::slice::from_ref(&record),
-            Some(&|path: &Path| {
-                let bytes = std::fs::read(path).unwrap();
+            Some(&|file: &mut std::fs::File| {
+                file.seek(SeekFrom::Start(0)).unwrap();
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes).unwrap();
                 let count = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
                 *observed.borrow_mut() = Some((count, bytes.len()));
             }),
