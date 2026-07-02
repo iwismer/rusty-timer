@@ -512,6 +512,57 @@ describe("receiver updater store", () => {
     expect(store.streamMetrics.get(key)).toEqual(metrics);
   });
 
+  it("keeps cached epoch dropdown options when a stream snapshot only updates reads", async () => {
+    const sseState = mockSseInitWithCallbacks();
+    const { initStore, store, streamIdentity } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    const callbacks = sseState.callbacks;
+    expect(callbacks).toBeDefined();
+
+    const previousStream = {
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+      subscribed: true,
+      local_port: 7001,
+      stream_epoch: 2,
+      reads_total: 10,
+    };
+    const key = streamIdentity(previousStream);
+    const options = [
+      { stream_epoch: 2, name: "Finish", first_seen_at: null, race_names: [] },
+      { stream_epoch: 1, name: "Start", first_seen_at: null, race_names: [] },
+    ];
+    store.streams = {
+      streams: [previousStream],
+      degraded: false,
+      upstream_error: null,
+    };
+    store.earliestEpochOptions = { [key]: options };
+    store.earliestEpochLoading = {};
+    apiMocks.getReplayTargetEpochs.mockClear();
+
+    callbacks?.onStreamsSnapshot({
+      streams: [
+        {
+          ...previousStream,
+          reads_total: 11,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+    await flushAsyncWork();
+
+    expect(apiMocks.getReplayTargetEpochs).not.toHaveBeenCalled();
+    expect(store.earliestEpochOptions[key]).toEqual(options);
+    expect(store.earliestEpochLoading[key]).toBeUndefined();
+  });
+
   it("onStreamsSnapshot keeps metrics for newly appearing streams", async () => {
     const sseState = mockSseInitWithCallbacks();
     const { initStore, store, streamKey } = await import("./store.svelte");

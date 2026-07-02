@@ -1376,20 +1376,36 @@ export function initStore(): void {
       }
     },
     onStreamsSnapshot: (s) => {
+      const previousStreams = store.streams?.streams ?? [];
       const previousEpochByKey = new Map(
-        (store.streams?.streams ?? []).map((st) => [
+        previousStreams.map((st) => [
           streamKey(st.forwarder_id, st.reader_ip),
           st.stream_epoch,
         ]),
       );
       const previousConcreteEpochByKey = captureConcreteEpochs(
         lastConcreteEpochByKey,
-        store.streams?.streams ?? [],
+        previousStreams,
       );
-      const refreshAllKeys = new Set(s.streams.map((st) => streamIdentity(st)));
+      const previousIdentities = new Set(previousStreams.map(streamIdentity));
+      const refreshEpochOptionKeys = new Set<string>();
+      for (const stream of s.streams) {
+        const identity = streamIdentity(stream);
+        if (!previousIdentities.has(identity)) {
+          refreshEpochOptionKeys.add(identity);
+          continue;
+        }
+        if (stream.stream_epoch == null) continue;
+        const key = streamKey(stream.forwarder_id, stream.reader_ip);
+        const lastKnown =
+          previousEpochByKey.get(key) ?? previousConcreteEpochByKey.get(key);
+        if (lastKnown != null && lastKnown !== stream.stream_epoch) {
+          refreshEpochOptionKeys.add(identity);
+        }
+      }
       streamRefreshVersion += 1;
       store.streams = s;
-      void prefetchEarliestEpochOptions(s.streams, refreshAllKeys);
+      void prefetchEarliestEpochOptions(s.streams, refreshEpochOptionKeys);
       // Prune stale metrics
       const currentKeys = new Set(
         s.streams.map((st) => streamKey(st.forwarder_id, st.reader_ip)),
