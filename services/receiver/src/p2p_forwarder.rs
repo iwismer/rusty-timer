@@ -19,15 +19,15 @@ use tracing::warn;
 use crate::control_api::{ConfigCommand, FORWARDER_CONFIG_TIMEOUT, ReaderCommand};
 use crate::db::Db;
 use crate::p2p_session::{
-    BackoffConfig, P2pSessionError, SessionStatusReporter, connect_and_hello, read_frame,
-    run_data_subscription_with_hint, write_frame,
+    BackoffConfig, DurableBatch, P2pSessionError, SessionStatusReporter, connect_and_hello,
+    read_frame, run_data_subscription_with_hint, write_frame,
 };
 
 #[derive(Clone, Debug)]
 pub struct ForwarderDataStream {
     pub stream_id: String,
     pub mode: SubscribeMode,
-    pub durable_hint_tx: Option<broadcast::Sender<i64>>,
+    pub durable_hint_tx: Option<broadcast::Sender<DurableBatch>>,
 }
 
 /// Owns one live control session to a forwarder and opens one data bi-stream per

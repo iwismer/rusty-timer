@@ -400,14 +400,40 @@ pub async fn wait_control_stream_closed(recv: &mut RecvStream) -> Result<(), P2p
     }
 }
 
+/// Post-commit notification for one durably persisted `EventBatch` (or gap
+/// jump). `inserted` contains only rows that were actually inserted this batch
+/// (duplicates deduped by `(stream_id, seq)` are excluded), in seq order.
+#[derive(Clone, Debug)]
+pub struct DurableBatch {
+    /// The durable contiguous cursor after this batch.
+    pub through_seq: i64,
+    /// Scalar facts for the rows actually inserted by this batch.
+    pub inserted: Arc<Vec<EventFact>>,
+}
+
+/// Scalar projection of a persisted row; no `raw_frame` blob is retained.
+#[derive(Clone, Debug)]
+pub struct EventFact {
+    pub seq: i64,
+    pub epoch: i64,
+    pub received_unix_ms: i64,
+    /// Chip id parsed once from the raw frame at persist time.
+    pub chip_id: String,
+}
+
 /// Insert every record of `batch` into the durable store (idempotent on
-/// `(stream_id, seq)`), then advance and return the contiguous durable cursor.
+/// `(stream_id, seq)`), then advance and return the contiguous durable cursor
+/// together with the facts for the rows actually inserted.
 ///
 /// Every record's `stream_id` is validated against the subscribed stream
 /// *before* any insertion, so a batch carrying a foreign record persists
 /// nothing. A duplicate `(stream_id, seq)` whose immutable payload differs from
 /// the stored row is rejected as [`P2pSessionError::ConflictingDuplicate`].
-fn persist_batch(db: &Db, stream_id: &str, batch: &EventBatch) -> Result<i64, P2pSessionError> {
+fn persist_batch(
+    db: &Db,
+    stream_id: &str,
+    batch: &EventBatch,
+) -> Result<(i64, Vec<EventFact>), P2pSessionError> {
     let mut records = Vec::with_capacity(batch.records.len());
     for record in &batch.records {
         check_stream_id(stream_id, &record.stream_id)?;
@@ -417,6 +443,7 @@ fn persist_batch(db: &Db, stream_id: &str, batch: &EventBatch) -> Result<i64, P2
     }
 
     let received_default = now_unix_ms();
+    let mut facts = Vec::with_capacity(batch.records.len());
     for (record, seq, epoch) in records {
         let reader_timestamp = if record.reader_timestamp == 0 {
             None
@@ -438,7 +465,16 @@ fn persist_batch(db: &Db, stream_id: &str, batch: &EventBatch) -> Result<i64, P2
             received_unix_ms,
             dbf_delivered_unix_ms: None,
         };
-        if !db.insert_received_event(&insert)? {
+        if db.insert_received_event(&insert)? {
+            // Parse the chip id once at persist time so downstream projections
+            // never need to re-read or re-parse the raw frame.
+            facts.push(EventFact {
+                seq,
+                epoch,
+                received_unix_ms,
+                chip_id: crate::ui_events::chip_id_from_raw_frame(&record.raw_frame),
+            });
+        } else {
             // Idempotent dedup: a row already exists for this (stream_id, seq).
             // The immutable payload must match — a divergent duplicate means the
             // forwarder re-sent a conflicting record under the same seq, which
@@ -463,7 +499,7 @@ fn persist_batch(db: &Db, stream_id: &str, batch: &EventBatch) -> Result<i64, P2
             }
         }
     }
-    Ok(db.advance_cursor_contiguous_prefix(stream_id)?)
+    Ok((db.advance_cursor_contiguous_prefix(stream_id)?, facts))
 }
 
 /// Record a gap marker and jump the cursor past the unavailable history,
@@ -539,7 +575,7 @@ pub async fn run_data_subscription_with_hint(
     db: &Arc<Mutex<Db>>,
     stream_id: &str,
     mode: SubscribeMode,
-    durable_hint_tx: Option<&broadcast::Sender<i64>>,
+    durable_hint_tx: Option<&broadcast::Sender<DurableBatch>>,
 ) -> Result<SessionOutcome, P2pSessionError> {
     let after_seq = { db.lock().await.load_stream_cursor(stream_id)? };
 
@@ -585,13 +621,16 @@ pub async fn run_data_subscription_with_hint(
                 // Durable-first: validate + insert rows, advance the contiguous
                 // cursor, then ack only through that durable cursor. The lock is
                 // released before the ack await.
-                let through_seq = {
+                let (through_seq, facts) = {
                     let db = db.lock().await;
                     persist_batch(&db, stream_id, &batch)
                 }?;
                 // Post-commit durable hint: rows are durable before the ack.
                 if let Some(tx) = durable_hint_tx {
-                    let _ = tx.send(through_seq);
+                    let _ = tx.send(DurableBatch {
+                        through_seq,
+                        inserted: Arc::new(facts),
+                    });
                 }
                 send_ack(&mut send, stream_id, through_seq).await?;
             }
@@ -604,7 +643,10 @@ pub async fn run_data_subscription_with_hint(
                     persist_gap(&db, stream_id, &gap)
                 }?;
                 if let Some(tx) = durable_hint_tx {
-                    let _ = tx.send(through_seq);
+                    let _ = tx.send(DurableBatch {
+                        through_seq,
+                        inserted: Arc::new(Vec::new()),
+                    });
                 }
                 send_ack(&mut send, stream_id, through_seq).await?;
             }
@@ -1046,9 +1088,13 @@ mod tests {
             .await
             .unwrap();
 
-            // The contiguous durable cursor (2) is broadcast as a post-commit hint.
+            // The contiguous durable cursor (2) is broadcast as a post-commit hint,
+            // carrying the facts for the rows inserted by this batch.
             let hint = hint_rx.recv().await.unwrap();
-            assert_eq!(hint, 2);
+            assert_eq!(hint.through_seq, 2);
+            assert_eq!(hint.inserted.len(), 2);
+            assert_eq!(hint.inserted[0].seq, 1);
+            assert_eq!(hint.inserted[1].seq, 2);
 
             forwarder.shutdown().await;
         })

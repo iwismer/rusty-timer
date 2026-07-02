@@ -62,7 +62,7 @@ use crate::control_api::{
 use crate::db::{Db, ReceivedEvent, StreamSubscription};
 use crate::local_proxy::LocalProxy;
 use crate::p2p_forwarder::{ForwarderConnection, ForwarderDataStream};
-use crate::p2p_session::{BackoffConfig, SessionStatusReporter};
+use crate::p2p_session::{BackoffConfig, DurableBatch, SessionStatusReporter};
 use crate::ports::{default_port, reader_addr_if_port_mappable};
 use crate::ui_events::ReceiverUiEvent;
 
@@ -394,7 +394,7 @@ struct StreamWorker {
     /// Cancels the session task and DBF/announcer workers.
     shutdown_tx: watch::Sender<bool>,
     /// Durable hint channel shared with the forwarder data subscription.
-    hint_tx: broadcast::Sender<i64>,
+    hint_tx: broadcast::Sender<DurableBatch>,
     /// The durable local proxy, if a local port could be resolved.
     proxy: Option<LocalProxy>,
     /// UI projection, DBF, and announcer task handles.
@@ -1167,7 +1167,7 @@ async fn start_stream_worker(
     let stream_id = sub.stream_id.clone();
     info!(%stream_id, "starting p2p stream worker");
 
-    let (hint_tx, _hint_rx) = broadcast::channel::<i64>(HINT_CHANNEL_CAPACITY);
+    let (hint_tx, _hint_rx) = broadcast::channel::<DurableBatch>(HINT_CHANNEL_CAPACITY);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let mut tasks: Vec<JoinHandle<()>> = Vec::new();
@@ -1320,7 +1320,7 @@ async fn run_ui_projection_worker(
     state: Arc<AppState>,
     stream_id: String,
     ui_key: StreamKey,
-    mut hint_rx: broadcast::Receiver<i64>,
+    mut hint_rx: broadcast::Receiver<DurableBatch>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     project_stream_ui_state(&state, &stream_id, &ui_key).await;
@@ -1460,7 +1460,7 @@ async fn run_dbf_worker(
     forwarder_endpoint_id: String,
     dbf_path: String,
     retry_interval: Duration,
-    mut hint_rx: broadcast::Receiver<i64>,
+    mut hint_rx: broadcast::Receiver<DurableBatch>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     // `needs_retry` is set whenever a delivery attempt fails (DBF write or a
@@ -1561,7 +1561,7 @@ async fn run_announcer_worker(
     client: Arc<dyn AnnouncerPushClient + Send + Sync>,
     generation: i64,
     retry_interval: Duration,
-    mut hint_rx: broadcast::Receiver<i64>,
+    mut hint_rx: broadcast::Receiver<DurableBatch>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     // `needs_retry` is set whenever a push attempt fails to reach the announcer
@@ -2624,7 +2624,7 @@ mod tests {
         let missing_dir = tmp.path().join("not-yet");
         let dbf_path = missing_dir.join("out.dbf").to_string_lossy().into_owned();
 
-        let (hint_tx, hint_rx) = broadcast::channel::<i64>(16);
+        let (hint_tx, hint_rx) = broadcast::channel::<DurableBatch>(16);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let handle = tokio::spawn(run_dbf_worker(
             Arc::clone(&db),
@@ -2637,7 +2637,10 @@ mod tests {
         ));
 
         // Startup attempt and an explicit hint both fail while the dir is gone.
-        let _ = hint_tx.send(1);
+        let _ = hint_tx.send(DurableBatch {
+            through_seq: 1,
+            inserted: std::sync::Arc::new(Vec::new()),
+        });
         tokio::time::sleep(Duration::from_millis(200)).await;
         {
             let guard = db.lock().await;
@@ -2694,7 +2697,7 @@ mod tests {
         });
         let client_dyn: Arc<dyn AnnouncerPushClient + Send + Sync> = Arc::clone(&client) as _;
 
-        let (hint_tx, hint_rx) = broadcast::channel::<i64>(16);
+        let (hint_tx, hint_rx) = broadcast::channel::<DurableBatch>(16);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let handle = tokio::spawn(run_announcer_worker(
             Arc::clone(&db),
@@ -2708,7 +2711,10 @@ mod tests {
         ));
 
         // Startup attempt and an explicit hint both fail while the sink is down.
-        let _ = hint_tx.send(1);
+        let _ = hint_tx.send(DurableBatch {
+            through_seq: 1,
+            inserted: std::sync::Arc::new(Vec::new()),
+        });
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(
             client.pushed.lock().unwrap().is_empty(),

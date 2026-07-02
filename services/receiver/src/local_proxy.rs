@@ -7,6 +7,7 @@
 //! Ports open as soon as subscriptions exist, even before server connection is established.
 
 use crate::db::{Db, ReceivedEvent};
+use crate::p2p_session::DurableBatch;
 use rt_domain::ReadEvent;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -64,7 +65,7 @@ impl LocalProxy {
         port: u16,
         stream_id: String,
         db: Arc<Mutex<Db>>,
-        durable_seq_tx: broadcast::Sender<i64>,
+        durable_seq_tx: broadcast::Sender<DurableBatch>,
     ) -> std::io::Result<Self> {
         let listener = bind_listener(port).await?;
         let port = listener.local_addr()?.port();
@@ -130,7 +131,7 @@ async fn serve_durable_consumer(
     mut stream: TcpStream,
     stream_id: String,
     db: Arc<Mutex<Db>>,
-    mut rx: broadcast::Receiver<i64>,
+    mut rx: broadcast::Receiver<DurableBatch>,
 ) {
     let mut last_delivered_seq = 0;
     let replay = {
@@ -154,8 +155,8 @@ async fn serve_durable_consumer(
 
     loop {
         match rx.recv().await {
-            Ok(seq) if seq <= last_delivered_seq => {}
-            Ok(seq) => {
+            Ok(batch) if batch.through_seq <= last_delivered_seq => {}
+            Ok(batch) => {
                 let events = {
                     let db = db.lock().await;
                     db.load_received_events_after(&stream_id, last_delivered_seq)
@@ -170,7 +171,7 @@ async fn serve_durable_consumer(
                         }
                     }
                     Err(e) => {
-                        warn!(error = %e, %stream_id, seq, "failed to drain durable events after live hint");
+                        warn!(error = %e, %stream_id, through_seq = batch.through_seq, "failed to drain durable events after live hint");
                         break;
                     }
                 }
@@ -232,6 +233,13 @@ mod tests {
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
     use tokio::sync::Mutex;
+
+    fn hint(through_seq: i64) -> DurableBatch {
+        DurableBatch {
+            through_seq,
+            inserted: Arc::new(Vec::new()),
+        }
+    }
 
     fn make_event(raw: &[u8]) -> ReadEvent {
         ReadEvent {
@@ -321,7 +329,7 @@ mod tests {
         assert_eq!(&replay_buf, b"replay");
 
         insert_durable_event(&db, stream_id, 2, b"live").await;
-        durable_tx.send(2).unwrap();
+        durable_tx.send(hint(2)).unwrap();
 
         let mut live_buf = vec![0u8; b"live".len()];
         tokio::time::timeout(
@@ -361,7 +369,7 @@ mod tests {
         assert_eq!(&replay_buf, b"one");
 
         insert_durable_event(&db, stream_id, 3, b"three").await;
-        durable_tx.send(3).unwrap();
+        durable_tx.send(hint(3)).unwrap();
         let mut early = [0u8; 1];
         assert!(
             tokio::time::timeout(
@@ -374,7 +382,7 @@ mod tests {
         );
 
         insert_durable_event(&db, stream_id, 2, b"two").await;
-        durable_tx.send(2).unwrap();
+        durable_tx.send(hint(2)).unwrap();
 
         let mut contiguous_buf = vec![0u8; b"twothree".len()];
         tokio::time::timeout(
@@ -394,7 +402,7 @@ mod tests {
         let stream_id = "33333333-3333-3333-3333-333333333333";
         let (durable_tx, rx) = broadcast::channel(16);
         insert_durable_event(&db, stream_id, 1, b"once").await;
-        durable_tx.send(1).unwrap();
+        durable_tx.send(hint(1)).unwrap();
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -458,9 +466,9 @@ mod tests {
         insert_durable_event(&db, stream_id, 2, b"two").await;
         insert_durable_event(&db, stream_id, 3, b"three").await;
         insert_durable_event(&db, stream_id, 4, b"four").await;
-        durable_tx.send(2).unwrap();
-        durable_tx.send(3).unwrap();
-        durable_tx.send(4).unwrap();
+        durable_tx.send(hint(2)).unwrap();
+        durable_tx.send(hint(3)).unwrap();
+        durable_tx.send(hint(4)).unwrap();
 
         let mut recovered_buf = vec![0u8; b"twothreefour".len()];
         tokio::time::timeout(
