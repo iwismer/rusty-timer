@@ -69,6 +69,16 @@ const mockState = vi.hoisted(() => {
       message: "",
       reader_info: null,
     })),
+    readerSetEpochName: vi.fn(async () => ({
+      success: true,
+      message: "",
+      reader_info: null,
+    })),
+    readerAdvanceEpoch: vi.fn(async () => ({
+      success: true,
+      message: "",
+      reader_info: null,
+    })),
     open: vi.fn(async () => {}),
   };
 });
@@ -92,6 +102,8 @@ vi.mock("$lib/api", () => ({
   readerStartDownload: mockState.readerControl,
   readerStopDownload: mockState.readerControl,
   readerSyncClock: mockState.readerControl,
+  readerSetEpochName: mockState.readerSetEpochName,
+  readerAdvanceEpoch: mockState.readerAdvanceEpoch,
   getForwarderConfig: vi.fn(),
   setForwarderConfig: vi.fn(),
   restartForwarder: vi.fn(),
@@ -316,6 +328,107 @@ describe("ConnectionsTab", () => {
     expect(panels[1]).toHaveTextContent("Reader: 10.0.0.1:10001");
     expect(panels[1]).toHaveTextContent("Hardware reader ID: 0");
     expect(panels[1]).toHaveTextContent("Local proxy: not subscribed");
+  });
+
+  it("shows reads counters, last seen, epoch name, and collapsible details", async () => {
+    mockState.store.connections.forwarders = [
+      {
+        endpoint_id: "endpoint-live",
+        display_name: "Live Forwarder",
+        state: "subscribed",
+        pending: false,
+        subscribed_count: 1,
+        available_count: 1,
+        readers: [
+          {
+            stream_id: "10.0.0.1:10000",
+            connected: true,
+            state: "online",
+            last_read_unix_ms: null,
+            reads_session: 12,
+            reads_total: 3456,
+            last_seen_secs: 5,
+            current_epoch_name: "Race Day",
+            hardware_reader_id: "reader-42",
+            firmware_version: "1.2.3",
+            model: "69",
+            local_port: 9100,
+          },
+        ],
+        ups: null,
+        restart_needed: null,
+        remote_config_available: false,
+        reader_control_available: true,
+      },
+    ] as import("./api").ForwarderConnectionStatus[];
+
+    render(ConnectionsTab);
+
+    const panel = screen.getByTestId("reader-control-panel");
+    expect(panel).toHaveTextContent("Reads (session): 12");
+    expect(panel).toHaveTextContent("Reads (total): 3,456");
+    expect(panel).toHaveTextContent("Last seen: 5s ago");
+    expect(panel).toHaveTextContent("Active epoch: Race Day");
+    // Hardware code renders both hex and decimal forms.
+    expect(panel).toHaveTextContent("Hardware: 0x45 (69)");
+
+    // Details start expanded and can be collapsed.
+    expect(screen.getByText("Banner:")).toBeInTheDocument();
+    await fireEvent.click(screen.getByLabelText("Hide details"));
+    expect(screen.queryByText("Banner:")).not.toBeInTheDocument();
+    await fireEvent.click(screen.getByLabelText("Show details"));
+    expect(screen.getByText("Banner:")).toBeInTheDocument();
+  });
+
+  it("wires epoch name save and advance epoch to the reader commands", async () => {
+    mockState.store.connections.forwarders = [
+      {
+        endpoint_id: "endpoint-live",
+        display_name: "Live Forwarder",
+        state: "subscribed",
+        pending: false,
+        subscribed_count: 1,
+        available_count: 1,
+        readers: [
+          {
+            stream_id: "10.0.0.1:10000",
+            connected: true,
+            state: "online",
+            last_read_unix_ms: null,
+            hardware_reader_id: "reader-42",
+            firmware_version: "1.2.3",
+            model: "IPICO",
+          },
+        ],
+        ups: null,
+        restart_needed: null,
+        remote_config_available: false,
+        reader_control_available: true,
+      },
+    ] as import("./api").ForwarderConnectionStatus[];
+
+    render(ConnectionsTab);
+
+    const input = screen.getByPlaceholderText("Set epoch name");
+    await fireEvent.input(input, { target: { value: "Lap 2" } });
+    await fireEvent.click(screen.getByText("Save"));
+
+    expect(mockState.readerSetEpochName).toHaveBeenCalledWith(
+      "endpoint-live",
+      "10.0.0.1:10000",
+      "Lap 2",
+    );
+    expect(await screen.findByText("Epoch name saved")).toBeInTheDocument();
+
+    await fireEvent.click(screen.getByText("Advance Epoch"));
+
+    expect(mockState.readerAdvanceEpoch).toHaveBeenCalledWith(
+      "endpoint-live",
+      "10.0.0.1:10000",
+    );
+    expect(
+      await screen.findByText("Advanced to next epoch"),
+    ).toBeInTheDocument();
   });
 
   it("shows configure only for forwarders that support remote config", () => {

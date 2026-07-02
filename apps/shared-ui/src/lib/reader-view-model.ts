@@ -140,6 +140,34 @@ export function driftColorClass(ms: number | null | undefined): string {
   return "text-red-500";
 }
 
+/**
+ * Format a reader hardware code showing both hex and decimal forms, e.g.
+ * `0x45 (69)`. Accepts numbers, decimal strings, or `0x`-prefixed hex
+ * strings. Falls back to the raw string when unparseable and `\u2014` for
+ * null/undefined/empty input.
+ */
+export function formatHardwareCode(
+  code: string | number | null | undefined,
+): string {
+  if (code == null) return "\u2014";
+  let value: number;
+  if (typeof code === "number") {
+    value = code;
+  } else {
+    const trimmed = code.trim();
+    if (trimmed === "") return "\u2014";
+    if (/^0x[0-9a-f]+$/i.test(trimmed)) {
+      value = parseInt(trimmed, 16);
+    } else if (/^[0-9]+$/.test(trimmed)) {
+      value = parseInt(trimmed, 10);
+    } else {
+      return code;
+    }
+  }
+  if (!Number.isInteger(value) || value < 0) return String(code);
+  return `0x${value.toString(16)} (${value})`;
+}
+
 export function formatLastSeen(secs: number | null): string {
   if (secs === null) return "never";
   if (secs < 60) return `${secs}s ago`;

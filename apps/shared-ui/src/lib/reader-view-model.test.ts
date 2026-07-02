@@ -11,7 +11,38 @@ import {
   formatWallClock,
   computeTickingClock,
   parseWallClock,
+  formatHardwareCode,
 } from "./reader-view-model";
+
+describe("formatHardwareCode", () => {
+  it("returns dash for null/undefined", () => {
+    expect(formatHardwareCode(null)).toBe("\u2014");
+    expect(formatHardwareCode(undefined)).toBe("\u2014");
+  });
+  it("formats a plain number as hex plus decimal", () => {
+    expect(formatHardwareCode(69)).toBe("0x45 (69)");
+    expect(formatHardwareCode(0)).toBe("0x0 (0)");
+  });
+  it("parses decimal strings", () => {
+    expect(formatHardwareCode("69")).toBe("0x45 (69)");
+  });
+  it("parses 0x-prefixed hex strings", () => {
+    expect(formatHardwareCode("0x45")).toBe("0x45 (69)");
+    expect(formatHardwareCode("0X2A")).toBe("0x2a (42)");
+  });
+  it("falls back to the raw string when unparseable", () => {
+    expect(formatHardwareCode("IPICO")).toBe("IPICO");
+    expect(formatHardwareCode("1.5x")).toBe("1.5x");
+  });
+  it("falls back to the raw value for non-integer or negative numbers", () => {
+    expect(formatHardwareCode(1.5)).toBe("1.5");
+    expect(formatHardwareCode(-3)).toBe("-3");
+  });
+  it("returns dash for empty strings", () => {
+    expect(formatHardwareCode("")).toBe("\u2014");
+    expect(formatHardwareCode("   ")).toBe("\u2014");
+  });
+});
 
 describe("formatReadMode", () => {
   it("returns dash for null/undefined", () => {

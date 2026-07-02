@@ -5,6 +5,7 @@
     BatteryIndicator,
     ReaderControlPanel,
     computeTickingClock,
+    formatLastSeen,
     parseWallClock,
   } from "@rusty-timer/shared-ui";
   import { loadConnections, store } from "$lib/store.svelte";
@@ -17,9 +18,11 @@
   import {
     connectForwarder,
     disconnectForwarder,
+    readerAdvanceEpoch,
     readerClearRecords,
     readerReconnect,
     readerRefresh,
+    readerSetEpochName,
     readerSetReadMode,
     readerSetRecording,
     readerSetTto,
@@ -259,6 +262,19 @@
     };
   }
 
+  function localPortValueForPanel(reader: ReaderLiveStatus): string {
+    return reader.local_port == null
+      ? "not subscribed"
+      : `127.0.0.1:${reader.local_port}`;
+  }
+
+  function lastSeenDisplayForPanel(
+    reader: ReaderLiveStatus,
+  ): string | undefined {
+    if (reader.last_seen_secs === undefined) return undefined;
+    return formatLastSeen(reader.last_seen_secs);
+  }
+
   function downloadProgressForPanel(reader: ReaderLiveStatus) {
     const progress = reader.download_progress;
     if (!progress) return null;
@@ -464,10 +480,32 @@
                         forwarderClockDisplay={forwarderClockDisplay(reader)}
                         readerState={readerConnectionState(reader)}
                         readerStateLabel={readerForwarderStateLabel(reader)}
-                        localProxyPort={reader.local_port ?? null}
+                        readsSession={reader.reads_session ?? null}
+                        readsTotal={reader.reads_total ?? null}
+                        lastSeenDisplay={lastSeenDisplayForPanel(reader)}
+                        currentEpochName={reader.current_epoch_name ?? null}
+                        localPortLabel="Local proxy"
+                        localPortValue={localPortValueForPanel(reader)}
+                        detailsCollapsible
+                        epochEditable
                         downloadProgress={downloadProgressForPanel(reader)}
                         disabled={busyByEndpoint[forwarder.endpoint_id]}
                         helpContext="forwarder"
+                        onSetEpochName={(name) =>
+                          runReaderCommand(() =>
+                            readerSetEpochName(
+                              forwarder.endpoint_id,
+                              reader.stream_id,
+                              name,
+                            ),
+                          )}
+                        onAdvanceEpoch={() =>
+                          runReaderCommand(() =>
+                            readerAdvanceEpoch(
+                              forwarder.endpoint_id,
+                              reader.stream_id,
+                            ),
+                          )}
                         onSyncClock={() =>
                           runReaderCommand(() =>
                             readerSyncClock(

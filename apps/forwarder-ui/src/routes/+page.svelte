@@ -9,9 +9,9 @@
     Card,
     AlertBanner,
     LogViewer,
-    HelpTip,
     HelpDialog,
     BatteryIndicator,
+    ReaderControlPanel,
   } from "@rusty-timer/shared-ui";
   import type { ForwarderStatus } from "$lib/api";
   import {
@@ -19,22 +19,10 @@
     formatLastSeen,
     readerBadgeState,
     readerConnectionSummary,
-    formatClockDrift,
-    formatReadMode,
-    formatTtoState,
-    readerControlDisabled,
-    computeDownloadPercent,
     computeTickingLastSeen,
     computeTickingClock,
-    driftColorClass,
   } from "$lib/status-view-model";
   import { pushLogEntry } from "$lib/log-buffer";
-  import {
-    READ_MODE_OPTIONS,
-    initialTimeoutDraft,
-    resolveTimeoutSeconds,
-    shouldShowTimeoutInput,
-  } from "$lib/read-mode-form";
   import {
     subscribeDownloadProgress,
     type DownloadProgressEvent,
@@ -57,18 +45,7 @@
   let updateBusy = $state(false);
   let sseConnected = $state(false);
   let logs = $state<string[]>([]);
-  let epochNameDrafts = $state<Record<string, string>>({});
-  let epochNameBusy = $state<Record<string, boolean>>({});
-  let epochNameFeedback = $state<
-    Record<string, { kind: "ok" | "err"; message: string } | undefined>
-  >({});
-  let resetEpochFeedback = $state<
-    Record<string, { kind: "ok" | "err"; message: string } | undefined>
-  >({});
-  let expandedReader = $state<string | null>(null);
   let readerInfoMap = $state<Record<string, api.ReaderInfo>>({});
-  let readModeDrafts = $state<Record<string, string>>({});
-  let readModeTimeoutDrafts = $state<Record<string, string>>({});
   let controlBusy = $state<Record<string, boolean>>({});
   let controlFeedback = $state<
     Record<string, { kind: "ok" | "err"; message: string } | undefined>
@@ -205,308 +182,89 @@
     }
   }
 
+  // Reader control handlers. These throw on failure so the shared
+  // ReaderControlPanel can surface the error via its own feedback banner;
+  // success feedback is likewise rendered by the panel.
   async function handleResetEpoch(readerIp: string) {
-    resetEpochFeedback = { ...resetEpochFeedback, [readerIp]: undefined };
-    try {
-      const result = await api.resetEpoch(readerIp);
-      resetEpochFeedback = {
-        ...resetEpochFeedback,
-        [readerIp]: {
-          kind: "ok",
-          message: `Advanced to epoch ${result.new_epoch}.`,
-        },
-      };
-    } catch (e) {
-      const msg = String(e);
-      error = msg;
-      resetEpochFeedback = {
-        ...resetEpochFeedback,
-        [readerIp]: { kind: "err", message: `Failed to advance epoch: ${msg}` },
-      };
-    }
-  }
-
-  function updateEpochNameDraft(readerIp: string, value: string) {
-    epochNameDrafts = { ...epochNameDrafts, [readerIp]: value };
-  }
-
-  function setEpochNameBusy(readerIp: string, busy: boolean) {
-    epochNameBusy = { ...epochNameBusy, [readerIp]: busy };
+    await api.resetEpoch(readerIp);
   }
 
   async function handleSetCurrentEpochName(
     readerIp: string,
     name: string | null,
   ) {
-    setEpochNameBusy(readerIp, true);
-    error = null;
-    epochNameFeedback = { ...epochNameFeedback, [readerIp]: undefined };
-    try {
-      await api.setCurrentEpochName(readerIp, name);
-      if (name === null) {
-        epochNameDrafts = { ...epochNameDrafts, [readerIp]: "" };
-      }
-      epochNameFeedback = {
-        ...epochNameFeedback,
-        [readerIp]: {
-          kind: "ok",
-          message: name === null ? "Epoch name cleared." : "Epoch name saved.",
-        },
-      };
-    } catch (e) {
-      const msg = String(e);
-      error = msg;
-      epochNameFeedback = {
-        ...epochNameFeedback,
-        [readerIp]: {
-          kind: "err",
-          message: `Failed to update epoch name: ${msg}`,
-        },
-      };
-    } finally {
-      setEpochNameBusy(readerIp, false);
-    }
-  }
-
-  function toggleReaderExpand(ip: string) {
-    expandedReader = expandedReader === ip ? null : ip;
-  }
-
-  function readModeDraftValue(
-    ip: string,
-    info: api.ReaderInfo | undefined,
-  ): "raw" | "event" | "fsls" {
-    return (
-      (readModeDrafts[ip] as "raw" | "event" | "fsls" | undefined) ??
-      info?.config?.mode ??
-      "raw"
-    );
-  }
-
-  function readModeTimeoutDraftValue(
-    ip: string,
-    info: api.ReaderInfo | undefined,
-  ) {
-    return (
-      readModeTimeoutDrafts[ip] ?? initialTimeoutDraft(info?.config?.timeout)
-    );
-  }
-
-  function updateReadModeDraft(
-    ip: string,
-    mode: "raw" | "event" | "fsls",
-    info: api.ReaderInfo | undefined,
-  ) {
-    readModeDrafts = { ...readModeDrafts, [ip]: mode };
-    if (shouldShowTimeoutInput(mode) && readModeTimeoutDrafts[ip] == null) {
-      readModeTimeoutDrafts = {
-        ...readModeTimeoutDrafts,
-        [ip]: initialTimeoutDraft(info?.config?.timeout),
-      };
-    }
-  }
-
-  function updateReadModeTimeoutDraft(ip: string, value: string) {
-    readModeTimeoutDrafts = { ...readModeTimeoutDrafts, [ip]: value };
-  }
-
-  function readerDetailsId(ip: string): string {
-    return `reader-details-${ip.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+    await api.setCurrentEpochName(readerIp, name);
   }
 
   async function handleSyncClock(ip: string) {
-    controlBusy = { ...controlBusy, [ip]: true };
-    controlFeedback = { ...controlFeedback, [ip]: undefined };
-    try {
-      const result = await api.syncReaderClock(ip);
-      readerInfoMap = {
-        ...readerInfoMap,
-        [ip]: {
-          ...readerInfoMap[ip],
-          clock: {
-            reader_clock: result.reader_clock,
-            drift_ms: result.clock_drift_ms ?? 0,
-          },
+    const result = await api.syncReaderClock(ip);
+    readerInfoMap = {
+      ...readerInfoMap,
+      [ip]: {
+        ...readerInfoMap[ip],
+        clock: {
+          reader_clock: result.reader_clock,
+          drift_ms: result.clock_drift_ms ?? 0,
         },
-      };
-      readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
-      if (result.reader_clock) storeReaderClockBase(ip, result.reader_clock);
-      controlFeedback = {
-        ...controlFeedback,
-        [ip]: { kind: "ok", message: `Clock synced: ${result.reader_clock}` },
-      };
-    } catch (e) {
-      controlFeedback = {
-        ...controlFeedback,
-        [ip]: { kind: "err", message: `Sync failed: ${e}` },
-      };
-    } finally {
-      controlBusy = { ...controlBusy, [ip]: false };
-    }
+      },
+    };
+    readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
+    if (result.reader_clock) storeReaderClockBase(ip, result.reader_clock);
   }
 
-  async function handleSetReadMode(
-    ip: string,
-    mode: "raw" | "event" | "fsls",
-    timeoutDraft: string,
-    currentTimeout: number | null | undefined,
-  ) {
-    const timeout = resolveTimeoutSeconds(timeoutDraft, currentTimeout);
-    controlBusy = { ...controlBusy, [ip]: true };
-    controlFeedback = { ...controlFeedback, [ip]: undefined };
-    try {
-      const result = await api.setReadMode(ip, mode, timeout);
-      readerInfoMap = {
-        ...readerInfoMap,
-        [ip]: {
-          ...readerInfoMap[ip],
-          config: {
-            mode: result.mode as "raw" | "event" | "fsls",
-            timeout,
-          },
+  async function handleSetReadMode(ip: string, mode: string, timeout: number) {
+    const result = await api.setReadMode(
+      ip,
+      mode as "raw" | "event" | "fsls",
+      timeout,
+    );
+    readerInfoMap = {
+      ...readerInfoMap,
+      [ip]: {
+        ...readerInfoMap[ip],
+        config: {
+          mode: result.mode as "raw" | "event" | "fsls",
+          timeout,
         },
-      };
-      readModeDrafts = { ...readModeDrafts, [ip]: result.mode };
-      readModeTimeoutDrafts = {
-        ...readModeTimeoutDrafts,
-        [ip]: String(timeout),
-      };
-      controlFeedback = {
-        ...controlFeedback,
-        [ip]: {
-          kind: "ok",
-          message: shouldShowTimeoutInput(result.mode)
-            ? `Mode set to ${formatReadMode(result.mode)} (${timeout}s)`
-            : `Mode set to ${formatReadMode(result.mode)}`,
-        },
-      };
-    } catch (e) {
-      controlFeedback = {
-        ...controlFeedback,
-        [ip]: { kind: "err", message: `Set mode failed: ${e}` },
-      };
-    } finally {
-      controlBusy = { ...controlBusy, [ip]: false };
-    }
+      },
+    };
   }
 
   async function handleRefreshReader(ip: string) {
-    controlBusy = { ...controlBusy, [ip]: true };
-    try {
-      const info = await api.refreshReader(ip);
-      if (info) {
-        readerInfoMap = {
-          ...readerInfoMap,
-          [ip]: { ...readerInfoMap[ip], ...info },
-        };
-        readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
-        if (info.clock?.reader_clock)
-          storeReaderClockBase(ip, info.clock.reader_clock);
-      }
-    } catch (e) {
-      controlFeedback = {
-        ...controlFeedback,
-        [ip]: { kind: "err", message: `Refresh failed: ${e}` },
+    const info = await api.refreshReader(ip);
+    if (info) {
+      readerInfoMap = {
+        ...readerInfoMap,
+        [ip]: { ...readerInfoMap[ip], ...info },
       };
-    } finally {
-      controlBusy = { ...controlBusy, [ip]: false };
+      readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
+      if (info.clock?.reader_clock)
+        storeReaderClockBase(ip, info.clock.reader_clock);
     }
   }
 
   async function handleClearRecords(ip: string) {
-    controlBusy = { ...controlBusy, [ip]: true };
-    controlFeedback = { ...controlFeedback, [ip]: undefined };
-    try {
-      await api.clearReaderRecords(ip);
-      controlFeedback = {
-        ...controlFeedback,
-        [ip]: { kind: "ok", message: "Records cleared" },
-      };
-    } catch (e) {
-      controlFeedback = {
-        ...controlFeedback,
-        [ip]: { kind: "err", message: `Clear failed: ${e}` },
-      };
-    } finally {
-      controlBusy = { ...controlBusy, [ip]: false };
-    }
+    await api.clearReaderRecords(ip);
   }
 
   async function handleReconnect(ip: string) {
-    controlBusy = { ...controlBusy, [ip]: true };
-    controlFeedback = { ...controlFeedback, [ip]: undefined };
-    try {
-      await api.reconnectReader(ip);
-      controlFeedback = {
-        ...controlFeedback,
-        [ip]: { kind: "ok", message: "Reconnect requested" },
-      };
-    } catch (e) {
-      controlFeedback = {
-        ...controlFeedback,
-        [ip]: { kind: "err", message: `Reconnect failed: ${e}` },
-      };
-    } finally {
-      controlBusy = { ...controlBusy, [ip]: false };
-    }
+    await api.reconnectReader(ip);
   }
 
-  async function handleToggleRecording(ip: string) {
-    const info = readerInfoMap[ip];
-    const currentlyRecording = info?.recording === true;
-    controlBusy = { ...controlBusy, [ip]: true };
-    controlFeedback = { ...controlFeedback, [ip]: undefined };
-    try {
-      const result = await api.setRecording(ip, !currentlyRecording);
-      readerInfoMap = {
-        ...readerInfoMap,
-        [ip]: { ...readerInfoMap[ip], recording: result.recording },
-      };
-      controlFeedback = {
-        ...controlFeedback,
-        [ip]: {
-          kind: "ok",
-          message: result.recording ? "Recording started" : "Recording stopped",
-        },
-      };
-    } catch (e) {
-      controlFeedback = {
-        ...controlFeedback,
-        [ip]: { kind: "err", message: `Toggle recording failed: ${e}` },
-      };
-    } finally {
-      controlBusy = { ...controlBusy, [ip]: false };
-    }
+  async function handleToggleRecording(ip: string, enabled: boolean) {
+    const result = await api.setRecording(ip, enabled);
+    readerInfoMap = {
+      ...readerInfoMap,
+      [ip]: { ...readerInfoMap[ip], recording: result.recording },
+    };
   }
 
-  async function handleToggleTto(ip: string) {
-    const info = readerInfoMap[ip];
-    const currentlyEnabled = info?.tto_enabled === true;
-    controlBusy = { ...controlBusy, [ip]: true };
-    controlFeedback = { ...controlFeedback, [ip]: undefined };
-    try {
-      const result = await api.setTtoState(ip, !currentlyEnabled);
-      readerInfoMap = {
-        ...readerInfoMap,
-        [ip]: { ...readerInfoMap[ip], tto_enabled: result.enabled },
-      };
-      controlFeedback = {
-        ...controlFeedback,
-        [ip]: {
-          kind: "ok",
-          message: result.enabled
-            ? "TTO reporting enabled"
-            : "TTO reporting disabled",
-        },
-      };
-    } catch (e) {
-      controlFeedback = {
-        ...controlFeedback,
-        [ip]: { kind: "err", message: `TTO toggle failed: ${e}` },
-      };
-    } finally {
-      controlBusy = { ...controlBusy, [ip]: false };
-    }
+  async function handleToggleTto(ip: string, enabled: boolean) {
+    const result = await api.setTtoState(ip, enabled);
+    readerInfoMap = {
+      ...readerInfoMap,
+      [ip]: { ...readerInfoMap[ip], tto_enabled: result.enabled },
+    };
   }
 
   async function handleDownloadReads(ip: string) {
@@ -560,11 +318,56 @@
         },
       );
     } catch (e) {
-      controlFeedback = {
-        ...controlFeedback,
-        [ip]: { kind: "err", message: `Download failed: ${e}` },
-      };
       controlBusy = { ...controlBusy, [ip]: false };
+      // Re-throw so the panel reports the start failure in its feedback.
+      throw e;
+    }
+  }
+
+  function downloadProgressForPanel(ip: string): {
+    state: "downloading" | "complete" | "error" | "idle";
+    reads_received: number;
+    progress: number;
+    total: number;
+    error?: string;
+  } | null {
+    const dl = downloadState[ip];
+    if (!dl) return null;
+    if (dl.state === "downloading") {
+      return {
+        state: dl.state,
+        reads_received: dl.reads_received,
+        progress: dl.progress,
+        total: dl.total,
+      };
+    }
+    if (dl.state === "complete") {
+      return {
+        state: dl.state,
+        reads_received: dl.reads_received,
+        progress: 0,
+        total: 0,
+      };
+    }
+    if (dl.state === "error") {
+      return {
+        state: dl.state,
+        reads_received: 0,
+        progress: 0,
+        total: 0,
+        error: dl.message,
+      };
+    }
+    return { state: dl.state, reads_received: 0, progress: 0, total: 0 };
+  }
+
+  function openReaderHelp(fieldKey: string) {
+    if (fieldKey === "read_mode" || fieldKey === "timeout") {
+      readModeHelpField = fieldKey;
+      readModeHelpOpen = true;
+    } else {
+      readerLiveHelpField = fieldKey;
+      readerLiveHelpOpen = true;
     }
   }
 
@@ -878,8 +681,7 @@
         <p class="text-sm text-text-muted m-0">No readers configured.</p>
       {:else}
         <div class="flex flex-col gap-4">
-          {#each status.readers as reader}
-            {@const info = readerInfoMap[reader.ip]}
+          {#each status.readers as reader (reader.ip)}
             <Card borderStatus={readerBadgeState(reader.state)}>
               {#snippet header()}
                 <span class="font-mono text-sm text-text-primary"
@@ -889,519 +691,81 @@
                   label={reader.state}
                   state={readerBadgeState(reader.state)}
                 />
-                <div class="ml-auto flex gap-2">
-                  {#if reader.state !== "connected"}
+                {#if reader.state !== "connected"}
+                  <div class="ml-auto flex gap-2">
                     <button
                       class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                      onclick={() => handleReconnect(reader.ip)}
+                      onclick={() => {
+                        handleReconnect(reader.ip).catch((e) => {
+                          error = String(e);
+                        });
+                      }}
                       disabled={controlBusy[reader.ip]}
                     >
                       Reconnect
                     </button>
-                  {/if}
-                  <button
-                    class="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
-                    onclick={() => toggleReaderExpand(reader.ip)}
-                    aria-expanded={expandedReader === reader.ip}
-                    aria-controls={readerDetailsId(reader.ip)}
-                    aria-label={expandedReader === reader.ip
-                      ? "Hide details"
-                      : "Show details"}
-                  >
-                    <span
-                      class={`inline-block transition-transform ${expandedReader === reader.ip ? "rotate-180" : ""}`}
-                      >▾</span
-                    >
-                    <span>Details</span>
-                  </button>
-                </div>
+                  </div>
+                {/if}
               {/snippet}
 
-              <!-- Always-visible stats row -->
-              <div class="flex flex-wrap gap-x-6 gap-y-2 text-sm mb-3">
-                <div>
-                  <span class="text-text-muted"
-                    >Reads (session):<HelpTip
-                      fieldKey="reads_session"
-                      sectionKey="reader_live"
-                      context="forwarder"
-                      onOpenModal={(fk) => {
-                        readerLiveHelpField = fk;
-                        readerLiveHelpOpen = true;
-                      }}
-                    /></span
-                  >
-                  <span class="font-mono ml-1 text-text-primary"
-                    >{reader.reads_session.toLocaleString()}</span
-                  >
-                </div>
-                <div>
-                  <span class="text-text-muted"
-                    >Reads (total):<HelpTip
-                      fieldKey="reads_total"
-                      sectionKey="reader_live"
-                      context="forwarder"
-                      onOpenModal={(fk) => {
-                        readerLiveHelpField = fk;
-                        readerLiveHelpOpen = true;
-                      }}
-                    /></span
-                  >
-                  <span class="font-mono ml-1 text-text-primary"
-                    >{reader.reads_total.toLocaleString()}</span
-                  >
-                </div>
-                <div>
-                  <span class="text-text-muted"
-                    >Local Port:<HelpTip
-                      fieldKey="local_port"
-                      sectionKey="reader_live"
-                      context="forwarder"
-                      onOpenModal={(fk) => {
-                        readerLiveHelpField = fk;
-                        readerLiveHelpOpen = true;
-                      }}
-                    /></span
-                  >
-                  <span class="font-mono ml-1 text-text-primary"
-                    >{reader.local_port}</span
-                  >
-                </div>
-                <div>
-                  <span class="text-text-muted"
-                    >Last seen:<HelpTip
-                      fieldKey="last_seen"
-                      sectionKey="reader_live"
-                      context="forwarder"
-                      onOpenModal={(fk) => {
-                        readerLiveHelpField = fk;
-                        readerLiveHelpOpen = true;
-                      }}
-                    /></span
-                  >
-                  <span class="ml-1 text-text-secondary"
-                    >{formatLastSeen(tickingLastSeen(reader.ip))}</span
-                  >
-                </div>
-              </div>
+              <ReaderControlPanel
+                readerIp={reader.ip}
+                showHeader={false}
+                readerInfo={readerInfoMap[reader.ip] ?? null}
+                readerState={reader.state}
+                readsSession={reader.reads_session}
+                readsTotal={reader.reads_total}
+                localPortLabel="Local Port"
+                localPortValue={String(reader.local_port)}
+                lastSeenDisplay={formatLastSeen(tickingLastSeen(reader.ip))}
+                currentEpochName={reader.current_epoch_name ?? null}
+                readerClockDisplay={tickingReaderClock(reader.ip)}
+                forwarderClockDisplay={tickingForwarderClock(reader.ip)}
+                lastRefreshDisplay={readerInfoReceivedAt[reader.ip]
+                  ? formatLastSeen(
+                      computeElapsedSecondsSince(
+                        readerInfoReceivedAt[reader.ip],
+                        clockTickNow,
+                      ),
+                    )
+                  : "\u2014"}
+                downloadProgress={downloadProgressForPanel(reader.ip)}
+                disabled={controlBusy[reader.ip] === true}
+                detailsCollapsible
+                defaultCollapsed
+                helpContext="forwarder"
+                onOpenHelpModal={openReaderHelp}
+                onSetEpochName={(name) =>
+                  handleSetCurrentEpochName(reader.ip, name)}
+                onAdvanceEpoch={() => handleResetEpoch(reader.ip)}
+                onSyncClock={() => handleSyncClock(reader.ip)}
+                onSetReadMode={(mode, timeout) =>
+                  handleSetReadMode(reader.ip, mode, timeout)}
+                onSetTto={(enabled) => handleToggleTto(reader.ip, enabled)}
+                onSetRecording={(enabled) =>
+                  handleToggleRecording(reader.ip, enabled)}
+                onClearRecords={() => handleClearRecords(reader.ip)}
+                onStartDownload={() => handleDownloadReads(reader.ip)}
+                onRefresh={() => handleRefreshReader(reader.ip)}
+                onReconnect={() => handleReconnect(reader.ip)}
+              />
 
-              <!-- Epoch name row -->
-              <div class="flex flex-col gap-1">
-                {#if reader.current_epoch_name}
-                  <span class="text-xs text-text-muted font-mono">
-                    Active epoch: {reader.current_epoch_name}
-                  </span>
-                {/if}
-                <div class="flex items-center gap-2 flex-wrap">
-                  <span class="text-xs text-text-muted"
-                    >Epoch Name:<HelpTip
-                      fieldKey="epoch_name"
-                      sectionKey="reader_live"
-                      context="forwarder"
-                      onOpenModal={(fk) => {
-                        readerLiveHelpField = fk;
-                        readerLiveHelpOpen = true;
+              {#if controlFeedback[reader.ip]}
+                {@const fb = controlFeedback[reader.ip]}
+                {#if fb}
+                  <div class="mt-3">
+                    <AlertBanner
+                      variant={fb.kind}
+                      message={fb.message}
+                      onDismiss={() => {
+                        controlFeedback = {
+                          ...controlFeedback,
+                          [reader.ip]: undefined,
+                        };
                       }}
-                    /></span
-                  >
-                  <input
-                    type="text"
-                    class="w-48 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-primary border border-border"
-                    placeholder="Set epoch name"
-                    value={epochNameDrafts[reader.ip] ?? ""}
-                    oninput={(event) =>
-                      updateEpochNameDraft(
-                        reader.ip,
-                        (event.currentTarget as HTMLInputElement).value,
-                      )}
-                    disabled={epochNameBusy[reader.ip] === true}
-                  />
-                  <button
-                    onclick={() =>
-                      handleSetCurrentEpochName(
-                        reader.ip,
-                        (epochNameDrafts[reader.ip] ?? "").trim() || null,
-                      )}
-                    class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                    disabled={epochNameBusy[reader.ip] === true}
-                  >
-                    Save
-                  </button>
-                  <span class="text-xs text-text-muted"
-                    ><HelpTip
-                      fieldKey="advance_epoch"
-                      sectionKey="reader_live"
-                      context="forwarder"
-                      onOpenModal={(fk) => {
-                        readerLiveHelpField = fk;
-                        readerLiveHelpOpen = true;
-                      }}
-                    /></span
-                  >
-                  <button
-                    onclick={() => handleResetEpoch(reader.ip)}
-                    class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
-                  >
-                    Advance Epoch
-                  </button>
-                </div>
-                {#if epochNameFeedback[reader.ip]}
-                  {@const feedback = epochNameFeedback[reader.ip]}
-                  {#if feedback}
-                    <span
-                      class={`text-xs ${feedback.kind === "ok" ? "text-status-ok" : "text-status-err"}`}
-                    >
-                      {feedback.message}
-                    </span>
-                  {/if}
-                {/if}
-                {#if resetEpochFeedback[reader.ip]}
-                  {@const rf = resetEpochFeedback[reader.ip]}
-                  {#if rf}
-                    <span
-                      class={`text-xs ${rf.kind === "ok" ? "text-status-ok" : "text-status-err"}`}
-                    >
-                      {rf.message}
-                    </span>
-                  {/if}
-                {/if}
-              </div>
-
-              <!-- Expanded details -->
-              {#if expandedReader === reader.ip}
-                <div
-                  id={readerDetailsId(reader.ip)}
-                  class="mt-4 pt-4 border-t border-border"
-                >
-                  <div class="grid grid-cols-2 gap-x-8 gap-y-2 text-sm mb-4">
-                    <div class="col-span-2">
-                      <span class="text-text-muted">Banner:</span>
-                      <span class="font-mono ml-2 text-xs"
-                        >{info?.banner ?? "\u2014"}</span
-                      >
-                    </div>
-                    <div>
-                      <span class="text-text-muted">Firmware:</span>
-                      <span class="font-mono ml-2"
-                        >{info?.hardware?.fw_version ?? "\u2014"}</span
-                      >
-                    </div>
-                    <div>
-                      <span class="text-text-muted">Hardware:</span>
-                      <span class="font-mono ml-2"
-                        >{info?.hardware?.hw_code != null
-                          ? `0x${info.hardware.hw_code.toString(16)}`
-                          : "\u2014"}</span
-                      >
-                    </div>
-                    <div>
-                      <span class="text-text-muted">Reader Clock:</span>
-                      <span class="font-mono ml-2"
-                        >{tickingReaderClock(reader.ip)}</span
-                      >
-                    </div>
-                    <div>
-                      <span class="text-text-muted"
-                        >Clock Drift:<HelpTip
-                          fieldKey="clock_drift"
-                          sectionKey="reader_live"
-                          context="forwarder"
-                          onOpenModal={(fk) => {
-                            readerLiveHelpField = fk;
-                            readerLiveHelpOpen = true;
-                          }}
-                        /></span
-                      >
-                      <span
-                        class="{driftColorClass(
-                          info?.clock?.drift_ms,
-                        )} font-mono ml-2"
-                        >{formatClockDrift(info?.clock?.drift_ms)}</span
-                      >
-                    </div>
-                    <div>
-                      <span class="text-text-muted">Forwarder Clock:</span>
-                      <span class="font-mono ml-2"
-                        >{tickingForwarderClock(reader.ip)}</span
-                      >
-                    </div>
-                    <div>
-                      <span class="text-text-muted">Last Refresh:</span>
-                      <span class="ml-2"
-                        >{#if readerInfoReceivedAt[reader.ip]}{formatLastSeen(
-                            computeElapsedSecondsSince(
-                              readerInfoReceivedAt[reader.ip],
-                              clockTickNow,
-                            ),
-                          )}{:else}&mdash;{/if}</span
-                      >
-                    </div>
-                    <div class="col-span-2">
-                      <span class="text-text-muted"
-                        >Read Mode: <HelpTip
-                          fieldKey="read_mode"
-                          sectionKey="read_mode"
-                          context="forwarder"
-                          onOpenModal={(fk) => {
-                            readModeHelpField = fk;
-                            readModeHelpOpen = true;
-                          }}
-                        /></span
-                      >
-                      <span
-                        class="ml-2 inline-flex items-center gap-2 flex-wrap"
-                      >
-                        <select
-                          class="px-2 py-0.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
-                          value={readModeDraftValue(reader.ip, info)}
-                          onchange={(e) => {
-                            e.stopPropagation();
-                            updateReadModeDraft(
-                              reader.ip,
-                              (e.currentTarget as HTMLSelectElement).value as
-                                | "raw"
-                                | "event"
-                                | "fsls",
-                              info,
-                            );
-                          }}
-                          disabled={controlBusy[reader.ip] ||
-                            reader.state !== "connected"}
-                        >
-                          {#each READ_MODE_OPTIONS as option}
-                            <option value={option.value}>{option.label}</option>
-                          {/each}
-                        </select>
-                        {#if shouldShowTimeoutInput(readModeDraftValue(reader.ip, info))}
-                          <label
-                            class="inline-flex items-center gap-1 text-xs text-text-secondary"
-                          >
-                            <span
-                              >Timeout <HelpTip
-                                fieldKey="timeout"
-                                sectionKey="read_mode"
-                                context="forwarder"
-                                onOpenModal={(fk) => {
-                                  readModeHelpField = fk;
-                                  readModeHelpOpen = true;
-                                }}
-                              /></span
-                            >
-                            <input
-                              class="w-16 px-2 py-0.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
-                              type="number"
-                              min="1"
-                              max="255"
-                              value={readModeTimeoutDraftValue(reader.ip, info)}
-                              oninput={(e) => {
-                                e.stopPropagation();
-                                updateReadModeTimeoutDraft(
-                                  reader.ip,
-                                  (e.currentTarget as HTMLInputElement).value,
-                                );
-                              }}
-                              disabled={controlBusy[reader.ip] ||
-                                reader.state !== "connected"}
-                            />
-                            <span>s</span>
-                          </label>
-                        {/if}
-                        <button
-                          class="px-2.5 py-0.5 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
-                          onclick={(e) => {
-                            e.stopPropagation();
-                            handleSetReadMode(
-                              reader.ip,
-                              readModeDraftValue(reader.ip, info),
-                              readModeTimeoutDraftValue(reader.ip, info),
-                              info?.config?.timeout,
-                            );
-                          }}
-                          disabled={controlBusy[reader.ip] ||
-                            reader.state !== "connected"}>Apply</button
-                        >
-                      </span>
-                    </div>
-                    <div class="col-span-2">
-                      <span class="text-text-muted"
-                        >TTO Bytes:<HelpTip
-                          fieldKey="tto_bytes"
-                          sectionKey="reader_live"
-                          context="forwarder"
-                          onOpenModal={(fk) => {
-                            readerLiveHelpField = fk;
-                            readerLiveHelpOpen = true;
-                          }}
-                        /></span
-                      >
-                      <span
-                        class="ml-2 inline-flex items-center gap-2 flex-wrap"
-                      >
-                        <span class="font-mono"
-                          >{formatTtoState(info?.tto_enabled)}</span
-                        >
-                        <button
-                          class="px-2.5 py-0.5 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
-                          onclick={(e) => {
-                            e.stopPropagation();
-                            handleToggleTto(reader.ip);
-                          }}
-                          disabled={readerControlDisabled(
-                            reader.state,
-                            controlBusy[reader.ip],
-                          )}
-                        >
-                          {info?.tto_enabled ? "Disable TTO" : "Enable TTO"}
-                        </button>
-                      </span>
-                    </div>
+                    />
                   </div>
-                  <div
-                    class="flex items-center gap-3 pt-3 border-t border-border flex-wrap"
-                  >
-                    <span class="inline-flex items-center gap-1">
-                      <button
-                        class={btnPrimary}
-                        onclick={(e) => {
-                          e.stopPropagation();
-                          handleSyncClock(reader.ip);
-                        }}
-                        disabled={controlBusy[reader.ip] ||
-                          reader.state !== "connected"}>Sync Clock</button
-                      ><HelpTip
-                        fieldKey="sync_clock"
-                        sectionKey="reader_live"
-                        context="forwarder"
-                        onOpenModal={(fk) => {
-                          readerLiveHelpField = fk;
-                          readerLiveHelpOpen = true;
-                        }}
-                      />
-                    </span>
-                    <span class="inline-flex items-center gap-1">
-                      <button
-                        class="px-3 py-1.5 text-sm rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
-                        onclick={(e) => {
-                          e.stopPropagation();
-                          handleRefreshReader(reader.ip);
-                        }}
-                        disabled={controlBusy[reader.ip] ||
-                          reader.state !== "connected"}>Refresh</button
-                      ><HelpTip
-                        fieldKey="refresh_reader"
-                        sectionKey="reader_live"
-                        context="forwarder"
-                        onOpenModal={(fk) => {
-                          readerLiveHelpField = fk;
-                          readerLiveHelpOpen = true;
-                        }}
-                      />
-                    </span>
-                    <span class="inline-flex items-center gap-1">
-                      <button
-                        class={info?.recording
-                          ? "px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
-                          : "px-3 py-1.5 text-sm rounded-md bg-green-600 text-white border-none cursor-pointer hover:bg-green-700 disabled:opacity-50"}
-                        onclick={(e) => {
-                          e.stopPropagation();
-                          handleToggleRecording(reader.ip);
-                        }}
-                        disabled={controlBusy[reader.ip] ||
-                          reader.state !== "connected"}
-                        >{info?.recording
-                          ? "Stop Recording"
-                          : "Start Recording"}</button
-                      ><HelpTip
-                        fieldKey="recording"
-                        sectionKey="reader_live"
-                        context="forwarder"
-                        onOpenModal={(fk) => {
-                          readerLiveHelpField = fk;
-                          readerLiveHelpOpen = true;
-                        }}
-                      />
-                    </span>
-                    <span class="inline-flex items-center gap-1">
-                      <button
-                        class={btnPrimary}
-                        onclick={(e) => {
-                          e.stopPropagation();
-                          handleDownloadReads(reader.ip);
-                        }}
-                        disabled={controlBusy[reader.ip] ||
-                          reader.state !== "connected"}>Download Reads</button
-                      ><HelpTip
-                        fieldKey="download_reads"
-                        sectionKey="reader_live"
-                        context="forwarder"
-                        onOpenModal={(fk) => {
-                          readerLiveHelpField = fk;
-                          readerLiveHelpOpen = true;
-                        }}
-                      />
-                    </span>
-                    <span class="inline-flex items-center gap-1">
-                      <button
-                        class="px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
-                        onclick={(e) => {
-                          e.stopPropagation();
-                          handleClearRecords(reader.ip);
-                        }}
-                        disabled={controlBusy[reader.ip] ||
-                          reader.state !== "connected"}>Clear Records</button
-                      ><HelpTip
-                        fieldKey="clear_records"
-                        sectionKey="reader_live"
-                        context="forwarder"
-                        onOpenModal={(fk) => {
-                          readerLiveHelpField = fk;
-                          readerLiveHelpOpen = true;
-                        }}
-                      />
-                    </span>
-                  </div>
-                  {#if downloadState[reader.ip]?.state === "downloading"}
-                    {@const dl = downloadState[reader.ip]}
-                    {@const percent = computeDownloadPercent(
-                      dl,
-                      info?.estimated_stored_reads,
-                    )}
-                    <div
-                      class="mt-3 flex items-center gap-3 text-sm text-text-secondary"
-                    >
-                      <div
-                        class="flex-1 h-2 rounded-full bg-surface-2 overflow-hidden"
-                      >
-                        <div
-                          class="h-full bg-accent rounded-full transition-all"
-                          style="width: {percent}%"
-                        ></div>
-                      </div>
-                      <span class="text-xs font-mono whitespace-nowrap">
-                        {dl?.state === "downloading" || dl?.state === "complete"
-                          ? dl.reads_received
-                          : 0} reads &middot; {percent}%
-                      </span>
-                    </div>
-                  {/if}
-                  {#if controlFeedback[reader.ip]}
-                    {@const fb = controlFeedback[reader.ip]}
-                    {#if fb}
-                      <div class="mt-3">
-                        <AlertBanner
-                          variant={fb.kind}
-                          message={fb.message}
-                          onDismiss={() => {
-                            controlFeedback = {
-                              ...controlFeedback,
-                              [reader.ip]: undefined,
-                            };
-                          }}
-                        />
-                      </div>
-                    {/if}
-                  {/if}
-                </div>
+                {/if}
               {/if}
             </Card>
           {/each}
