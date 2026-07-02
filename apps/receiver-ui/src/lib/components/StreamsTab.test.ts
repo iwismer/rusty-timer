@@ -288,6 +288,71 @@ describe("StreamsTab", () => {
     });
   });
 
+  it("subscribes all available streams while preserving existing subscriptions", async () => {
+    store.streams = {
+      streams: [
+        {
+          forwarder_endpoint_id: "endpoint-existing",
+          stream_id: "reader-existing",
+          forwarder_id: "fwd-existing",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 10100,
+          event_type: "start",
+        },
+        {
+          forwarder_endpoint_id: "endpoint-available",
+          stream_id: "reader-available",
+          forwarder_id: "fwd-available",
+          reader_ip: "10.0.0.2:10000",
+          subscribed: false,
+          local_port: null,
+        },
+        {
+          forwarder_endpoint_id: "endpoint-canonical",
+          stream_id: "reader-canonical",
+          subscribed: false,
+          local_port: null,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    };
+
+    render(StreamsTab);
+
+    await fireEvent.click(
+      screen.getByRole("button", { name: "Subscribe All" }),
+    );
+
+    await waitFor(() => {
+      expect(apiMocks.putSubscriptions).toHaveBeenCalledWith([
+        {
+          forwarder_endpoint_id: "endpoint-existing",
+          stream_id: "reader-existing",
+          forwarder_id: "fwd-existing",
+          reader_ip: "10.0.0.1:10000",
+          local_port_override: 10100,
+          event_type: "start",
+        },
+        {
+          forwarder_endpoint_id: "endpoint-available",
+          stream_id: "reader-available",
+          forwarder_id: "fwd-available",
+          reader_ip: "10.0.0.2:10000",
+          local_port_override: null,
+          event_type: "finish",
+        },
+        {
+          forwarder_endpoint_id: "endpoint-canonical",
+          stream_id: "reader-canonical",
+          local_port_override: null,
+          event_type: "finish",
+        },
+      ]);
+    });
+  });
+
   it("renders canonical-only streams with distinct identity and expand state", async () => {
     // Two streams with no legacy forwarder_id/reader_ip. Legacy streamKey would
     // collapse both to "/", colliding their each-key and expand slot; canonical

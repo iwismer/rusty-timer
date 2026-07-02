@@ -10,7 +10,10 @@ import type {
   StreamCountUpdate,
   StreamsResponse,
 } from "./api";
-import { buildUpdatedSubscriptions } from "./subscriptions";
+import {
+  buildAllSubscriptions,
+  buildUpdatedSubscriptions,
+} from "./subscriptions";
 import { initSSE, destroySSE } from "./sse";
 import { cycleTheme } from "@rusty-timer/shared-ui/lib/dark-mode";
 import {
@@ -923,6 +926,27 @@ export async function toggleSubscription(
       return;
     }
     await api.putSubscriptions(result.subscriptions!);
+    const latestStreams = await api.getStreams();
+    if (refreshVersion === streamRefreshVersion) {
+      store.streams = latestStreams;
+      void prefetchEarliestEpochOptions(latestStreams.streams);
+    }
+  } catch (e) {
+    store.error = String(e);
+  } finally {
+    store.streamActionBusy = false;
+  }
+}
+
+export async function subscribeAllAvailable(): Promise<void> {
+  if (store.streamActionBusy || !store.streams) return;
+  if (!store.streams.streams.some((stream) => !stream.subscribed)) return;
+
+  store.streamActionBusy = true;
+  const refreshVersion = ++streamRefreshVersion;
+  try {
+    store.error = null;
+    await api.putSubscriptions(buildAllSubscriptions(store.streams.streams));
     const latestStreams = await api.getStreams();
     if (refreshVersion === streamRefreshVersion) {
       store.streams = latestStreams;

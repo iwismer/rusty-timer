@@ -7,6 +7,7 @@
     streamKey,
     streamIdentity,
     toggleSubscription,
+    subscribeAllAvailable,
     setStreamAnnouncerPublish,
     updateStreamEventType,
     changeEarliestEpoch,
@@ -203,15 +204,27 @@
     </div>
   {/if}
 
-  {#if store.modeDraft === "targeted_replay"}
-    <div class="flex justify-end px-4 py-2 border-b border-border">
-      <button
-        data-testid="replay-all-btn"
-        class={btnSecondary}
-        onclick={() => void replayAll()}
-      >
-        Replay All
-      </button>
+  {#if store.modeDraft === "targeted_replay" || store.streams?.streams.some((stream) => !stream.subscribed)}
+    <div class="flex justify-end gap-2 px-4 py-2 border-b border-border">
+      {#if store.streams?.streams.some((stream) => !stream.subscribed)}
+        <button
+          data-testid="subscribe-all-btn"
+          class={btnPrimary}
+          onclick={() => void subscribeAllAvailable()}
+          disabled={store.streamActionBusy}
+        >
+          Subscribe All
+        </button>
+      {/if}
+      {#if store.modeDraft === "targeted_replay"}
+        <button
+          data-testid="replay-all-btn"
+          class={btnSecondary}
+          onclick={() => void replayAll()}
+        >
+          Replay All
+        </button>
+      {/if}
     </div>
   {/if}
 

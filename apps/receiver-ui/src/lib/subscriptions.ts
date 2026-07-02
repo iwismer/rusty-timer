@@ -70,6 +70,18 @@ function legacyMetadata(stream: SubscriptionBuildStream | undefined): {
   };
 }
 
+export function buildAllSubscriptions(
+  allStreams: SubscriptionBuildStream[],
+): NonNullable<BuildUpdatedSubscriptionsResult["subscriptions"]> {
+  return allStreams.map((stream) => ({
+    forwarder_endpoint_id: stream.forwarder_endpoint_id,
+    stream_id: stream.stream_id,
+    ...legacyMetadata(stream),
+    local_port_override: stream.subscribed ? (stream.local_port ?? null) : null,
+    event_type: stream.subscribed ? (stream.event_type ?? "finish") : "finish",
+  }));
+}
+
 export function buildUpdatedSubscriptions(
   params: BuildUpdatedSubscriptionsParams,
 ): BuildUpdatedSubscriptionsResult {
