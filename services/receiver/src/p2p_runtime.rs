@@ -1082,7 +1082,7 @@ async fn reconcile_once(
             endpoint_id.clone(),
             Arc::clone(endpoint),
             forwarder_addr,
-            Arc::clone(&state.db),
+            state.writer.clone(),
             client_hello(),
             Arc::clone(reporter),
             BackoffConfig::default(),

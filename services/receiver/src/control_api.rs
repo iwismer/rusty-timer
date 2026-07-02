@@ -285,6 +285,10 @@ pub enum ShutdownSignal {
 
 pub struct AppState {
     pub db: Arc<Mutex<Db>>,
+    /// Handle to the dedicated SQLite writer thread. All hot-path persistence
+    /// (P2P EventBatch/GapNotice) flows through it; the `db` mutex above is
+    /// the cold control-plane connection.
+    pub writer: crate::writer::WriterHandle,
     pub connection_state: watch::Sender<ConnectionState>,
     // Keepalive receiver so that `connection_state.send()` never fails due
     // to "no receivers" even when no external subscriber is active.
@@ -351,14 +355,43 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Test-only convenience constructor: the state carries a *disconnected*
+    /// writer (every `state.writer` call fails). Tests that persist through
+    /// the writer must use [`AppState::new_for_test`], which shares one
+    /// temp-file DB between `state.db` and a live writer thread.
     pub fn new(db: Db, receiver_id: String) -> (Arc<Self>, watch::Receiver<ShutdownSignal>) {
-        Self::with_integrity(db, receiver_id, true)
+        Self::with_integrity(
+            db,
+            receiver_id,
+            true,
+            crate::writer::WriterHandle::disconnected_for_test(),
+        )
+    }
+
+    /// Test constructor with a *live* writer: creates a temp-file DB opened by
+    /// both `state.db` and the writer thread. Keep the returned `TempDir`
+    /// alive for the duration of the test.
+    #[doc(hidden)]
+    pub fn new_for_test() -> (
+        Arc<Self>,
+        watch::Receiver<ShutdownSignal>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let db_path = dir.path().join("receiver-test.sqlite3");
+        let db = Db::open(&db_path).expect("open test db");
+        let (writer, _thread) =
+            crate::writer::spawn_writer(&db_path, crate::writer::WriterConfig::default())
+                .expect("spawn test writer");
+        let (state, shutdown_rx) = Self::with_integrity(db, "recv-test".to_owned(), true, writer);
+        (state, shutdown_rx, dir)
     }
 
     pub fn with_integrity(
         db: Db,
         receiver_id: String,
         db_integrity_ok: bool,
+        writer: crate::writer::WriterHandle,
     ) -> (Arc<Self>, watch::Receiver<ShutdownSignal>) {
         let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownSignal::None);
         let (ui_tx, _) = broadcast::channel(256);
@@ -378,6 +411,7 @@ impl AppState {
             .expect("failed to build HTTP client");
         let state = Arc::new(Self {
             db: Arc::new(Mutex::new(db)),
+            writer,
             connection_state: conn_tx,
             _conn_state_keepalive: conn_keepalive_rx,
             logger: Arc::new(rt_ui_log::UiLogger::with_buffer(

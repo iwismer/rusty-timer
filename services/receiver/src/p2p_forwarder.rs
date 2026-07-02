@@ -11,17 +11,17 @@ use rt_p2p_protocol::{
     ReaderControlResponse, RestartRequest, RestartResponse, SubscribeMode, control_c2f,
     control_f2c, has_capability,
 };
-use tokio::sync::{Mutex, Notify, broadcast, mpsc, oneshot, watch};
+use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::warn;
 
 use crate::control_api::{ConfigCommand, FORWARDER_CONFIG_TIMEOUT, ReaderCommand};
-use crate::db::Db;
 use crate::p2p_session::{
     BackoffConfig, DurableBatch, P2pSessionError, SessionStatusReporter, connect_and_hello,
     read_frame, run_data_subscription_with_hint, write_frame,
 };
+use crate::writer::WriterHandle;
 
 #[derive(Clone, Debug)]
 pub struct ForwarderDataStream {
@@ -45,7 +45,7 @@ impl ForwarderConnection {
         endpoint_id: String,
         endpoint: Arc<Endpoint>,
         forwarder_addr: NodeAddr,
-        db: Arc<Mutex<Db>>,
+        writer: WriterHandle,
         client_hello: Hello,
         reporter: Arc<SessionStatusReporter>,
         backoff: BackoffConfig,
@@ -56,7 +56,7 @@ impl ForwarderConnection {
             endpoint_id,
             endpoint,
             forwarder_addr,
-            db,
+            writer,
             client_hello,
             reporter,
             backoff,
@@ -101,7 +101,7 @@ async fn run_forwarder_connection(
     endpoint_id: String,
     endpoint: Arc<Endpoint>,
     forwarder_addr: NodeAddr,
-    db: Arc<Mutex<Db>>,
+    writer: WriterHandle,
     client_hello: Hello,
     reporter: Arc<SessionStatusReporter>,
     backoff: BackoffConfig,
@@ -134,7 +134,7 @@ async fn run_forwarder_connection(
                 run_connected_forwarder(
                     &endpoint_id,
                     session,
-                    &db,
+                    &writer,
                     &reporter,
                     &mut desired_rx,
                     &mut shutdown_rx,
@@ -171,7 +171,7 @@ fn next_backoff(current: Duration, max: Duration) -> Duration {
 async fn run_connected_forwarder(
     endpoint_id: &str,
     session: crate::p2p_session::ControlSession,
-    db: &Arc<Mutex<Db>>,
+    writer: &WriterHandle,
     reporter: &Arc<SessionStatusReporter>,
     desired_rx: &mut watch::Receiver<HashMap<String, ForwarderDataStream>>,
     shutdown_rx: &mut watch::Receiver<bool>,
@@ -241,7 +241,7 @@ async fn run_connected_forwarder(
     sync_data_tasks(
         endpoint_id,
         &connection,
-        db,
+        writer,
         reporter,
         &desired,
         &mut data_tasks,
@@ -298,7 +298,7 @@ async fn run_connected_forwarder(
                 sync_data_tasks(
                     endpoint_id,
                     &connection,
-                    db,
+                    writer,
                     reporter,
                     &desired,
                     &mut data_tasks,
@@ -669,7 +669,7 @@ async fn handle_control_frame(
 async fn sync_data_tasks(
     endpoint_id: &str,
     connection: &rt_iroh::Connection,
-    db: &Arc<Mutex<Db>>,
+    writer: &WriterHandle,
     reporter: &Arc<SessionStatusReporter>,
     desired: &HashMap<String, ForwarderDataStream>,
     tasks: &mut HashMap<String, JoinHandle<()>>,
@@ -703,7 +703,7 @@ async fn sync_data_tasks(
         }
         let endpoint_id = endpoint_id.to_owned();
         let connection = connection.clone();
-        let db = Arc::clone(db);
+        let writer = writer.clone();
         let reporter = Arc::clone(reporter);
         let stream = stream.clone();
         tasks.insert(
@@ -712,7 +712,7 @@ async fn sync_data_tasks(
                 let _data_guard = reporter.on_data_session(&endpoint_id).await;
                 let result = run_data_subscription_with_hint(
                     &connection,
-                    &db,
+                    &writer,
                     &stream.stream_id,
                     stream.mode,
                     stream.durable_hint_tx.as_ref(),
@@ -752,13 +752,12 @@ mod tests {
     };
     use rt_test_utils::p2p::{ConnectivityFault, ForwarderScript, MockForwarderPeer};
     use rt_test_utils::poll_until;
-    use tokio::sync::{Mutex, broadcast, oneshot};
+    use tokio::sync::{broadcast, oneshot};
 
     use crate::control_api::{
         AppState, ConfigCommand, ForwarderConnState, ReaderCommand, get_connections,
         get_forwarder_config, restart_forwarder, set_forwarder_config,
     };
-    use crate::db::Db;
     use crate::p2p_session::{BackoffConfig, SessionStatusReporter};
 
     use super::{
@@ -807,6 +806,26 @@ mod tests {
         }
     }
 
+    /// Writer + Db pair sharing one temp-file DB for data-stream tests.
+    struct TestStore {
+        writer: crate::writer::WriterHandle,
+        db: Arc<tokio::sync::Mutex<crate::db::Db>>,
+        _dir: tempfile::TempDir,
+    }
+
+    fn test_store() -> TestStore {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fwd-test.sqlite3");
+        let db = crate::db::Db::open(&path).unwrap();
+        let (writer, _thread) =
+            crate::writer::spawn_writer(&path, crate::writer::WriterConfig::default()).unwrap();
+        TestStore {
+            writer,
+            db: Arc::new(tokio::sync::Mutex::new(db)),
+            _dir: dir,
+        }
+    }
+
     async fn test_endpoint(seed: u8) -> Endpoint {
         EndpointBuilder::test([seed; 32]).bind().await.unwrap()
     }
@@ -819,16 +838,18 @@ mod tests {
                 .unwrap();
             let endpoint_id = forwarder.node_addr().node_id.to_string();
             let endpoint = Arc::new(test_endpoint(41).await);
-            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-            let (state, _shutdown_rx) =
-                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let store = test_store();
+            let (state, _shutdown_rx) = AppState::new(
+                crate::db::Db::open_in_memory().unwrap(),
+                "recv-test".to_owned(),
+            );
             let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
 
             let connection = ForwarderConnection::start(
                 endpoint_id.clone(),
                 Arc::clone(&endpoint),
                 forwarder.node_addr(),
-                Arc::clone(&db),
+                store.writer.clone(),
                 test_hello(),
                 Arc::clone(&reporter),
                 BackoffConfig {
@@ -958,16 +979,18 @@ mod tests {
                 .unwrap();
             let endpoint_id = forwarder.node_addr().node_id.to_string();
             let endpoint = Arc::new(test_endpoint(43).await);
-            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-            let (state, _shutdown_rx) =
-                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let store = test_store();
+            let (state, _shutdown_rx) = AppState::new(
+                crate::db::Db::open_in_memory().unwrap(),
+                "recv-test".to_owned(),
+            );
             let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
 
             let connection = ForwarderConnection::start(
                 endpoint_id.clone(),
                 Arc::clone(&endpoint),
                 forwarder.node_addr(),
-                Arc::clone(&db),
+                store.writer.clone(),
                 test_hello(),
                 Arc::clone(&reporter),
                 BackoffConfig {
@@ -1005,7 +1028,7 @@ mod tests {
 
             // Resuming re-delivers [1, 2]; dedup keeps exactly one durable row
             // per seq, with no duplicate seqs in the final durable set.
-            let guard = db.lock().await;
+            let guard = store.db.lock().await;
             let seqs: Vec<i64> = guard
                 .load_received_events(STREAM_ID)
                 .unwrap()
@@ -1082,16 +1105,18 @@ mod tests {
                 .unwrap();
             let endpoint_id = forwarder.node_addr().node_id.to_string();
             let endpoint = Arc::new(test_endpoint(45).await);
-            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-            let (state, _shutdown_rx) =
-                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let store = test_store();
+            let (state, _shutdown_rx) = AppState::new(
+                crate::db::Db::open_in_memory().unwrap(),
+                "recv-test".to_owned(),
+            );
             let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
 
             let connection = ForwarderConnection::start(
                 endpoint_id.clone(),
                 Arc::clone(&endpoint),
                 forwarder.node_addr(),
-                Arc::clone(&db),
+                store.writer.clone(),
                 test_hello(),
                 Arc::clone(&reporter),
                 BackoffConfig {
@@ -1229,9 +1254,11 @@ mod tests {
                 .unwrap();
             let endpoint_id = forwarder.node_addr().node_id.to_string();
             let endpoint = Arc::new(test_endpoint(47).await);
-            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-            let (state, _shutdown_rx) =
-                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let store = test_store();
+            let (state, _shutdown_rx) = AppState::new(
+                crate::db::Db::open_in_memory().unwrap(),
+                "recv-test".to_owned(),
+            );
             let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
 
             let mut ui_rx = state.ui_tx.subscribe();
@@ -1239,7 +1266,7 @@ mod tests {
                 endpoint_id.clone(),
                 Arc::clone(&endpoint),
                 forwarder.node_addr(),
-                Arc::clone(&db),
+                store.writer.clone(),
                 remote_config_hello(),
                 Arc::clone(&reporter),
                 BackoffConfig {
@@ -1353,16 +1380,18 @@ mod tests {
                 .unwrap();
             let endpoint_id = forwarder.node_addr().node_id.to_string();
             let endpoint = Arc::new(test_endpoint(53).await);
-            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-            let (state, _shutdown_rx) =
-                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let store = test_store();
+            let (state, _shutdown_rx) = AppState::new(
+                crate::db::Db::open_in_memory().unwrap(),
+                "recv-test".to_owned(),
+            );
             let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
 
             let connection = ForwarderConnection::start(
                 endpoint_id.clone(),
                 Arc::clone(&endpoint),
                 forwarder.node_addr(),
-                Arc::clone(&db),
+                store.writer.clone(),
                 reader_control_hello(),
                 Arc::clone(&reporter),
                 BackoffConfig {
@@ -1478,16 +1507,18 @@ mod tests {
                 .unwrap();
             let endpoint_id = forwarder.node_addr().node_id.to_string();
             let endpoint = Arc::new(test_endpoint(51).await);
-            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-            let (state, _shutdown_rx) =
-                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let store = test_store();
+            let (state, _shutdown_rx) = AppState::new(
+                crate::db::Db::open_in_memory().unwrap(),
+                "recv-test".to_owned(),
+            );
             let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
 
             let connection = ForwarderConnection::start(
                 endpoint_id.clone(),
                 Arc::clone(&endpoint),
                 forwarder.node_addr(),
-                Arc::clone(&db),
+                store.writer.clone(),
                 remote_config_hello(),
                 Arc::clone(&reporter),
                 BackoffConfig {
@@ -1546,16 +1577,18 @@ mod tests {
                 .unwrap();
             let endpoint_id = forwarder.node_addr().node_id.to_string();
             let endpoint = Arc::new(test_endpoint(53).await);
-            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-            let (state, _shutdown_rx) =
-                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let store = test_store();
+            let (state, _shutdown_rx) = AppState::new(
+                crate::db::Db::open_in_memory().unwrap(),
+                "recv-test".to_owned(),
+            );
             let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
 
             let connection = ForwarderConnection::start(
                 endpoint_id.clone(),
                 Arc::clone(&endpoint),
                 forwarder.node_addr(),
-                Arc::clone(&db),
+                store.writer.clone(),
                 remote_config_hello(),
                 Arc::clone(&reporter),
                 BackoffConfig {
@@ -1606,16 +1639,18 @@ mod tests {
                 .unwrap();
             let endpoint_id = forwarder.node_addr().node_id.to_string();
             let endpoint = Arc::new(test_endpoint(55).await);
-            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-            let (state, _shutdown_rx) =
-                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let store = test_store();
+            let (state, _shutdown_rx) = AppState::new(
+                crate::db::Db::open_in_memory().unwrap(),
+                "recv-test".to_owned(),
+            );
             let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
 
             let connection = ForwarderConnection::start(
                 endpoint_id.clone(),
                 Arc::clone(&endpoint),
                 forwarder.node_addr(),
-                Arc::clone(&db),
+                store.writer.clone(),
                 remote_config_hello(),
                 Arc::clone(&reporter),
                 BackoffConfig {
@@ -1669,16 +1704,18 @@ mod tests {
             let forwarder = MockForwarderPeer::start([56; 32], script).await.unwrap();
             let endpoint_id = forwarder.node_addr().node_id.to_string();
             let endpoint = Arc::new(test_endpoint(57).await);
-            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-            let (state, _shutdown_rx) =
-                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let store = test_store();
+            let (state, _shutdown_rx) = AppState::new(
+                crate::db::Db::open_in_memory().unwrap(),
+                "recv-test".to_owned(),
+            );
             let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
 
             let connection = ForwarderConnection::start(
                 endpoint_id.clone(),
                 Arc::clone(&endpoint),
                 forwarder.node_addr(),
-                Arc::clone(&db),
+                store.writer.clone(),
                 remote_config_hello(),
                 Arc::clone(&reporter),
                 BackoffConfig {
@@ -1744,16 +1781,18 @@ mod tests {
                 .unwrap();
             let endpoint_id = forwarder.node_addr().node_id.to_string();
             let endpoint = Arc::new(test_endpoint(49).await);
-            let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-            let (state, _shutdown_rx) =
-                AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+            let store = test_store();
+            let (state, _shutdown_rx) = AppState::new(
+                crate::db::Db::open_in_memory().unwrap(),
+                "recv-test".to_owned(),
+            );
             let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
 
             let connection = ForwarderConnection::start(
                 endpoint_id.clone(),
                 Arc::clone(&endpoint),
                 forwarder.node_addr(),
-                Arc::clone(&db),
+                store.writer.clone(),
                 // Client advertises remote-config, but the forwarder does not,
                 // so the negotiated session has no remote-config capability.
                 remote_config_hello(),
@@ -1809,8 +1848,10 @@ mod tests {
     /// With no live session at all, a config command errors immediately.
     #[tokio::test]
     async fn config_command_without_live_session_errors() {
-        let (state, _shutdown_rx) =
-            AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+        let (state, _shutdown_rx) = AppState::new(
+            crate::db::Db::open_in_memory().unwrap(),
+            "recv-test".to_owned(),
+        );
         let result = get_forwarder_config(&state, "no-such-forwarder".to_owned()).await;
         assert!(
             result.is_err(),

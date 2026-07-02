@@ -124,7 +124,15 @@ pub async fn init_with_data_dir(
     let receiver_id = resolve_receiver_id(receiver_id, &db)?;
     info!(receiver_id = %receiver_id, "resolved receiver ID");
 
-    let (state, shutdown_rx) = AppState::with_integrity(db, receiver_id, db_integrity_ok);
+    // Dedicated writer thread for hot-path persistence (group commit, one
+    // fsync per commit window). It owns its own connection to the same DB
+    // file; `state.db` remains the cold control-plane connection. The thread
+    // exits when the last WriterHandle drops (process shutdown).
+    let (writer, _writer_thread) =
+        crate::writer::spawn_writer(&db_path, crate::writer::WriterConfig::from_env())
+            .map_err(|e| format!("failed to start sqlite writer: {e}"))?;
+
+    let (state, shutdown_rx) = AppState::with_integrity(db, receiver_id, db_integrity_ok, writer);
     state.logger.log("Receiver started");
 
     // Populate the chip->participant lookup from any previously imported

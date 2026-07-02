@@ -36,10 +36,10 @@ use rt_p2p_protocol::{
     HelloOk, MAX_FRAME_BYTES, StreamCatalog, SubscribeMode, control_c2f, control_f2c, data_c2f,
     data_f2c, encode_frame,
 };
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::broadcast;
 
 use crate::control_api::AppState;
-use crate::db::{Db, GapMarkerInsert, ReceivedEventInsert};
+use crate::writer::{PreparedGap, PreparedRecord, WriteError, WriterHandle};
 
 /// Aggregates live control/data connectivity per forwarder and reflects it
 /// into the shared [`AppState`] connection state.
@@ -198,6 +198,11 @@ pub enum P2pSessionError {
         /// The out-of-range wire value.
         value: u64,
     },
+    /// The writer thread rejected or dropped a persist command (group commit
+    /// failure or shutdown). Nothing was persisted or acked; resuming from the
+    /// persisted cursor is safe, so this is retryable.
+    #[error("writer error: {0}")]
+    Writer(String),
 }
 
 impl P2pSessionError {
@@ -223,7 +228,8 @@ impl P2pSessionError {
             P2pSessionError::Iroh(_)
             | P2pSessionError::Stream(_)
             | P2pSessionError::Read(_)
-            | P2pSessionError::Write(_) => true,
+            | P2pSessionError::Write(_)
+            | P2pSessionError::Writer(_) => true,
             P2pSessionError::Decode(_)
             | P2pSessionError::FrameTooLarge(_)
             | P2pSessionError::Db(_)
@@ -421,121 +427,67 @@ pub struct EventFact {
     pub chip_id: String,
 }
 
-/// Insert every record of `batch` into the durable store (idempotent on
-/// `(stream_id, seq)`), then advance and return the contiguous durable cursor
-/// together with the facts for the rows actually inserted.
-///
-/// The whole batch — inserts, conflict checks, and the cursor advance — runs
-/// in **one `IMMEDIATE` transaction**: one fsync per `EventBatch` instead of
-/// one per row. A conflicting duplicate anywhere in the batch rolls the whole
-/// batch back (nothing persists, nothing is acked); at-least-once redelivery
-/// covers the rolled-back rows.
-///
-/// Every record's `stream_id` is validated against the subscribed stream
-/// *before* any insertion, so a batch carrying a foreign record persists
-/// nothing. A duplicate `(stream_id, seq)` whose immutable payload differs from
-/// the stored row is rejected as [`P2pSessionError::ConflictingDuplicate`].
-fn persist_batch(
-    db: &mut Db,
+/// Validate an `EventBatch` and convert it into writer-ready records: stream
+/// ids checked, u64→i64 converted, `received_unix_ms` defaulted, and the chip
+/// id parsed once. A batch carrying a foreign record prepares nothing (and is
+/// therefore never persisted or acked).
+fn prepare_batch(
     stream_id: &str,
     batch: &EventBatch,
-) -> Result<(i64, Vec<EventFact>), P2pSessionError> {
+) -> Result<Vec<PreparedRecord>, P2pSessionError> {
+    let received_default = now_unix_ms();
     let mut records = Vec::with_capacity(batch.records.len());
     for record in &batch.records {
         check_stream_id(stream_id, &record.stream_id)?;
         let seq = u64_to_i64(record.seq, "record.seq")?;
         let epoch = u64_to_i64(record.epoch, "record.epoch")?;
-        records.push((record, seq, epoch));
-    }
-
-    let received_default = now_unix_ms();
-    let mut facts = Vec::with_capacity(batch.records.len());
-    let tx = db.transaction()?;
-    for (record, seq, epoch) in records {
-        let reader_timestamp = if record.reader_timestamp == 0 {
-            None
-        } else {
-            Some(record.reader_timestamp.to_string())
-        };
-        let received_unix_ms = if record.received_unix_ms == 0 {
-            received_default
-        } else {
-            record.received_unix_ms
-        };
-        let insert = ReceivedEventInsert {
-            stream_id,
+        // A non-zero received_unix_ms is part of the immutable payload for
+        // duplicate-conflict checks (it is persisted and used as the announcer
+        // ordering key); zero means the forwarder omitted it and the receiver
+        // supplies a local default.
+        let received_unix_ms_explicit = record.received_unix_ms != 0;
+        records.push(PreparedRecord {
             seq,
             epoch,
-            raw_frame: &record.raw_frame,
-            read_kind: &record.read_kind,
-            reader_timestamp: reader_timestamp.as_deref(),
-            received_unix_ms,
-            dbf_delivered_unix_ms: None,
-        };
-        if crate::db::insert_received_event_conn(&tx, &insert)? {
-            // Parse the chip id once at persist time so downstream projections
-            // never need to re-read or re-parse the raw frame.
-            facts.push(EventFact {
-                seq,
-                epoch,
-                received_unix_ms,
-                chip_id: crate::ui_events::chip_id_from_raw_frame(&record.raw_frame),
-            });
-        } else {
-            // Idempotent dedup: a row already exists for this (stream_id, seq).
-            // The immutable payload must match — a divergent duplicate means the
-            // forwarder re-sent a conflicting record under the same seq, which
-            // is a data-integrity violation we must not silently ack past. A
-            // non-zero received_unix_ms is part of that payload because it is
-            // persisted and used as the announcer ordering key; zero means the
-            // forwarder omitted it and the receiver supplied a local default.
-            if let Some(existing) = crate::db::load_received_event_conn(&tx, stream_id, insert.seq)?
-            {
-                let received_unix_ms_conflicts = record.received_unix_ms != 0
-                    && existing.received_unix_ms != insert.received_unix_ms;
-                let conflicts = existing.epoch != insert.epoch
-                    || existing.raw_frame != insert.raw_frame
-                    || existing.read_kind != insert.read_kind
-                    || existing.reader_timestamp.as_deref() != insert.reader_timestamp
-                    || received_unix_ms_conflicts;
-                if conflicts {
-                    // Dropping `tx` rolls back every insert in this batch.
-                    return Err(P2pSessionError::ConflictingDuplicate {
-                        stream_id: stream_id.to_owned(),
-                        seq: insert.seq,
-                    });
-                }
-            }
-        }
+            raw_frame: record.raw_frame.clone(),
+            read_kind: record.read_kind.clone(),
+            reader_timestamp: (record.reader_timestamp != 0)
+                .then(|| record.reader_timestamp.to_string()),
+            received_unix_ms: if received_unix_ms_explicit {
+                record.received_unix_ms
+            } else {
+                received_default
+            },
+            received_unix_ms_explicit,
+            chip_id: crate::ui_events::chip_id_from_raw_frame(&record.raw_frame),
+        });
     }
-    let through_seq = crate::db::advance_cursor_contiguous_prefix_conn(&tx, stream_id)?;
-    tx.commit().map_err(crate::db::DbError::from)?;
-    Ok((through_seq, facts))
+    Ok(records)
 }
 
-/// Record a gap marker and jump the cursor past the unavailable history in one
-/// transaction, returning the resulting durable cursor.
-fn persist_gap(db: &mut Db, stream_id: &str, gap: &GapNotice) -> Result<i64, P2pSessionError> {
+/// Validate a `GapNotice` into a writer-ready gap.
+fn prepare_gap(stream_id: &str, gap: &GapNotice) -> Result<PreparedGap, P2pSessionError> {
     check_stream_id(stream_id, &gap.stream_id)?;
-    let requested_after_seq = u64_to_i64(gap.requested_after_seq, "gap.requested_after_seq")?;
-    let earliest_available_seq =
-        u64_to_i64(gap.earliest_available_seq, "gap.earliest_available_seq")?;
-    let latest_available_seq = u64_to_i64(gap.latest_available_seq, "gap.latest_available_seq")?;
-    let marker = GapMarkerInsert {
-        stream_id,
-        requested_after_seq,
-        earliest_available_seq,
-        latest_available_seq,
-        reason: &gap.reason,
+    Ok(PreparedGap {
+        requested_after_seq: u64_to_i64(gap.requested_after_seq, "gap.requested_after_seq")?,
+        earliest_available_seq: u64_to_i64(
+            gap.earliest_available_seq,
+            "gap.earliest_available_seq",
+        )?,
+        latest_available_seq: u64_to_i64(gap.latest_available_seq, "gap.latest_available_seq")?,
+        reason: gap.reason.clone(),
         created_unix_ms: now_unix_ms(),
-    };
-    let tx = db.transaction()?;
-    crate::db::save_gap_marker_conn(&tx, &marker)?;
-    let jump_to = earliest_available_seq.saturating_sub(1);
-    crate::db::jump_stream_cursor_conn(&tx, stream_id, jump_to)?;
-    let cursor = crate::db::load_stream_cursor_conn(&tx, stream_id)?;
-    tx.commit().map_err(crate::db::DbError::from)?;
-    Ok(cursor)
+    })
+}
+
+fn map_write_error(error: WriteError) -> P2pSessionError {
+    match error {
+        WriteError::ConflictingDuplicate { stream_id, seq } => {
+            P2pSessionError::ConflictingDuplicate { stream_id, seq }
+        }
+        WriteError::Db(e) => P2pSessionError::Db(e),
+        WriteError::Closed(message) => P2pSessionError::Writer(message),
+    }
 }
 
 async fn send_ack(
@@ -559,24 +511,23 @@ async fn send_ack(
 /// data stream ends (clean disconnect/EOF).
 ///
 /// Reads the persisted cursor, opens a data stream, sends `DataSubscribe { after_seq }`,
-/// then pumps `EventBatch` (insert → advance cursor → cumulative `Ack`) and
+/// then pumps `EventBatch` (persist via the writer → cumulative `Ack`) and
 /// `GapNotice` (record + jump cursor) until the stream closes.
 ///
-/// `db` is a shared, `Send`-friendly handle. The lock is held only for short
-/// synchronous persistence/cursor operations and is always released before any
-/// network await, so the returned future stays `Send` and never blocks the
-/// runtime on I/O while holding the connection.
+/// All persistence flows through the group-commit `writer`; a reply from it is
+/// proof of a durable commit, so the ack that follows preserves the
+/// insert-before-ack contract.
 ///
 /// Every stream-scoped frame's `stream_id` is validated against `stream_id`
 /// before it is persisted or acked; a mismatch is rejected as
 /// [`P2pSessionError::StreamIdMismatch`].
 pub async fn run_data_subscription(
     connection: &Connection,
-    db: &Arc<Mutex<Db>>,
+    writer: &WriterHandle,
     stream_id: &str,
     mode: SubscribeMode,
 ) -> Result<SessionOutcome, P2pSessionError> {
-    run_data_subscription_with_hint(connection, db, stream_id, mode, None).await
+    run_data_subscription_with_hint(connection, writer, stream_id, mode, None).await
 }
 
 /// Like [`run_data_subscription`], but broadcasts the durable contiguous cursor
@@ -586,12 +537,15 @@ pub async fn run_data_subscription(
 /// DBF, announcer) use it to drain freshly persisted rows.
 pub async fn run_data_subscription_with_hint(
     connection: &Connection,
-    db: &Arc<Mutex<Db>>,
+    writer: &WriterHandle,
     stream_id: &str,
     mode: SubscribeMode,
     durable_hint_tx: Option<&broadcast::Sender<DurableBatch>>,
 ) -> Result<SessionOutcome, P2pSessionError> {
-    let after_seq = { db.lock().await.load_stream_cursor(stream_id)? };
+    let after_seq = writer
+        .load_cursor(stream_id.to_owned())
+        .await
+        .map_err(map_write_error)?;
 
     let (mut send, mut recv) = connection
         .open_bi()
@@ -632,19 +586,18 @@ pub async fn run_data_subscription_with_hint(
 
         match frame.msg {
             Some(data_f2c::Msg::EventBatch(batch)) => {
-                // Durable-first: validate + insert rows, advance the contiguous
-                // cursor, then ack only through that durable cursor. The lock is
-                // released before the ack await.
-                let (through_seq, facts) = {
-                    let mut db = db.lock().await;
-                    persist_batch(&mut db, stream_id, &batch)
-                }?;
+                // Durable-first: validate, persist through the writer (the
+                // reply resolves only after a successful group commit), then
+                // ack through the durable cursor.
+                let records = prepare_batch(stream_id, &batch)?;
+                let durable = writer
+                    .persist_batch(stream_id.to_owned(), records)
+                    .await
+                    .map_err(map_write_error)?;
+                let through_seq = durable.through_seq;
                 // Post-commit durable hint: rows are durable before the ack.
                 if let Some(tx) = durable_hint_tx {
-                    let _ = tx.send(DurableBatch {
-                        through_seq,
-                        inserted: Arc::new(facts),
-                    });
+                    let _ = tx.send(durable);
                 }
                 send_ack(&mut send, stream_id, through_seq).await?;
             }
@@ -652,10 +605,11 @@ pub async fn run_data_subscription_with_hint(
                 // Record the gap, jump the cursor past the unavailable history,
                 // then ack the jumped cursor so the forwarder will not resend
                 // the now-skipped seqs.
-                let through_seq = {
-                    let mut db = db.lock().await;
-                    persist_gap(&mut db, stream_id, &gap)
-                }?;
+                let gap = prepare_gap(stream_id, &gap)?;
+                let through_seq = writer
+                    .persist_gap(stream_id.to_owned(), gap)
+                    .await
+                    .map_err(map_write_error)?;
                 if let Some(tx) = durable_hint_tx {
                     let _ = tx.send(DurableBatch {
                         through_seq,
@@ -714,8 +668,25 @@ mod tests {
         OTHER_STREAM_ID.as_bytes().to_vec()
     }
 
-    fn test_db() -> Arc<Mutex<Db>> {
-        Arc::new(Mutex::new(Db::open_in_memory().unwrap()))
+    /// Writer + Db pair sharing one temp-file DB (an in-memory DB cannot be
+    /// shared with the writer's own connection). Keep the TempDir alive.
+    struct TestStore {
+        writer: WriterHandle,
+        db: Arc<tokio::sync::Mutex<crate::db::Db>>,
+        _dir: tempfile::TempDir,
+    }
+
+    fn test_store() -> TestStore {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-test.sqlite3");
+        let db = crate::db::Db::open(&path).unwrap();
+        let (writer, _thread) =
+            crate::writer::spawn_writer(&path, crate::writer::WriterConfig::default()).unwrap();
+        TestStore {
+            writer,
+            db: Arc::new(tokio::sync::Mutex::new(db)),
+            _dir: dir,
+        }
     }
 
     fn test_hello(catalog_generation: u64) -> Hello {
@@ -791,16 +762,20 @@ mod tests {
     }
 
     fn reporter_state() -> (Arc<AppState>, Arc<SessionStatusReporter>) {
-        let (state, _shutdown_rx) =
-            AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+        let (state, _shutdown_rx) = AppState::new(
+            crate::db::Db::open_in_memory().unwrap(),
+            "recv-test".to_owned(),
+        );
         let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
         (state, reporter)
     }
 
     #[tokio::test]
     async fn reporter_tracks_per_forwarder_states() {
-        let (state, _shutdown_rx) =
-            AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+        let (state, _shutdown_rx) = AppState::new(
+            crate::db::Db::open_in_memory().unwrap(),
+            "recv-test".to_owned(),
+        );
         let reporter = SessionStatusReporter::new(Arc::clone(&state));
 
         let control_guard = reporter.on_control_connected("fwd-1").await;
@@ -889,17 +864,22 @@ mod tests {
 
             let forwarder = MockForwarderPeer::start([10; 32], script).await.unwrap();
             let endpoint = test_endpoint(11).await;
-            let db = test_db();
+            let store = test_store();
 
             let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
                 .await
                 .unwrap();
-            run_data_subscription(&session.connection, &db, stream_id, SubscribeMode::Replay)
-                .await
-                .unwrap();
+            run_data_subscription(
+                &session.connection,
+                &store.writer,
+                stream_id,
+                SubscribeMode::Replay,
+            )
+            .await
+            .unwrap();
 
             // Every received record is durable.
-            let guard = db.lock().await;
+            let guard = store.db.lock().await;
             let seqs: Vec<i64> = guard
                 .load_received_events(stream_id)
                 .unwrap()
@@ -944,16 +924,21 @@ mod tests {
 
             let forwarder = MockForwarderPeer::start([12; 32], script).await.unwrap();
             let endpoint = test_endpoint(13).await;
-            let db = test_db();
+            let store = test_store();
 
             let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
                 .await
                 .unwrap();
-            run_data_subscription(&session.connection, &db, stream_id, SubscribeMode::Replay)
-                .await
-                .unwrap();
+            run_data_subscription(
+                &session.connection,
+                &store.writer,
+                stream_id,
+                SubscribeMode::Replay,
+            )
+            .await
+            .unwrap();
 
-            let guard = db.lock().await;
+            let guard = store.db.lock().await;
             let markers = guard.load_gap_markers(stream_id).unwrap();
             assert_eq!(markers.len(), 1);
             assert_eq!(markers[0].requested_after_seq, 0);
@@ -979,28 +964,41 @@ mod tests {
 
             let forwarder = MockForwarderPeer::start([14; 32], script).await.unwrap();
             let endpoint = test_endpoint(15).await;
-            let db = test_db();
+            let store = test_store();
 
             // First connection: receive [1, 2], cursor advances to 2.
             let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
                 .await
                 .unwrap();
-            run_data_subscription(&session.connection, &db, stream_id, SubscribeMode::Replay)
-                .await
-                .unwrap();
-            assert_eq!(db.lock().await.load_stream_cursor(stream_id).unwrap(), 2);
+            run_data_subscription(
+                &session.connection,
+                &store.writer,
+                stream_id,
+                SubscribeMode::Replay,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                store.db.lock().await.load_stream_cursor(stream_id).unwrap(),
+                2
+            );
             drop(session);
 
             // Reconnect: a fresh connection must resume from the persisted cursor.
             let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
                 .await
                 .unwrap();
-            run_data_subscription(&session.connection, &db, stream_id, SubscribeMode::Replay)
-                .await
-                .unwrap();
+            run_data_subscription(
+                &session.connection,
+                &store.writer,
+                stream_id,
+                SubscribeMode::Replay,
+            )
+            .await
+            .unwrap();
 
             // The forwarder re-sent [1, 2]; dedup keeps a single row per seq.
-            let guard = db.lock().await;
+            let guard = store.db.lock().await;
             assert_eq!(guard.load_received_events(stream_id).unwrap().len(), 2);
             assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 2);
             drop(guard);
@@ -1035,16 +1033,21 @@ mod tests {
 
             let forwarder = MockForwarderPeer::start([16; 32], script).await.unwrap();
             let endpoint = test_endpoint(17).await;
-            let db = test_db();
+            let store = test_store();
 
             let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
                 .await
                 .unwrap();
-            run_data_subscription(&session.connection, &db, stream_id, SubscribeMode::Replay)
-                .await
-                .unwrap();
+            run_data_subscription(
+                &session.connection,
+                &store.writer,
+                stream_id,
+                SubscribeMode::Replay,
+            )
+            .await
+            .unwrap();
 
-            let guard = db.lock().await;
+            let guard = store.db.lock().await;
             let seqs: Vec<i64> = guard
                 .load_received_events(stream_id)
                 .unwrap()
@@ -1086,7 +1089,7 @@ mod tests {
 
             let forwarder = MockForwarderPeer::start([60; 32], script).await.unwrap();
             let endpoint = test_endpoint(61).await;
-            let db = test_db();
+            let store = test_store();
             let (hint_tx, mut hint_rx) = broadcast::channel(16);
 
             let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
@@ -1094,7 +1097,7 @@ mod tests {
                 .unwrap();
             run_data_subscription_with_hint(
                 &session.connection,
-                &db,
+                &store.writer,
                 stream_id,
                 SubscribeMode::Replay,
                 Some(&hint_tx),
@@ -1158,21 +1161,25 @@ mod tests {
 
             let forwarder = MockForwarderPeer::start([20; 32], script).await.unwrap();
             let endpoint = test_endpoint(21).await;
-            let db = test_db();
+            let store = test_store();
 
             let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
                 .await
                 .unwrap();
-            let result =
-                run_data_subscription(&session.connection, &db, stream_id, SubscribeMode::Replay)
-                    .await;
+            let result = run_data_subscription(
+                &session.connection,
+                &store.writer,
+                stream_id,
+                SubscribeMode::Replay,
+            )
+            .await;
 
             assert!(
                 matches!(result, Err(P2pSessionError::StreamIdMismatch { .. })),
                 "mismatched event stream_id must be rejected, got {result:?}"
             );
             // Nothing was persisted and nothing was acked.
-            let guard = db.lock().await;
+            let guard = store.db.lock().await;
             assert!(guard.load_received_events(stream_id).unwrap().is_empty());
             assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 0);
             drop(guard);
@@ -1199,20 +1206,24 @@ mod tests {
 
             let forwarder = MockForwarderPeer::start([22; 32], script).await.unwrap();
             let endpoint = test_endpoint(23).await;
-            let db = test_db();
+            let store = test_store();
 
             let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
                 .await
                 .unwrap();
-            let result =
-                run_data_subscription(&session.connection, &db, stream_id, SubscribeMode::Replay)
-                    .await;
+            let result = run_data_subscription(
+                &session.connection,
+                &store.writer,
+                stream_id,
+                SubscribeMode::Replay,
+            )
+            .await;
 
             assert!(
                 matches!(result, Err(P2pSessionError::StreamIdMismatch { .. })),
                 "mismatched gap stream_id must be rejected, got {result:?}"
             );
-            let guard = db.lock().await;
+            let guard = store.db.lock().await;
             assert!(guard.load_gap_markers(stream_id).unwrap().is_empty());
             assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 0);
             drop(guard);
@@ -1236,14 +1247,18 @@ mod tests {
 
             let forwarder = MockForwarderPeer::start([24; 32], script).await.unwrap();
             let endpoint = test_endpoint(25).await;
-            let db = test_db();
+            let store = test_store();
 
             let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
                 .await
                 .unwrap();
-            let result =
-                run_data_subscription(&session.connection, &db, stream_id, SubscribeMode::Replay)
-                    .await;
+            let result = run_data_subscription(
+                &session.connection,
+                &store.writer,
+                stream_id,
+                SubscribeMode::Replay,
+            )
+            .await;
 
             assert!(
                 matches!(result, Err(P2pSessionError::StreamIdMismatch { .. })),
@@ -1270,14 +1285,18 @@ mod tests {
 
             let forwarder = MockForwarderPeer::start([26; 32], script).await.unwrap();
             let endpoint = test_endpoint(27).await;
-            let db = test_db();
+            let store = test_store();
 
             let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
                 .await
                 .unwrap();
-            let result =
-                run_data_subscription(&session.connection, &db, stream_id, SubscribeMode::Replay)
-                    .await;
+            let result = run_data_subscription(
+                &session.connection,
+                &store.writer,
+                stream_id,
+                SubscribeMode::Replay,
+            )
+            .await;
 
             assert!(
                 matches!(
@@ -1318,14 +1337,18 @@ mod tests {
 
             let forwarder = MockForwarderPeer::start([62; 32], script).await.unwrap();
             let endpoint = test_endpoint(63).await;
-            let db = test_db();
+            let store = test_store();
 
             let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
                 .await
                 .unwrap();
-            let result =
-                run_data_subscription(&session.connection, &db, stream_id, SubscribeMode::Replay)
-                    .await;
+            let result = run_data_subscription(
+                &session.connection,
+                &store.writer,
+                stream_id,
+                SubscribeMode::Replay,
+            )
+            .await;
 
             assert!(
                 matches!(
@@ -1334,7 +1357,7 @@ mod tests {
                 ),
                 "the conflicting duplicate must abort the batch, got {result:?}"
             );
-            let guard = db.lock().await;
+            let guard = store.db.lock().await;
             assert!(
                 guard.load_received_events(stream_id).unwrap().is_empty(),
                 "a batch with a conflicting duplicate must persist nothing"
@@ -1364,16 +1387,21 @@ mod tests {
 
             let forwarder = MockForwarderPeer::start([28; 32], script).await.unwrap();
             let endpoint = test_endpoint(29).await;
-            let db = test_db();
+            let store = test_store();
 
             let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
                 .await
                 .unwrap();
-            run_data_subscription(&session.connection, &db, stream_id, SubscribeMode::Replay)
-                .await
-                .unwrap();
+            run_data_subscription(
+                &session.connection,
+                &store.writer,
+                stream_id,
+                SubscribeMode::Replay,
+            )
+            .await
+            .unwrap();
 
-            let guard = db.lock().await;
+            let guard = store.db.lock().await;
             assert_eq!(guard.load_received_events(stream_id).unwrap().len(), 1);
             assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 1);
             drop(guard);
@@ -1399,14 +1427,18 @@ mod tests {
 
             let forwarder = MockForwarderPeer::start([34; 32], script).await.unwrap();
             let endpoint = test_endpoint(35).await;
-            let db = test_db();
+            let store = test_store();
 
             let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
                 .await
                 .unwrap();
-            let result =
-                run_data_subscription(&session.connection, &db, stream_id, SubscribeMode::Replay)
-                    .await;
+            let result = run_data_subscription(
+                &session.connection,
+                &store.writer,
+                stream_id,
+                SubscribeMode::Replay,
+            )
+            .await;
 
             assert!(
                 matches!(
@@ -1438,14 +1470,18 @@ mod tests {
 
             let forwarder = MockForwarderPeer::start([36; 32], script).await.unwrap();
             let endpoint = test_endpoint(37).await;
-            let db = test_db();
+            let store = test_store();
 
             let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
                 .await
                 .unwrap();
-            let result =
-                run_data_subscription(&session.connection, &db, stream_id, SubscribeMode::Replay)
-                    .await;
+            let result = run_data_subscription(
+                &session.connection,
+                &store.writer,
+                stream_id,
+                SubscribeMode::Replay,
+            )
+            .await;
 
             assert!(
                 matches!(
@@ -1457,7 +1493,7 @@ mod tests {
                 ),
                 "over-i64 seq must be rejected, got {result:?}"
             );
-            let guard = db.lock().await;
+            let guard = store.db.lock().await;
             assert!(guard.load_received_events(stream_id).unwrap().is_empty());
             assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 0);
             drop(guard);
@@ -1484,14 +1520,18 @@ mod tests {
 
             let forwarder = MockForwarderPeer::start([38; 32], script).await.unwrap();
             let endpoint = test_endpoint(39).await;
-            let db = test_db();
+            let store = test_store();
 
             let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
                 .await
                 .unwrap();
-            let result =
-                run_data_subscription(&session.connection, &db, stream_id, SubscribeMode::Replay)
-                    .await;
+            let result = run_data_subscription(
+                &session.connection,
+                &store.writer,
+                stream_id,
+                SubscribeMode::Replay,
+            )
+            .await;
 
             assert!(
                 matches!(
@@ -1503,7 +1543,7 @@ mod tests {
                 ),
                 "over-i64 gap must be rejected, got {result:?}"
             );
-            let guard = db.lock().await;
+            let guard = store.db.lock().await;
             assert!(guard.load_gap_markers(stream_id).unwrap().is_empty());
             assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 0);
             drop(guard);
@@ -1525,15 +1565,19 @@ mod tests {
 
             let forwarder = MockForwarderPeer::start([30; 32], script).await.unwrap();
             let endpoint = test_endpoint(31).await;
-            let db = test_db();
+            let store = test_store();
 
             let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
                 .await
                 .unwrap();
-            let outcome =
-                run_data_subscription(&session.connection, &db, stream_id, SubscribeMode::Replay)
-                    .await
-                    .unwrap();
+            let outcome = run_data_subscription(
+                &session.connection,
+                &store.writer,
+                stream_id,
+                SubscribeMode::Replay,
+            )
+            .await
+            .unwrap();
 
             assert_eq!(
                 outcome,

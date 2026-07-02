@@ -156,6 +156,13 @@ pub enum WriteCommand {
         gap: PreparedGap,
         reply: tokio::sync::oneshot::Sender<Result<i64, WriteError>>,
     },
+    /// Read a stream's durable cursor from the writer's authoritative
+    /// in-memory state (lazily initialized from the DB). Used once per
+    /// subscription open to resume from the persisted cursor.
+    LoadCursor {
+        stream_id: String,
+        reply: tokio::sync::oneshot::Sender<Result<i64, WriteError>>,
+    },
     /// Trigger a manual PASSIVE WAL checkpoint.
     Checkpoint,
 }
@@ -253,6 +260,31 @@ impl WriterHandle {
             .map_err(|_| WriteError::Closed("writer channel closed".to_owned()))?;
         rx.await
             .map_err(|_| WriteError::Closed("writer dropped reply".to_owned()))?
+    }
+
+    /// Read the durable cursor for `stream_id` (the `after_seq` a resuming
+    /// subscription must request).
+    pub async fn load_cursor(&self, stream_id: String) -> Result<i64, WriteError> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(WriteCommand::LoadCursor { stream_id, reply })
+            .await
+            .map_err(|_| WriteError::Closed("writer channel closed".to_owned()))?;
+        rx.await
+            .map_err(|_| WriteError::Closed("writer dropped reply".to_owned()))?
+    }
+
+    /// A handle whose writer is gone: every call fails with
+    /// [`WriteError::Closed`]. For tests whose `AppState` never persists
+    /// through the writer; tests that do use `AppState::new_for_test`.
+    #[doc(hidden)]
+    pub fn disconnected_for_test() -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        Self {
+            tx,
+            commits: Arc::new(AtomicU64::new(0)),
+        }
     }
 
     /// Request a manual PASSIVE WAL checkpoint.
@@ -362,7 +394,9 @@ impl WriteCommand {
     fn record_len(&self) -> usize {
         match self {
             WriteCommand::PersistBatch { records, .. } => records.len(),
-            WriteCommand::PersistGap { .. } | WriteCommand::Checkpoint => 1,
+            WriteCommand::PersistGap { .. }
+            | WriteCommand::LoadCursor { .. }
+            | WriteCommand::Checkpoint => 1,
         }
     }
 }
@@ -373,7 +407,7 @@ enum StagedReply {
         reply: tokio::sync::oneshot::Sender<Result<DurableBatch, WriteError>>,
         result: Result<DurableBatch, WriteError>,
     },
-    Gap {
+    Cursor {
         reply: tokio::sync::oneshot::Sender<Result<i64, WriteError>>,
         result: Result<i64, WriteError>,
     },
@@ -385,7 +419,7 @@ impl StagedReply {
             StagedReply::Batch { reply, result } => {
                 let _ = reply.send(result);
             }
-            StagedReply::Gap { reply, result } => {
+            StagedReply::Cursor { reply, result } => {
                 let _ = reply.send(result);
             }
         }
@@ -396,7 +430,7 @@ impl StagedReply {
             StagedReply::Batch { reply, .. } => {
                 let _ = reply.send(Err(WriteError::Closed(message.to_owned())));
             }
-            StagedReply::Gap { reply, .. } => {
+            StagedReply::Cursor { reply, .. } => {
                 let _ = reply.send(Err(WriteError::Closed(message.to_owned())));
             }
         }
@@ -473,17 +507,25 @@ fn process_group(
                         Ok(()) => {
                             let result = Ok(cursor.durable_cursor());
                             staged_cursors.insert(stream_id, cursor);
-                            staged_replies.push(StagedReply::Gap { reply, result });
+                            staged_replies.push(StagedReply::Cursor { reply, result });
                         }
                         Err(CommandError::Conflict { .. }) => unreachable!("gaps cannot conflict"),
                         Err(CommandError::Db(e)) => {
-                            staged_replies.push(StagedReply::Gap {
+                            staged_replies.push(StagedReply::Cursor {
                                 reply,
                                 result: Err(WriteError::Closed(String::new())),
                             });
                             return Err(e);
                         }
                     }
+                }
+                WriteCommand::LoadCursor { stream_id, reply } => {
+                    let cursor = staged_cursor(&tx, &staged_cursors, cursors, &stream_id)?;
+                    let result = Ok(cursor.durable_cursor());
+                    // Cache the lazily-initialized state for later commands.
+                    touched_streams.insert(stream_id.clone());
+                    staged_cursors.insert(stream_id, cursor);
+                    staged_replies.push(StagedReply::Cursor { reply, result });
                 }
             }
         }
