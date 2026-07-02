@@ -55,6 +55,13 @@ CREATE TABLE IF NOT EXISTS received_events (
     PRIMARY KEY (stream_id, seq)
 );
 
+-- Partial index so the DBF worker's undelivered probe/fetch is O(pending),
+-- not O(stream rows). The set stays small at steady state because delivery
+-- marks rows in batches right after each append pass.
+CREATE INDEX IF NOT EXISTS idx_received_dbf_undelivered
+    ON received_events(stream_id, seq)
+    WHERE dbf_delivered_unix_ms IS NULL;
+
 -- Fences the announcer push source. Holds the highest accepted
 -- announcer_source_generation per stream so a delayed or out-of-order push
 -- carrying an older generation can be rejected without sending stale rows.

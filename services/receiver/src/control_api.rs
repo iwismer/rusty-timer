@@ -2841,7 +2841,15 @@ pub async fn clear_dbf(state: &AppState) -> Result<(), ReceiverError> {
     tokio::task::spawn_blocking(move || crate::dbf_writer::clear_dbf(&path))
         .await
         .map_err(|e| ReceiverError::Internal(format!("Failed to clear DBF: {e}")))?
-        .map_err(|e| ReceiverError::Internal(format!("Failed to clear DBF: {e}")))
+        .map_err(|e| ReceiverError::Internal(format!("Failed to clear DBF: {e}")))?;
+    // Reset delivery markers so the next DBF pass regenerates the full file
+    // from the durable store. With incremental appends the old "silent
+    // resurrection on the next rebuild" no longer happens implicitly, so make
+    // it deliberate — clear-then-regenerate is the documented behavior.
+    let db = state.db.lock().await;
+    db.reset_dbf_delivered_all()
+        .map_err(|e| ReceiverError::Internal(format!("Failed to reset DBF markers: {e}")))?;
+    Ok(())
 }
 
 pub async fn get_rd_import_config(

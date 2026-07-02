@@ -953,6 +953,87 @@ impl Db {
     /// Mark a single durable event as written to the DBF file. Only updates rows
     /// whose marker is still NULL, so this is safe to call repeatedly without
     /// overwriting an earlier delivery timestamp. Returns whether a row changed.
+    /// Lowest stored seq that has not been delivered to the DBF, or `None`
+    /// when nothing is pending. O(1) via the partial undelivered index. The
+    /// DBF worker uses this both as its cheap idle probe and to detect
+    /// out-of-order arrivals below its append point (which force a
+    /// regenerate).
+    pub fn min_undelivered_dbf_seq(&self, stream_id: &str) -> DbResult<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT MIN(seq) FROM received_events
+                 WHERE stream_id = ?1 AND dbf_delivered_unix_ms IS NULL",
+                rusqlite::params![stream_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Undelivered rows above `after_seq`, bounded, for incremental DBF
+    /// append passes.
+    pub fn load_undelivered_received_events_after(
+        &self,
+        stream_id: &str,
+        after_seq: i64,
+        limit: usize,
+    ) -> DbResult<Vec<ReceivedEvent>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
+             FROM received_events
+             WHERE stream_id = ?1 AND seq > ?2 AND dbf_delivered_unix_ms IS NULL
+             ORDER BY seq
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                stream_id,
+                after_seq,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            received_event_from_row,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Mark a batch of seqs DBF-delivered in **one transaction** (chunked
+    /// `IN` lists) instead of one autocommit fsync per row. Returns the number
+    /// of rows newly marked.
+    pub fn mark_dbf_delivered_batch(
+        &mut self,
+        stream_id: &str,
+        seqs: &[i64],
+        delivered_unix_ms: i64,
+    ) -> DbResult<usize> {
+        if seqs.is_empty() {
+            return Ok(0);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut marked = 0usize;
+        for chunk in seqs.chunks(500) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "UPDATE received_events SET dbf_delivered_unix_ms = ?1
+                 WHERE stream_id = ?2 AND dbf_delivered_unix_ms IS NULL AND seq IN ({placeholders})"
+            );
+            let mut stmt = tx.prepare(&sql)?;
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 2);
+            params.push(&delivered_unix_ms);
+            params.push(&stream_id);
+            for seq in chunk {
+                params.push(seq);
+            }
+            marked += stmt.execute(params.as_slice())?;
+        }
+        tx.commit()?;
+        Ok(marked)
+    }
+
     pub fn mark_dbf_delivered(
         &self,
         stream_id: &str,
@@ -971,6 +1052,17 @@ impl Db {
     /// Clear the DBF delivery markers for every event of `stream_id`, returning
     /// the number of rows reset. Used when regenerating the DBF file from the
     /// durable store so all events are re-delivered on the next feed run.
+    /// Clear delivery markers for **all** streams (used by `clear_dbf`): the
+    /// next DBF pass then regenerates the full file from the durable store,
+    /// matching the observable behavior the old full-rebuild path had.
+    pub fn reset_dbf_delivered_all(&self) -> DbResult<usize> {
+        let count = self.conn.execute(
+            "UPDATE received_events SET dbf_delivered_unix_ms = NULL",
+            [],
+        )?;
+        Ok(count)
+    }
+
     pub fn reset_dbf_delivered(&self, stream_id: &str) -> DbResult<usize> {
         let count = self.conn.execute(
             "UPDATE received_events SET dbf_delivered_unix_ms = NULL WHERE stream_id = ?1",

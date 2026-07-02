@@ -498,6 +498,15 @@ async fn run_reconcile_loop(
         .clone()
         .map(|thin| spawn_approval_watch(thin, shutdown_rx.clone()));
 
+    // Single cross-stream DBF worker (one per DBF file; see
+    // run_shared_dbf_worker). Lives for the whole runtime; it re-resolves
+    // config/subscriptions every pass, so stream worker rebuilds don't touch
+    // it.
+    let dbf_worker_task = tokio::spawn(run_shared_dbf_worker(
+        Arc::clone(&state),
+        shutdown_rx.clone(),
+    ));
+
     // Server announcer generation, acquired by registering this endpoint and
     // taking over the announcer generation. When the server is unavailable
     // at startup the takeover is retried every reconcile pass (bounded by the
@@ -721,6 +730,8 @@ async fn run_reconcile_loop(
         task.abort();
         let _ = task.await;
     }
+    dbf_worker_task.abort();
+    let _ = dbf_worker_task.await;
     endpoint.close().await;
     // The runtime is shutting down: no sessions remain and none will be
     // reattempted, so report a clean Disconnected. `P2pReceiverRuntime::shutdown`
@@ -1212,38 +1223,10 @@ async fn start_stream_worker(
         )));
     }
 
-    // DBF feed.
-    let dbf_config = {
-        let db = state.db.lock().await;
-        db.load_dbf_config().ok()
-    };
-    if dbf_config.is_some_and(|c| c.enabled) {
-        let db = Arc::clone(&state.db);
-        let dbf_path = {
-            let db = state.db.lock().await;
-            db.load_rd_import_config()
-                .ok()
-                .map(|cfg| std::path::Path::new(&cfg.dir).join("IPICO.DBF"))
-                .unwrap_or_else(|| {
-                    std::path::Path::new(crate::db::DEFAULT_RD_IMPORT_DIR).join("IPICO.DBF")
-                })
-                .to_string_lossy()
-                .into_owned()
-        };
-        let stream_id = stream_id.clone();
-        let forwarder_endpoint_id = sub.forwarder_endpoint_id.clone();
-        let hint_rx = hint_tx.subscribe();
-        let dbf_shutdown = shutdown_rx.clone();
-        tasks.push(tokio::spawn(run_dbf_worker(
-            db,
-            stream_id,
-            forwarder_endpoint_id,
-            dbf_path,
-            config.reconcile_interval,
-            hint_rx,
-            dbf_shutdown,
-        )));
-    }
+    // DBF delivery is NOT per-stream: all streams share one IPICO.DBF file,
+    // so a single cross-stream worker (spawned once in the reconcile loop,
+    // see run_shared_dbf_worker) owns it. Per-stream workers used to clobber
+    // each other's rows via full-file rebuilds.
 
     // Announcer push. Gated by the per-stream + global opt-in resolved by the
     // reconcile loop (`announce`).
@@ -1497,103 +1480,139 @@ async fn emit_stream_projection(
     state.emit_streams_snapshot().await;
 }
 
-async fn run_dbf_worker(
-    db: Arc<Mutex<Db>>,
-    stream_id: String,
-    forwarder_endpoint_id: String,
-    dbf_path: String,
-    retry_interval: Duration,
-    mut hint_rx: broadcast::Receiver<DurableBatch>,
-    mut shutdown_rx: watch::Receiver<bool>,
-) {
-    // `needs_retry` is set whenever a delivery attempt fails (DBF write or a
-    // transient DB error). While set, the worker retries on `retry_interval`
-    // even if no new durable hint arrives, so pending rows are not stranded
-    // after the last hint. A successful attempt clears it.
-    let mut needs_retry = !deliver_dbf(&db, &stream_id, &forwarder_endpoint_id, &dbf_path).await;
+/// Default coalescing interval between DBF delivery passes. Task 4.4 makes
+/// this configurable via `DbfConfig.flush_interval_ms`.
+const DEFAULT_DBF_FLUSH_INTERVAL_MS: u64 = 1000;
+
+/// Single cross-stream DBF worker: one worker per DBF *file*, not per stream.
+///
+/// All subscribed streams deliver into one `IPICO.DBF`, so per-stream workers
+/// (the previous design) clobbered each other's rows on every full rebuild.
+/// This worker runs **at most one delivery pass per flush interval**
+/// (interval-coalesced: per-hint passes would mean a file open — and a
+/// Defender scan on Windows — per group commit). Nothing real-time reads the
+/// DBF: Race Director polls it on a multi-second cadence.
+///
+/// Instead of subscribing to every stream's hint channel, each tick probes
+/// `min_undelivered_dbf_seq` per subscribed stream — O(1) via the partial
+/// undelivered index and near-free when idle — which also retries failed
+/// passes automatically on the next tick.
+async fn run_shared_dbf_worker(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<bool>) {
+    let mut pass_state = crate::dbf_writer::DbfPassState::default();
+    let mut was_enabled = false;
+    let mut tick = tokio::time::interval(Duration::from_millis(DEFAULT_DBF_FLUSH_INTERVAL_MS));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             biased;
             changed = shutdown_rx.changed() => {
                 if changed.is_err() || *shutdown_rx.borrow() { break; }
             }
-            recv = hint_rx.recv() => {
-                match recv {
-                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                        needs_retry =
-                            !deliver_dbf(&db, &stream_id, &forwarder_endpoint_id, &dbf_path).await;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-            () = tokio::time::sleep(retry_interval), if needs_retry => {
-                needs_retry =
-                    !deliver_dbf(&db, &stream_id, &forwarder_endpoint_id, &dbf_path).await;
+            _ = tick.tick() => {
+                let enabled = run_shared_dbf_pass(&state, &mut pass_state, was_enabled).await;
+                was_enabled = enabled;
             }
         }
     }
 }
 
-/// Run one DBF delivery pass. Returns `true` when no retry is needed (delivery
-/// succeeded, there is nothing to deliver, or the failure is permanent and
-/// cannot be fixed by retrying), and `false` when the caller should schedule a
-/// retry (DBF write failed or a transient DB error occurred).
-async fn deliver_dbf(
-    db: &Arc<Mutex<Db>>,
-    stream_id: &str,
-    forwarder_endpoint_id: &str,
-    dbf_path: &str,
+/// One tick of the shared DBF worker. Returns whether DBF output is enabled.
+async fn run_shared_dbf_pass(
+    state: &Arc<AppState>,
+    pass_state: &mut crate::dbf_writer::DbfPassState,
+    was_enabled: bool,
 ) -> bool {
-    // DBF delivery does synchronous disk + flock I/O, so run it on a blocking
-    // thread (acquiring the durable store via `blocking_lock`, like the
-    // announcer path) instead of blocking an async worker thread while holding
-    // the async mutex.
-    let db = Arc::clone(db);
-    let stream_id = stream_id.to_owned();
-    let forwarder_endpoint_id = forwarder_endpoint_id.to_owned();
-    let dbf_path = dbf_path.to_owned();
-    let result = tokio::task::spawn_blocking(move || -> bool {
-        let guard = db.blocking_lock();
-        let details =
-            match guard.load_subscription_dbf_details(&forwarder_endpoint_id, &stream_id) {
-                Ok(Some(details)) => details,
-                Ok(None) => return true,
-                Err(e) => {
-                    warn!(error = %e, %stream_id, "failed to load DBF subscription details");
-                    return false;
+    // Resolve config + subscriptions on the cold connection (tiny queries).
+    let (enabled, dbf_path, specs) = {
+        let db = state.db.lock().await;
+        let enabled = db.load_dbf_config().map(|c| c.enabled).unwrap_or(false);
+        if !enabled {
+            (false, String::new(), Vec::new())
+        } else {
+            let dbf_path = db
+                .load_rd_import_config()
+                .ok()
+                .map(|cfg| std::path::Path::new(&cfg.dir).join("IPICO.DBF"))
+                .unwrap_or_else(|| {
+                    std::path::Path::new(crate::db::DEFAULT_RD_IMPORT_DIR).join("IPICO.DBF")
+                })
+                .to_string_lossy()
+                .into_owned();
+            let mut specs = Vec::new();
+            match db.load_stream_subscriptions() {
+                Ok(subs) => {
+                    for sub in subs {
+                        match db.load_subscription_dbf_details(
+                            &sub.forwarder_endpoint_id,
+                            &sub.stream_id,
+                        ) {
+                            Ok(Some((idx, event_type))) => match u8::try_from(idx) {
+                                Ok(reader_index) if reader_index <= 9 => {
+                                    specs.push(crate::dbf_writer::DbfStreamSpec {
+                                        stream_id: sub.stream_id,
+                                        event_type,
+                                        reader_index,
+                                    });
+                                }
+                                _ => {
+                                    warn!(
+                                        stream_id = %sub.stream_id,
+                                        idx,
+                                        "subscription index exceeds DBF reader range; skipping stream"
+                                    );
+                                }
+                            },
+                            Ok(None) => {}
+                            Err(e) => {
+                                warn!(error = %e, stream_id = %sub.stream_id, "failed to load DBF subscription details");
+                            }
+                        }
+                    }
                 }
-            };
-        let (idx, event_type) = details;
-        let reader_index = match u8::try_from(idx) {
-            Ok(idx) => idx,
-            Err(_) => {
-                warn!(%stream_id, idx, "subscription index exceeds DBF reader range; skipping DBF delivery");
-                return true;
+                Err(e) => {
+                    warn!(error = %e, "failed to load subscriptions for DBF delivery");
+                    return was_enabled;
+                }
             }
-        };
-        match crate::dbf_writer::deliver_durable_events_to_dbf(
-            &guard,
-            &stream_id,
-            std::path::Path::new(&dbf_path),
-            event_type,
-            reader_index,
-            now_unix_ms(),
-        ) {
-            Ok(_) => true,
-            Err(e) => {
-                warn!(error = %e, %stream_id, "DBF delivery failed; will retry");
-                false
-            }
+            (true, dbf_path, specs)
         }
+    };
+    if !enabled {
+        // Re-enabling later must reconcile the file against the durable
+        // store, exactly like a restart.
+        if was_enabled {
+            *pass_state = crate::dbf_writer::DbfPassState::default();
+        }
+        return false;
+    }
+
+    // DBF delivery does synchronous disk + flock I/O: run on a blocking
+    // thread with the cold connection (blocking_lock), like the announcer.
+    let db = Arc::clone(&state.db);
+    let mut moved_state = std::mem::take(pass_state);
+    let result = tokio::task::spawn_blocking(move || {
+        let mut guard = db.blocking_lock();
+        let result = crate::dbf_writer::run_dbf_delivery_pass(
+            &mut guard,
+            &specs,
+            std::path::Path::new(&dbf_path),
+            &mut moved_state,
+            now_unix_ms(),
+        );
+        (moved_state, result)
     })
     .await;
     match result {
-        Ok(no_retry) => no_retry,
+        Ok((state_back, Ok(()))) => *pass_state = state_back,
+        Ok((state_back, Err(e))) => {
+            warn!(error = %e, "DBF delivery pass failed; will retry next tick");
+            *pass_state = state_back;
+        }
         Err(e) => {
             warn!(error = %e, "DBF delivery task failed");
-            false
         }
     }
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2723,52 +2742,50 @@ mod tests {
         );
     }
 
-    /// A DBF write that fails (its parent directory does not yet exist) must be
-    /// retried by the worker's retry timer once the directory appears, even
-    /// though no new durable hint arrives after the failure.
+    /// The shared cross-stream DBF worker delivers pending rows on its
+    /// interval tick (no hints involved), retries after failures (missing
+    /// directory) on later ticks, and appends incrementally afterwards.
     #[tokio::test]
-    async fn dbf_worker_retries_after_failure_without_new_hint() {
+    async fn shared_dbf_worker_delivers_and_retries_on_interval() {
         let stream_id = "127.0.0.1:11000";
         let fwd = "fwd-dbf-retry";
 
-        let mut db = Db::open_in_memory().unwrap();
-        db.replace_stream_subscriptions(&[StreamSubscription {
-            forwarder_endpoint_id: fwd.to_owned(),
-            stream_id: stream_id.to_owned(),
-            local_port_override: None,
-            event_type: EventType::Finish,
-            forwarder_id: None,
-            reader_ip: Some(stream_id.to_owned()),
-        }])
-        .unwrap();
-        insert_chip_event(&db, stream_id, 1, 1_700_000_000_100);
-        insert_chip_event(&db, stream_id, 2, 1_700_000_000_200);
-        let db = Arc::new(Mutex::new(db));
-
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
         let tmp = tempfile::tempdir().unwrap();
         let missing_dir = tmp.path().join("not-yet");
-        let dbf_path = missing_dir.join("out.dbf").to_string_lossy().into_owned();
-
-        let (hint_tx, hint_rx) = broadcast::channel::<DurableBatch>(16);
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let handle = tokio::spawn(run_dbf_worker(
-            Arc::clone(&db),
-            stream_id.to_owned(),
-            fwd.to_owned(),
-            dbf_path,
-            Duration::from_millis(50),
-            hint_rx,
-            shutdown_rx,
-        ));
-
-        // Startup attempt and an explicit hint both fail while the dir is gone.
-        let _ = hint_tx.send(DurableBatch {
-            through_seq: 1,
-            inserted: std::sync::Arc::new(Vec::new()),
-        });
-        tokio::time::sleep(Duration::from_millis(200)).await;
         {
-            let guard = db.lock().await;
+            let mut db = state.db.lock().await;
+            db.save_profile("http://server", "tok", "check-and-download", None)
+                .unwrap();
+            db.save_dbf_config(&crate::db::DbfConfig { enabled: true })
+                .unwrap();
+            db.save_rd_import_config(&crate::db::RdImportConfig {
+                enabled: false,
+                dir: missing_dir.to_string_lossy().into_owned(),
+                interval_secs: 15,
+            })
+            .unwrap();
+            db.replace_stream_subscriptions(&[StreamSubscription {
+                forwarder_endpoint_id: fwd.to_owned(),
+                stream_id: stream_id.to_owned(),
+                local_port_override: None,
+                event_type: EventType::Finish,
+                forwarder_id: None,
+                reader_ip: Some(stream_id.to_owned()),
+            }])
+            .unwrap();
+            insert_chip_event(&db, stream_id, 1, 1_700_000_000_100);
+            insert_chip_event(&db, stream_id, 2, 1_700_000_000_200);
+        }
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let handle = tokio::spawn(run_shared_dbf_worker(Arc::clone(&state), shutdown_rx));
+
+        // While the RD directory is missing every pass fails; rows stay
+        // undelivered.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        {
+            let guard = state.db.lock().await;
             assert_eq!(
                 guard
                     .load_undelivered_received_events(stream_id)
@@ -2779,13 +2796,14 @@ mod tests {
             );
         }
 
-        // Recover by creating the directory. Send NO new hint.
+        // Recover by creating the directory: the next tick regenerates.
         std::fs::create_dir_all(&missing_dir).unwrap();
-
-        let delivered = poll_async(Duration::from_secs(5), || {
-            let db = Arc::clone(&db);
+        let delivered = poll_async(Duration::from_secs(10), || {
+            let state = Arc::clone(&state);
             async move {
-                db.lock()
+                state
+                    .db
+                    .lock()
                     .await
                     .load_undelivered_received_events(stream_id)
                     .unwrap()
@@ -2793,14 +2811,31 @@ mod tests {
             }
         })
         .await;
-        assert!(
-            delivered,
-            "retry timer must deliver pending DBF rows after recovery without a new hint"
-        );
+        assert!(delivered, "interval tick must deliver once the dir exists");
+        assert!(missing_dir.join("IPICO.DBF").exists());
+
+        // New rows are appended incrementally on later ticks.
+        {
+            let guard = state.db.lock().await;
+            insert_chip_event(&guard, stream_id, 3, 1_700_000_000_300);
+        }
+        let appended = poll_async(Duration::from_secs(10), || {
+            let state = Arc::clone(&state);
+            async move {
+                state
+                    .db
+                    .lock()
+                    .await
+                    .load_undelivered_received_events(stream_id)
+                    .unwrap()
+                    .is_empty()
+            }
+        })
+        .await;
+        assert!(appended, "incremental append must deliver new rows");
 
         let _ = shutdown_tx.send(true);
         let _ = handle.await;
-        drop(hint_tx);
     }
 
     /// An announcer push that fails (simulated transport outage) must be retried

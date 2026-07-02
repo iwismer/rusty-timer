@@ -345,6 +345,94 @@ fn append_record_if_active(
     Ok(true)
 }
 
+/// Append many records in one pass: **record bytes first, header count
+/// last**, one `flush`, **no fsync**.
+///
+/// Ordering matters because Race Director opens `IPICO.DBF` directly and
+/// trusts the header record count — it does not honor our advisory sidecar
+/// lock. A reader catching us mid-append sees the old count, so the partial
+/// trailing bytes are invisible; only the final header update publishes the
+/// new rows.
+///
+/// No `sync_all`: the durable source of truth is `received_events` plus the
+/// delivery markers — a crash between append and mark is healed by the
+/// startup regenerate. The fsync budget on old disks belongs to the SQLite
+/// writer.
+pub fn append_records(path: &Path, records: &[DbfRecord]) -> std::io::Result<()> {
+    append_records_inner(path, records, None)
+}
+
+fn append_records_inner(
+    path: &Path,
+    records: &[DbfRecord],
+    between_writes: Option<&dyn Fn(&Path)>,
+) -> std::io::Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    file.lock_exclusive()?;
+    let result = append_records_locked(&mut file, records, between_writes, path);
+    file.unlock()?;
+    result
+}
+
+fn append_records_locked(
+    file: &mut std::fs::File,
+    records: &[DbfRecord],
+    between_writes: Option<&dyn Fn(&Path)>,
+    path: &Path,
+) -> std::io::Result<()> {
+    if file.metadata()?.len() == 0 {
+        write_empty_header(file)?;
+    }
+    let mut header_buf = [0u8; 12];
+    file.read_exact(&mut header_buf)?;
+    let record_count =
+        u32::from_le_bytes([header_buf[4], header_buf[5], header_buf[6], header_buf[7]]);
+    let header_size = u16::from_le_bytes([header_buf[8], header_buf[9]]) as u64;
+    let record_size = u16::from_le_bytes([header_buf[10], header_buf[11]]) as u64;
+    if record_size != (1 + RECORD_DATA_LEN as u64) {
+        return Err(std::io::Error::other(format!(
+            "unexpected DBF record size: expected {}, got {record_size}",
+            1 + RECORD_DATA_LEN
+        )));
+    }
+
+    // Record bytes first (one buffered write), ending with the EOF marker.
+    let write_pos = header_size + u64::from(record_count) * record_size;
+    file.seek(SeekFrom::Start(write_pos))?;
+    let mut buf = Vec::with_capacity(records.len() * (1 + RECORD_DATA_LEN) + 1);
+    for record in records {
+        buf.push(DBF_RECORD_NOT_DELETED);
+        buf.extend_from_slice(&serialize_record(record));
+    }
+    buf.push(DBF_EOF_MARKER);
+    file.write_all(&buf)?;
+    file.flush()?;
+
+    if let Some(hook) = between_writes {
+        hook(path);
+    }
+
+    // Header record count last: publishes the appended rows to readers.
+    let new_count = record_count
+        .checked_add(
+            u32::try_from(records.len())
+                .map_err(|_| std::io::Error::other("DBF record count overflow"))?,
+        )
+        .ok_or_else(|| std::io::Error::other("DBF record count overflow"))?;
+    file.seek(SeekFrom::Start(4))?;
+    file.write_all(&new_count.to_le_bytes())?;
+    file.flush()?;
+    Ok(())
+}
+
 /// Rewrite the DBF file at `path` as empty (header only, zero records).
 ///
 /// If the file does not exist it is created. An exclusive lock is acquired so
@@ -586,6 +674,193 @@ pub fn regenerate_dbf_from_received_events(
     })
 }
 
+/// One stream's DBF delivery parameters, resolved from its subscription.
+#[derive(Clone, Debug)]
+pub struct DbfStreamSpec {
+    pub stream_id: String,
+    pub event_type: EventType,
+    pub reader_index: u8,
+}
+
+/// Per-worker DBF delivery state. `regenerated == false` forces one
+/// cross-stream regenerate (startup / crash reconciliation / seq regression)
+/// before incremental appends resume.
+#[derive(Debug, Default)]
+pub struct DbfPassState {
+    pub regenerated: bool,
+    /// Highest seq processed per stream; appends fetch strictly above this.
+    pub last_delivered: std::collections::HashMap<String, i64>,
+}
+
+/// Map events to records, also returning **every** input seq as processed.
+/// Frames that are not valid chip reads produce no DBF output but are still
+/// marked delivered ("processed, nothing to write") — otherwise they would
+/// hold the min-undelivered probe down and force regenerates forever.
+fn collect_records_and_processed(
+    events: &[ReceivedEvent],
+    event_type: EventType,
+    reader_index: u8,
+) -> (Vec<DbfRecord>, Vec<i64>) {
+    let mut records = Vec::with_capacity(events.len());
+    let mut processed = Vec::with_capacity(events.len());
+    for event in events {
+        match map_to_dbf_fields(&event.raw_frame, event_type, reader_index) {
+            Ok(record) => records.push(record),
+            Err(e) => {
+                tracing::warn!(
+                    stream_id = %event.stream_id,
+                    seq = event.seq,
+                    read_kind = %event.read_kind,
+                    error = %e,
+                    "skipping undeliverable durable frame for DBF write"
+                );
+            }
+        }
+        processed.push(event.seq);
+    }
+    (records, processed)
+}
+
+/// Rows fetched per incremental append chunk.
+const DBF_APPEND_CHUNK_ROWS: usize = 4096;
+
+/// Run one delivery pass for all subscribed streams against a single DBF
+/// file.
+///
+/// First pass (or after a detected seq regression): one **cross-stream
+/// regenerate** — the file is atomically replaced with every stream's
+/// deliverable rows and all rows are re-marked. This is the crash
+/// reconciliation for the append-then-crash-before-mark window and the reason
+/// mark-before-append is never needed. Subsequent passes append only rows
+/// above each stream's append point and mark them in one transaction per
+/// stream.
+pub fn run_dbf_delivery_pass(
+    db: &mut Db,
+    streams: &[DbfStreamSpec],
+    path: &Path,
+    state: &mut DbfPassState,
+    delivered_unix_ms: i64,
+) -> Result<(), DbError> {
+    for spec in streams {
+        validate_reader_index_for_rebuild(spec.reader_index)?;
+    }
+    if !state.regenerated {
+        state.last_delivered = regenerate_dbf_cross_stream(db, streams, path, delivered_unix_ms)?;
+        state.regenerated = true;
+        return Ok(());
+    }
+
+    // Detect out-of-order arrivals below any stream's append point (late
+    // redelivery after a gap, or an epoch/seq reset): the append-only file
+    // cannot represent them, so fall back to one cross-stream regenerate.
+    for spec in streams {
+        let append_point = state
+            .last_delivered
+            .get(&spec.stream_id)
+            .copied()
+            .unwrap_or(0);
+        if let Some(min_pending) = db.min_undelivered_dbf_seq(&spec.stream_id)?
+            && min_pending <= append_point
+        {
+            tracing::info!(
+                stream_id = %spec.stream_id,
+                min_pending,
+                append_point,
+                "undelivered row below DBF append point; regenerating cross-stream"
+            );
+            state.last_delivered =
+                regenerate_dbf_cross_stream(db, streams, path, delivered_unix_ms)?;
+            return Ok(());
+        }
+    }
+
+    for spec in streams {
+        loop {
+            let append_point = state
+                .last_delivered
+                .get(&spec.stream_id)
+                .copied()
+                .unwrap_or(0);
+            let events = db.load_undelivered_received_events_after(
+                &spec.stream_id,
+                append_point,
+                DBF_APPEND_CHUNK_ROWS,
+            )?;
+            if events.is_empty() {
+                break;
+            }
+            let fetched = events.len();
+            let (records, processed) =
+                collect_records_and_processed(&events, spec.event_type, spec.reader_index);
+            let max_seq = processed.iter().copied().max().unwrap_or(append_point);
+            // Append under the receiver-side advisory lock, then mark in one
+            // transaction. Append-before-mark: a crash in between is healed by
+            // the startup regenerate (never the reverse — mark-before-append
+            // would lose reads).
+            with_durable_dbf_lock(path, || Ok(append_records(path, &records)?))?;
+            db.mark_dbf_delivered_batch(&spec.stream_id, &processed, delivered_unix_ms)?;
+            state.last_delivered.insert(spec.stream_id.clone(), max_seq);
+            if fetched < DBF_APPEND_CHUNK_ROWS {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Replace the DBF file with **every subscribed stream's** deliverable rows
+/// (ordered chronologically) and re-mark all rows delivered. Returns each
+/// stream's max processed seq (the new append points).
+fn regenerate_dbf_cross_stream(
+    db: &mut Db,
+    streams: &[DbfStreamSpec],
+    path: &Path,
+    delivered_unix_ms: i64,
+) -> Result<std::collections::HashMap<String, i64>, DbError> {
+    with_durable_dbf_lock(path, || {
+        let mut all: Vec<(i64, usize, i64, DbfRecord)> = Vec::new();
+        let mut append_points = std::collections::HashMap::new();
+        let mut processed_per_stream: Vec<(String, Vec<i64>)> = Vec::new();
+        for (stream_idx, spec) in streams.iter().enumerate() {
+            let events = db.load_received_events(&spec.stream_id)?;
+            let mut processed = Vec::with_capacity(events.len());
+            for event in &events {
+                match map_to_dbf_fields(&event.raw_frame, spec.event_type, spec.reader_index) {
+                    Ok(record) => {
+                        all.push((event.received_unix_ms, stream_idx, event.seq, record));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            stream_id = %event.stream_id,
+                            seq = event.seq,
+                            error = %e,
+                            "skipping undeliverable durable frame during DBF regenerate"
+                        );
+                    }
+                }
+                processed.push(event.seq);
+            }
+            let max_seq = processed.iter().copied().max().unwrap_or(0);
+            append_points.insert(spec.stream_id.clone(), max_seq);
+            processed_per_stream.push((spec.stream_id.clone(), processed));
+        }
+        all.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+        let records: Vec<DbfRecord> = all.into_iter().map(|(_, _, _, record)| record).collect();
+        tracing::info!(
+            records = records.len(),
+            streams = streams.len(),
+            path = %path.display(),
+            "regenerating DBF from durable store (cross-stream)"
+        );
+        write_replacement_dbf(path, &records)?;
+        for (stream_id, processed) in processed_per_stream {
+            db.reset_dbf_delivered(&stream_id)?;
+            db.mark_dbf_delivered_batch(&stream_id, &processed, delivered_unix_ms)?;
+        }
+        Ok(append_points)
+    })
+}
+
 /// Maximum consecutive I/O failures before the writer gives up and stops.
 const MAX_CONSECUTIVE_WRITE_FAILURES: u32 = 10;
 
@@ -765,6 +1040,183 @@ mod tests {
             FieldValue::Character(Some(s)) => Some(s.trim().to_owned()),
             _ => None,
         })
+    }
+
+    fn spec(stream_id: &str, reader_index: u8) -> DbfStreamSpec {
+        DbfStreamSpec {
+            stream_id: stream_id.to_owned(),
+            event_type: EventType::Finish,
+            reader_index,
+        }
+    }
+
+    #[test]
+    fn incremental_pass_appends_only_new_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let dbf_path = dir.path().join("out.dbf");
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_id = "s-incremental";
+        let raw = sample_raw_frame();
+        insert_durable_event(&db, stream_id, 1, &raw, 1_700_000_000_000);
+        insert_durable_event(&db, stream_id, 2, &raw, 1_700_000_000_001);
+
+        let specs = vec![spec(stream_id, 0)];
+        let mut state = DbfPassState::default();
+        run_dbf_delivery_pass(&mut db, &specs, &dbf_path, &mut state, 1_700_000_010_000).unwrap();
+        assert_eq!(dbf_records(&dbf_path).len(), 2);
+
+        // Rows persisted between passes are appended, not rebuilt.
+        insert_durable_event(&db, stream_id, 3, &raw, 1_700_000_000_002);
+        insert_durable_event(&db, stream_id, 4, &raw, 1_700_000_000_003);
+        run_dbf_delivery_pass(&mut db, &specs, &dbf_path, &mut state, 1_700_000_020_000).unwrap();
+
+        let records = dbf_records(&dbf_path);
+        assert_eq!(records.len(), 4, "second pass appends only the new rows");
+        assert!(
+            db.load_undelivered_received_events(stream_id)
+                .unwrap()
+                .is_empty(),
+            "all rows marked delivered"
+        );
+
+        // An idle pass changes nothing.
+        run_dbf_delivery_pass(&mut db, &specs, &dbf_path, &mut state, 1_700_000_030_000).unwrap();
+        assert_eq!(dbf_records(&dbf_path).len(), 4);
+    }
+
+    #[test]
+    fn startup_regenerate_dedupes_after_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let dbf_path = dir.path().join("out.dbf");
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_id = "s-crash";
+        let raw = sample_raw_frame();
+        insert_durable_event(&db, stream_id, 1, &raw, 1_700_000_000_000);
+        insert_durable_event(&db, stream_id, 2, &raw, 1_700_000_000_001);
+
+        // Simulate append-then-crash-before-mark: the rows are already in the
+        // DBF file but dbf_delivered_unix_ms is still NULL.
+        let (records, _) = collect_records_and_processed(
+            &db.load_received_events(stream_id).unwrap(),
+            EventType::Finish,
+            0,
+        );
+        append_records(&dbf_path, &records).unwrap();
+        assert_eq!(dbf_records(&dbf_path).len(), 2);
+
+        // Restart-shaped pass (fresh state): the cross-stream regenerate
+        // yields the exact record count, no duplicates.
+        let specs = vec![spec(stream_id, 0)];
+        let mut state = DbfPassState::default();
+        run_dbf_delivery_pass(&mut db, &specs, &dbf_path, &mut state, 1_700_000_010_000).unwrap();
+        assert_eq!(
+            dbf_records(&dbf_path).len(),
+            2,
+            "regenerate must not duplicate rows appended before the crash"
+        );
+        assert!(
+            db.load_undelivered_received_events(stream_id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn regenerate_includes_all_streams() {
+        let dir = tempfile::tempdir().unwrap();
+        let dbf_path = dir.path().join("out.dbf");
+        let mut db = Db::open_in_memory().unwrap();
+        let raw = sample_raw_frame();
+        insert_durable_event(&db, "s-one", 1, &raw, 1_700_000_000_000);
+        insert_durable_event(&db, "s-two", 1, &raw, 1_700_000_000_001);
+        insert_durable_event(&db, "s-two", 2, &raw, 1_700_000_000_002);
+
+        let specs = vec![spec("s-one", 0), spec("s-two", 1)];
+        let mut state = DbfPassState::default();
+        run_dbf_delivery_pass(&mut db, &specs, &dbf_path, &mut state, 1_700_000_010_000).unwrap();
+
+        let records = dbf_records(&dbf_path);
+        assert_eq!(records.len(), 3, "regenerate carries both streams' rows");
+        let readers: Vec<String> = records
+            .iter()
+            .filter_map(|record| char_field(record, "READER"))
+            .collect();
+        assert_eq!(
+            readers,
+            vec!["0", "1", "1"],
+            "rows are ordered chronologically and keep per-stream reader indexes"
+        );
+
+        // A gap-jump on one stream (undelivered row below its append point)
+        // triggers a cross-stream regenerate that must not erase the other
+        // stream's rows. Simulate by clearing a delivered marker.
+        assert!(db.mark_dbf_delivered("s-one", 1, 1).is_ok());
+        db.reset_dbf_delivered("s-one").unwrap();
+        run_dbf_delivery_pass(&mut db, &specs, &dbf_path, &mut state, 1_700_000_020_000).unwrap();
+        assert_eq!(
+            dbf_records(&dbf_path).len(),
+            3,
+            "regenerate after one stream's reset keeps all streams' rows exactly once"
+        );
+    }
+
+    #[test]
+    fn mark_dbf_delivered_batch_marks_all_rows_in_one_call() {
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_id = "s-batch";
+        let raw = sample_raw_frame();
+        for seq in 1..=700 {
+            insert_durable_event(&db, stream_id, seq, &raw, 1_700_000_000_000 + seq);
+        }
+        let seqs: Vec<i64> = (1..=700).collect();
+        // One call, one transaction (chunked IN lists internally).
+        let marked = db
+            .mark_dbf_delivered_batch(stream_id, &seqs, 1_700_000_010_000)
+            .unwrap();
+        assert_eq!(marked, 700);
+        assert!(
+            db.load_undelivered_received_events(stream_id)
+                .unwrap()
+                .is_empty()
+        );
+        // Idempotent: re-marking changes nothing.
+        let again = db
+            .mark_dbf_delivered_batch(stream_id, &seqs, 1_700_000_020_000)
+            .unwrap();
+        assert_eq!(again, 0);
+    }
+
+    #[test]
+    fn append_writes_records_before_header_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let dbf_path = dir.path().join("out.dbf");
+        create_empty_dbf(&dbf_path).unwrap();
+        let record = map_to_dbf_fields(&sample_raw_frame(), EventType::Finish, 0).unwrap();
+
+        // The hook runs after the record bytes are flushed but before the
+        // header count is updated: a concurrent reader (Race Director) at
+        // that instant must still see the old count, hiding the partial tail.
+        let observed = std::cell::RefCell::new(None);
+        append_records_inner(
+            &dbf_path,
+            std::slice::from_ref(&record),
+            Some(&|path: &Path| {
+                let bytes = std::fs::read(path).unwrap();
+                let count = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                *observed.borrow_mut() = Some((count, bytes.len()));
+            }),
+        )
+        .unwrap();
+
+        let (mid_count, mid_len) = observed.into_inner().expect("hook ran");
+        assert_eq!(mid_count, 0, "header count updates only after record bytes");
+        assert!(
+            mid_len > (1 + RECORD_DATA_LEN),
+            "record bytes were on disk before the header update"
+        );
+        let bytes = std::fs::read(&dbf_path).unwrap();
+        let final_count = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        assert_eq!(final_count, 1);
     }
 
     #[test]
