@@ -6,14 +6,14 @@
 //! Supports multiple simultaneous local consumers per stream.
 //! Ports open as soon as subscriptions exist, even before server connection is established.
 
-use crate::db::{Db, ReceivedEvent};
+use crate::db::ReceivedEvent;
 use crate::p2p_session::DurableBatch;
+use crate::read_pool::ReadSource;
 use rt_domain::ReadEvent;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 /// A handle to a running local proxy for one stream.
@@ -64,7 +64,7 @@ impl LocalProxy {
     pub async fn bind_durable(
         port: u16,
         stream_id: String,
-        db: Arc<Mutex<Db>>,
+        read: ReadSource,
         durable_seq_tx: broadcast::Sender<DurableBatch>,
     ) -> std::io::Result<Self> {
         let listener = bind_listener(port).await?;
@@ -84,7 +84,7 @@ impl LocalProxy {
                             Ok((stream, peer)) => {
                                 debug!(?peer, port, %stream_id, "durable local consumer connected");
                                 let rx = durable_seq_tx.subscribe();
-                                tokio::spawn(serve_durable_consumer(stream, stream_id.clone(), db.clone(), rx));
+                                tokio::spawn(serve_durable_consumer(stream, stream_id.clone(), read.clone(), rx));
                             }
                             Err(e) => { warn!(error=%e, "accept error"); }
                         }
@@ -127,53 +127,79 @@ async fn serve_consumer(mut stream: TcpStream, mut rx: broadcast::Receiver<ReadE
     }
 }
 
+/// Rows fetched per drain chunk. A pooled read connection is released after
+/// each chunk — never held across the TCP `write_all` — so a slow consumer
+/// cannot stall WAL checkpointing.
+const DRAIN_CHUNK_ROWS: usize = 4096;
+
+/// Drain durable rows after `last_delivered_seq` to the consumer in bounded
+/// chunks. Returns `Err(())` when the consumer disconnected or a DB error
+/// makes continuing pointless.
+async fn drain_durable_chunks(
+    stream: &mut TcpStream,
+    stream_id: &str,
+    read: &ReadSource,
+    last_delivered_seq: &mut i64,
+) -> Result<(), ()> {
+    loop {
+        let after_seq = *last_delivered_seq;
+        let stream_id_owned = stream_id.to_owned();
+        let events = read
+            .run(move |db| {
+                db.load_received_events_after_limited(&stream_id_owned, after_seq, DRAIN_CHUNK_ROWS)
+            })
+            .await;
+        let events = match events {
+            Ok(events) => events,
+            Err(e) => {
+                warn!(error = %e, %stream_id, "failed to load durable events for consumer");
+                return Err(());
+            }
+        };
+        if events.is_empty() {
+            return Ok(());
+        }
+        let fetched = events.len();
+        let last_seq_in_chunk = events.last().map_or(after_seq, |event| event.seq);
+        // Connection released above; only now write to the (possibly slow)
+        // consumer.
+        if write_received_events(stream, events, last_delivered_seq)
+            .await
+            .is_err()
+        {
+            return Err(());
+        }
+        // Stop when the contiguous prefix ended inside the chunk (a gap — the
+        // next hint resumes) or the chunk was the tail of the table.
+        if *last_delivered_seq < last_seq_in_chunk || fetched < DRAIN_CHUNK_ROWS {
+            return Ok(());
+        }
+    }
+}
+
 async fn serve_durable_consumer(
     mut stream: TcpStream,
     stream_id: String,
-    db: Arc<Mutex<Db>>,
+    read: ReadSource,
     mut rx: broadcast::Receiver<DurableBatch>,
 ) {
     let mut last_delivered_seq = 0;
-    let replay = {
-        let db = db.lock().await;
-        db.load_received_events_after(&stream_id, last_delivered_seq)
-    };
-    match replay {
-        Ok(events) => {
-            if write_received_events(&mut stream, events, &mut last_delivered_seq)
-                .await
-                .is_err()
-            {
-                return;
-            }
-        }
-        Err(e) => {
-            warn!(error = %e, %stream_id, "failed to replay durable events");
-            return;
-        }
+    if drain_durable_chunks(&mut stream, &stream_id, &read, &mut last_delivered_seq)
+        .await
+        .is_err()
+    {
+        return;
     }
 
     loop {
         match rx.recv().await {
             Ok(batch) if batch.through_seq <= last_delivered_seq => {}
-            Ok(batch) => {
-                let events = {
-                    let db = db.lock().await;
-                    db.load_received_events_after(&stream_id, last_delivered_seq)
-                };
-                match events {
-                    Ok(events) => {
-                        if write_received_events(&mut stream, events, &mut last_delivered_seq)
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, %stream_id, through_seq = batch.through_seq, "failed to drain durable events after live hint");
-                        break;
-                    }
+            Ok(_batch) => {
+                if drain_durable_chunks(&mut stream, &stream_id, &read, &mut last_delivered_seq)
+                    .await
+                    .is_err()
+                {
+                    break;
                 }
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -181,23 +207,11 @@ async fn serve_durable_consumer(
                     n,
                     "local consumer lagged, {n} durable event hints dropped; recovering from durable store"
                 );
-                let events = {
-                    let db = db.lock().await;
-                    db.load_received_events_after(&stream_id, last_delivered_seq)
-                };
-                match events {
-                    Ok(events) => {
-                        if write_received_events(&mut stream, events, &mut last_delivered_seq)
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, %stream_id, "failed to recover lagged durable events");
-                        break;
-                    }
+                if drain_durable_chunks(&mut stream, &stream_id, &read, &mut last_delivered_seq)
+                    .await
+                    .is_err()
+                {
+                    break;
                 }
             }
             Err(broadcast::error::RecvError::Closed) => break,
@@ -284,9 +298,10 @@ mod tests {
         insert_durable_event(&db, stream_id, 2, b"second").await;
         insert_durable_event(&db, stream_id, 1, b"first").await;
         let (durable_tx, _rx) = broadcast::channel(16);
-        let proxy = LocalProxy::bind_durable(0, stream_id.to_owned(), db, durable_tx)
-            .await
-            .unwrap();
+        let proxy =
+            LocalProxy::bind_durable(0, stream_id.to_owned(), ReadSource::Mutex(db), durable_tx)
+                .await
+                .unwrap();
 
         let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", proxy.port))
             .await
@@ -310,10 +325,14 @@ mod tests {
         let stream_id = "22222222-2222-2222-2222-222222222222";
         insert_durable_event(&db, stream_id, 1, b"replay").await;
         let (durable_tx, _rx) = broadcast::channel(16);
-        let proxy =
-            LocalProxy::bind_durable(0, stream_id.to_owned(), db.clone(), durable_tx.clone())
-                .await
-                .unwrap();
+        let proxy = LocalProxy::bind_durable(
+            0,
+            stream_id.to_owned(),
+            ReadSource::Mutex(db.clone()),
+            durable_tx.clone(),
+        )
+        .await
+        .unwrap();
         let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", proxy.port))
             .await
             .unwrap();
@@ -350,10 +369,14 @@ mod tests {
         let stream_id = "55555555-5555-5555-5555-555555555555";
         insert_durable_event(&db, stream_id, 1, b"one").await;
         let (durable_tx, _rx) = broadcast::channel(16);
-        let proxy =
-            LocalProxy::bind_durable(0, stream_id.to_owned(), db.clone(), durable_tx.clone())
-                .await
-                .unwrap();
+        let proxy = LocalProxy::bind_durable(
+            0,
+            stream_id.to_owned(),
+            ReadSource::Mutex(db.clone()),
+            durable_tx.clone(),
+        )
+        .await
+        .unwrap();
         let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", proxy.port))
             .await
             .unwrap();
@@ -411,7 +434,7 @@ mod tests {
         let handle = tokio::spawn(serve_durable_consumer(
             server_stream,
             stream_id.to_owned(),
-            db,
+            ReadSource::Mutex(db),
             rx,
         ));
 
@@ -445,10 +468,14 @@ mod tests {
         let stream_id = "44444444-4444-4444-4444-444444444444";
         insert_durable_event(&db, stream_id, 1, b"one").await;
         let (durable_tx, _rx) = broadcast::channel(1);
-        let proxy =
-            LocalProxy::bind_durable(0, stream_id.to_owned(), db.clone(), durable_tx.clone())
-                .await
-                .unwrap();
+        let proxy = LocalProxy::bind_durable(
+            0,
+            stream_id.to_owned(),
+            ReadSource::Mutex(db.clone()),
+            durable_tx.clone(),
+        )
+        .await
+        .unwrap();
         let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", proxy.port))
             .await
             .unwrap();

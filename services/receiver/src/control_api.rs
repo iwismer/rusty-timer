@@ -289,6 +289,10 @@ pub struct AppState {
     /// (P2P EventBatch/GapNotice) flows through it; the `db` mutex above is
     /// the cold control-plane connection.
     pub writer: crate::writer::WriterHandle,
+    /// Read access for hot readers (proxy replay, projection rebuild): the
+    /// read-only pool in production, or the cold mutex where no file-backed
+    /// pool exists (in-memory test states).
+    pub read_source: crate::read_pool::ReadSource,
     pub connection_state: watch::Sender<ConnectionState>,
     // Keepalive receiver so that `connection_state.send()` never fails due
     // to "no receivers" even when no external subscriber is active.
@@ -365,6 +369,7 @@ impl AppState {
             receiver_id,
             true,
             crate::writer::WriterHandle::disconnected_for_test(),
+            None,
         )
     }
 
@@ -383,7 +388,9 @@ impl AppState {
         let (writer, _thread) =
             crate::writer::spawn_writer(&db_path, crate::writer::WriterConfig::default())
                 .expect("spawn test writer");
-        let (state, shutdown_rx) = Self::with_integrity(db, "recv-test".to_owned(), true, writer);
+        let read_pool = crate::read_pool::ReadPool::open(&db_path, 2).expect("open test read pool");
+        let (state, shutdown_rx) =
+            Self::with_integrity(db, "recv-test".to_owned(), true, writer, Some(read_pool));
         (state, shutdown_rx, dir)
     }
 
@@ -392,6 +399,7 @@ impl AppState {
         receiver_id: String,
         db_integrity_ok: bool,
         writer: crate::writer::WriterHandle,
+        read_pool: Option<std::sync::Arc<crate::read_pool::ReadPool>>,
     ) -> (Arc<Self>, watch::Receiver<ShutdownSignal>) {
         let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownSignal::None);
         let (ui_tx, _) = broadcast::channel(256);
@@ -409,9 +417,15 @@ impl AppState {
             .timeout(std::time::Duration::from_secs(3))
             .build()
             .expect("failed to build HTTP client");
+        let db = Arc::new(Mutex::new(db));
+        let read_source = match read_pool {
+            Some(pool) => crate::read_pool::ReadSource::Pool(pool),
+            None => crate::read_pool::ReadSource::Mutex(Arc::clone(&db)),
+        };
         let state = Arc::new(Self {
-            db: Arc::new(Mutex::new(db)),
+            db,
             writer,
+            read_source,
             connection_state: conn_tx,
             _conn_state_keepalive: conn_keepalive_rx,
             logger: Arc::new(rt_ui_log::UiLogger::with_buffer(

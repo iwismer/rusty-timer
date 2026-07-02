@@ -16,6 +16,7 @@ pub mod ports;
 pub mod projection;
 pub mod rd_dbf;
 pub mod rd_poll;
+pub mod read_pool;
 pub mod runtime;
 pub mod ui_events;
 pub mod writer;

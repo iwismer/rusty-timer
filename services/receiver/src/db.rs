@@ -213,6 +213,19 @@ pub enum AnnouncerGenerationAcceptance {
     Stale { current: i64, attempted: i64 },
 }
 
+/// Connection roles after the Phase 3 re-architecture:
+///
+/// - **Writer thread** (`crate::writer`): owns its own connection; all hot
+///   P2P persistence (EventBatch/GapNotice inserts + cursor advances) flows
+///   through it in group commits.
+/// - **Read pool** (`crate::read_pool`): read-only connections for hot
+///   readers — durable proxy replay/drain and projection rebuilds.
+/// - **This `Db` behind `Arc<Mutex<_>>` (cold path, now uncontended)**:
+///   subscriptions/profile/participants writes, DBF bookkeeping, announcer
+///   bookkeeping, and control-API queries.
+///
+/// WAL allows one writer at a time across connections; every connection sets
+/// `busy_timeout=10000` so cold-path writes ride out group commits.
 pub struct Db {
     conn: Connection,
 }
@@ -231,6 +244,13 @@ impl Db {
         d.apply_pragmas()?;
         d.apply_schema()?;
         Ok(d)
+    }
+
+    /// Wrap an already-configured **read-only** connection (see
+    /// `crate::read_pool`). Applies no pragmas and no schema — the read-write
+    /// open must have happened first.
+    pub(crate) fn from_read_only_connection(conn: Connection) -> Self {
+        Self { conn }
     }
     pub fn integrity_check(&self) -> DbResult<()> {
         let r: String = self
@@ -801,6 +821,33 @@ impl Db {
         )?;
         let rows = stmt.query_map(
             rusqlite::params![stream_id, after_seq],
+            received_event_from_row,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Bounded variant of [`Db::load_received_events_after`] for chunked hot
+    /// reads (the durable proxy drains in `LIMIT`-sized chunks so a pooled
+    /// connection is never held across a slow consumer write).
+    pub fn load_received_events_after_limited(
+        &self,
+        stream_id: &str,
+        after_seq: i64,
+        limit: usize,
+    ) -> DbResult<Vec<ReceivedEvent>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
+             FROM received_events
+             WHERE stream_id = ?1 AND seq > ?2
+             ORDER BY seq
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                stream_id,
+                after_seq,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
             received_event_from_row,
         )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)

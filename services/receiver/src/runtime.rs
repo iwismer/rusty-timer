@@ -132,7 +132,14 @@ pub async fn init_with_data_dir(
         crate::writer::spawn_writer(&db_path, crate::writer::WriterConfig::from_env())
             .map_err(|e| format!("failed to start sqlite writer: {e}"))?;
 
-    let (state, shutdown_rx) = AppState::with_integrity(db, receiver_id, db_integrity_ok, writer);
+    // Read-only pool for hot readers (proxy replay/drain, projection
+    // rebuilds). Opened after the read-write connection so the WAL sidecars
+    // exist.
+    let read_pool = crate::read_pool::ReadPool::open(&db_path, 2)
+        .map_err(|e| format!("failed to open read pool: {e}"))?;
+
+    let (state, shutdown_rx) =
+        AppState::with_integrity(db, receiver_id, db_integrity_ok, writer, Some(read_pool));
     state.logger.log("Receiver started");
 
     // Populate the chip->participant lookup from any previously imported

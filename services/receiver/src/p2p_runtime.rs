@@ -1180,7 +1180,7 @@ async fn start_stream_worker(
             match LocalProxy::bind_durable(
                 port,
                 stream_id.clone(),
-                Arc::clone(&state.db),
+                state.read_source.clone(),
                 hint_tx.clone(),
             )
             .await
@@ -1400,8 +1400,12 @@ async fn rebuild_stream_projection(
     stream_id: &str,
     ui_key: &StreamKey,
 ) -> Option<StreamProjection> {
-    let db = state.db.lock().await;
-    let rows = match db.load_stream_projection_summary(stream_id) {
+    let stream_id_owned = stream_id.to_owned();
+    let rows = match state
+        .read_source
+        .run(move |db| db.load_stream_projection_summary(&stream_id_owned))
+        .await
+    {
         Ok(rows) => rows,
         Err(e) => {
             warn!(error = %e, %stream_id, "failed to load stream projection summary");
@@ -1418,7 +1422,12 @@ async fn rebuild_stream_projection(
     let live_epoch = rows.last().map_or(0, |row| row.epoch);
     let mut chips = HashSet::new();
     let mut last_chip_id = None;
-    match db.load_epoch_raw_frames(stream_id, live_epoch) {
+    let stream_id_owned = stream_id.to_owned();
+    match state
+        .read_source
+        .run(move |db| db.load_epoch_raw_frames(&stream_id_owned, live_epoch))
+        .await
+    {
         Ok(frames) => {
             for (_seq, frame) in &frames {
                 let _ = chips.insert(crate::ui_events::chip_id_from_raw_frame(frame));
@@ -1431,7 +1440,6 @@ async fn rebuild_stream_projection(
             warn!(error = %e, %stream_id, "failed to load live-epoch frames for projection seed");
         }
     }
-    drop(db);
 
     state.stream_counts.seed_from_epoch_summaries(
         ui_key,
