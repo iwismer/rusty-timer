@@ -309,7 +309,10 @@ CREATE TABLE IF NOT EXISTS profile (
     receiver_id TEXT,
     dbf_enabled INTEGER NOT NULL DEFAULT 0,
     dbf_path    TEXT NOT NULL DEFAULT 'C:\\winrace\\Files\\IPICO.DBF',
-    announcer_enabled INTEGER NOT NULL DEFAULT 0
+    announcer_enabled INTEGER NOT NULL DEFAULT 0,
+    rd_import_enabled INTEGER NOT NULL DEFAULT 0,
+    rd_import_dir TEXT NOT NULL DEFAULT 'C:\\Winrace\\Files',
+    rd_import_interval_secs INTEGER NOT NULL DEFAULT 15
 );
 CREATE TABLE IF NOT EXISTS subscriptions (
     forwarder_endpoint_id TEXT NOT NULL,
@@ -344,12 +347,16 @@ def preseed_receiver_db(db_path: Path, forwarder_node_id: str, stream_id: str,
     conn = sqlite3.connect(str(db_path))
     try:
         conn.executescript(PRESEED_SQL)
+        # The receiver writes IPICO.DBF into the Race Director working
+        # directory (profile.rd_import_dir); the legacy dbf_path column is
+        # kept for schema compatibility but no longer read.
         conn.execute(
             "INSERT INTO profile "
             "(server_url, token, update_mode, receiver_mode_json, receiver_id, "
-            " dbf_enabled, dbf_path, announcer_enabled) VALUES (?,?,?,?,?,?,?,?)",
+            " dbf_enabled, dbf_path, announcer_enabled, rd_import_dir) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
             (server_url, server_token, "check-and-download", None,
-             "rx-e2e", 1, str(dbf_path), 1),
+             "rx-e2e", 1, str(dbf_path), 1, str(dbf_path.parent)),
         )
         conn.execute(
             "INSERT INTO subscriptions "
