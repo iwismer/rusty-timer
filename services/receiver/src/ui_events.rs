@@ -117,11 +117,31 @@ pub enum ReceiverUiEvent {
     },
     LastRead(LastRead),
     StreamMetricsUpdated(StreamMetricsPayload),
+    /// Coalesced per-stream UI updates: one event carries every stream that
+    /// changed since the last emitter tick (4–10 Hz), replacing the
+    /// per-stream/per-tick StreamCountsUpdated + LastRead +
+    /// StreamMetricsUpdated + full StreamsSnapshot fan-out on the hot path.
+    /// Full snapshots are sent only on UI (re)connect/resync and
+    /// control-plane changes.
+    StreamDeltas {
+        updates: Vec<StreamDelta>,
+    },
     ForwarderUpsUpdated {
         forwarder_id: String,
         available: bool,
         status: Option<rt_domain::UpsStatus>,
     },
+}
+
+/// One stream's coalesced UI state for [`ReceiverUiEvent::StreamDeltas`].
+#[derive(Clone, Debug, Serialize)]
+pub struct StreamDelta {
+    pub forwarder_id: String,
+    pub reader_ip: String,
+    pub reads_total: u64,
+    pub reads_epoch: u64,
+    pub metrics: StreamMetricsPayload,
+    pub last_read: Option<LastRead>,
 }
 
 #[cfg(test)]

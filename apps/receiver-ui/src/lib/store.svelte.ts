@@ -1491,6 +1491,39 @@ export function initStore(): void {
       next.set(key, metrics);
       store.streamMetrics = next;
     },
+    onStreamDeltas: (updates) => {
+      if (updates.length === 0) return;
+      // Counts (keyed row update; unknown streams trigger a resync/reload,
+      // same as the legacy per-stream counts event).
+      const needsResync = applyStreamCountUpdates(
+        updates.map((u) => ({
+          forwarder_id: u.forwarder_id,
+          reader_ip: u.reader_ip,
+          reads_total: u.reads_total,
+          reads_epoch: u.reads_epoch,
+        })),
+      );
+      if (needsResync) void loadAll();
+      // Metrics + last read, keyed.
+      const nextMetrics = new Map(store.streamMetrics);
+      const nextReads = new Map(store.lastReads);
+      for (const u of updates) {
+        const key = streamKey(u.forwarder_id, u.reader_ip);
+        nextMetrics.set(key, u.metrics);
+        if (u.last_read) {
+          nextReads.set(key, {
+            forwarder_id: u.last_read.forwarder_id,
+            reader_ip: u.last_read.reader_ip,
+            chip_id: u.last_read.chip_id,
+            timestamp: u.last_read.timestamp,
+            bib: u.last_read.bib ?? null,
+            name: u.last_read.name ?? null,
+          });
+        }
+      }
+      store.streamMetrics = nextMetrics;
+      store.lastReads = nextReads;
+    },
     onForwarderUpsUpdated: (payload) => {
       applyForwarderUpsUpdate(
         payload.forwarder_id,

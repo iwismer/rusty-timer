@@ -43,6 +43,17 @@ export type ForwarderUpsUpdatedPayload = {
   status: UpsStatus | null;
 };
 
+// One stream's coalesced update from the backend's 4-10 Hz delta emitter.
+export type StreamDeltaPayload = {
+  forwarder_id: string;
+  reader_ip: string;
+  reads_total: number;
+  reads_epoch: number;
+  metrics: StreamMetrics;
+  last_read?: LastReadPayload | null;
+};
+type StreamDeltasPayload = { updates?: StreamDeltaPayload[] };
+
 export type SseCallbacks = {
   onStatusChanged: (status: StatusChangedUpdate) => void;
   onStreamsSnapshot: (streams: StreamsResponse) => void;
@@ -55,6 +66,7 @@ export type SseCallbacks = {
   onModeChanged: (mode: ReceiverMode) => void;
   onLastRead: (read: LastRead) => void;
   onStreamMetricsUpdated: (metrics: StreamMetrics) => void;
+  onStreamDeltas: (updates: StreamDeltaPayload[]) => void;
   onForwarderUpsUpdated?: (payload: ForwarderUpsUpdatedPayload) => void;
 };
 
@@ -128,6 +140,9 @@ export async function initSSE(callbacks: SseCallbacks): Promise<void> {
         epoch_last_received_at: event.payload.epoch_last_received_at ?? null,
         epoch_lag_ms: event.payload.epoch_lag_ms ?? null,
       });
+    }),
+    listen<StreamDeltasPayload>("stream_deltas", (event) => {
+      callbacks.onStreamDeltas(event.payload.updates ?? []);
     }),
     listen<ForwarderUpsUpdatedPayload>("forwarder_ups_updated", (event) => {
       callbacks.onForwarderUpsUpdated?.(event.payload);

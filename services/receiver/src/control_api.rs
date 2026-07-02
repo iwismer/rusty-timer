@@ -293,6 +293,11 @@ pub struct AppState {
     /// read-only pool in production, or the cold mutex where no file-backed
     /// pool exists (in-memory test states).
     pub read_source: crate::read_pool::ReadSource,
+    /// Dirty per-stream UI deltas, drained by the global coalescing emitter
+    /// (see `p2p_runtime::run_stream_delta_emitter`) into single
+    /// [`ReceiverUiEvent::StreamDeltas`] events.
+    pub stream_delta_buffer:
+        Arc<StdMutex<HashMap<(String, String), crate::ui_events::StreamDelta>>>,
     pub connection_state: watch::Sender<ConnectionState>,
     // Keepalive receiver so that `connection_state.send()` never fails due
     // to "no receivers" even when no external subscriber is active.
@@ -426,6 +431,7 @@ impl AppState {
             db,
             writer,
             read_source,
+            stream_delta_buffer: Arc::new(StdMutex::new(HashMap::new())),
             connection_state: conn_tx,
             _conn_state_keepalive: conn_keepalive_rx,
             logger: Arc::new(rt_ui_log::UiLogger::with_buffer(
@@ -3307,6 +3313,7 @@ pub fn event_name(event: &ReceiverUiEvent) -> &'static str {
         ReceiverUiEvent::ModeChanged { .. } => "mode_changed",
         ReceiverUiEvent::LastRead(_) => "last_read",
         ReceiverUiEvent::StreamMetricsUpdated(_) => "stream_metrics_updated",
+        ReceiverUiEvent::StreamDeltas { .. } => "stream_deltas",
         ReceiverUiEvent::ForwarderUpsUpdated { .. } => "forwarder_ups_updated",
     }
 }

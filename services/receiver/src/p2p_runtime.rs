@@ -506,6 +506,12 @@ async fn run_reconcile_loop(
         Arc::clone(&state),
         shutdown_rx.clone(),
     ));
+    // Global UI delta emitter: one coalesced StreamDeltas event per tick for
+    // all dirty streams (see Task 5.2).
+    let delta_emitter_task = tokio::spawn(run_stream_delta_emitter(
+        Arc::clone(&state),
+        shutdown_rx.clone(),
+    ));
 
     // Server announcer generation, acquired by registering this endpoint and
     // taking over the announcer generation. When the server is unavailable
@@ -732,6 +738,8 @@ async fn run_reconcile_loop(
     }
     dbf_worker_task.abort();
     let _ = dbf_worker_task.await;
+    delta_emitter_task.abort();
+    let _ = delta_emitter_task.await;
     endpoint.close().await;
     // The runtime is shutting down: no sessions remain and none will be
     // reattempted, so report a clean Disconnected. `P2pReceiverRuntime::shutdown`
@@ -1433,51 +1441,97 @@ async fn rebuild_stream_projection(
     ))
 }
 
-/// Emit the throttled UI events for one stream projection: counts, last read,
-/// metrics, and the streams snapshot.
+/// Fold one stream projection's UI state into the shared delta buffer.
+///
+/// No events are sent here: the global coalescing emitter
+/// ([`run_stream_delta_emitter`]) drains the buffer into a single
+/// [`ReceiverUiEvent::StreamDeltas`] at 4-10 Hz — full `StreamsSnapshot`
+/// rebuilds happen only on UI (re)connect/resync and control-plane changes,
+/// never per batch tick.
 async fn emit_stream_projection(
     state: &Arc<AppState>,
     ui_key: &StreamKey,
     proj: &StreamProjection,
 ) {
-    if let Some(counts) = state.stream_counts.get(ui_key) {
-        let _ = state.ui_tx.send(ReceiverUiEvent::StreamCountsUpdated {
-            updates: vec![crate::ui_events::StreamCountUpdate {
-                forwarder_id: ui_key.forwarder_id.clone(),
-                reader_ip: ui_key.reader_ip.clone(),
-                reads_total: counts.total,
-                reads_epoch: counts.epoch,
-            }],
+    let (reads_total, reads_epoch) = state
+        .stream_counts
+        .get(ui_key)
+        .map_or((proj.total, proj.epoch_count), |counts| {
+            (counts.total, counts.epoch)
         });
-    }
 
-    if let Some(chip_id) = proj.last_chip_id.clone() {
+    let last_read = if let Some(chip_id) = proj.last_chip_id.clone() {
         let resolved = {
             let snapshot = state.chip_lookup.read().await.clone();
             SnapshotResolver { snapshot }.resolve(&chip_id)
         };
-        let _ = state
-            .ui_tx
-            .send(ReceiverUiEvent::LastRead(crate::ui_events::LastRead {
-                forwarder_id: ui_key.forwarder_id.clone(),
-                reader_ip: ui_key.reader_ip.clone(),
-                chip_id,
-                timestamp: crate::ui_events::unix_ms_to_rfc3339(proj.max_received_unix_ms)
-                    .unwrap_or_else(|| proj.max_received_unix_ms.to_string()),
-                bib: resolved.as_ref().map(|participant| participant.bib.clone()),
-                name: resolved
-                    .as_ref()
-                    .and_then(|participant| participant.name.clone()),
-                division: resolved.and_then(|participant| participant.division),
-            }));
-    }
+        Some(crate::ui_events::LastRead {
+            forwarder_id: ui_key.forwarder_id.clone(),
+            reader_ip: ui_key.reader_ip.clone(),
+            chip_id,
+            timestamp: crate::ui_events::unix_ms_to_rfc3339(proj.max_received_unix_ms)
+                .unwrap_or_else(|| proj.max_received_unix_ms.to_string()),
+            bib: resolved.as_ref().map(|participant| participant.bib.clone()),
+            name: resolved
+                .as_ref()
+                .and_then(|participant| participant.name.clone()),
+            division: resolved.and_then(|participant| participant.division),
+        })
+    } else {
+        None
+    };
 
     let metrics = proj.metrics(ui_key, now_unix_ms());
     state.cache_stream_metrics(&metrics).await;
-    let _ = state
-        .ui_tx
-        .send(ReceiverUiEvent::StreamMetricsUpdated(metrics));
-    state.emit_streams_snapshot().await;
+
+    let mut buffer = state
+        .stream_delta_buffer
+        .lock()
+        .expect("stream delta buffer poisoned");
+    let _ = buffer.insert(
+        (ui_key.forwarder_id.clone(), ui_key.reader_ip.clone()),
+        crate::ui_events::StreamDelta {
+            forwarder_id: ui_key.forwarder_id.clone(),
+            reader_ip: ui_key.reader_ip.clone(),
+            reads_total,
+            reads_epoch,
+            metrics,
+            last_read,
+        },
+    );
+}
+
+/// How often the global emitter flushes dirty stream deltas (~6.7 Hz).
+const STREAM_DELTA_EMIT_INTERVAL: Duration = Duration::from_millis(150);
+
+/// Global coalescing emitter: drains the shared delta buffer into one
+/// [`ReceiverUiEvent::StreamDeltas`] per tick when anything changed.
+async fn run_stream_delta_emitter(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<bool>) {
+    let mut tick = tokio::time::interval(STREAM_DELTA_EMIT_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() { break; }
+            }
+            _ = tick.tick() => {
+                let updates: Vec<crate::ui_events::StreamDelta> = {
+                    let mut buffer = state
+                        .stream_delta_buffer
+                        .lock()
+                        .expect("stream delta buffer poisoned");
+                    if buffer.is_empty() {
+                        continue;
+                    }
+                    buffer.drain().map(|(_, delta)| delta).collect()
+                };
+                let _ = state
+                    .ui_tx
+                    .send(ReceiverUiEvent::StreamDeltas { updates });
+            }
+        }
+    }
 }
 
 /// Single cross-stream DBF worker: one worker per DBF *file*, not per stream.
@@ -2521,7 +2575,6 @@ mod tests {
         stream_id: &str,
         facts: Vec<crate::p2p_session::EventFact>,
     ) -> crate::ui_events::LastRead {
-        let mut ui_rx = state.ui_tx.subscribe();
         let through_seq = facts.iter().map(|fact| fact.seq).max().unwrap_or(0);
         let (hint_tx, hint_rx) = broadcast::channel::<DurableBatch>(16);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -2539,16 +2592,28 @@ mod tests {
             })
             .unwrap();
 
+        // The projection flushes into the shared delta buffer on its tick;
+        // the global emitter (not running here) would fan it out to the UI.
+        let key = ("fwd-1".to_owned(), "10.0.0.1:10000".to_owned());
         let mut last_read = None;
-        while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(2), ui_rx.recv()).await {
-            if let ReceiverUiEvent::LastRead(read) = event {
-                last_read = Some(read);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            {
+                let buffer = state.stream_delta_buffer.lock().unwrap();
+                if let Some(delta) = buffer.get(&key)
+                    && let Some(read) = delta.last_read.clone()
+                {
+                    last_read = Some(read);
+                }
+            }
+            if last_read.is_some() {
                 break;
             }
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
         let _ = shutdown_tx.send(true);
         let _ = worker.await;
-        last_read.expect("last read event")
+        last_read.expect("last read delta")
     }
 
     fn chip_fact(seq: i64, received_unix_ms: i64) -> crate::p2p_session::EventFact {
