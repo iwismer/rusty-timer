@@ -487,6 +487,7 @@
                         localPortLabel="Local proxy"
                         localPortValue={localPortValueForPanel(reader)}
                         detailsCollapsible
+                        defaultCollapsed
                         epochEditable
                         downloadProgress={downloadProgressForPanel(reader)}
                         disabled={busyByEndpoint[forwarder.endpoint_id]}

@@ -231,7 +231,7 @@ describe("ConnectionsTab", () => {
     );
   });
 
-  it("places forwarder actions above reader controls", () => {
+  it("places forwarder actions above reader controls", async () => {
     mockState.store.connections.forwarders = [
       {
         endpoint_id: "endpoint-live",
@@ -264,6 +264,7 @@ describe("ConnectionsTab", () => {
     expect(
       screen.queryByTestId("forwarder-reader-endpoint-live-10.0.0.1:10000"),
     ).not.toBeInTheDocument();
+    await fireEvent.click(screen.getByLabelText("Show details"));
     const configure = screen.getByTestId("forwarder-configure-endpoint-live");
     const banner = within(row).getByText("Banner:");
 
@@ -369,15 +370,15 @@ describe("ConnectionsTab", () => {
     expect(panel).toHaveTextContent("Reads (total): 3,456");
     expect(panel).toHaveTextContent("Last seen: 5s ago");
     expect(panel).toHaveTextContent("Active epoch: Race Day");
-    // Hardware code renders both hex and decimal forms.
-    expect(panel).toHaveTextContent("Hardware: 0x45 (69)");
 
-    // Details start expanded and can be collapsed.
-    expect(screen.getByText("Banner:")).toBeInTheDocument();
-    await fireEvent.click(screen.getByLabelText("Hide details"));
+    // Details start collapsed and can be expanded.
     expect(screen.queryByText("Banner:")).not.toBeInTheDocument();
     await fireEvent.click(screen.getByLabelText("Show details"));
     expect(screen.getByText("Banner:")).toBeInTheDocument();
+    // Hardware code renders both hex and decimal forms.
+    expect(panel).toHaveTextContent("Hardware: 0x45 (69)");
+    await fireEvent.click(screen.getByLabelText("Hide details"));
+    expect(screen.queryByText("Banner:")).not.toBeInTheDocument();
   });
 
   it("wires epoch name save and advance epoch to the reader commands", async () => {
@@ -485,7 +486,7 @@ describe("ConnectionsTab", () => {
     ).toEqual(["Reconnect", "Disconnect"]);
   });
 
-  it("shows reconnect but disables other controls for disconnected readers", () => {
+  it("shows reconnect but disables other controls for disconnected readers", async () => {
     mockState.store.connections.forwarders = [
       {
         endpoint_id: "endpoint-live",
@@ -514,6 +515,7 @@ describe("ConnectionsTab", () => {
 
     render(ConnectionsTab);
 
+    await fireEvent.click(screen.getByLabelText("Show details"));
     expect(screen.getByText("No reader data available")).toBeInTheDocument();
     expect(screen.getByText("Sync Clock")).toBeDisabled();
     expect(screen.getAllByText("Reconnect")[0]).toBeEnabled();
@@ -553,6 +555,7 @@ describe("ConnectionsTab", () => {
 
     render(ConnectionsTab);
 
+    await fireEvent.click(screen.getByLabelText("Show details"));
     await fireEvent.click(screen.getByText("Sync Clock"));
 
     expect(
