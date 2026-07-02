@@ -293,6 +293,17 @@ export interface ForwarderMetricsUpdate {
   last_read_at: string | null;
 }
 
+/// Targeted patch for a reader's volatile counters on the Connections tab,
+/// pushed by the receiver instead of a full connections reload.
+export interface ForwarderReaderCountsUpdate {
+  forwarder_id: string;
+  stream_id: string;
+  reads_session: number;
+  reads_total: number;
+  last_read_unix_ms: number | null;
+  last_seen_secs: number | null;
+}
+
 export interface UpsStatus {
   battery_percent: number;
   battery_voltage_mv: number;

@@ -260,6 +260,24 @@ fn subscription_local_ports(
         .collect()
 }
 
+/// Reader statuses with volatile read-count fields cleared, for the
+/// connections-changed fingerprint.
+///
+/// Read counters and last-seen timestamps change on every coalesced
+/// `ReaderStatus` delta from a forwarder; including them in the fingerprint
+/// would turn each count refresh into a `ConnectionsChanged` event and a full
+/// connections reload in the UI. Those fields are instead delivered through
+/// the targeted `ForwarderReaderCountsUpdated` event.
+fn fingerprint_reader_statuses(mut readers: Vec<ReaderLiveStatus>) -> Vec<ReaderLiveStatus> {
+    for reader in &mut readers {
+        reader.reads_session = None;
+        reader.reads_total = None;
+        reader.last_read_unix_ms = None;
+        reader.last_seen_secs = None;
+    }
+    readers
+}
+
 fn sorted_reader_statuses(
     live_status: &ForwarderLiveStatus,
     local_ports: &HashMap<(String, String), Option<u16>>,
@@ -603,6 +621,22 @@ impl AppState {
         status: ReaderStatus,
     ) {
         let stream_id = decode_stream_id(status.stream_id);
+        // Volatile counters are excluded from the connections fingerprint (see
+        // `fingerprint_reader_statuses`), so push them to the UI as a targeted
+        // patch event instead.
+        let _ = self
+            .ui_tx
+            .send(ReceiverUiEvent::ForwarderReaderCountsUpdated(
+                crate::ui_events::ForwarderReaderCounts {
+                    forwarder_id: endpoint_id.to_owned(),
+                    stream_id: stream_id.clone(),
+                    reads_session: status.reads_session,
+                    reads_total: status.reads_total,
+                    last_read_unix_ms: (status.last_read_unix_ms != 0)
+                        .then_some(status.last_read_unix_ms),
+                    last_seen_secs: status.last_seen_secs,
+                },
+            ));
         let reader = ReaderLiveStatus {
             stream_id: stream_id.clone(),
             connected: status.connected,
@@ -1035,7 +1069,11 @@ impl AppState {
                     subscribed_count: subscribed_counts.get(&endpoint_id).copied().unwrap_or(0),
                     available_count: discovered_forwarder
                         .map_or(0, |forwarder| forwarder.streams.len()),
-                    readers: sorted_reader_statuses(&live_status, &local_ports, &endpoint_id),
+                    readers: fingerprint_reader_statuses(sorted_reader_statuses(
+                        &live_status,
+                        &local_ports,
+                        &endpoint_id,
+                    )),
                     ups: live_status.ups,
                 }
             })
@@ -3222,6 +3260,7 @@ pub const EVENT_NAMES: &[&str] = &[
     "log_entry",
     "stream_counts_updated",
     "forwarder_metrics_updated",
+    "forwarder_reader_counts_updated",
     "mode_changed",
     "last_read",
     "stream_metrics_updated",
@@ -3242,6 +3281,7 @@ pub fn event_name(event: &ReceiverUiEvent) -> &'static str {
         ReceiverUiEvent::LogEntry { .. } => "log_entry",
         ReceiverUiEvent::StreamCountsUpdated { .. } => "stream_counts_updated",
         ReceiverUiEvent::ForwarderMetricsUpdated(_) => "forwarder_metrics_updated",
+        ReceiverUiEvent::ForwarderReaderCountsUpdated(_) => "forwarder_reader_counts_updated",
         ReceiverUiEvent::ModeChanged { .. } => "mode_changed",
         ReceiverUiEvent::LastRead(_) => "last_read",
         ReceiverUiEvent::StreamMetricsUpdated(_) => "stream_metrics_updated",
@@ -4034,6 +4074,74 @@ mod tests {
         assert!(
             saw_connections_changed,
             "forwarder state change should emit ConnectionsChanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_count_only_updates_emit_targeted_event_without_connections_changed() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+
+        let status =
+            |reads_session: u64, reads_total: i64, connected: bool| rt_p2p_protocol::ReaderStatus {
+                stream_id: b"stream-a".to_vec(),
+                connected,
+                state: if connected { "online" } else { "offline" }.to_owned(),
+                last_read_unix_ms: 1234,
+                reads_session,
+                reads_total,
+                last_seen_secs: Some(reads_session),
+                current_epoch_name: None,
+            };
+
+        // Initial status: the reader appearing is a structural change.
+        state
+            .record_forwarder_reader_status("endpoint-a", status(1, 10, true))
+            .await;
+
+        let mut ui_rx = state.ui_tx.subscribe();
+
+        // Count-only update: counters advance, everything structural is equal.
+        state
+            .record_forwarder_reader_status("endpoint-a", status(2, 11, true))
+            .await;
+
+        let mut saw_counts_update = false;
+        let mut connections_changed = 0;
+        while let Ok(Ok(event)) =
+            tokio::time::timeout(std::time::Duration::from_millis(25), ui_rx.recv()).await
+        {
+            match event {
+                ReceiverUiEvent::ForwarderReaderCountsUpdated(update) => {
+                    assert_eq!(update.forwarder_id, "endpoint-a");
+                    assert_eq!(update.stream_id, "stream-a");
+                    assert_eq!(update.reads_session, 2);
+                    assert_eq!(update.reads_total, 11);
+                    assert_eq!(update.last_read_unix_ms, Some(1234));
+                    assert_eq!(update.last_seen_secs, Some(2));
+                    saw_counts_update = true;
+                }
+                ReceiverUiEvent::ConnectionsChanged => connections_changed += 1,
+                _ => {}
+            }
+        }
+        assert!(
+            saw_counts_update,
+            "count-only reader status should emit ForwarderReaderCountsUpdated"
+        );
+        assert_eq!(
+            connections_changed, 0,
+            "count-only reader status must not emit ConnectionsChanged"
+        );
+
+        // A state transition is structural and still triggers ConnectionsChanged.
+        state
+            .record_forwarder_reader_status("endpoint-a", status(2, 11, false))
+            .await;
+        let connections_changed = count_connections_changed_events(&mut ui_rx).await;
+        assert_eq!(
+            connections_changed, 1,
+            "reader state transition should emit ConnectionsChanged"
         );
     }
 

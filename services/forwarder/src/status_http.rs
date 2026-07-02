@@ -58,7 +58,7 @@ use rt_updater::UpdateStatus;
 use rt_updater::workflow::{RealChecker, WorkflowState, run_check, run_download};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::future::Future;
 use std::io::Write as _;
@@ -213,6 +213,9 @@ pub struct SubsystemStatus {
     restart_needed: bool,
     /// UPS status snapshot (None if UPS monitoring is not configured).
     ups_status: Option<UpsStatusState>,
+    /// Readers whose read counters changed since the last coalesced P2P
+    /// status broadcast (see [`spawn_read_count_broadcaster`]).
+    read_counts_dirty: HashSet<String>,
 }
 
 impl SubsystemStatus {
@@ -231,6 +234,7 @@ impl SubsystemStatus {
             update_mode: rt_updater::UpdateMode::default(),
             restart_needed: false,
             ups_status: None,
+            read_counts_dirty: HashSet::new(),
         }
     }
 
@@ -249,6 +253,7 @@ impl SubsystemStatus {
             update_mode: rt_updater::UpdateMode::default(),
             restart_needed: false,
             ups_status: None,
+            read_counts_dirty: HashSet::new(),
         }
     }
 
@@ -527,6 +532,53 @@ fn spawn_download_progress_bridge(
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
+        }
+    });
+}
+
+/// Interval at which accumulated read-count changes are broadcast to P2P
+/// control sessions as `ReaderStatus` deltas.
+const READ_COUNT_BROADCAST_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Broadcast a `ReaderStatus` delta for every reader whose read counters
+/// changed since the last tick (see `record_read`).
+///
+/// Sends while holding the `SubsystemStatus` lock so deltas stay ordered
+/// against `subscribe_and_snapshot`, like every other status broadcast.
+/// Broadcasting current state (not increments) makes a dropped or duplicated
+/// delta harmless: the next tick carries the up-to-date counters.
+async fn broadcast_dirty_read_counts(
+    subsystem: &Mutex<SubsystemStatus>,
+    status_event_tx: &broadcast::Sender<ForwarderStatusEvent>,
+) {
+    let mut ss = subsystem.lock().await;
+    if ss.read_counts_dirty.is_empty() {
+        return;
+    }
+    let dirty = std::mem::take(&mut ss.read_counts_dirty);
+    for reader_ip in dirty {
+        if let Some(status) = ss.readers.get(&reader_ip) {
+            let _ = status_event_tx.send(ForwarderStatusEvent::ReaderStatus {
+                stream_id: reader_ip,
+                status: status.clone(),
+            });
+        }
+    }
+}
+
+/// Spawn the coalescing task that pushes read-count updates to P2P peers at a
+/// bounded rate. Quiet when no reads arrive; at most one delta per reader per
+/// interval during bursts.
+fn spawn_read_count_broadcaster(
+    subsystem: Arc<Mutex<SubsystemStatus>>,
+    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(READ_COUNT_BROADCAST_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            broadcast_dirty_read_counts(&subsystem, &status_event_tx).await;
         }
     });
 }
@@ -986,6 +1038,10 @@ impl StatusServer {
                         local_port: r.local_port,
                         current_epoch_name: r.current_epoch_name.clone(),
                     });
+                // Per-read P2P broadcasts would flood the control stream during
+                // bursts, so reads only mark the reader dirty; the coalescing
+                // task broadcasts the latest counters at a bounded rate.
+                ss.read_counts_dirty.insert(reader_ip.to_owned());
             }
         }
         #[cfg(any(feature = "eink", feature = "lcd"))]
@@ -1048,6 +1104,7 @@ impl StatusServer {
                 tracing::error!(error = %err, "status HTTP server fatal error");
             }
         });
+        spawn_read_count_broadcaster(subsystem.clone(), status_event_tx.clone());
 
         Ok(StatusServer {
             local_addr,
@@ -1117,6 +1174,7 @@ impl StatusServer {
                 tracing::error!(error = %err, "status HTTP server fatal error");
             }
         });
+        spawn_read_count_broadcaster(subsystem.clone(), status_event_tx.clone());
 
         Ok(StatusServer {
             local_addr,
@@ -6366,6 +6424,99 @@ target = "192.168.1.100:10000"
                 reads_received: 1,
                 ..
             }
+        ));
+    }
+
+    #[tokio::test]
+    async fn record_read_marks_reader_dirty_without_p2p_broadcast() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+        server
+            .init_readers(&[("10.0.0.9:10000".to_owned(), 10_001)])
+            .await;
+        let (mut events, _snapshot) = server.status_feed().subscribe_and_snapshot().await;
+
+        server.record_read("10.0.0.9:10000").await;
+        server.record_read("10.0.0.9:10000").await;
+
+        // Reads mark the reader dirty for the coalescing broadcaster rather
+        // than pushing a per-read P2P status delta. (The dirty flag may already
+        // have been consumed if the background broadcaster ticked, in which
+        // case the delta must be on the feed instead.)
+        let dirty = {
+            let ss = server.subsystem.lock().await;
+            ss.read_counts_dirty.contains("10.0.0.9:10000")
+        };
+        if !dirty {
+            match events.try_recv() {
+                Ok(ForwarderStatusEvent::ReaderStatus { stream_id, status }) => {
+                    assert_eq!(stream_id, "10.0.0.9:10000");
+                    assert_eq!(status.reads_since_restart, 2);
+                }
+                other => panic!(
+                    "reader must be dirty or a coalesced delta must be on the feed, got {other:?}"
+                ),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_dirty_read_counts_coalesces_and_clears() {
+        let subsystem = Arc::new(Mutex::new(SubsystemStatus::ready()));
+        let (status_event_tx, mut events) = broadcast::channel(16);
+        {
+            let mut ss = subsystem.lock().await;
+            ss.readers.insert(
+                "10.0.0.9:10000".to_owned(),
+                ReaderStatus {
+                    state: ReaderConnectionState::Connected,
+                    last_seen: Some(Instant::now()),
+                    reads_since_restart: 2,
+                    reads_total: 42,
+                    local_port: 10_001,
+                    current_epoch_name: None,
+                    reader_info: None,
+                },
+            );
+            ss.read_counts_dirty.insert("10.0.0.9:10000".to_owned());
+            // A dirty entry with no matching reader must be skipped silently.
+            ss.read_counts_dirty.insert("10.0.0.250:10000".to_owned());
+        }
+
+        broadcast_dirty_read_counts(&subsystem, &status_event_tx).await;
+
+        match events.try_recv().expect("one coalesced ReaderStatus delta") {
+            ForwarderStatusEvent::ReaderStatus { stream_id, status } => {
+                assert_eq!(stream_id, "10.0.0.9:10000");
+                assert_eq!(status.reads_since_restart, 2);
+                assert_eq!(status.reads_total, 42);
+            }
+            other => panic!("expected ReaderStatus delta, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
+            "exactly one delta per dirty reader per tick"
+        );
+        assert!(
+            subsystem.lock().await.read_counts_dirty.is_empty(),
+            "dirty set must be drained by the broadcast"
+        );
+
+        // A second tick without new reads must broadcast nothing.
+        broadcast_dirty_read_counts(&subsystem, &status_event_tx).await;
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
         ));
     }
 

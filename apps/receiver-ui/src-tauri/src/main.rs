@@ -1132,7 +1132,8 @@ mod tests {
     #[test]
     fn event_names_match() {
         use receiver::ui_events::{
-            ForwarderMetricsUpdate, LastRead, StreamCountUpdate, StreamMetricsPayload,
+            ForwarderMetricsUpdate, ForwarderReaderCounts, LastRead, StreamCountUpdate,
+            StreamMetricsPayload,
         };
         use std::collections::BTreeSet;
 
@@ -1168,6 +1169,14 @@ mod tests {
                 unique_chips: 0,
                 total_reads: 0,
                 last_read_at: None,
+            }),
+            ReceiverUiEvent::ForwarderReaderCountsUpdated(ForwarderReaderCounts {
+                forwarder_id: "f".to_owned(),
+                stream_id: "ip".to_owned(),
+                reads_session: 0,
+                reads_total: 0,
+                last_read_unix_ms: None,
+                last_seen_secs: None,
             }),
             ReceiverUiEvent::ModeChanged {
                 mode: rt_domain::ReceiverMode::Race {

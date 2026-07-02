@@ -4,6 +4,7 @@
 import * as api from "./api";
 import type {
   ConnectionsResponse,
+  ForwarderReaderCountsUpdate,
   LastRead,
   ReceiverMode,
   StatusResponse,
@@ -1316,6 +1317,37 @@ function applyForwarderMetricsUpdate(update: api.ForwarderMetricsUpdate): void {
   store.forwarders = next;
 }
 
+/// Patch a reader's volatile counters (session/total reads, last seen) into
+/// the cached connections payload in place. Count refreshes arrive as targeted
+/// events so they don't trigger a full connections reload; unknown
+/// forwarders/readers are ignored because structural changes still fire
+/// ConnectionsChanged.
+function applyForwarderReaderCountsUpdate(
+  update: ForwarderReaderCountsUpdate,
+): void {
+  const connections = store.connections;
+  if (!connections) return;
+  let changed = false;
+  const forwarders = connections.forwarders.map((forwarder) => {
+    if (forwarder.endpoint_id !== update.forwarder_id) return forwarder;
+    const readers = forwarder.readers.map((reader) => {
+      if (reader.stream_id !== update.stream_id) return reader;
+      changed = true;
+      return {
+        ...reader,
+        reads_session: update.reads_session,
+        reads_total: update.reads_total,
+        last_read_unix_ms: update.last_read_unix_ms,
+        last_seen_secs: update.last_seen_secs,
+      };
+    });
+    return { ...forwarder, readers };
+  });
+  if (changed) {
+    store.connections = { ...connections, forwarders };
+  }
+}
+
 function applyForwarderUpsUpdate(
   forwarderId: string,
   available: boolean,
@@ -1469,6 +1501,9 @@ export function initStore(): void {
     },
     onForwarderMetricsUpdated: (update) => {
       applyForwarderMetricsUpdate(update);
+    },
+    onForwarderReaderCountsUpdated: (update) => {
+      applyForwarderReaderCountsUpdate(update);
     },
     onModeChanged: (mode) => {
       applyHydratedMode(mode);
