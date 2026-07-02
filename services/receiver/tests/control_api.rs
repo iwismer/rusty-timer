@@ -588,9 +588,15 @@ async fn put_dbf_config_updates_enabled_flag_only() {
         .unwrap();
     }
 
-    control_api::put_dbf_config(&state, receiver::db::DbfConfig { enabled: true })
-        .await
-        .unwrap();
+    control_api::put_dbf_config(
+        &state,
+        receiver::db::DbfConfig {
+            enabled: true,
+            flush_interval_ms: receiver::db::DEFAULT_DBF_FLUSH_INTERVAL_MS,
+        },
+    )
+    .await
+    .unwrap();
 
     let config = control_api::get_dbf_config(&state).await.unwrap();
     assert!(config.enabled);

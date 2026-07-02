@@ -674,6 +674,8 @@ export async function getSubscriptions(): Promise<{
 
 export interface DbfConfig {
   enabled: boolean;
+  /** DBF write coalescing interval in milliseconds (clamped 250–5000). */
+  flush_interval_ms: number;
 }
 
 export async function getDbfConfig(): Promise<DbfConfig> {

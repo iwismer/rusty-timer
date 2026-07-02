@@ -362,7 +362,7 @@ pub enum PushOutcome {
 /// transport leaves rows unmarked for a later retry, and a successful push
 /// followed by a repush sends nothing (idempotent).
 pub fn push_announcer_rows(
-    db: &Db,
+    db: &mut Db,
     client: &dyn AnnouncerPushClient,
     resolver: &dyn ParticipantResolver,
     stream_id: &str,
@@ -419,12 +419,10 @@ pub fn push_announcer_rows(
 
     // Only mark after a successful push, so a failed transport leaves rows
     // pending for a later retry (at-least-once + idempotency key downstream).
-    let mut marked = 0usize;
-    for event in &pending {
-        if db.mark_announcer_pushed(stream_id, event.seq, pushed_unix_ms)? {
-            marked += 1;
-        }
-    }
+    // One transaction for the whole pass — per-row autocommits blew the fsync
+    // budget on slow disks whenever the announcer was enabled.
+    let seqs: Vec<i64> = pending.iter().map(|event| event.seq).collect();
+    let marked = db.mark_announcer_pushed_batch(stream_id, &seqs, pushed_unix_ms)?;
     Ok(PushOutcome::Pushed { rows: marked })
 }
 
@@ -507,8 +505,61 @@ mod tests {
     }
 
     #[test]
+    fn batch_marking_marks_all_pushed_rows_in_one_call() {
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_id = "127.0.0.1:10400";
+        let raw = sample_raw_frame();
+        for seq in 1..=600 {
+            insert_event(&db, stream_id, seq, &raw, 1_700_000_000_000 + seq);
+        }
+        let client = RecordingClient::default();
+        let resolver = map_resolver(&[]);
+
+        let outcome =
+            push_announcer_rows(&mut db, &client, &resolver, stream_id, 1, 1_700_000_010_000)
+                .unwrap();
+        assert_eq!(outcome, PushOutcome::Pushed { rows: 600 });
+        assert!(
+            db.load_unpushed_announcer_events(stream_id)
+                .unwrap()
+                .is_empty(),
+            "one pass marks every pushed row (single transaction, chunked IN lists)"
+        );
+    }
+
+    #[test]
+    fn late_arriving_low_seq_row_is_pushed_on_next_pass() {
+        // The unpushed scan is marker-based (announcer_pushed_unix_ms IS
+        // NULL), never a seq cursor: announcer ordering is by
+        // received_unix_ms, so a late-received low-seq row must still be
+        // picked up by a later pass.
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_id = "127.0.0.1:10500";
+        let raw = sample_raw_frame();
+        insert_event(&db, stream_id, 2, &raw, 1_700_000_000_200);
+        insert_event(&db, stream_id, 3, &raw, 1_700_000_000_300);
+        let client = RecordingClient::default();
+        let resolver = map_resolver(&[]);
+        let outcome =
+            push_announcer_rows(&mut db, &client, &resolver, stream_id, 1, 1_700_000_010_000)
+                .unwrap();
+        assert_eq!(outcome, PushOutcome::Pushed { rows: 2 });
+
+        // Seq 1 arrives late (redelivery after a gap), with a *newer*
+        // received time.
+        insert_event(&db, stream_id, 1, &raw, 1_700_000_000_400);
+        let outcome =
+            push_announcer_rows(&mut db, &client, &resolver, stream_id, 1, 1_700_000_020_000)
+                .unwrap();
+        assert_eq!(outcome, PushOutcome::Pushed { rows: 1 });
+        let last_batch = client.batches.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(last_batch.len(), 1);
+        assert_eq!(last_batch[0].seq, 1, "the late low-seq row is pushed");
+    }
+
+    #[test]
     fn pushes_resolved_rows() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         let stream_id = "127.0.0.1:10000";
         let raw = sample_raw_frame();
         // Insert out of received order to prove ordering by received_unix_ms.
@@ -519,7 +570,8 @@ mod tests {
         let resolver = map_resolver(&[("000000012345", "42", "Ada Lovelace")]);
 
         let outcome =
-            push_announcer_rows(&db, &client, &resolver, stream_id, 7, 1_700_000_010_000).unwrap();
+            push_announcer_rows(&mut db, &client, &resolver, stream_id, 7, 1_700_000_010_000)
+                .unwrap();
         assert_eq!(outcome, PushOutcome::Pushed { rows: 2 });
 
         let rows = client.all_rows();
@@ -580,7 +632,7 @@ mod tests {
 
     #[test]
     fn pushes_division_into_announcer_row_payload() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         let stream_id = "127.0.0.1:10000";
         let raw = sample_raw_frame();
         insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
@@ -595,7 +647,7 @@ mod tests {
             })
         };
 
-        push_announcer_rows(&db, &client, &resolver, stream_id, 7, 1_700_000_010_000).unwrap();
+        push_announcer_rows(&mut db, &client, &resolver, stream_id, 7, 1_700_000_010_000).unwrap();
         let rows = client.all_rows();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].division.as_deref(), Some("5k"));
@@ -608,7 +660,7 @@ mod tests {
 
     #[test]
     fn pushes_rows_with_bib_and_without_name_when_participant_is_unknown() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         let stream_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
         let raw = sample_raw_frame();
         insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
@@ -623,7 +675,8 @@ mod tests {
         };
 
         let outcome =
-            push_announcer_rows(&db, &client, &resolver, stream_id, 1, 1_700_000_010_000).unwrap();
+            push_announcer_rows(&mut db, &client, &resolver, stream_id, 1, 1_700_000_010_000)
+                .unwrap();
         assert_eq!(outcome, PushOutcome::Pushed { rows: 1 });
 
         let rows = client.all_rows();
@@ -635,7 +688,7 @@ mod tests {
 
     #[test]
     fn pushes_rows_without_bib_or_name_when_unresolved() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         let stream_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
         let raw = sample_raw_frame();
         insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
@@ -645,7 +698,8 @@ mod tests {
         let resolver = map_resolver(&[]);
 
         let outcome =
-            push_announcer_rows(&db, &client, &resolver, stream_id, 1, 1_700_000_010_000).unwrap();
+            push_announcer_rows(&mut db, &client, &resolver, stream_id, 1, 1_700_000_010_000)
+                .unwrap();
         assert_eq!(outcome, PushOutcome::Pushed { rows: 1 });
 
         let rows = client.all_rows();
@@ -657,7 +711,7 @@ mod tests {
 
     #[test]
     fn idempotent_repush() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         let stream_id = "cccccccc-cccc-cccc-cccc-cccccccccccc";
         let raw = sample_raw_frame();
         insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
@@ -667,12 +721,14 @@ mod tests {
         let resolver = map_resolver(&[("000000012345", "42", "Ada Lovelace")]);
 
         let first =
-            push_announcer_rows(&db, &client, &resolver, stream_id, 3, 1_700_000_010_000).unwrap();
+            push_announcer_rows(&mut db, &client, &resolver, stream_id, 3, 1_700_000_010_000)
+                .unwrap();
         assert_eq!(first, PushOutcome::Pushed { rows: 2 });
 
         // Repush with the same generation must send nothing new.
         let second =
-            push_announcer_rows(&db, &client, &resolver, stream_id, 3, 1_700_000_020_000).unwrap();
+            push_announcer_rows(&mut db, &client, &resolver, stream_id, 3, 1_700_000_020_000)
+                .unwrap();
         assert_eq!(second, PushOutcome::Pushed { rows: 0 });
 
         assert_eq!(client.all_rows().len(), 2, "repush must not duplicate rows");
@@ -685,7 +741,7 @@ mod tests {
 
     #[test]
     fn stale_generation_not_sent() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         let stream_id = "dddddddd-dddd-dddd-dddd-dddddddddddd";
         let raw = sample_raw_frame();
         insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
@@ -695,13 +751,15 @@ mod tests {
 
         // Accept a newer generation first, raising the fence to 5.
         let fresh =
-            push_announcer_rows(&db, &client, &resolver, stream_id, 5, 1_700_000_010_000).unwrap();
+            push_announcer_rows(&mut db, &client, &resolver, stream_id, 5, 1_700_000_010_000)
+                .unwrap();
         assert_eq!(fresh, PushOutcome::Pushed { rows: 1 });
 
         // A later event arrives, but a stale (older) generation tries to push it.
         insert_event(&db, stream_id, 2, &raw, 1_700_000_000_300);
         let stale =
-            push_announcer_rows(&db, &client, &resolver, stream_id, 3, 1_700_000_020_000).unwrap();
+            push_announcer_rows(&mut db, &client, &resolver, stream_id, 3, 1_700_000_020_000)
+                .unwrap();
         assert_eq!(
             stale,
             PushOutcome::StaleGeneration {
@@ -743,20 +801,26 @@ mod tests {
 
     #[test]
     fn interleaved_newer_generation_prevents_stale_send() {
-        let db = Db::open_in_memory().unwrap();
+        // Two connections on one temp-file DB: the resolver raises the fence
+        // on its own connection while the push holds `&mut db`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ann.sqlite3");
+        let mut db = Db::open(&path).unwrap();
+        let resolver_db = Db::open(&path).unwrap();
         let stream_id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
         let raw = sample_raw_frame();
         insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
 
         let client = RecordingClient::default();
         let resolver = NewerGenerationWinsDuringResolve {
-            db: &db,
+            db: &resolver_db,
             stream_id,
             triggered: AtomicBool::new(false),
         };
 
         let outcome =
-            push_announcer_rows(&db, &client, &resolver, stream_id, 3, 1_700_000_010_000).unwrap();
+            push_announcer_rows(&mut db, &client, &resolver, stream_id, 3, 1_700_000_010_000)
+                .unwrap();
         assert_eq!(
             outcome,
             PushOutcome::StaleGeneration {

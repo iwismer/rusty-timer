@@ -502,8 +502,11 @@ mod tests {
                 Some("recv-test"),
             )
             .unwrap();
-            db.save_dbf_config(&crate::db::DbfConfig { enabled: false })
-                .unwrap();
+            db.save_dbf_config(&crate::db::DbfConfig {
+                enabled: false,
+                flush_interval_ms: crate::db::DEFAULT_DBF_FLUSH_INTERVAL_MS,
+            })
+            .unwrap();
             let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
             let args = Value::Object(serde_json::Map::new());
             if let Err(BridgeError::Unknown(cmd)) = dispatch(state.as_ref(), name, &args).await {

@@ -15,7 +15,10 @@
   import ReceiverModeConfig from "$lib/components/ReceiverModeConfig.svelte";
 
   function getDbfDirty(): boolean {
-    return store.editDbfEnabled !== store.dbfEnabled;
+    return (
+      store.editDbfEnabled !== store.dbfEnabled ||
+      store.editDbfFlushIntervalMs !== store.dbfFlushIntervalMs
+    );
   }
 
   function getRdImportDirty(): boolean {
@@ -172,6 +175,30 @@
       <p class="mt-3 text-xs text-text-muted">
         Writes to <code>{store.editRdImportDir}\IPICO.DBF</code>.
       </p>
+
+      {#if store.editDbfEnabled}
+        <label class="mt-3 flex items-center gap-2 text-xs text-text-primary">
+          DBF write interval (seconds)
+          <input
+            data-testid="dbf-flush-interval-input"
+            type="number"
+            min="0.25"
+            max="5"
+            step="0.25"
+            value={store.editDbfFlushIntervalMs / 1000}
+            oninput={(e) => {
+              const seconds = Number(e.currentTarget.value);
+              if (Number.isFinite(seconds) && seconds > 0) {
+                store.editDbfFlushIntervalMs = Math.round(seconds * 1000);
+              }
+            }}
+            class="w-20 rounded border border-border bg-surface px-2 py-1 text-xs"
+          />
+        </label>
+        <p class="mt-1 text-xs text-text-muted">
+          How often new reads are written to the file (0.25–5 seconds).
+        </p>
+      {/if}
 
       <div class="mt-3 flex items-center gap-2">
         <button

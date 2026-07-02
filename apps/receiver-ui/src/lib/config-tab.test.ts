@@ -30,6 +30,8 @@ const mockState = vi.hoisted(() => {
       status: defaultStatus(),
       editDbfEnabled: false,
       dbfEnabled: false,
+      dbfFlushIntervalMs: 1000,
+      editDbfFlushIntervalMs: 1000,
       dbfSaving: false,
       dbfClearing: false,
       editRdImportEnabled: false,
@@ -91,6 +93,8 @@ describe("ConfigTab", () => {
     mockState.store.status = mockState.defaultStatus();
     mockState.store.editDbfEnabled = false;
     mockState.store.dbfEnabled = false;
+    mockState.store.dbfFlushIntervalMs = 1000;
+    mockState.store.editDbfFlushIntervalMs = 1000;
     mockState.store.dbfSaving = false;
     mockState.store.dbfClearing = false;
     mockState.store.editRdImportEnabled = false;
@@ -186,6 +190,38 @@ describe("ConfigTab", () => {
     expect(screen.queryByTestId("dbf-path-input")).not.toBeInTheDocument();
     expect(screen.getByTestId("save-dbf-btn")).toBeDisabled();
     expect(screen.getByTestId("clear-dbf-btn")).toBeEnabled();
+    expect(
+      screen.queryByTestId("dbf-flush-interval-input"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the DBF write interval only when DBF output is enabled", () => {
+    mockState.store.editDbfEnabled = true;
+    mockState.store.editDbfFlushIntervalMs = 1000;
+
+    render(ConfigTab);
+
+    // Rendered in seconds, default 1s.
+    expect(screen.getByTestId("dbf-flush-interval-input")).toHaveValue(1);
+  });
+
+  it("editing the DBF write interval marks the DBF config dirty and saves", async () => {
+    mockState.store.editDbfEnabled = true;
+    mockState.store.dbfEnabled = true;
+    mockState.store.editDbfFlushIntervalMs = 1000;
+    mockState.store.dbfFlushIntervalMs = 1000;
+
+    render(ConfigTab);
+
+    expect(screen.getByTestId("save-dbf-btn")).toBeDisabled();
+    await fireEvent.input(screen.getByTestId("dbf-flush-interval-input"), {
+      target: { value: "2.5" },
+    });
+    expect(mockState.store.editDbfFlushIntervalMs).toBe(2500);
+    expect(screen.getByTestId("save-dbf-btn")).toBeEnabled();
+
+    await fireEvent.click(screen.getByTestId("save-dbf-btn"));
+    expect(mockState.saveDbfConfig).toHaveBeenCalledOnce();
   });
 
   it("saves Race Director import config separately from DBF output", async () => {

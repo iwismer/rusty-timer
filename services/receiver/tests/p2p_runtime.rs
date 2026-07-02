@@ -400,7 +400,11 @@ async fn dbf_feed_delivers_from_received_events_without_duplicates() {
                 interval_secs: 15,
             })
             .unwrap();
-            db.save_dbf_config(&DbfConfig { enabled: true }).unwrap();
+            db.save_dbf_config(&DbfConfig {
+                enabled: true,
+                flush_interval_ms: receiver::db::DEFAULT_DBF_FLUSH_INTERVAL_MS,
+            })
+            .unwrap();
             db.replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
                 .unwrap();
         }

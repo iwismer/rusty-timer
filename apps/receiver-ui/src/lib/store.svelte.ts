@@ -101,6 +101,8 @@ export const store = $state({
   // Race Director output DBF config
   dbfEnabled: false,
   editDbfEnabled: false,
+  dbfFlushIntervalMs: 1000,
+  editDbfFlushIntervalMs: 1000,
   dbfSaving: false,
   dbfClearing: false,
 
@@ -1188,6 +1190,8 @@ export async function loadDbfConfig() {
     const config = await api.getDbfConfig();
     store.dbfEnabled = config.enabled;
     store.editDbfEnabled = config.enabled;
+    store.dbfFlushIntervalMs = config.flush_interval_ms ?? 1000;
+    store.editDbfFlushIntervalMs = store.dbfFlushIntervalMs;
   } catch (e) {
     console.error("Failed to load DBF config:", e);
     store.error = `Failed to load DBF config: ${e}`;
@@ -1199,8 +1203,10 @@ export async function saveDbfConfig() {
   try {
     await api.putDbfConfig({
       enabled: store.editDbfEnabled,
+      flush_interval_ms: store.editDbfFlushIntervalMs,
     });
     store.dbfEnabled = store.editDbfEnabled;
+    store.dbfFlushIntervalMs = store.editDbfFlushIntervalMs;
   } catch (e) {
     store.error = `Failed to save DBF config: ${e}`;
   } finally {

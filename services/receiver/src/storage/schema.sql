@@ -26,7 +26,9 @@ CREATE TABLE IF NOT EXISTS profile (
     -- default off. The manual import action ignores `rd_import_enabled`.
     rd_import_enabled INTEGER NOT NULL DEFAULT 0,
     rd_import_dir     TEXT NOT NULL DEFAULT 'C:\Winrace\Files',
-    rd_import_interval_secs INTEGER NOT NULL DEFAULT 15
+    rd_import_interval_secs INTEGER NOT NULL DEFAULT 15,
+    -- DBF write coalescing interval (ms), clamped 250..5000 on save.
+    dbf_flush_interval_ms INTEGER NOT NULL DEFAULT 1000
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (

@@ -117,6 +117,23 @@ pub struct StreamCursorRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DbfConfig {
     pub enabled: bool,
+    /// Coalescing interval between DBF delivery passes, in milliseconds.
+    /// Clamped to [`DBF_FLUSH_INTERVAL_MIN_MS`]..=[`DBF_FLUSH_INTERVAL_MAX_MS`]
+    /// on save. Serde default keeps old persisted profiles and old UI
+    /// payloads deserializing cleanly.
+    #[serde(default = "default_dbf_flush_interval_ms")]
+    pub flush_interval_ms: u32,
+}
+
+/// Default DBF write coalescing interval (ms).
+pub const DEFAULT_DBF_FLUSH_INTERVAL_MS: u32 = 1000;
+/// Lower clamp for the DBF write interval (ms).
+pub const DBF_FLUSH_INTERVAL_MIN_MS: u32 = 250;
+/// Upper clamp for the DBF write interval (ms).
+pub const DBF_FLUSH_INTERVAL_MAX_MS: u32 = 5000;
+
+fn default_dbf_flush_interval_ms() -> u32 {
+    DEFAULT_DBF_FLUSH_INTERVAL_MS
 }
 
 /// Default Race Director working directory containing participant/chip DBF files.
@@ -295,8 +312,8 @@ impl Db {
         let tx = self.conn.transaction()?;
         tx.execute_batch("DELETE FROM profile")?;
         tx.execute(
-            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, announcer_enabled, announcer_max_list_size, rd_import_enabled, rd_import_dir, rd_import_interval_secs) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, i64::from(announcer_enabled), i64::from(announcer_max_list_size), i64::from(rd_import.enabled), &rd_import.dir, i64::from(rd_import.interval_secs)],
+            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, dbf_flush_interval_ms, announcer_enabled, announcer_max_list_size, rd_import_enabled, rd_import_dir, rd_import_interval_secs) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, dbf_config.flush_interval_ms, i64::from(announcer_enabled), i64::from(announcer_max_list_size), i64::from(rd_import.enabled), &rd_import.dir, i64::from(rd_import.interval_secs)],
         )?;
         tx.commit()?;
         Ok(())
@@ -1090,6 +1107,44 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Mark a batch of seqs announcer-pushed in **one transaction** (chunked
+    /// `IN` lists) instead of one autocommit fsync per row. Only rows whose
+    /// marker is still NULL are updated. Returns the number of rows newly
+    /// marked.
+    pub fn mark_announcer_pushed_batch(
+        &mut self,
+        stream_id: &str,
+        seqs: &[i64],
+        pushed_unix_ms: i64,
+    ) -> DbResult<usize> {
+        if seqs.is_empty() {
+            return Ok(0);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut marked = 0usize;
+        for chunk in seqs.chunks(500) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "UPDATE received_events SET announcer_pushed_unix_ms = ?1
+                 WHERE stream_id = ?2 AND announcer_pushed_unix_ms IS NULL AND seq IN ({placeholders})"
+            );
+            let mut stmt = tx.prepare(&sql)?;
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 2);
+            params.push(&pushed_unix_ms);
+            params.push(&stream_id);
+            for seq in chunk {
+                params.push(seq);
+            }
+            marked += stmt.execute(params.as_slice())?;
+        }
+        tx.commit()?;
+        Ok(marked)
+    }
+
     /// Mark a single durable event as pushed to the announcer. Only updates rows
     /// whose marker is still NULL, so this is safe to call repeatedly without
     /// overwriting an earlier push timestamp. Returns whether a row changed.
@@ -1346,6 +1401,11 @@ impl Db {
         )?;
         apply_add_column_migration(
             &self.conn,
+            "ALTER TABLE profile ADD COLUMN dbf_flush_interval_ms INTEGER NOT NULL DEFAULT 1000;",
+            "dbf_flush_interval_ms",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
             "ALTER TABLE earliest_epochs ADD COLUMN stream_id TEXT;",
             "stream_id",
         )?;
@@ -1388,6 +1448,15 @@ impl Db {
         migrate_cursors_to_stream_id_shape(&self.conn)?;
         migrate_earliest_epochs_to_stream_id_shape(&self.conn)?;
         migrate_forwarder_intent(&self.conn)?;
+        // Created after the column migrations (a legacy DB gains
+        // announcer_pushed_unix_ms above): the unpushed scan becomes
+        // O(unpushed) instead of O(stream rows), and the set stays small at
+        // steady state because pushes mark rows in batches.
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_received_announcer_unpushed
+                 ON received_events(stream_id, received_unix_ms, seq)
+                 WHERE announcer_pushed_unix_ms IS NULL;",
+        )?;
         Ok(())
     }
 
@@ -1521,21 +1590,35 @@ impl Db {
     }
 
     pub fn load_dbf_config(&self) -> DbResult<DbfConfig> {
-        let enabled: Option<i64> = self
+        let row: Option<(i64, i64)> = self
             .conn
-            .query_row("SELECT dbf_enabled FROM profile LIMIT 1", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT dbf_enabled, dbf_flush_interval_ms FROM profile LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .optional()?;
-        Ok(DbfConfig {
-            enabled: enabled.unwrap_or(0) != 0,
+        Ok(match row {
+            Some((enabled, flush_interval_ms)) => DbfConfig {
+                enabled: enabled != 0,
+                flush_interval_ms: u32::try_from(flush_interval_ms)
+                    .unwrap_or(DEFAULT_DBF_FLUSH_INTERVAL_MS)
+                    .clamp(DBF_FLUSH_INTERVAL_MIN_MS, DBF_FLUSH_INTERVAL_MAX_MS),
+            },
+            None => DbfConfig {
+                enabled: false,
+                flush_interval_ms: DEFAULT_DBF_FLUSH_INTERVAL_MS,
+            },
         })
     }
 
     pub fn save_dbf_config(&self, config: &DbfConfig) -> DbResult<()> {
+        let flush_interval_ms = config
+            .flush_interval_ms
+            .clamp(DBF_FLUSH_INTERVAL_MIN_MS, DBF_FLUSH_INTERVAL_MAX_MS);
         let changed = self.conn.execute(
-            "UPDATE profile SET dbf_enabled = ?1",
-            rusqlite::params![config.enabled as i64],
+            "UPDATE profile SET dbf_enabled = ?1, dbf_flush_interval_ms = ?2",
+            rusqlite::params![config.enabled as i64, flush_interval_ms],
         )?;
         if changed == 0 {
             return Err(DbError::ProfileMissing);
@@ -2724,7 +2807,11 @@ mod tests {
         let mut db = Db::open_in_memory().unwrap();
         db.save_profile("https://example.com", "tok", "check-only", Some("recv-1"))
             .unwrap();
-        db.save_dbf_config(&DbfConfig { enabled: true }).unwrap();
+        db.save_dbf_config(&DbfConfig {
+            enabled: true,
+            flush_interval_ms: DEFAULT_DBF_FLUSH_INTERVAL_MS,
+        })
+        .unwrap();
         db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
         db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
         db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
@@ -2962,7 +3049,11 @@ mod tests {
             .unwrap();
         let config = db.load_dbf_config().unwrap();
         assert!(!config.enabled);
-        db.save_dbf_config(&DbfConfig { enabled: true }).unwrap();
+        db.save_dbf_config(&DbfConfig {
+            enabled: true,
+            flush_interval_ms: DEFAULT_DBF_FLUSH_INTERVAL_MS,
+        })
+        .unwrap();
         let config = db.load_dbf_config().unwrap();
         assert!(config.enabled);
         db.save_profile("https://new.com", "tok2", "check-and-download", None)
@@ -3232,6 +3323,67 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].raw_frame, b"frame-one");
         assert_eq!(rows[0].received_unix_ms, 1_700_000_000_123);
+    }
+
+    #[test]
+    fn dbf_flush_interval_round_trips_and_clamps() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.save_profile("http://server", "tok", "check-and-download", None)
+            .unwrap();
+
+        // Round trip.
+        db.save_dbf_config(&DbfConfig {
+            enabled: true,
+            flush_interval_ms: 2500,
+        })
+        .unwrap();
+        let loaded = db.load_dbf_config().unwrap();
+        assert!(loaded.enabled);
+        assert_eq!(loaded.flush_interval_ms, 2500);
+
+        // Clamped low and high.
+        db.save_dbf_config(&DbfConfig {
+            enabled: true,
+            flush_interval_ms: 1,
+        })
+        .unwrap();
+        assert_eq!(
+            db.load_dbf_config().unwrap().flush_interval_ms,
+            DBF_FLUSH_INTERVAL_MIN_MS
+        );
+        db.save_dbf_config(&DbfConfig {
+            enabled: true,
+            flush_interval_ms: 60_000,
+        })
+        .unwrap();
+        assert_eq!(
+            db.load_dbf_config().unwrap().flush_interval_ms,
+            DBF_FLUSH_INTERVAL_MAX_MS
+        );
+    }
+
+    #[test]
+    fn dbf_config_deserializes_without_flush_interval() {
+        // Old UI payloads / persisted JSON without the field default to 1000.
+        let config: DbfConfig = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.flush_interval_ms, DEFAULT_DBF_FLUSH_INTERVAL_MS);
+    }
+
+    #[test]
+    fn save_profile_preserves_dbf_flush_interval() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.save_profile("http://server", "tok", "check-and-download", None)
+            .unwrap();
+        db.save_dbf_config(&DbfConfig {
+            enabled: true,
+            flush_interval_ms: 3000,
+        })
+        .unwrap();
+        // The delete+insert profile save must carry the interval across.
+        db.save_profile("http://server2", "tok2", "check-and-download", None)
+            .unwrap();
+        assert_eq!(db.load_dbf_config().unwrap().flush_interval_ms, 3000);
     }
 
     #[test]

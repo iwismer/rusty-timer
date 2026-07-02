@@ -1480,10 +1480,6 @@ async fn emit_stream_projection(
     state.emit_streams_snapshot().await;
 }
 
-/// Default coalescing interval between DBF delivery passes. Task 4.4 makes
-/// this configurable via `DbfConfig.flush_interval_ms`.
-const DEFAULT_DBF_FLUSH_INTERVAL_MS: u64 = 1000;
-
 /// Single cross-stream DBF worker: one worker per DBF *file*, not per stream.
 ///
 /// All subscribed streams deliver into one `IPICO.DBF`, so per-stream workers
@@ -1500,7 +1496,8 @@ const DEFAULT_DBF_FLUSH_INTERVAL_MS: u64 = 1000;
 async fn run_shared_dbf_worker(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<bool>) {
     let mut pass_state = crate::dbf_writer::DbfPassState::default();
     let mut was_enabled = false;
-    let mut tick = tokio::time::interval(Duration::from_millis(DEFAULT_DBF_FLUSH_INTERVAL_MS));
+    let mut interval_ms = u64::from(crate::db::DEFAULT_DBF_FLUSH_INTERVAL_MS);
+    let mut tick = tokio::time::interval(Duration::from_millis(interval_ms));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
@@ -1509,25 +1506,40 @@ async fn run_shared_dbf_worker(state: Arc<AppState>, mut shutdown_rx: watch::Rec
                 if changed.is_err() || *shutdown_rx.borrow() { break; }
             }
             _ = tick.tick() => {
-                let enabled = run_shared_dbf_pass(&state, &mut pass_state, was_enabled).await;
+                let (enabled, configured_ms) =
+                    run_shared_dbf_pass(&state, &mut pass_state, was_enabled).await;
                 was_enabled = enabled;
+                // Apply a changed flush interval without restart. Each pass
+                // re-reads the persisted config, so a UI save takes effect on
+                // the next tick.
+                if configured_ms != interval_ms {
+                    interval_ms = configured_ms;
+                    tick = tokio::time::interval(Duration::from_millis(interval_ms));
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    tick.reset();
+                }
             }
         }
     }
 }
 
-/// One tick of the shared DBF worker. Returns whether DBF output is enabled.
+/// One tick of the shared DBF worker. Returns `(dbf enabled, configured
+/// flush interval in ms)`.
 async fn run_shared_dbf_pass(
     state: &Arc<AppState>,
     pass_state: &mut crate::dbf_writer::DbfPassState,
     was_enabled: bool,
-) -> bool {
+) -> (bool, u64) {
     // Resolve config + subscriptions on the cold connection (tiny queries).
-    let (enabled, dbf_path, specs) = {
+    let (enabled, interval_ms, dbf_path, specs) = {
         let db = state.db.lock().await;
-        let enabled = db.load_dbf_config().map(|c| c.enabled).unwrap_or(false);
-        if !enabled {
-            (false, String::new(), Vec::new())
+        let config = db.load_dbf_config().unwrap_or(crate::db::DbfConfig {
+            enabled: false,
+            flush_interval_ms: crate::db::DEFAULT_DBF_FLUSH_INTERVAL_MS,
+        });
+        let interval_ms = u64::from(config.flush_interval_ms);
+        if !config.enabled {
+            (false, interval_ms, String::new(), Vec::new())
         } else {
             let dbf_path = db
                 .load_rd_import_config()
@@ -1571,10 +1583,10 @@ async fn run_shared_dbf_pass(
                 }
                 Err(e) => {
                     warn!(error = %e, "failed to load subscriptions for DBF delivery");
-                    return was_enabled;
+                    return (was_enabled, interval_ms);
                 }
             }
-            (true, dbf_path, specs)
+            (true, interval_ms, dbf_path, specs)
         }
     };
     if !enabled {
@@ -1583,7 +1595,7 @@ async fn run_shared_dbf_pass(
         if was_enabled {
             *pass_state = crate::dbf_writer::DbfPassState::default();
         }
-        return false;
+        return (false, interval_ms);
     }
 
     // DBF delivery does synchronous disk + flock I/O: run on a blocking
@@ -1612,7 +1624,7 @@ async fn run_shared_dbf_pass(
             warn!(error = %e, "DBF delivery task failed");
         }
     }
-    true
+    (true, interval_ms)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1672,9 +1684,9 @@ async fn push_announcer(
     let stream_id_owned = stream_id.to_owned();
     let result = tokio::task::spawn_blocking(move || {
         let resolver = SnapshotResolver { snapshot };
-        let guard = db.blocking_lock();
+        let mut guard = db.blocking_lock();
         announcer_push::push_announcer_rows(
-            &guard,
+            &mut guard,
             client.as_ref(),
             &resolver,
             &stream_id_owned,
@@ -2757,8 +2769,11 @@ mod tests {
             let mut db = state.db.lock().await;
             db.save_profile("http://server", "tok", "check-and-download", None)
                 .unwrap();
-            db.save_dbf_config(&crate::db::DbfConfig { enabled: true })
-                .unwrap();
+            db.save_dbf_config(&crate::db::DbfConfig {
+                enabled: true,
+                flush_interval_ms: crate::db::DEFAULT_DBF_FLUSH_INTERVAL_MS,
+            })
+            .unwrap();
             db.save_rd_import_config(&crate::db::RdImportConfig {
                 enabled: false,
                 dir: missing_dir.to_string_lossy().into_owned(),

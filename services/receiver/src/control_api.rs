@@ -2805,6 +2805,12 @@ pub async fn put_dbf_config(
     }
     let config = crate::db::DbfConfig {
         enabled: body.enabled,
+        // Clamp (rather than reject) and return the stored value via a
+        // subsequent get; save_dbf_config clamps identically.
+        flush_interval_ms: body.flush_interval_ms.clamp(
+            crate::db::DBF_FLUSH_INTERVAL_MIN_MS,
+            crate::db::DBF_FLUSH_INTERVAL_MAX_MS,
+        ),
     };
     let db = state.db.lock().await;
     match db.save_dbf_config(&config) {
@@ -4701,8 +4707,11 @@ mod tests {
             Some("recv-1"),
         )
         .unwrap();
-        db.save_dbf_config(&crate::db::DbfConfig { enabled: true })
-            .unwrap();
+        db.save_dbf_config(&crate::db::DbfConfig {
+            enabled: true,
+            flush_interval_ms: crate::db::DEFAULT_DBF_FLUSH_INTERVAL_MS,
+        })
+        .unwrap();
         db.save_receiver_mode(&ReceiverMode::Race {
             race_id: "11111111-1111-1111-1111-111111111111".to_owned(),
         })
