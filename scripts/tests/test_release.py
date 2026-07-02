@@ -226,7 +226,7 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
                 "--bin",
                 "forwarder",
                 "--features",
-                "embed-ui,eink",
+                "embed-ui,lcd",
             ],
             calls,
         )
@@ -481,7 +481,7 @@ class DryRunBehaviorTests(unittest.TestCase):
                 "--bin",
                 "forwarder",
                 "--features",
-                "embed-ui,eink",
+                "embed-ui,lcd",
             ],
             calls,
         )
