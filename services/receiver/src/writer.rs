@@ -347,13 +347,19 @@ fn run_writer(
     let mut cursors: HashMap<String, CursorState> = HashMap::new();
     let mut commits_since_checkpoint: u64 = 0;
     while let Some(first) = rx.blocking_recv() {
-        // Group phase: drain further commands until the commit window closes,
-        // the record cap is hit, or the channel is exhausted/closed. tokio's
-        // mpsc has no blocking recv-with-timeout, so poll try_recv with short
-        // sleeps until the deadline.
+        // Group phase: drain queued commands into one transaction. The
+        // commit window is only an **upper bound** under sustained arrival;
+        // when the queue goes quiet after one short grace sweep the group
+        // commits immediately. Waiting out the full window on every group
+        // would add dead latency to each live-tail ack round trip and
+        // throttle small-batch steady state (measured: drain capped at ~55%
+        // of ingest). On slow disks the fsync duration itself provides the
+        // batching window: commands queue while COMMIT runs and the next
+        // group picks them all up.
         let mut commands = vec![first];
         let mut record_count = commands[0].record_len();
         let deadline = Instant::now() + config.commit_window;
+        let mut grace_used = false;
         while record_count < config.max_records_per_tx {
             match rx.try_recv() {
                 Ok(cmd) => {
@@ -361,9 +367,12 @@ fn run_writer(
                     commands.push(cmd);
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                    if Instant::now() >= deadline {
+                    if grace_used || Instant::now() >= deadline {
                         break;
                     }
+                    // One grace sweep: catches the near-simultaneous sends of
+                    // the other live sessions without a full window wait.
+                    grace_used = true;
                     std::thread::sleep(Duration::from_micros(500));
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
