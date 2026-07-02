@@ -18,6 +18,7 @@ pub mod rd_dbf;
 pub mod rd_poll;
 pub mod runtime;
 pub mod ui_events;
+pub mod writer;
 pub use cache::{EventBus, StreamCounts, StreamKey};
 pub use db::{Db, DbError, DbResult, EventType, Profile, Subscription};
 pub use error::ReceiverError;
