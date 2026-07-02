@@ -13,6 +13,7 @@ pub mod p2p_runtime;
 pub mod p2p_session;
 pub mod participants;
 pub mod ports;
+pub mod projection;
 pub mod rd_dbf;
 pub mod rd_poll;
 pub mod runtime;

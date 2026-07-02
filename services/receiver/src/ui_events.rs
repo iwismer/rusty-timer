@@ -63,6 +63,16 @@ pub struct ForwarderMetricsUpdate {
     pub total_reads: i64,
     pub last_read_at: Option<String>,
 }
+/// Format a unix-millisecond timestamp as RFC 3339, or `None` when out of
+/// range.
+pub fn unix_ms_to_rfc3339(unix_ms: i64) -> Option<String> {
+    use chrono::TimeZone as _;
+    chrono::Utc
+        .timestamp_millis_opt(unix_ms)
+        .single()
+        .map(|dt| dt.to_rfc3339())
+}
+
 /// Extract chip ID from IPICO raw frame bytes.
 /// The raw frame is ASCII text; characters 4..16 are the chip identifier
 /// (e.g. "000000012345"), matching the server's `tag_id` format.
