@@ -298,6 +298,9 @@ pub struct AppState {
     /// [`ReceiverUiEvent::StreamDeltas`] events.
     pub stream_delta_buffer:
         Arc<StdMutex<HashMap<(String, String), crate::ui_events::StreamDelta>>>,
+    /// Live durable-proxy consumer cursors (retention floor input; see
+    /// `crate::retention`).
+    pub proxy_consumer_cursors: crate::retention::ProxyConsumerCursors,
     pub connection_state: watch::Sender<ConnectionState>,
     // Keepalive receiver so that `connection_state.send()` never fails due
     // to "no receivers" even when no external subscriber is active.
@@ -432,6 +435,7 @@ impl AppState {
             writer,
             read_source,
             stream_delta_buffer: Arc::new(StdMutex::new(HashMap::new())),
+            proxy_consumer_cursors: Arc::default(),
             connection_state: conn_tx,
             _conn_state_keepalive: conn_keepalive_rx,
             logger: Arc::new(rt_ui_log::UiLogger::with_buffer(

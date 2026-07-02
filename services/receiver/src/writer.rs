@@ -163,6 +163,15 @@ pub enum WriteCommand {
         stream_id: String,
         reply: tokio::sync::oneshot::Sender<Result<i64, WriteError>>,
     },
+    /// Delete rows `seq <= through_seq` for one stream and advance the
+    /// persisted `pruned_through_seq` watermark **in the same transaction**.
+    /// The reply carries the number of rows deleted. Sent by the retention
+    /// worker with a pre-computed, floor-bounded target.
+    Prune {
+        stream_id: String,
+        through_seq: i64,
+        reply: tokio::sync::oneshot::Sender<Result<usize, WriteError>>,
+    },
     /// Trigger a manual PASSIVE WAL checkpoint.
     Checkpoint,
 }
@@ -268,6 +277,22 @@ impl WriterHandle {
         let (reply, rx) = tokio::sync::oneshot::channel();
         self.tx
             .send(WriteCommand::LoadCursor { stream_id, reply })
+            .await
+            .map_err(|_| WriteError::Closed("writer channel closed".to_owned()))?;
+        rx.await
+            .map_err(|_| WriteError::Closed("writer dropped reply".to_owned()))?
+    }
+
+    /// Prune rows `seq <= through_seq` and advance the retention watermark
+    /// atomically. Returns the number of rows deleted.
+    pub async fn prune(&self, stream_id: String, through_seq: i64) -> Result<usize, WriteError> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(WriteCommand::Prune {
+                stream_id,
+                through_seq,
+                reply,
+            })
             .await
             .map_err(|_| WriteError::Closed("writer channel closed".to_owned()))?;
         rx.await
@@ -405,6 +430,7 @@ impl WriteCommand {
             WriteCommand::PersistBatch { records, .. } => records.len(),
             WriteCommand::PersistGap { .. }
             | WriteCommand::LoadCursor { .. }
+            | WriteCommand::Prune { .. }
             | WriteCommand::Checkpoint => 1,
         }
     }
@@ -420,6 +446,10 @@ enum StagedReply {
         reply: tokio::sync::oneshot::Sender<Result<i64, WriteError>>,
         result: Result<i64, WriteError>,
     },
+    Prune {
+        reply: tokio::sync::oneshot::Sender<Result<usize, WriteError>>,
+        result: Result<usize, WriteError>,
+    },
 }
 
 impl StagedReply {
@@ -431,6 +461,9 @@ impl StagedReply {
             StagedReply::Cursor { reply, result } => {
                 let _ = reply.send(result);
             }
+            StagedReply::Prune { reply, result } => {
+                let _ = reply.send(result);
+            }
         }
     }
 
@@ -440,6 +473,9 @@ impl StagedReply {
                 let _ = reply.send(Err(WriteError::Closed(message.to_owned())));
             }
             StagedReply::Cursor { reply, .. } => {
+                let _ = reply.send(Err(WriteError::Closed(message.to_owned())));
+            }
+            StagedReply::Prune { reply, .. } => {
                 let _ = reply.send(Err(WriteError::Closed(message.to_owned())));
             }
         }
@@ -521,6 +557,44 @@ fn process_group(
                         Err(CommandError::Conflict { .. }) => unreachable!("gaps cannot conflict"),
                         Err(CommandError::Db(e)) => {
                             staged_replies.push(StagedReply::Cursor {
+                                reply,
+                                result: Err(WriteError::Closed(String::new())),
+                            });
+                            return Err(e);
+                        }
+                    }
+                }
+                WriteCommand::Prune {
+                    stream_id,
+                    through_seq,
+                    reply,
+                } => {
+                    // Seq-range delete on the PK plus the watermark upsert,
+                    // atomic with the rest of the group. Cursor state is
+                    // unaffected: the retention floor never exceeds the ack
+                    // cursor.
+                    let result = (|| -> Result<usize, DbError> {
+                        let deleted = tx.execute(
+                            "DELETE FROM received_events WHERE stream_id = ?1 AND seq <= ?2",
+                            rusqlite::params![stream_id, through_seq],
+                        )?;
+                        tx.execute(
+                            "INSERT INTO retention (stream_id, pruned_through_seq) VALUES (?1, ?2)
+                             ON CONFLICT (stream_id) DO UPDATE SET pruned_through_seq = excluded.pruned_through_seq
+                             WHERE excluded.pruned_through_seq > retention.pruned_through_seq",
+                            rusqlite::params![stream_id, through_seq],
+                        )?;
+                        Ok(deleted)
+                    })();
+                    match result {
+                        Ok(deleted) => {
+                            staged_replies.push(StagedReply::Prune {
+                                reply,
+                                result: Ok(deleted),
+                            });
+                        }
+                        Err(e) => {
+                            staged_replies.push(StagedReply::Prune {
                                 reply,
                                 result: Err(WriteError::Closed(String::new())),
                             });
@@ -950,6 +1024,42 @@ mod thread_tests {
 
         let reader = read_conn(&path);
         assert_eq!(seqs(&reader, "s1"), vec![1, 2]);
+
+        drop(writer);
+        thread.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn prune_deletes_range_and_advances_watermark_atomically() {
+        let (_dir, path) = test_db();
+        let (writer, thread) = spawn_writer(&path, WriterConfig::default()).unwrap();
+
+        let records: Vec<PreparedRecord> = (1..=10).map(|seq| rec(seq, "x")).collect();
+        writer
+            .persist_batch("s1".to_owned(), records)
+            .await
+            .unwrap();
+
+        let deleted = writer.prune("s1".to_owned(), 6).await.unwrap();
+        assert_eq!(deleted, 6);
+
+        let reader = read_conn(&path);
+        assert_eq!(seqs(&reader, "s1"), vec![7, 8, 9, 10]);
+        assert_eq!(
+            crate::db::load_pruned_through_seq_conn(&reader, "s1").unwrap(),
+            6,
+            "watermark advances in the same commit as the delete"
+        );
+        // The ack cursor is untouched (prune floor never exceeds it).
+        assert_eq!(cursor(&reader, "s1"), 10);
+
+        // A repeated / stale prune is a no-op and never regresses the mark.
+        let deleted = writer.prune("s1".to_owned(), 4).await.unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(
+            crate::db::load_pruned_through_seq_conn(&reader, "s1").unwrap(),
+            6
+        );
 
         drop(writer);
         thread.join().unwrap();

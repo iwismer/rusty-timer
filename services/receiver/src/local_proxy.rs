@@ -9,6 +9,7 @@
 use crate::db::ReceivedEvent;
 use crate::p2p_session::DurableBatch;
 use crate::read_pool::ReadSource;
+use crate::retention::ProxyConsumerCursors;
 use rt_domain::ReadEvent;
 use std::net::SocketAddr;
 use tokio::io::AsyncWriteExt;
@@ -66,6 +67,7 @@ impl LocalProxy {
         stream_id: String,
         read: ReadSource,
         durable_seq_tx: broadcast::Sender<DurableBatch>,
+        consumer_cursors: ProxyConsumerCursors,
     ) -> std::io::Result<Self> {
         let listener = bind_listener(port).await?;
         let port = listener.local_addr()?.port();
@@ -84,7 +86,13 @@ impl LocalProxy {
                             Ok((stream, peer)) => {
                                 debug!(?peer, port, %stream_id, "durable local consumer connected");
                                 let rx = durable_seq_tx.subscribe();
-                                tokio::spawn(serve_durable_consumer(stream, stream_id.clone(), read.clone(), rx));
+                                tokio::spawn(serve_durable_consumer(
+                                    stream,
+                                    stream_id.clone(),
+                                    read.clone(),
+                                    rx,
+                                    consumer_cursors.clone(),
+                                ));
                             }
                             Err(e) => { warn!(error=%e, "accept error"); }
                         }
@@ -177,19 +185,85 @@ async fn drain_durable_chunks(
     }
 }
 
+/// RAII registration of one consumer's replay cursor in the shared registry
+/// (retention floor input). Deregisters on drop so a disconnected consumer
+/// stops holding the prune floor down.
+struct ConsumerCursorGuard {
+    registry: ProxyConsumerCursors,
+    stream_id: String,
+    id: u64,
+}
+
+impl ConsumerCursorGuard {
+    fn register(registry: ProxyConsumerCursors, stream_id: String, cursor: i64) -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut map = registry.lock().expect("proxy cursor registry poisoned");
+            let _ = map.entry(stream_id.clone()).or_default().insert(id, cursor);
+        }
+        Self {
+            registry,
+            stream_id,
+            id,
+        }
+    }
+
+    fn update(&self, cursor: i64) {
+        let mut map = self
+            .registry
+            .lock()
+            .expect("proxy cursor registry poisoned");
+        if let Some(consumers) = map.get_mut(&self.stream_id) {
+            let _ = consumers.insert(self.id, cursor);
+        }
+    }
+}
+
+impl Drop for ConsumerCursorGuard {
+    fn drop(&mut self) {
+        let mut map = self
+            .registry
+            .lock()
+            .expect("proxy cursor registry poisoned");
+        if let Some(consumers) = map.get_mut(&self.stream_id) {
+            let _ = consumers.remove(&self.id);
+            if consumers.is_empty() {
+                let _ = map.remove(&self.stream_id);
+            }
+        }
+    }
+}
+
 async fn serve_durable_consumer(
     mut stream: TcpStream,
     stream_id: String,
     read: ReadSource,
     mut rx: broadcast::Receiver<DurableBatch>,
+    consumer_cursors: ProxyConsumerCursors,
 ) {
-    let mut last_delivered_seq = 0;
+    // Start replay at the retention watermark, not 0: seqs at or below it
+    // were pruned, and contiguous delivery would otherwise wait forever for
+    // a deleted seq (analogous to gap markers jumping the P2P cursor).
+    let mut last_delivered_seq = {
+        let sid = stream_id.clone();
+        match read.run(move |db| db.load_pruned_through_seq(&sid)).await {
+            Ok(seq) => seq,
+            Err(e) => {
+                warn!(error = %e, %stream_id, "failed to load retention watermark for consumer");
+                return;
+            }
+        }
+    };
+    let guard =
+        ConsumerCursorGuard::register(consumer_cursors, stream_id.clone(), last_delivered_seq);
     if drain_durable_chunks(&mut stream, &stream_id, &read, &mut last_delivered_seq)
         .await
         .is_err()
     {
         return;
     }
+    guard.update(last_delivered_seq);
 
     loop {
         match rx.recv().await {
@@ -201,6 +275,7 @@ async fn serve_durable_consumer(
                 {
                     break;
                 }
+                guard.update(last_delivered_seq);
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 warn!(
@@ -213,6 +288,7 @@ async fn serve_durable_consumer(
                 {
                     break;
                 }
+                guard.update(last_delivered_seq);
             }
             Err(broadcast::error::RecvError::Closed) => break,
         }
@@ -292,6 +368,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_consumer_after_pruning_receives_retained_rows() {
+        // Regression test for the retention hang: seqs 1..=2 were pruned; a
+        // new consumer must initialize its cursor from pruned_through_seq and
+        // receive the retained contiguous rows instead of waiting forever for
+        // the deleted seq 1.
+        let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        let stream_id = "127.0.0.1:10600";
+        insert_durable_event(&db, stream_id, 3, b"three").await;
+        insert_durable_event(&db, stream_id, 4, b"four").await;
+        {
+            let guard = db.lock().await;
+            // Simulate a completed prune of seqs 1..=2.
+            guard
+                .raw_execute_for_test(
+                    "INSERT INTO retention (stream_id, pruned_through_seq) VALUES (?1, 2)",
+                    rusqlite::params![stream_id],
+                )
+                .unwrap();
+        }
+
+        let (durable_tx, _rx) = broadcast::channel(16);
+        let registry: crate::retention::ProxyConsumerCursors = std::sync::Arc::default();
+        let proxy = LocalProxy::bind_durable(
+            0,
+            stream_id.to_owned(),
+            ReadSource::Mutex(db),
+            durable_tx,
+            registry.clone(),
+        )
+        .await
+        .unwrap();
+
+        let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", proxy.port))
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; b"threefour".len()];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.read_exact(&mut buf),
+        )
+        .await
+        .expect("retained rows must replay to a post-prune consumer")
+        .unwrap();
+        assert_eq!(&buf, b"threefour");
+
+        // The consumer registered its cursor for the retention floor.
+        assert_eq!(
+            crate::retention::min_proxy_cursor(&registry, stream_id),
+            Some(4)
+        );
+        proxy.shutdown();
+    }
+
+    #[tokio::test]
     async fn new_client_gets_replay() {
         let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
         // A real forwarder P2P stream_id (`ip:port`), not a parseable UUID.
@@ -299,10 +429,15 @@ mod tests {
         insert_durable_event(&db, stream_id, 2, b"second").await;
         insert_durable_event(&db, stream_id, 1, b"first").await;
         let (durable_tx, _rx) = broadcast::channel(16);
-        let proxy =
-            LocalProxy::bind_durable(0, stream_id.to_owned(), ReadSource::Mutex(db), durable_tx)
-                .await
-                .unwrap();
+        let proxy = LocalProxy::bind_durable(
+            0,
+            stream_id.to_owned(),
+            ReadSource::Mutex(db),
+            durable_tx,
+            std::sync::Arc::default(),
+        )
+        .await
+        .unwrap();
 
         let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", proxy.port))
             .await
@@ -331,6 +466,7 @@ mod tests {
             stream_id.to_owned(),
             ReadSource::Mutex(db.clone()),
             durable_tx.clone(),
+            std::sync::Arc::default(),
         )
         .await
         .unwrap();
@@ -375,6 +511,7 @@ mod tests {
             stream_id.to_owned(),
             ReadSource::Mutex(db.clone()),
             durable_tx.clone(),
+            std::sync::Arc::default(),
         )
         .await
         .unwrap();
@@ -437,6 +574,7 @@ mod tests {
             stream_id.to_owned(),
             ReadSource::Mutex(db),
             rx,
+            std::sync::Arc::default(),
         ));
 
         let mut buf = vec![0u8; b"once".len()];
@@ -474,6 +612,7 @@ mod tests {
             stream_id.to_owned(),
             ReadSource::Mutex(db.clone()),
             durable_tx.clone(),
+            std::sync::Arc::default(),
         )
         .await
         .unwrap();

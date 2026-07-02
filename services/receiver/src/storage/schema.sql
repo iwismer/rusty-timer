@@ -57,6 +57,15 @@ CREATE TABLE IF NOT EXISTS received_events (
     PRIMARY KEY (stream_id, seq)
 );
 
+-- Retention watermark: seqs at or below pruned_through_seq have been deleted
+-- from received_events. Durable-proxy consumers initialize their replay
+-- cursor here (analogous to how gap markers jump the P2P cursor), so new
+-- consumers are not stuck waiting for pruned seq 1.
+CREATE TABLE IF NOT EXISTS retention (
+    stream_id          TEXT PRIMARY KEY,
+    pruned_through_seq BIGINT NOT NULL DEFAULT 0
+);
+
 -- Partial index so the DBF worker's undelivered probe/fetch is O(pending),
 -- not O(stream rows). The set stays small at steady state because delivery
 -- marks rows in batches right after each append pass.

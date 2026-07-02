@@ -970,6 +970,87 @@ impl Db {
     /// Mark a single durable event as written to the DBF file. Only updates rows
     /// whose marker is still NULL, so this is safe to call repeatedly without
     /// overwriting an earlier delivery timestamp. Returns whether a row changed.
+    /// Test-only escape hatch for setting up storage states (e.g. a completed
+    /// prune) without widening the public API.
+    #[doc(hidden)]
+    pub fn raw_execute_for_test(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> DbResult<usize> {
+        Ok(self.conn.execute(sql, params)?)
+    }
+
+    /// The retention watermark for `stream_id`: seqs at or below it have been
+    /// pruned from `received_events`. 0 when nothing was pruned.
+    pub fn load_pruned_through_seq(&self, stream_id: &str) -> DbResult<i64> {
+        Ok(load_pruned_through_seq_conn(&self.conn, stream_id)?)
+    }
+
+    /// Highest stored seq for `stream_id`, or `None` when the stream has no
+    /// rows.
+    pub fn max_stream_seq(&self, stream_id: &str) -> DbResult<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT MAX(seq) FROM received_events WHERE stream_id = ?1",
+                rusqlite::params![stream_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Highest DBF-delivered seq for `stream_id` (retention floor input).
+    pub fn max_dbf_delivered_seq(&self, stream_id: &str) -> DbResult<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT MAX(seq) FROM received_events
+                 WHERE stream_id = ?1 AND dbf_delivered_unix_ms IS NOT NULL",
+                rusqlite::params![stream_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Lowest announcer-unpushed seq for `stream_id` (retention floor input;
+    /// seq-min on purpose — announcer *ordering* is by received time, but the
+    /// floor must protect every unpushed row). O(unpushed) via the partial
+    /// index.
+    pub fn min_unpushed_announcer_seq(&self, stream_id: &str) -> DbResult<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT MIN(seq) FROM received_events
+                 WHERE stream_id = ?1 AND announcer_pushed_unix_ms IS NULL",
+                rusqlite::params![stream_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// `received_unix_ms` of the first stored row at or after `seq`, used by
+    /// the retention worker's binary search for the age boundary.
+    pub fn received_unix_ms_at_or_after(
+        &self,
+        stream_id: &str,
+        seq: i64,
+    ) -> DbResult<Option<(i64, i64)>> {
+        self.conn
+            .query_row(
+                "SELECT seq, received_unix_ms FROM received_events
+                 WHERE stream_id = ?1 AND seq >= ?2
+                 ORDER BY seq LIMIT 1",
+                rusqlite::params![stream_id, seq],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// Lowest stored seq that has not been delivered to the DBF, or `None`
     /// when nothing is pending. O(1) via the partial undelivered index. The
     /// DBF worker uses this both as its cheap idle probe and to detect
@@ -1944,6 +2025,17 @@ pub fn load_received_event_conn(
     )
     .optional()
     .map_err(Into::into)
+}
+
+pub fn load_pruned_through_seq_conn(conn: &Connection, stream_id: &str) -> DbResult<i64> {
+    let seq: Option<i64> = conn
+        .query_row(
+            "SELECT pruned_through_seq FROM retention WHERE stream_id = ?1",
+            rusqlite::params![stream_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(seq.unwrap_or(0))
 }
 
 pub fn load_stream_cursor_conn(conn: &Connection, stream_id: &str) -> DbResult<i64> {

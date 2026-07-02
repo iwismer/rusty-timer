@@ -512,6 +512,12 @@ async fn run_reconcile_loop(
         Arc::clone(&state),
         shutdown_rx.clone(),
     ));
+    // Retention pruning behind the delivery low-water mark (Task 5.1).
+    let retention_task = tokio::spawn(crate::retention::run_retention_worker(
+        Arc::clone(&state),
+        crate::retention::RetentionConfig::from_env(),
+        shutdown_rx.clone(),
+    ));
 
     // Server announcer generation, acquired by registering this endpoint and
     // taking over the announcer generation. When the server is unavailable
@@ -740,6 +746,8 @@ async fn run_reconcile_loop(
     let _ = dbf_worker_task.await;
     delta_emitter_task.abort();
     let _ = delta_emitter_task.await;
+    retention_task.abort();
+    let _ = retention_task.await;
     endpoint.close().await;
     // The runtime is shutting down: no sessions remain and none will be
     // reattempted, so report a clean Disconnected. `P2pReceiverRuntime::shutdown`
@@ -1201,6 +1209,7 @@ async fn start_stream_worker(
                 stream_id.clone(),
                 state.read_source.clone(),
                 hint_tx.clone(),
+                Arc::clone(&state.proxy_consumer_cursors),
             )
             .await
             {
