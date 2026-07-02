@@ -79,6 +79,40 @@ impl StreamCounts {
         }
     }
 
+    /// Replace the counts for `key` from per-epoch summary rows
+    /// `(epoch, unique_count, max_seq)`, as produced by the startup projection
+    /// rebuild. Mirrors the cumulative `record_batch` semantics: totals span
+    /// epochs, the epoch counter tracks the highest epoch, and per-epoch max
+    /// seqs are seeded so subsequent `record_batch` calls dedup correctly.
+    pub fn seed_from_epoch_summaries<I>(&self, key: &StreamKey, rows: I)
+    where
+        I: IntoIterator<Item = (i64, u64, i64)>,
+    {
+        let mut counts = Counts::default();
+        for (epoch, count, max_seq) in rows {
+            let previous_max = counts
+                .max_seen_seq_by_epoch
+                .get(&epoch)
+                .copied()
+                .unwrap_or(0);
+            counts
+                .max_seen_seq_by_epoch
+                .insert(epoch, previous_max.max(max_seq));
+            counts.total += count;
+            match epoch.cmp(&counts.current_epoch) {
+                std::cmp::Ordering::Greater => {
+                    counts.current_epoch = epoch;
+                    counts.epoch = count;
+                }
+                std::cmp::Ordering::Equal => {
+                    counts.epoch += count;
+                }
+                std::cmp::Ordering::Less => {}
+            }
+        }
+        self.inner.write().unwrap().insert(key.clone(), counts);
+    }
+
     pub fn get(&self, key: &StreamKey) -> Option<Counts> {
         self.inner.read().unwrap().get(key).cloned()
     }
@@ -287,6 +321,44 @@ mod tests {
         assert_eq!(c.epoch, 1);
         assert_eq!(c.current_epoch, 4);
     }
+    #[test]
+    fn seed_from_epoch_summaries_matches_record_batch_fold() {
+        // Restart-shaped rebuild: the seeded snapshot must equal the counts a
+        // live fold over the same rows would have produced.
+        let live = StreamCounts::new();
+        let k = StreamKey::new("f", "i");
+        live.record_batch(&k, 1, [1, 2]);
+        live.record_batch(&k, 2, [3, 4, 5]);
+        let live_counts = live.get(&k).unwrap();
+
+        let seeded = StreamCounts::new();
+        seeded.seed_from_epoch_summaries(&k, [(1, 2, 2), (2, 3, 5)]);
+        let seeded_counts = seeded.get(&k).unwrap();
+
+        assert_eq!(seeded_counts.total, live_counts.total);
+        assert_eq!(seeded_counts.epoch, live_counts.epoch);
+        assert_eq!(seeded_counts.current_epoch, live_counts.current_epoch);
+
+        // Fresh reads after the seed dedup against the seeded max seqs.
+        seeded.record_batch(&k, 2, [5, 6]);
+        let after = seeded.get(&k).unwrap();
+        assert_eq!(after.total, live_counts.total + 1);
+        assert_eq!(after.epoch, live_counts.epoch + 1);
+    }
+
+    #[test]
+    fn seed_from_epoch_summaries_replaces_previous_counts() {
+        let sc = StreamCounts::new();
+        let k = StreamKey::new("f", "i");
+        sc.record_batch(&k, 1, [1, 2, 3]);
+        // A rebuild (e.g. after hint-channel overflow) replaces, not adds.
+        sc.seed_from_epoch_summaries(&k, [(1, 3, 3), (2, 1, 4)]);
+        let c = sc.get(&k).unwrap();
+        assert_eq!(c.total, 4);
+        assert_eq!(c.epoch, 1);
+        assert_eq!(c.current_epoch, 2);
+    }
+
     #[test]
     fn stream_counts_retain_keys_prunes_removed_streams() {
         let sc = StreamCounts::new();

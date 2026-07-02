@@ -810,6 +810,50 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// One-time projection seed: per-epoch counts and latest row per epoch for
+    /// a stream. O(N) once at startup (or after a hint-channel overflow); the
+    /// hot path never calls this.
+    pub fn load_stream_projection_summary(
+        &self,
+        stream_id: &str,
+    ) -> DbResult<Vec<crate::projection::EpochSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT epoch, COUNT(*), MAX(received_unix_ms), MAX(seq)
+             FROM received_events
+             WHERE stream_id = ?1
+             GROUP BY epoch
+             ORDER BY epoch",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![stream_id], |row| {
+            Ok(crate::projection::EpochSummary {
+                epoch: row.get(0)?,
+                count: row.get::<_, i64>(1)?.try_into().unwrap_or_default(),
+                max_received_unix_ms: row.get(2)?,
+                max_seq: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Raw frames of one epoch, ordered by seq, for the one-time projection
+    /// chip-set seed. Bounded to a single epoch; the hot path never calls this.
+    pub fn load_epoch_raw_frames(
+        &self,
+        stream_id: &str,
+        epoch: i64,
+    ) -> DbResult<Vec<(i64, Vec<u8>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, raw_frame
+             FROM received_events
+             WHERE stream_id = ?1 AND epoch = ?2
+             ORDER BY seq",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![stream_id, epoch], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Load the distinct epochs durably received for `stream_id`, newest first,
     /// with the earliest `reader_timestamp` seen in each epoch.
     ///

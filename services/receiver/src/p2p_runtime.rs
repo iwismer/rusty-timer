@@ -34,7 +34,7 @@
 //! * Announcer pushes run on a blocking task and resolve participants from a
 //!   snapshot of the in-memory chip lookup, searching across all forwarders.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1322,16 +1322,21 @@ const UI_PROJECTION_EMIT_INTERVAL: Duration = Duration::from_millis(250);
 
 async fn run_ui_projection_worker(
     state: Arc<AppState>,
-    _stream_id: String,
+    stream_id: String,
     ui_key: StreamKey,
     mut hint_rx: broadcast::Receiver<DurableBatch>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    let mut proj = StreamProjection::default();
+    // One-time O(N) seed from the durable store; the hot path below never
+    // touches the DB.
+    let mut proj = rebuild_stream_projection(&state, &stream_id, &ui_key)
+        .await
+        .unwrap_or_default();
+    let mut dirty = proj.total > 0;
+    let mut needs_rebuild = false;
     // (epoch → seqs) folded since the last tick, mirrored into the shared
     // `state.stream_counts` cache on emit.
     let mut pending_counts: HashMap<i64, Vec<i64>> = HashMap::new();
-    let mut dirty = false;
     let mut tick = tokio::time::interval(UI_PROJECTION_EMIT_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -1353,14 +1358,26 @@ async fn run_ui_projection_worker(
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        // Hint channel overflowed; facts were lost. The startup
-                        // rebuild path (Task 1.4) re-seeds from the DB.
+                        // Hint channel overflowed; facts were lost. Re-seed
+                        // from the durable store on the next tick.
+                        needs_rebuild = true;
                         dirty = true;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
             _ = tick.tick() => {
+                if needs_rebuild {
+                    if let Some(rebuilt) =
+                        rebuild_stream_projection(&state, &stream_id, &ui_key).await
+                    {
+                        proj = rebuilt;
+                        // The rebuild replaced the shared counts wholesale;
+                        // drop deltas already covered by the durable store.
+                        pending_counts.clear();
+                        needs_rebuild = false;
+                    }
+                }
                 if !dirty {
                     continue;
                 }
@@ -1372,6 +1389,59 @@ async fn run_ui_projection_worker(
             }
         }
     }
+}
+
+/// One-time projection rebuild from the durable store: seeds the in-memory
+/// [`StreamProjection`] and replaces the shared `state.stream_counts` entry so
+/// status/UI totals survive a restart. Returns `None` on a DB error (the
+/// worker keeps its current state and retries on the next overflow).
+async fn rebuild_stream_projection(
+    state: &Arc<AppState>,
+    stream_id: &str,
+    ui_key: &StreamKey,
+) -> Option<StreamProjection> {
+    let db = state.db.lock().await;
+    let rows = match db.load_stream_projection_summary(stream_id) {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(error = %e, %stream_id, "failed to load stream projection summary");
+            return None;
+        }
+    };
+    if rows.is_empty() {
+        return Some(StreamProjection::default());
+    }
+    info!(%stream_id, epochs = rows.len(), "rebuilding stream projection");
+
+    // Until the chip_id column exists (Phase 4), seed the live epoch's unique
+    // chips by parsing that epoch's raw frames — bounded to one epoch, once.
+    let live_epoch = rows.last().map_or(0, |row| row.epoch);
+    let mut chips = HashSet::new();
+    let mut last_chip_id = None;
+    match db.load_epoch_raw_frames(stream_id, live_epoch) {
+        Ok(frames) => {
+            for (_seq, frame) in &frames {
+                let _ = chips.insert(crate::ui_events::chip_id_from_raw_frame(frame));
+            }
+            last_chip_id = frames
+                .last()
+                .map(|(_, frame)| crate::ui_events::chip_id_from_raw_frame(frame));
+        }
+        Err(e) => {
+            warn!(error = %e, %stream_id, "failed to load live-epoch frames for projection seed");
+        }
+    }
+    drop(db);
+
+    state.stream_counts.seed_from_epoch_summaries(
+        ui_key,
+        rows.iter().map(|row| (row.epoch, row.count, row.max_seq)),
+    );
+    Some(StreamProjection::seed_from_summary(
+        &rows,
+        chips,
+        last_chip_id,
+    ))
 }
 
 /// Emit the throttled UI events for one stream projection: counts, last read,
@@ -2335,10 +2405,20 @@ mod tests {
     }
 
     fn insert_chip_event(db: &Db, stream_id: &str, seq: i64, received_unix_ms: i64) {
+        insert_chip_event_in_epoch(db, stream_id, seq, 1, received_unix_ms);
+    }
+
+    fn insert_chip_event_in_epoch(
+        db: &Db,
+        stream_id: &str,
+        seq: i64,
+        epoch: i64,
+        received_unix_ms: i64,
+    ) {
         db.insert_received_event(&ReceivedEventInsert {
             stream_id,
             seq,
-            epoch: 1,
+            epoch,
             raw_frame: SAMPLE_FRAME,
             read_kind: "chip",
             reader_timestamp: None,
@@ -2346,6 +2426,54 @@ mod tests {
             dbf_delivered_unix_ms: None,
         })
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_rebuild_seeds_projection_and_stream_counts() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let stream_id = "rebuild-stream";
+        {
+            let db = state.db.lock().await;
+            insert_chip_event_in_epoch(&db, stream_id, 1, 1, 1_700_000_000_100);
+            insert_chip_event_in_epoch(&db, stream_id, 2, 1, 1_700_000_000_200);
+            insert_chip_event_in_epoch(&db, stream_id, 3, 2, 1_700_000_000_300);
+        }
+        let ui_key = StreamKey::new("fwd-1", "10.0.0.1:10000");
+
+        let proj = rebuild_stream_projection(&state, stream_id, &ui_key)
+            .await
+            .expect("rebuild succeeds");
+
+        assert_eq!(proj.total, 3);
+        assert_eq!(proj.epoch, 2);
+        assert_eq!(
+            proj.epoch_count, 1,
+            "epoch count covers the live epoch only"
+        );
+        assert_eq!(proj.unique_chips.len(), 1);
+        assert_eq!(proj.last_seq, 3);
+        assert_eq!(proj.last_chip_id.as_deref(), Some("000000012345"));
+        assert_eq!(proj.max_received_unix_ms, 1_700_000_000_300);
+
+        // The shared counts cache is seeded so status/UI totals survive restart.
+        let counts = state.stream_counts.get(&ui_key).expect("counts seeded");
+        assert_eq!(counts.total, 3);
+        assert_eq!(counts.epoch, 1);
+        assert_eq!(counts.current_epoch, 2);
+    }
+
+    #[tokio::test]
+    async fn startup_rebuild_with_empty_stream_is_default() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let ui_key = StreamKey::new("fwd-1", "10.0.0.1:10000");
+        let proj = rebuild_stream_projection(&state, "missing", &ui_key)
+            .await
+            .expect("rebuild succeeds");
+        assert_eq!(proj.total, 0);
+        assert!(
+            state.stream_counts.get(&ui_key).is_none(),
+            "an empty stream must not fabricate a counts entry"
+        );
     }
 
     /// Feed facts through a hint channel into the projection worker and wait
