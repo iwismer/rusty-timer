@@ -173,6 +173,9 @@ pub struct ReceivedEventInsert<'a> {
     pub reader_timestamp: Option<&'a str>,
     pub received_unix_ms: i64,
     pub dbf_delivered_unix_ms: Option<i64>,
+    /// Chip id parsed once from `raw_frame` at persist time. `None` only in
+    /// legacy/test paths; readers fall back to parsing the raw frame.
+    pub chip_id: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -878,21 +881,29 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Raw frames of one epoch, ordered by seq, for the one-time projection
-    /// chip-set seed. Bounded to a single epoch; the hot path never calls this.
-    pub fn load_epoch_raw_frames(
-        &self,
-        stream_id: &str,
-        epoch: i64,
-    ) -> DbResult<Vec<(i64, Vec<u8>)>> {
+    /// Chip ids of one epoch, ordered by seq, for the one-time projection
+    /// chip-set seed. Uses the stored `chip_id` column; rows persisted before
+    /// the column existed (NULL) fall back to parsing the raw frame — an
+    /// acceptable one-time rebuild cost, no offline backfill job. Bounded to a
+    /// single epoch; the hot path never calls this.
+    pub fn load_epoch_chip_ids(&self, stream_id: &str, epoch: i64) -> DbResult<Vec<(i64, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT seq, raw_frame
+            "SELECT seq, chip_id, raw_frame
              FROM received_events
              WHERE stream_id = ?1 AND epoch = ?2
              ORDER BY seq",
         )?;
         let rows = stmt.query_map(rusqlite::params![stream_id, epoch], |row| {
-            Ok((row.get(0)?, row.get(1)?))
+            let seq: i64 = row.get(0)?;
+            let chip_id: Option<String> = row.get(1)?;
+            let chip_id = match chip_id {
+                Some(chip_id) => chip_id,
+                None => {
+                    let raw_frame: Vec<u8> = row.get(2)?;
+                    crate::ui_events::chip_id_from_raw_frame(&raw_frame)
+                }
+            };
+            Ok((seq, chip_id))
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -1235,6 +1246,11 @@ impl Db {
             &self.conn,
             "ALTER TABLE received_events ADD COLUMN announcer_pushed_unix_ms BIGINT;",
             "announcer_pushed_unix_ms",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE received_events ADD COLUMN chip_id TEXT;",
+            "chip_id",
         )?;
         apply_add_column_migration(
             &self.conn,
@@ -1721,8 +1737,8 @@ pub fn insert_received_event_conn(
 ) -> DbResult<bool> {
     let changed = conn.execute(
         "INSERT INTO received_events
-         (stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         (stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms, chip_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT (stream_id, seq) DO NOTHING",
         rusqlite::params![
             event.stream_id,
@@ -1733,6 +1749,7 @@ pub fn insert_received_event_conn(
             event.reader_timestamp,
             event.received_unix_ms,
             event.dbf_delivered_unix_ms,
+            event.chip_id,
         ],
     )?;
     Ok(changed > 0)
@@ -3107,6 +3124,7 @@ mod tests {
             reader_timestamp: Some("12:34:56.789"),
             received_unix_ms: 1_700_000_000_123,
             dbf_delivered_unix_ms: None,
+            chip_id: None,
         };
 
         assert!(db.insert_received_event(&event).unwrap());
@@ -3122,6 +3140,64 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].raw_frame, b"frame-one");
         assert_eq!(rows[0].received_unix_ms, 1_700_000_000_123);
+    }
+
+    #[test]
+    fn chip_id_migration_is_idempotent() {
+        // Opening (and therefore migrating) the same DB twice must not fail on
+        // the already-added chip_id column.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("migrate.sqlite3");
+        drop(Db::open(&path).unwrap());
+        drop(Db::open(&path).unwrap());
+    }
+
+    #[test]
+    fn chip_id_round_trips_through_insert_and_seed_query() {
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = "chip-stream";
+        db.insert_received_event(&ReceivedEventInsert {
+            stream_id,
+            seq: 1,
+            epoch: 1,
+            raw_frame: b"raw-without-valid-prefix",
+            read_kind: "chip",
+            reader_timestamp: None,
+            received_unix_ms: 1,
+            dbf_delivered_unix_ms: None,
+            chip_id: Some("000000012345"),
+        })
+        .unwrap();
+
+        let chips = db.load_epoch_chip_ids(stream_id, 1).unwrap();
+        assert_eq!(
+            chips,
+            vec![(1, "000000012345".to_owned())],
+            "the stored chip_id is used verbatim, no raw-frame parse"
+        );
+    }
+
+    #[test]
+    fn chip_id_seed_parses_raw_frame_for_null_rows() {
+        // Rows persisted before the chip_id column existed have NULL; the
+        // rebuild seed parses their raw frames once.
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = "legacy-stream";
+        db.insert_received_event(&ReceivedEventInsert {
+            stream_id,
+            seq: 1,
+            epoch: 1,
+            raw_frame: b"aa400000000123450a2a01123018455927a7",
+            read_kind: "chip",
+            reader_timestamp: None,
+            received_unix_ms: 1,
+            dbf_delivered_unix_ms: None,
+            chip_id: None,
+        })
+        .unwrap();
+
+        let chips = db.load_epoch_chip_ids(stream_id, 1).unwrap();
+        assert_eq!(chips, vec![(1, "000000012345".to_owned())]);
     }
 
     #[test]
@@ -3154,6 +3230,7 @@ mod tests {
                 reader_timestamp: Some(timestamp),
                 received_unix_ms: 1_700_000_000_000 + seq,
                 dbf_delivered_unix_ms: None,
+                chip_id: None,
             })
             .unwrap();
         }
@@ -3188,6 +3265,7 @@ mod tests {
                 reader_timestamp: None,
                 received_unix_ms: 1_700_000_000_000 + seq,
                 dbf_delivered_unix_ms: None,
+                chip_id: None,
             };
             assert!(db.insert_received_event(&event).unwrap());
         }
@@ -3203,6 +3281,7 @@ mod tests {
             reader_timestamp: None,
             received_unix_ms: 1_700_000_000_003,
             dbf_delivered_unix_ms: None,
+            chip_id: None,
         };
         assert!(db.insert_received_event(&event).unwrap());
 
@@ -3224,6 +3303,7 @@ mod tests {
                 reader_timestamp: None,
                 received_unix_ms: seq,
                 dbf_delivered_unix_ms: None,
+                chip_id: None,
             })
             .unwrap();
         }
@@ -3264,6 +3344,7 @@ mod tests {
                     reader_timestamp: None,
                     received_unix_ms: 1_700_000_000_000 + seq,
                     dbf_delivered_unix_ms: None,
+                    chip_id: None,
                 })
                 .unwrap()
             );
@@ -3288,6 +3369,7 @@ mod tests {
                 reader_timestamp: None,
                 received_unix_ms: 1,
                 dbf_delivered_unix_ms: None,
+                chip_id: None,
             })
             .unwrap()
         );

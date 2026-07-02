@@ -136,6 +136,7 @@ mod tests {
             reader_timestamp: None,
             received_unix_ms: 1,
             dbf_delivered_unix_ms: None,
+            chip_id: None,
         })
         .unwrap();
 
@@ -154,6 +155,7 @@ mod tests {
                 reader_timestamp: None,
                 received_unix_ms: 2,
                 dbf_delivered_unix_ms: None,
+                chip_id: None,
             },
         )
         .unwrap();
@@ -202,6 +204,7 @@ mod tests {
                     reader_timestamp: None,
                     received_unix_ms: 1,
                     dbf_delivered_unix_ms: None,
+                    chip_id: None,
                 })
             })
             .await;

@@ -1425,19 +1425,17 @@ async fn rebuild_stream_projection(
     let stream_id_owned = stream_id.to_owned();
     match state
         .read_source
-        .run(move |db| db.load_epoch_raw_frames(&stream_id_owned, live_epoch))
+        .run(move |db| db.load_epoch_chip_ids(&stream_id_owned, live_epoch))
         .await
     {
-        Ok(frames) => {
-            for (_seq, frame) in &frames {
-                let _ = chips.insert(crate::ui_events::chip_id_from_raw_frame(frame));
+        Ok(chip_ids) => {
+            last_chip_id = chip_ids.last().map(|(_, chip_id)| chip_id.clone());
+            for (_seq, chip_id) in chip_ids {
+                let _ = chips.insert(chip_id);
             }
-            last_chip_id = frames
-                .last()
-                .map(|(_, frame)| crate::ui_events::chip_id_from_raw_frame(frame));
         }
         Err(e) => {
-            warn!(error = %e, %stream_id, "failed to load live-epoch frames for projection seed");
+            warn!(error = %e, %stream_id, "failed to load live-epoch chip ids for projection seed");
         }
     }
 
@@ -2432,6 +2430,7 @@ mod tests {
             reader_timestamp: None,
             received_unix_ms,
             dbf_delivered_unix_ms: None,
+            chip_id: None,
         })
         .unwrap();
     }

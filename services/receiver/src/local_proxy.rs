@@ -285,6 +285,7 @@ mod tests {
                 reader_timestamp: None,
                 received_unix_ms: 1_700_000_000_000 + seq,
                 dbf_delivered_unix_ms: None,
+                chip_id: None,
             })
             .unwrap();
         assert!(inserted);

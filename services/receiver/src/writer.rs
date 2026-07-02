@@ -652,8 +652,8 @@ fn apply_batch_inner(
     let mut facts = Vec::with_capacity(records.len());
     let mut insert = tx.prepare_cached(
         "INSERT INTO received_events
-         (stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)
+         (stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms, chip_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8)
          ON CONFLICT (stream_id, seq) DO NOTHING",
     )?;
     for record in records {
@@ -665,6 +665,7 @@ fn apply_batch_inner(
             record.read_kind,
             record.reader_timestamp,
             record.received_unix_ms,
+            record.chip_id,
         ])?;
         if changed > 0 {
             facts.push(EventFact {

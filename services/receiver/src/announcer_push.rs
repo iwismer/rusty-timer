@@ -451,6 +451,7 @@ mod tests {
             reader_timestamp: None,
             received_unix_ms,
             dbf_delivered_unix_ms: None,
+            chip_id: None,
         })
         .unwrap();
     }
