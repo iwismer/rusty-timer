@@ -608,6 +608,10 @@ impl AppState {
             connected: status.connected,
             state: status.state,
             last_read_unix_ms: (status.last_read_unix_ms != 0).then_some(status.last_read_unix_ms),
+            reads_session: Some(status.reads_session),
+            reads_total: Some(status.reads_total),
+            last_seen_secs: status.last_seen_secs,
+            current_epoch_name: status.current_epoch_name,
             hardware_reader_id: None,
             firmware_version: None,
             model: None,
@@ -683,6 +687,10 @@ impl AppState {
                 connected: false,
                 state: "unknown".to_owned(),
                 last_read_unix_ms: None,
+                reads_session: None,
+                reads_total: None,
+                last_seen_secs: None,
+                current_epoch_name: None,
                 hardware_reader_id,
                 firmware_version,
                 model,
@@ -733,6 +741,10 @@ impl AppState {
                 connected: false,
                 state: "unknown".to_owned(),
                 last_read_unix_ms: None,
+                reads_session: None,
+                reads_total: None,
+                last_seen_secs: None,
+                current_epoch_name: None,
                 hardware_reader_id: None,
                 firmware_version: None,
                 model: None,
@@ -1492,6 +1504,10 @@ pub struct ReaderLiveStatus {
     pub connected: bool,
     pub state: String,
     pub last_read_unix_ms: Option<i64>,
+    pub reads_session: Option<u64>,
+    pub reads_total: Option<i64>,
+    pub last_seen_secs: Option<u64>,
+    pub current_epoch_name: Option<String>,
     pub hardware_reader_id: Option<String>,
     pub firmware_version: Option<String>,
     pub model: Option<String>,
@@ -2561,6 +2577,35 @@ pub async fn reader_sync_clock(
     .await
 }
 
+pub async fn reader_set_epoch_name(
+    state: &AppState,
+    endpoint_id: String,
+    stream_id: String,
+    name: Option<String>,
+) -> Result<ReaderControlResult, ReceiverError> {
+    reader_control_command(
+        state,
+        endpoint_id,
+        stream_id,
+        rt_domain::ReaderControlAction::SetEpochName { name },
+    )
+    .await
+}
+
+pub async fn reader_advance_epoch(
+    state: &AppState,
+    endpoint_id: String,
+    stream_id: String,
+) -> Result<ReaderControlResult, ReceiverError> {
+    reader_control_command(
+        state,
+        endpoint_id,
+        stream_id,
+        rt_domain::ReaderControlAction::AdvanceEpoch,
+    )
+    .await
+}
+
 pub async fn reader_set_read_mode(
     state: &AppState,
     endpoint_id: String,
@@ -3059,6 +3104,12 @@ macro_rules! receiver_command_list {
             restart_forwarder(endpoint_id: "String") -> "ForwarderRestartResult",
             reader_get_info(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
             reader_sync_clock(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
+            reader_set_epoch_name(
+                endpoint_id: "String",
+                stream_id: "String",
+                name: "Option<String>"
+            ) -> "ReaderControlResult",
+            reader_advance_epoch(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
             reader_set_read_mode(
                 endpoint_id: "String",
                 stream_id: "String",
@@ -3640,6 +3691,10 @@ mod tests {
                     connected: true,
                     state: "online".to_owned(),
                     last_read_unix_ms: 1234,
+                    reads_session: 12,
+                    reads_total: 120,
+                    last_seen_secs: Some(3),
+                    current_epoch_name: Some("Race 1".to_owned()),
                 },
             )
             .await;
@@ -3651,6 +3706,10 @@ mod tests {
                     connected: false,
                     state: "offline".to_owned(),
                     last_read_unix_ms: 0,
+                    reads_session: 0,
+                    reads_total: 0,
+                    last_seen_secs: None,
+                    current_epoch_name: None,
                 },
             )
             .await;
@@ -3711,6 +3770,10 @@ mod tests {
                     connected: true,
                     state: "online".to_owned(),
                     last_read_unix_ms: 5678,
+                    reads_session: 13,
+                    reads_total: 121,
+                    last_seen_secs: Some(1),
+                    current_epoch_name: Some("Race 2".to_owned()),
                 },
             )
             .await;
@@ -3737,6 +3800,13 @@ mod tests {
         assert!(forwarder.readers[0].connected);
         assert_eq!(forwarder.readers[0].state, "online");
         assert_eq!(forwarder.readers[0].last_read_unix_ms, Some(5678));
+        assert_eq!(forwarder.readers[0].reads_session, Some(13));
+        assert_eq!(forwarder.readers[0].reads_total, Some(121));
+        assert_eq!(forwarder.readers[0].last_seen_secs, Some(1));
+        assert_eq!(
+            forwarder.readers[0].current_epoch_name.as_deref(),
+            Some("Race 2")
+        );
         assert_eq!(forwarder.readers[0].local_port, Some(9100));
         assert_eq!(
             forwarder.readers[0].hardware_reader_id.as_deref(),
@@ -3764,6 +3834,13 @@ mod tests {
         assert_eq!(forwarder.readers[1].stream_id, "stream-b");
         assert!(forwarder.readers[1].connected);
         assert_eq!(forwarder.readers[1].last_read_unix_ms, Some(1234));
+        assert_eq!(forwarder.readers[1].reads_session, Some(12));
+        assert_eq!(forwarder.readers[1].reads_total, Some(120));
+        assert_eq!(forwarder.readers[1].last_seen_secs, Some(3));
+        assert_eq!(
+            forwarder.readers[1].current_epoch_name.as_deref(),
+            Some("Race 1")
+        );
         assert_eq!(forwarder.readers[1].local_port, None);
         let ups = forwarder
             .ups
@@ -3794,6 +3871,10 @@ mod tests {
                     connected: true,
                     state: "online".to_owned(),
                     last_read_unix_ms: 10,
+                    reads_session: 1,
+                    reads_total: 10,
+                    last_seen_secs: Some(1),
+                    current_epoch_name: None,
                 },
             )
             .await;
@@ -4235,6 +4316,10 @@ mod tests {
                     connected: true,
                     state: "connected".to_owned(),
                     last_read_unix_ms: 1234,
+                    reads_session: 1,
+                    reads_total: 1,
+                    last_seen_secs: Some(1),
+                    current_epoch_name: None,
                 },
             )
             .await;

@@ -535,6 +535,7 @@ fn action_to_request(
         mode: None,
         timeout: None,
         enabled: None,
+        epoch_name: None,
     };
     match action {
         rt_domain::ReaderControlAction::GetInfo => request.command = "get_info".to_owned(),
@@ -567,6 +568,13 @@ fn action_to_request(
         }
         rt_domain::ReaderControlAction::Refresh => request.command = "refresh".to_owned(),
         rt_domain::ReaderControlAction::Reconnect => request.command = "reconnect".to_owned(),
+        rt_domain::ReaderControlAction::SetEpochName { name } => {
+            request.command = "set_epoch_name".to_owned();
+            request.epoch_name = name;
+        }
+        rt_domain::ReaderControlAction::AdvanceEpoch => {
+            request.command = "advance_epoch".to_owned()
+        }
     }
     request
 }
@@ -1048,6 +1056,10 @@ mod tests {
                     connected: false,
                     state: "disconnected".to_owned(),
                     last_read_unix_ms: 0,
+                    reads_session: 0,
+                    reads_total: 0,
+                    last_seen_secs: None,
+                    current_epoch_name: None,
                 })),
             },
         ];

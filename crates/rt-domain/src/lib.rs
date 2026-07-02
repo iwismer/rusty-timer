@@ -178,6 +178,8 @@ pub enum ReaderControlAction {
     StopDownload,
     Refresh,
     Reconnect,
+    SetEpochName { name: Option<String> },
+    AdvanceEpoch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

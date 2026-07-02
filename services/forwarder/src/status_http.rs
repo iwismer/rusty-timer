@@ -205,7 +205,7 @@ pub struct SubsystemStatus {
     p2p_endpoint_id: Option<String>,
     forwarder_id: String,
     local_ip: Option<String>,
-    readers: HashMap<String, ReaderStatus>,
+    pub(crate) readers: HashMap<String, ReaderStatus>,
     update_status: UpdateStatus,
     staged_update_path: Option<std::path::PathBuf>,
     pub update_mode: rt_updater::UpdateMode,

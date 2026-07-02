@@ -408,6 +408,10 @@ fn reader_status_event(stream_id: &str, status: &ReaderStatus) -> ControlEvent {
         connected: status.state == ReaderConnectionState::Connected,
         state: reader_state_token(&status.state).to_owned(),
         last_read_unix_ms: last_read_unix_ms(status.last_seen),
+        reads_session: status.reads_since_restart,
+        reads_total: status.reads_total,
+        last_seen_secs: status.last_seen.map(|t| t.elapsed().as_secs()),
+        current_epoch_name: status.current_epoch_name.clone(),
     })
 }
 

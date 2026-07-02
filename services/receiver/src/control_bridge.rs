@@ -313,6 +313,19 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
             arg(args, "stream_id")?,
         )
         .await?),
+        "reader_set_epoch_name" => ok(control_api::reader_set_epoch_name(
+            state,
+            arg(args, "endpoint_id")?,
+            arg(args, "stream_id")?,
+            arg(args, "name")?,
+        )
+        .await?),
+        "reader_advance_epoch" => ok(control_api::reader_advance_epoch(
+            state,
+            arg(args, "endpoint_id")?,
+            arg(args, "stream_id")?,
+        )
+        .await?),
         "reader_set_read_mode" => ok(control_api::reader_set_read_mode(
             state,
             arg(args, "endpoint_id")?,

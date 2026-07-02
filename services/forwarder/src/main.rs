@@ -257,6 +257,7 @@ async fn main() {
     ));
     let reader_control_handler = Arc::new(forwarder::p2p::ForwarderReaderControlHandler::new(
         status_server.reader_control_service(),
+        Arc::clone(&journal),
     ));
     let p2p_runtime = match forwarder::p2p::start_forwarder_p2p(
         &cfg.p2p,

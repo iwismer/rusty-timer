@@ -83,6 +83,7 @@ fn sync_clock_reader_control_request_round_trips() {
                 mode: None,
                 timeout: None,
                 enabled: None,
+                epoch_name: None,
             },
         )),
     };
@@ -106,6 +107,7 @@ fn set_read_mode_reader_control_request_round_trips() {
                 mode: Some("event".to_string()),
                 timeout: Some(7),
                 enabled: None,
+                epoch_name: None,
             },
         )),
     };
@@ -129,6 +131,7 @@ fn set_tto_reader_control_request_round_trips() {
                 mode: None,
                 timeout: None,
                 enabled: Some(true),
+                epoch_name: None,
             },
         )),
     };

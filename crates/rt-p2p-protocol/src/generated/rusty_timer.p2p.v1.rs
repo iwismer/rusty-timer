@@ -92,6 +92,9 @@ pub struct ReaderControlRequest {
     /// Optional boolean for set_tto and set_recording.
     #[prost(bool, optional, tag = "6")]
     pub enabled: ::core::option::Option<bool>,
+    /// Optional epoch name for set_epoch_name; absent clears the name.
+    #[prost(string, optional, tag = "7")]
+    pub epoch_name: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Result of a ReaderControlRequest.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -123,6 +126,18 @@ pub struct ReaderStatus {
     /// Wall-clock time of the last observed read, in unix milliseconds.
     #[prost(int64, tag = "4")]
     pub last_read_unix_ms: i64,
+    /// Forwarder-authoritative reads received during this process session.
+    #[prost(uint64, tag = "5")]
+    pub reads_session: u64,
+    /// Forwarder-authoritative durable total reads for this stream.
+    #[prost(int64, tag = "6")]
+    pub reads_total: i64,
+    /// Seconds since the forwarder last saw a read for this reader.
+    #[prost(uint64, optional, tag = "7")]
+    pub last_seen_secs: ::core::option::Option<u64>,
+    /// Forwarder-authoritative current epoch name, if any.
+    #[prost(string, optional, tag = "8")]
+    pub current_epoch_name: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Static descriptive information about a reader.
 #[derive(Clone, PartialEq, ::prost::Message)]

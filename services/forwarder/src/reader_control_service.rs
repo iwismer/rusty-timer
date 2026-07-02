@@ -67,6 +67,53 @@ impl ReaderControlService {
         Ok(info)
     }
 
+    pub async fn set_epoch_name(
+        &self,
+        reader_ip: &str,
+        name: Option<String>,
+    ) -> Result<crate::reader_control::ReaderInfo, String> {
+        let status = {
+            let mut ss = self.subsystem.lock().await;
+            let reader = ss
+                .readers
+                .get_mut(reader_ip)
+                .ok_or_else(|| "reader not found".to_owned())?;
+            reader.current_epoch_name = name;
+            let status = reader.clone();
+            let _ = self
+                .ui_tx
+                .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
+                    ip: reader_ip.to_owned(),
+                    state: (&reader.state).into(),
+                    reads_session: reader.reads_since_restart,
+                    reads_total: reader.reads_total,
+                    last_seen_secs: reader.last_seen.map(|t| t.elapsed().as_secs()),
+                    local_port: reader.local_port,
+                    current_epoch_name: reader.current_epoch_name.clone(),
+                });
+            let _ = self
+                .status_event_tx
+                .send(ForwarderStatusEvent::ReaderStatus {
+                    stream_id: reader_ip.to_owned(),
+                    status: status.clone(),
+                });
+            status
+        };
+        Ok(status.reader_info.unwrap_or_default())
+    }
+
+    pub async fn emit_status_refresh(&self, reader_ip: &str) {
+        let ss = self.subsystem.lock().await;
+        if let Some(status) = ss.readers.get(reader_ip) {
+            let _ = self
+                .status_event_tx
+                .send(ForwarderStatusEvent::ReaderStatus {
+                    stream_id: reader_ip.to_owned(),
+                    status: status.clone(),
+                });
+        }
+    }
+
     pub async fn sync_clock(
         &self,
         reader_ip: &str,

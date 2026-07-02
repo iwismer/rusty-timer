@@ -77,6 +77,8 @@ message ReaderControlRequest {
   optional uint32 timeout = 5;
   // Optional boolean for set_tto and set_recording.
   optional bool enabled = 6;
+  // Optional epoch name for set_epoch_name; absent clears the name.
+  optional string epoch_name = 7;
 }
 
 // Result of a ReaderControlRequest.
@@ -99,6 +101,14 @@ message ReaderStatus {
   string state = 3;
   // Wall-clock time of the last observed read, in unix milliseconds.
   int64 last_read_unix_ms = 4;
+  // Forwarder-authoritative reads received during this process session.
+  uint64 reads_session = 5;
+  // Forwarder-authoritative durable total reads for this stream.
+  int64 reads_total = 6;
+  // Seconds since the forwarder last saw a read for this reader.
+  optional uint64 last_seen_secs = 7;
+  // Forwarder-authoritative current epoch name, if any.
+  optional string current_epoch_name = 8;
 }
 
 // Static descriptive information about a reader.

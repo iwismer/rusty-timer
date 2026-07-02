@@ -176,6 +176,10 @@ export interface ReaderLiveStatus {
   connected: boolean;
   state: string;
   last_read_unix_ms: number | null;
+  reads_session?: number | null;
+  reads_total?: number | null;
+  last_seen_secs?: number | null;
+  current_epoch_name?: string | null;
   hardware_reader_id: string | null;
   firmware_version: string | null;
   model: string | null;
@@ -470,6 +474,28 @@ export async function readerSyncClock(
   streamId: string,
 ): Promise<ReaderControlResult> {
   return invoke<ReaderControlResult>("reader_sync_clock", {
+    endpointId,
+    streamId,
+  });
+}
+
+export async function readerSetEpochName(
+  endpointId: string,
+  streamId: string,
+  name: string | null,
+): Promise<ReaderControlResult> {
+  return invoke<ReaderControlResult>("reader_set_epoch_name", {
+    endpointId,
+    streamId,
+    name,
+  });
+}
+
+export async function readerAdvanceEpoch(
+  endpointId: string,
+  streamId: string,
+): Promise<ReaderControlResult> {
+  return invoke<ReaderControlResult>("reader_advance_epoch", {
     endpointId,
     streamId,
   });

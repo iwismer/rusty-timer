@@ -1569,6 +1569,7 @@ mod tests {
                         mode: None,
                         timeout: None,
                         enabled: None,
+                        epoch_name: None,
                     },
                 )),
             },
@@ -1635,6 +1636,7 @@ mod tests {
                         mode: None,
                         timeout: None,
                         enabled: None,
+                        epoch_name: None,
                     },
                 )),
             },
@@ -1648,6 +1650,10 @@ mod tests {
                 connected: true,
                 state: "online".to_owned(),
                 last_read_unix_ms: 1_700_000_000_125,
+                reads_session: 0,
+                reads_total: 0,
+                last_seen_secs: None,
+                current_epoch_name: None,
             }))
             .await
             .expect("control event receiver alive");
@@ -1745,6 +1751,7 @@ mod tests {
                         mode: None,
                         timeout: None,
                         enabled: None,
+                        epoch_name: None,
                     },
                 )),
             },

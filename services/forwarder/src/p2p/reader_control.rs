@@ -2,11 +2,15 @@
 
 use super::{ReaderControlFuture, ReaderControlHandler};
 use crate::reader_control_service::{ReaderControlService, domain_read_mode_to_native};
+use crate::status_http::{EpochResetError, JournalAccess};
 use rt_p2p_protocol::{ReaderControlRequest, ReaderControlResponse};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct ForwarderReaderControlHandler {
     service: ReaderControlService,
+    journal: Arc<Mutex<crate::storage::journal::Journal>>,
 }
 
 impl std::fmt::Debug for ForwarderReaderControlHandler {
@@ -18,8 +22,11 @@ impl std::fmt::Debug for ForwarderReaderControlHandler {
 
 impl ForwarderReaderControlHandler {
     #[must_use]
-    pub fn new(service: ReaderControlService) -> Self {
-        Self { service }
+    pub fn new(
+        service: ReaderControlService,
+        journal: Arc<Mutex<crate::storage::journal::Journal>>,
+    ) -> Self {
+        Self { service, journal }
     }
 }
 
@@ -47,7 +54,7 @@ impl ReaderControlHandler for ForwarderReaderControlHandler {
                 Err(error) => return error_response(stream_id, request_id, error),
             };
 
-            match dispatch_action(&self.service, &reader_key, action).await {
+            match dispatch_action(&self.service, &self.journal, &reader_key, action).await {
                 Ok(info) => success_response(stream_id, request_id, "ok", info.as_ref()),
                 Err(error) => error_response(stream_id, request_id, error),
             }
@@ -57,6 +64,7 @@ impl ReaderControlHandler for ForwarderReaderControlHandler {
 
 async fn dispatch_action(
     service: &ReaderControlService,
+    journal: &Arc<Mutex<crate::storage::journal::Journal>>,
     reader_key: &str,
     action: rt_domain::ReaderControlAction,
 ) -> Result<Option<rt_domain::ReaderInfo>, String> {
@@ -97,6 +105,22 @@ async fn dispatch_action(
         rt_domain::ReaderControlAction::Reconnect => {
             service.reconnect(reader_key).await.map(|()| None)
         }
+        rt_domain::ReaderControlAction::SetEpochName { name } => service
+            .set_epoch_name(reader_key, name)
+            .await
+            .map(|info| Some(crate::reader_control_service::native_info_to_domain(&info))),
+        rt_domain::ReaderControlAction::AdvanceEpoch => {
+            journal
+                .lock()
+                .await
+                .reset_epoch(reader_key)
+                .map_err(|e| match e {
+                    EpochResetError::NotFound => "stream not found".to_owned(),
+                    EpochResetError::Storage(message) => message,
+                })?;
+            service.emit_status_refresh(reader_key).await;
+            Ok(None)
+        }
     }
 }
 
@@ -136,6 +160,13 @@ pub(crate) fn request_to_action(
         "stop_download" => Ok(rt_domain::ReaderControlAction::StopDownload),
         "refresh" => Ok(rt_domain::ReaderControlAction::Refresh),
         "reconnect" => Ok(rt_domain::ReaderControlAction::Reconnect),
+        "set_epoch_name" => Ok(rt_domain::ReaderControlAction::SetEpochName {
+            name: request
+                .epoch_name
+                .clone()
+                .filter(|name| !name.trim().is_empty()),
+        }),
+        "advance_epoch" => Ok(rt_domain::ReaderControlAction::AdvanceEpoch),
         other => Err(format!("unsupported reader control command: {other}")),
     }
 }
@@ -214,7 +245,44 @@ mod tests {
             mode: None,
             timeout: None,
             enabled: None,
+            epoch_name: None,
         }
+    }
+
+    #[test]
+    fn set_epoch_name_maps_name_and_blank_to_action() {
+        let request = ReaderControlRequest {
+            epoch_name: Some("Race 1".to_owned()),
+            ..base_request("set_epoch_name")
+        };
+        assert_eq!(
+            request_to_action(&request).expect("set epoch name action"),
+            rt_domain::ReaderControlAction::SetEpochName {
+                name: Some("Race 1".to_owned())
+            }
+        );
+
+        let request = ReaderControlRequest {
+            epoch_name: Some("   ".to_owned()),
+            ..base_request("set_epoch_name")
+        };
+        assert_eq!(
+            request_to_action(&request).expect("blank clears epoch name"),
+            rt_domain::ReaderControlAction::SetEpochName { name: None }
+        );
+
+        assert_eq!(
+            request_to_action(&base_request("set_epoch_name")).expect("absent clears epoch name"),
+            rt_domain::ReaderControlAction::SetEpochName { name: None }
+        );
+    }
+
+    #[test]
+    fn advance_epoch_maps_to_action() {
+        assert_eq!(
+            request_to_action(&base_request("advance_epoch")).expect("advance epoch action"),
+            rt_domain::ReaderControlAction::AdvanceEpoch
+        );
     }
 
     #[test]

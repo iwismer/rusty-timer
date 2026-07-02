@@ -161,6 +161,8 @@ describe("api client", () => {
     const {
       readerGetInfo,
       readerSyncClock,
+      readerSetEpochName,
+      readerAdvanceEpoch,
       readerSetReadMode,
       readerSetTto,
       readerSetRecording,
@@ -175,6 +177,8 @@ describe("api client", () => {
 
     await readerGetInfo("endpoint-1", "stream-a");
     await readerSyncClock("endpoint-1", "stream-a");
+    await readerSetEpochName("endpoint-1", "stream-a", "Race 1");
+    await readerAdvanceEpoch("endpoint-1", "stream-a");
     await readerSetReadMode("endpoint-1", "stream-a", "event", 7);
     await readerSetTto("endpoint-1", "stream-a", true);
     await readerSetRecording("endpoint-1", "stream-a", false);
@@ -192,39 +196,48 @@ describe("api client", () => {
       endpointId: "endpoint-1",
       streamId: "stream-a",
     });
-    expect(mockInvoke).toHaveBeenNthCalledWith(3, "reader_set_read_mode", {
+    expect(mockInvoke).toHaveBeenNthCalledWith(3, "reader_set_epoch_name", {
+      endpointId: "endpoint-1",
+      streamId: "stream-a",
+      name: "Race 1",
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(4, "reader_advance_epoch", {
+      endpointId: "endpoint-1",
+      streamId: "stream-a",
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(5, "reader_set_read_mode", {
       endpointId: "endpoint-1",
       streamId: "stream-a",
       mode: "event",
       timeout: 7,
     });
-    expect(mockInvoke).toHaveBeenNthCalledWith(4, "reader_set_tto", {
+    expect(mockInvoke).toHaveBeenNthCalledWith(6, "reader_set_tto", {
       endpointId: "endpoint-1",
       streamId: "stream-a",
       enabled: true,
     });
-    expect(mockInvoke).toHaveBeenNthCalledWith(5, "reader_set_recording", {
+    expect(mockInvoke).toHaveBeenNthCalledWith(7, "reader_set_recording", {
       endpointId: "endpoint-1",
       streamId: "stream-a",
       enabled: false,
     });
-    expect(mockInvoke).toHaveBeenNthCalledWith(6, "reader_clear_records", {
+    expect(mockInvoke).toHaveBeenNthCalledWith(8, "reader_clear_records", {
       endpointId: "endpoint-1",
       streamId: "stream-a",
     });
-    expect(mockInvoke).toHaveBeenNthCalledWith(7, "reader_start_download", {
+    expect(mockInvoke).toHaveBeenNthCalledWith(9, "reader_start_download", {
       endpointId: "endpoint-1",
       streamId: "stream-a",
     });
-    expect(mockInvoke).toHaveBeenNthCalledWith(8, "reader_stop_download", {
+    expect(mockInvoke).toHaveBeenNthCalledWith(10, "reader_stop_download", {
       endpointId: "endpoint-1",
       streamId: "stream-a",
     });
-    expect(mockInvoke).toHaveBeenNthCalledWith(9, "reader_refresh", {
+    expect(mockInvoke).toHaveBeenNthCalledWith(11, "reader_refresh", {
       endpointId: "endpoint-1",
       streamId: "stream-a",
     });
-    expect(mockInvoke).toHaveBeenNthCalledWith(10, "reader_reconnect", {
+    expect(mockInvoke).toHaveBeenNthCalledWith(12, "reader_reconnect", {
       endpointId: "endpoint-1",
       streamId: "stream-a",
     });
