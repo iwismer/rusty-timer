@@ -177,10 +177,67 @@ async fn drain_durable_chunks(
         {
             return Err(());
         }
-        // Stop when the contiguous prefix ended inside the chunk (a gap — the
-        // next hint resumes) or the chunk was the tail of the table.
-        if *last_delivered_seq < last_seq_in_chunk || fetched < DRAIN_CHUNK_ROWS {
+        // The contiguous prefix ended inside the chunk: either a transient
+        // arrival gap (the next hint resumes) or a *permanent* one — rows
+        // pruned by retention after this consumer read its start watermark,
+        // or a P2P gap notice that jumped the durable cursor. Permanent gaps
+        // must jump the consumer cursor (the analog of the P2P gap jump),
+        // otherwise the consumer stalls forever and its registered cursor
+        // wedges retention for the stream.
+        if *last_delivered_seq < last_seq_in_chunk {
+            match durable_gap_jump_target(stream_id, read, *last_delivered_seq).await {
+                Ok(Some(jump_to)) => {
+                    debug!(
+                        %stream_id,
+                        from = *last_delivered_seq,
+                        jump_to,
+                        "durable consumer jumping permanent gap (prune/gap-notice)"
+                    );
+                    *last_delivered_seq = jump_to;
+                    continue;
+                }
+                Ok(None) => return Ok(()), // transient gap; wait for a hint
+                Err(()) => return Err(()),
+            }
+        }
+        if fetched < DRAIN_CHUNK_ROWS {
             return Ok(());
+        }
+    }
+}
+
+/// When a consumer is stalled at `cursor`, resolve the highest *permanent*
+/// gap jump covering it: the retention watermark (rows at or below it are
+/// deleted) and any recorded P2P gap marker whose unavailable range covers
+/// `cursor + 1`. Returns `None` when the gap is not provably permanent.
+async fn durable_gap_jump_target(
+    stream_id: &str,
+    read: &ReadSource,
+    cursor: i64,
+) -> Result<Option<i64>, ()> {
+    let stream_id_owned = stream_id.to_owned();
+    let target = read
+        .run(move |db| {
+            let mut target = db.load_pruned_through_seq(&stream_id_owned)?;
+            for marker in db.load_gap_markers(&stream_id_owned)? {
+                // The marker says seqs in (requested_after_seq,
+                // earliest_available_seq) are permanently unavailable; if the
+                // consumer's next seq falls in that range, jump to the marker
+                // boundary exactly like the P2P cursor did.
+                let jump_to = marker.earliest_available_seq.saturating_sub(1);
+                if marker.requested_after_seq <= cursor && jump_to > cursor {
+                    target = target.max(jump_to);
+                }
+            }
+            Ok(target)
+        })
+        .await;
+    match target {
+        Ok(target) if target > cursor => Ok(Some(target)),
+        Ok(_) => Ok(None),
+        Err(e) => {
+            warn!(error = %e, %stream_id, "failed to resolve durable gap jump for consumer");
+            Err(())
         }
     }
 }
@@ -418,6 +475,120 @@ mod tests {
             crate::retention::min_proxy_cursor(&registry, stream_id),
             Some(4)
         );
+        proxy.shutdown();
+    }
+
+    #[tokio::test]
+    async fn consumer_stalled_by_concurrent_prune_jumps_to_watermark() {
+        // B1 regression: the consumer connects and reads watermark 0, then a
+        // retention prune outruns it (rows 1..=4 deleted, watermark 4). The
+        // drain must jump to the new watermark instead of stalling on the
+        // head gap forever (which also wedged retention via the registered
+        // cursor).
+        let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        let stream_id = "127.0.0.1:10700";
+        let (durable_tx, rx) = broadcast::channel(16);
+        let registry: crate::retention::ProxyConsumerCursors = std::sync::Arc::default();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let handle = tokio::spawn(serve_durable_consumer(
+            server_stream,
+            stream_id.to_owned(),
+            ReadSource::Mutex(db.clone()),
+            rx,
+            registry.clone(),
+        ));
+
+        // Consumer is up with watermark 0 and an empty table. Now the prune
+        // "wins the race": rows 5..=6 exist, 1..=4 are gone, watermark = 4.
+        insert_durable_event(&db, stream_id, 5, b"five").await;
+        insert_durable_event(&db, stream_id, 6, b"six").await;
+        {
+            let guard = db.lock().await;
+            guard
+                .raw_execute_for_test(
+                    "INSERT INTO retention (stream_id, pruned_through_seq) VALUES (?1, 4)",
+                    rusqlite::params![stream_id],
+                )
+                .unwrap();
+        }
+        durable_tx
+            .send(crate::p2p_session::DurableBatch {
+                through_seq: 6,
+                inserted: std::sync::Arc::new(Vec::new()),
+            })
+            .unwrap();
+
+        let mut buf = vec![0u8; b"fivesix".len()];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.read_exact(&mut buf),
+        )
+        .await
+        .expect("consumer must jump the pruned gap instead of stalling")
+        .unwrap();
+        assert_eq!(&buf, b"fivesix");
+
+        // The registered cursor advanced past the watermark, so retention is
+        // not wedged by this consumer.
+        assert_eq!(
+            crate::retention::min_proxy_cursor(&registry, stream_id),
+            Some(6)
+        );
+        drop(durable_tx);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn consumer_jumps_p2p_gap_markers_like_the_durable_cursor() {
+        // S2 regression: seqs 1..=14 were never stored (forwarder gap notice,
+        // recorded as a gap marker). A consumer starting at 0 must jump to
+        // earliest_available - 1 like the P2P cursor did, not stall forever
+        // (and hold the retention floor at 0).
+        let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        let stream_id = "127.0.0.1:10800";
+        insert_durable_event(&db, stream_id, 15, b"fifteen").await;
+        insert_durable_event(&db, stream_id, 16, b"sixteen").await;
+        {
+            let guard = db.lock().await;
+            guard
+                .save_gap_marker(&crate::db::GapMarkerInsert {
+                    stream_id,
+                    requested_after_seq: 0,
+                    earliest_available_seq: 15,
+                    latest_available_seq: 16,
+                    reason: "retention-window",
+                    created_unix_ms: 1_700_000_000_000,
+                })
+                .unwrap();
+        }
+
+        let (durable_tx, _rx) = broadcast::channel(16);
+        let proxy = LocalProxy::bind_durable(
+            0,
+            stream_id.to_owned(),
+            ReadSource::Mutex(db),
+            durable_tx,
+            std::sync::Arc::default(),
+        )
+        .await
+        .unwrap();
+
+        let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", proxy.port))
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; b"fifteensixteen".len()];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.read_exact(&mut buf),
+        )
+        .await
+        .expect("consumer must jump the recorded P2P gap")
+        .unwrap();
+        assert_eq!(&buf, b"fifteensixteen");
         proxy.shutdown();
     }
 

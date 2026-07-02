@@ -1161,6 +1161,21 @@ impl Db {
         Ok(count)
     }
 
+    /// Mark **every** stored row of `stream_id` DBF-delivered (used by the
+    /// cross-stream regenerate, which by construction just wrote them all to
+    /// the file). One statement; replaces reset-then-remark row loops.
+    pub fn mark_all_dbf_delivered(
+        &self,
+        stream_id: &str,
+        delivered_unix_ms: i64,
+    ) -> DbResult<usize> {
+        let count = self.conn.execute(
+            "UPDATE received_events SET dbf_delivered_unix_ms = ?2 WHERE stream_id = ?1",
+            rusqlite::params![stream_id, delivered_unix_ms],
+        )?;
+        Ok(count)
+    }
+
     pub fn reset_dbf_delivered(&self, stream_id: &str) -> DbResult<usize> {
         let count = self.conn.execute(
             "UPDATE received_events SET dbf_delivered_unix_ms = NULL WHERE stream_id = ?1",
@@ -1185,6 +1200,28 @@ impl Db {
              ORDER BY received_unix_ms, seq",
         )?;
         let rows = stmt.query_map(rusqlite::params![stream_id], received_event_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Bounded variant of [`Db::load_unpushed_announcer_events`]: the push
+    /// pass drains in chunks so enabling the announcer against a large
+    /// backlog does not load every unpushed row (with raw frames) at once.
+    pub fn load_unpushed_announcer_events_limited(
+        &self,
+        stream_id: &str,
+        limit: usize,
+    ) -> DbResult<Vec<ReceivedEvent>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
+             FROM received_events
+             WHERE stream_id = ?1 AND announcer_pushed_unix_ms IS NULL
+             ORDER BY received_unix_ms, seq
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![stream_id, i64::try_from(limit).unwrap_or(i64::MAX)],
+            received_event_from_row,
+        )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 

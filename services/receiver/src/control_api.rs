@@ -2854,17 +2854,21 @@ pub async fn clear_dbf(state: &AppState) -> Result<(), ReceiverError> {
             parent.display()
         )));
     }
+    // Reset delivery markers *before* touching the file: the next DBF pass
+    // then regenerates the full file from the durable store (deliberate
+    // clear-then-regenerate behavior). Marker reset followed by a failed file
+    // clear is harmless — the regenerate replaces the file anyway — whereas
+    // the reverse order could leave an emptied file that no pass repopulates
+    // until restart.
+    {
+        let db = state.db.lock().await;
+        db.reset_dbf_delivered_all()
+            .map_err(|e| ReceiverError::Internal(format!("Failed to reset DBF markers: {e}")))?;
+    }
     tokio::task::spawn_blocking(move || crate::dbf_writer::clear_dbf(&path))
         .await
         .map_err(|e| ReceiverError::Internal(format!("Failed to clear DBF: {e}")))?
         .map_err(|e| ReceiverError::Internal(format!("Failed to clear DBF: {e}")))?;
-    // Reset delivery markers so the next DBF pass regenerates the full file
-    // from the durable store. With incremental appends the old "silent
-    // resurrection on the next rebuild" no longer happens implicitly, so make
-    // it deliberate — clear-then-regenerate is the documented behavior.
-    let db = state.db.lock().await;
-    db.reset_dbf_delivered_all()
-        .map_err(|e| ReceiverError::Internal(format!("Failed to reset DBF markers: {e}")))?;
     Ok(())
 }
 

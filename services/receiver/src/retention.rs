@@ -170,20 +170,31 @@ async fn run_retention_pass(
     config: &RetentionConfig,
 ) -> Result<(), crate::db::DbError> {
     // Stream list + global toggles from the cold connection (tiny queries).
-    let (stream_ids, dbf_enabled, announcer_enabled, announcer_streams) = {
+    // `dbf_active` mirrors the DBF worker's per-stream eligibility rule
+    // (details resolvable, reader index <= 9): a stream the DBF worker never
+    // delivers must not carry a DBF floor, or its floor pins near 0 and the
+    // stream is silently never pruned.
+    let (streams, announcer_enabled, announcer_streams) = {
         let db = state.db.lock().await;
         let subs = db.load_stream_subscriptions()?;
         let dbf_enabled = db.load_dbf_config().map(|c| c.enabled).unwrap_or(false);
         let announcer_enabled = db.load_announcer_enabled().unwrap_or(false);
         let announcer_streams = db.load_announcer_publish_streams().unwrap_or_default();
-        (
-            subs.into_iter()
-                .map(|sub| sub.stream_id)
-                .collect::<Vec<_>>(),
-            dbf_enabled,
-            announcer_enabled,
-            announcer_streams,
-        )
+        let streams = subs
+            .into_iter()
+            .map(|sub| {
+                let dbf_active = dbf_enabled
+                    && matches!(
+                        db.load_subscription_dbf_details(
+                            &sub.forwarder_endpoint_id,
+                            &sub.stream_id,
+                        ),
+                        Ok(Some((idx, _))) if idx <= 9
+                    );
+                (sub.stream_id, dbf_active)
+            })
+            .collect::<Vec<_>>();
+        (streams, announcer_enabled, announcer_streams)
     };
 
     let now_ms = i64::try_from(
@@ -193,7 +204,7 @@ async fn run_retention_pass(
             .unwrap_or(0),
     )
     .unwrap_or(i64::MAX);
-    for stream_id in stream_ids {
+    for (stream_id, dbf_active) in streams {
         let announcer_active =
             announcer_enabled && announcer_streams.iter().any(|s| s == &stream_id);
         let proxy_floor = min_proxy_cursor(&state.proxy_consumer_cursors, &stream_id);
@@ -209,7 +220,7 @@ async fn run_retention_pass(
                 let Some(max_seq) = db.max_stream_seq(&sid)? else {
                     return Ok(None); // nothing stored, nothing to prune
                 };
-                let dbf_floor = if dbf_enabled {
+                let dbf_floor = if dbf_active {
                     let processed = db.max_dbf_delivered_seq(&sid)?.unwrap_or(0);
                     let pending_bound = db
                         .min_undelivered_dbf_seq(&sid)?
@@ -367,6 +378,69 @@ mod tests {
         assert_eq!(prune_target(&f, 350_000, 400_000, 0), Some(350_000));
         // Nothing new below the watermark.
         assert_eq!(prune_target(&f, 350_000, 400_000, 350_000), None);
+    }
+
+    #[tokio::test]
+    async fn retention_pass_prunes_end_to_end() {
+        // Full pipeline: floor gathering via the read pool + prune through
+        // the writer, against a real temp-file DB.
+        let (state, _shutdown_rx, _dir) = crate::control_api::AppState::new_for_test();
+        let stream_id = "127.0.0.1:10900";
+        {
+            let mut db = state.db.lock().await;
+            db.save_profile("http://server", "tok", "check-and-download", None)
+                .unwrap();
+            db.replace_stream_subscriptions(&[crate::db::StreamSubscription {
+                forwarder_endpoint_id: "fwd-ret".to_owned(),
+                stream_id: stream_id.to_owned(),
+                local_port_override: None,
+                event_type: crate::db::EventType::Finish,
+                forwarder_id: None,
+                reader_ip: Some(stream_id.to_owned()),
+            }])
+            .unwrap();
+            for seq in 1..=10 {
+                db.insert_received_event(&crate::db::ReceivedEventInsert {
+                    stream_id,
+                    seq,
+                    epoch: 1,
+                    raw_frame: b"frame",
+                    read_kind: "chip",
+                    reader_timestamp: None,
+                    received_unix_ms: 1_700_000_000_000 + seq,
+                    dbf_delivered_unix_ms: None,
+                    chip_id: None,
+                })
+                .unwrap();
+            }
+            db.jump_stream_cursor(stream_id, 10).unwrap();
+        }
+
+        // DBF + announcer disabled (profile defaults), no proxy consumers:
+        // the ack cursor and the safety window govern. Keep 3 rows, no age
+        // requirement (all rows are older than a zero-age cutoff).
+        let config = RetentionConfig {
+            retain_min_rows: 3,
+            retain_min_age_ms: 0,
+            interval: Duration::from_secs(60),
+            max_rows_per_pass: 20_000,
+        };
+        run_retention_pass(&state, &config).await.unwrap();
+
+        let db = state.db.lock().await;
+        let remaining: Vec<i64> = db
+            .load_received_events(stream_id)
+            .unwrap()
+            .iter()
+            .map(|event| event.seq)
+            .collect();
+        assert_eq!(remaining, vec![8, 9, 10], "safety window keeps 3 rows");
+        assert_eq!(db.load_pruned_through_seq(stream_id).unwrap(), 7);
+        assert_eq!(
+            db.load_stream_cursor(stream_id).unwrap(),
+            10,
+            "pruning never touches the ack cursor"
+        );
     }
 
     #[test]

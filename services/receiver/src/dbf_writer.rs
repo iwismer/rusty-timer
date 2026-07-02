@@ -604,6 +604,11 @@ fn mark_dbf_delivered_or_confirm(
 /// * **Reader timestamp is authoritative.** The DBF TIME/DAYCODE fields are
 ///   derived from the reader timestamp embedded in the frame, never from the
 ///   receiver receipt time (`received_unix_ms`).
+/// Test-only since the single cross-stream worker (`run_dbf_delivery_pass`)
+/// replaced per-stream delivery: this rebuilds one stream's rows into the
+/// whole file (clobbering other streams') with an O(n²) pending filter. Kept
+/// for characterization tests of the legacy semantics; do not reuse.
+#[cfg(test)]
 pub fn deliver_durable_events_to_dbf(
     db: &Db,
     stream_id: &str,
@@ -649,6 +654,9 @@ pub fn deliver_durable_events_to_dbf(
 /// durable store is the source of truth, so this can recover a lost or corrupt
 /// DBF file without first clearing the live DBF. Returns the number of records
 /// written.
+/// Test-only single-stream regenerate (see `deliver_durable_events_to_dbf`);
+/// production regeneration is the cross-stream `regenerate_dbf_cross_stream`.
+#[cfg(test)]
 pub fn regenerate_dbf_from_received_events(
     db: &Db,
     stream_id: &str,
@@ -811,6 +819,11 @@ pub fn run_dbf_delivery_pass(
 /// Replace the DBF file with **every subscribed stream's** deliverable rows
 /// (ordered chronologically) and re-mark all rows delivered. Returns each
 /// stream's max processed seq (the new append points).
+///
+/// Memory-bounded: rows are loaded in seq-ordered chunks and immediately
+/// serialized to their fixed 40-byte DBF form, so the in-memory working set
+/// is ~64 bytes/row (not raw frames + field strings) even at 1M+ retained
+/// rows on the low-RAM target hardware.
 fn regenerate_dbf_cross_stream(
     db: &mut Db,
     streams: &[DbfStreamSpec],
@@ -818,47 +831,106 @@ fn regenerate_dbf_cross_stream(
     delivered_unix_ms: i64,
 ) -> Result<std::collections::HashMap<String, i64>, DbError> {
     with_durable_dbf_lock(path, || {
-        let mut all: Vec<(i64, usize, i64, DbfRecord)> = Vec::new();
+        let mut all: Vec<(i64, usize, i64, [u8; RECORD_DATA_LEN])> = Vec::new();
         let mut append_points = std::collections::HashMap::new();
-        let mut processed_per_stream: Vec<(String, Vec<i64>)> = Vec::new();
         for (stream_idx, spec) in streams.iter().enumerate() {
-            let events = db.load_received_events(&spec.stream_id)?;
-            let mut processed = Vec::with_capacity(events.len());
-            for event in &events {
-                match map_to_dbf_fields(&event.raw_frame, spec.event_type, spec.reader_index) {
-                    Ok(record) => {
-                        all.push((event.received_unix_ms, stream_idx, event.seq, record));
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            stream_id = %event.stream_id,
-                            seq = event.seq,
-                            error = %e,
-                            "skipping undeliverable durable frame during DBF regenerate"
-                        );
-                    }
+            let mut after_seq = 0i64;
+            let mut max_seq = 0i64;
+            loop {
+                let events = db.load_received_events_after_limited(
+                    &spec.stream_id,
+                    after_seq,
+                    DBF_APPEND_CHUNK_ROWS,
+                )?;
+                if events.is_empty() {
+                    break;
                 }
-                processed.push(event.seq);
+                let fetched = events.len();
+                after_seq = events.last().map_or(after_seq, |event| event.seq);
+                for event in &events {
+                    match map_to_dbf_fields(&event.raw_frame, spec.event_type, spec.reader_index) {
+                        Ok(record) => {
+                            all.push((
+                                event.received_unix_ms,
+                                stream_idx,
+                                event.seq,
+                                serialize_record(&record),
+                            ));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                stream_id = %event.stream_id,
+                                seq = event.seq,
+                                error = %e,
+                                "skipping undeliverable durable frame during DBF regenerate"
+                            );
+                        }
+                    }
+                    max_seq = max_seq.max(event.seq);
+                }
+                if fetched < DBF_APPEND_CHUNK_ROWS {
+                    break;
+                }
             }
-            let max_seq = processed.iter().copied().max().unwrap_or(0);
             append_points.insert(spec.stream_id.clone(), max_seq);
-            processed_per_stream.push((spec.stream_id.clone(), processed));
         }
         all.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
-        let records: Vec<DbfRecord> = all.into_iter().map(|(_, _, _, record)| record).collect();
         tracing::info!(
-            records = records.len(),
+            records = all.len(),
             streams = streams.len(),
             path = %path.display(),
             "regenerating DBF from durable store (cross-stream)"
         );
-        write_replacement_dbf(path, &records)?;
-        for (stream_id, processed) in processed_per_stream {
-            db.reset_dbf_delivered(&stream_id)?;
-            db.mark_dbf_delivered_batch(&stream_id, &processed, delivered_unix_ms)?;
+        write_replacement_dbf_bytes(path, all.len(), all.iter().map(|(_, _, _, bytes)| bytes))?;
+        for spec in streams {
+            // Every stored row was just written (or logged as undeliverable):
+            // mark the whole stream in one statement.
+            db.mark_all_dbf_delivered(&spec.stream_id, delivered_unix_ms)?;
         }
         Ok(append_points)
     })
+}
+
+/// Atomically replace the DBF at `path` from pre-serialized 40-byte records:
+/// template header (record count patched) + records + EOF marker, written to
+/// a temp file, synced, and renamed into place.
+fn write_replacement_dbf_bytes<'a>(
+    path: &Path,
+    count: usize,
+    records: impl Iterator<Item = &'a [u8; RECORD_DATA_LEN]>,
+) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temp = tempfile::Builder::new()
+        .prefix(".dbf-")
+        .suffix(".tmp")
+        .tempfile_in(parent)?;
+    {
+        let header_size =
+            u16::from_le_bytes([DBF_TEMPLATE_BYTES[8], DBF_TEMPLATE_BYTES[9]]) as usize;
+        if header_size > DBF_TEMPLATE_BYTES.len() {
+            return Err(std::io::Error::other("DBF template header out of range"));
+        }
+        let mut header = DBF_TEMPLATE_BYTES[..header_size].to_vec();
+        let count =
+            u32::try_from(count).map_err(|_| std::io::Error::other("DBF record count overflow"))?;
+        header[4..8].copy_from_slice(&count.to_le_bytes());
+        let mut writer = std::io::BufWriter::new(temp.as_file_mut());
+        writer.write_all(&header)?;
+        for record in records {
+            writer.write_all(&[DBF_RECORD_NOT_DELETED])?;
+            writer.write_all(record)?;
+        }
+        writer.write_all(&[DBF_EOF_MARKER])?;
+        writer.flush()?;
+    }
+    temp.as_file_mut().sync_all()?;
+    let persisted = temp.persist(path).map_err(|e| e.error)?;
+    persisted.sync_all()?;
+    sync_parent_dir(path)?;
+    Ok(())
 }
 
 /// Maximum consecutive I/O failures before the writer gives up and stops.
@@ -1157,6 +1229,57 @@ mod tests {
             dbf_records(&dbf_path).len(),
             3,
             "regenerate after one stream's reset keeps all streams' rows exactly once"
+        );
+    }
+
+    #[test]
+    fn mark_failure_recovery_regenerates_without_duplicates() {
+        // B2 regression: a pass can append rows to the file and then fail to
+        // mark them delivered (e.g. SQLITE_BUSY). The worker's error path
+        // forces `regenerated = false`; the retry pass must then produce the
+        // exact row set via the idempotent cross-stream regenerate instead of
+        // re-appending duplicates.
+        let dir = tempfile::tempdir().unwrap();
+        let dbf_path = dir.path().join("out.dbf");
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_id = "s-mark-fail";
+        let raw = sample_raw_frame();
+        insert_durable_event(&db, stream_id, 1, &raw, 1_700_000_000_000);
+        insert_durable_event(&db, stream_id, 2, &raw, 1_700_000_000_001);
+
+        let specs = vec![spec(stream_id, 0)];
+        let mut state = DbfPassState::default();
+        run_dbf_delivery_pass(&mut db, &specs, &dbf_path, &mut state, 1_700_000_010_000).unwrap();
+        assert_eq!(dbf_records(&dbf_path).len(), 2);
+
+        // Simulate "append succeeded, marking failed": rows 3..=4 land in the
+        // file but stay unmarked and the pass state is unchanged.
+        insert_durable_event(&db, stream_id, 3, &raw, 1_700_000_000_002);
+        insert_durable_event(&db, stream_id, 4, &raw, 1_700_000_000_003);
+        let (records, _) = collect_records_and_processed(
+            &db.load_undelivered_received_events(stream_id).unwrap(),
+            EventType::Finish,
+            0,
+        );
+        append_records(&dbf_path, &records).unwrap();
+        assert_eq!(
+            dbf_records(&dbf_path).len(),
+            4,
+            "append landed before the failure"
+        );
+
+        // The worker error path forces a regenerate on the retry tick.
+        state.regenerated = false;
+        run_dbf_delivery_pass(&mut db, &specs, &dbf_path, &mut state, 1_700_000_020_000).unwrap();
+        assert_eq!(
+            dbf_records(&dbf_path).len(),
+            4,
+            "retry must regenerate the exact row set, not append duplicates"
+        );
+        assert!(
+            db.load_undelivered_received_events(stream_id)
+                .unwrap()
+                .is_empty()
         );
     }
 

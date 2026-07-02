@@ -382,48 +382,65 @@ pub fn push_announcer_rows(
         }
     }
 
-    let pending = db.load_unpushed_announcer_events(stream_id)?;
-    if pending.is_empty() {
-        return Ok(PushOutcome::Pushed { rows: 0 });
-    }
-
-    let rows: Vec<AnnouncerRow> = pending
-        .iter()
-        .map(|event| {
-            let chip_id = chip_id_from_raw_frame(&event.raw_frame);
-            let resolved = resolver.resolve(&chip_id);
-            AnnouncerRow {
-                stream_id: event.stream_id.clone(),
-                seq: event.seq,
-                received_unix_ms: event.received_unix_ms,
-                announcer_source_generation: generation,
-                chip_id,
-                bib: resolved.as_ref().map(|p| p.bib.clone()),
-                name: resolved.as_ref().and_then(|p| p.name.clone()),
-                division: resolved.and_then(|p| p.division),
-            }
-        })
-        .collect();
-
-    if let Some(fenced) = db.load_announcer_fence(stream_id)?
-        && generation < fenced
-    {
-        return Ok(PushOutcome::StaleGeneration {
-            fenced,
-            attempted: generation,
-        });
-    }
-
+    // Drain unpushed rows in bounded chunks so enabling the announcer
+    // against a large backlog never materializes every row (with raw
+    // frames) in memory at once.
+    const ANNOUNCER_PUSH_CHUNK_ROWS: usize = 4096;
     let max_list_size = db.load_announcer_max_list_size()?;
-    client.push(&rows, max_list_size)?;
+    let mut total_marked = 0usize;
+    loop {
+        let pending =
+            db.load_unpushed_announcer_events_limited(stream_id, ANNOUNCER_PUSH_CHUNK_ROWS)?;
+        if pending.is_empty() {
+            break;
+        }
+        let fetched = pending.len();
 
-    // Only mark after a successful push, so a failed transport leaves rows
-    // pending for a later retry (at-least-once + idempotency key downstream).
-    // One transaction for the whole pass — per-row autocommits blew the fsync
-    // budget on slow disks whenever the announcer was enabled.
-    let seqs: Vec<i64> = pending.iter().map(|event| event.seq).collect();
-    let marked = db.mark_announcer_pushed_batch(stream_id, &seqs, pushed_unix_ms)?;
-    Ok(PushOutcome::Pushed { rows: marked })
+        let rows: Vec<AnnouncerRow> = pending
+            .iter()
+            .map(|event| {
+                let chip_id = chip_id_from_raw_frame(&event.raw_frame);
+                let resolved = resolver.resolve(&chip_id);
+                AnnouncerRow {
+                    stream_id: event.stream_id.clone(),
+                    seq: event.seq,
+                    received_unix_ms: event.received_unix_ms,
+                    announcer_source_generation: generation,
+                    chip_id,
+                    bib: resolved.as_ref().map(|p| p.bib.clone()),
+                    name: resolved.as_ref().and_then(|p| p.name.clone()),
+                    division: resolved.and_then(|p| p.division),
+                }
+            })
+            .collect();
+
+        // Re-check the fence per chunk (a newer generation can take over
+        // while this pass runs); rows already pushed under the then-current
+        // generation stay marked — same at-least-once semantics as across
+        // passes.
+        if let Some(fenced) = db.load_announcer_fence(stream_id)?
+            && generation < fenced
+        {
+            return Ok(PushOutcome::StaleGeneration {
+                fenced,
+                attempted: generation,
+            });
+        }
+
+        client.push(&rows, max_list_size)?;
+
+        // Only mark after a successful push, so a failed transport leaves
+        // rows pending for a later retry (at-least-once + idempotency key
+        // downstream). One transaction per chunk — per-row autocommits blew
+        // the fsync budget on slow disks whenever the announcer was enabled.
+        let seqs: Vec<i64> = pending.iter().map(|event| event.seq).collect();
+        total_marked += db.mark_announcer_pushed_batch(stream_id, &seqs, pushed_unix_ms)?;
+
+        if fetched < ANNOUNCER_PUSH_CHUNK_ROWS {
+            break;
+        }
+    }
+    Ok(PushOutcome::Pushed { rows: total_marked })
 }
 
 #[cfg(test)]

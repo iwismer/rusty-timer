@@ -58,14 +58,31 @@ impl ReadPool {
             .expect("read pool mutex poisoned")
             .pop()
             .expect("semaphore permit guarantees an idle connection");
-        let pool = Arc::clone(self);
+        // Return the connection on drop, so a panicking closure cannot leak
+        // it and break the permit⇔connection accounting (the next `run`
+        // would otherwise panic on an empty pool despite holding a permit).
+        struct ReturnOnDrop {
+            pool: Arc<ReadPool>,
+            conn: Option<Db>,
+        }
+        impl Drop for ReturnOnDrop {
+            fn drop(&mut self) {
+                if let Some(conn) = self.conn.take() {
+                    self.pool
+                        .conns
+                        .lock()
+                        .expect("read pool mutex poisoned")
+                        .push(conn);
+                }
+            }
+        }
+        let guard = ReturnOnDrop {
+            pool: Arc::clone(self),
+            conn: Some(conn),
+        };
         let result = tokio::task::spawn_blocking(move || {
-            let out = f(&conn);
-            pool.conns
-                .lock()
-                .expect("read pool mutex poisoned")
-                .push(conn);
-            out
+            let guard = guard;
+            f(guard.conn.as_ref().expect("connection present until drop"))
         })
         .await
         .map_err(|e| DbError::IntegrityCheckFailed(format!("read task join error: {e}")))?;
@@ -185,6 +202,27 @@ mod tests {
             .unwrap()
             .len();
         assert_eq!(after, 2, "committed row visible to subsequent reads");
+    }
+
+    #[tokio::test]
+    async fn panicking_read_closure_does_not_leak_the_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pool-panic.sqlite3");
+        drop(Db::open(&path).unwrap());
+        let pool = ReadPool::open(&path, 1).unwrap();
+
+        let panicked = pool
+            .run(|_db| -> DbResult<()> { panic!("boom in read closure") })
+            .await;
+        assert!(panicked.is_err(), "the panic surfaces as a join error");
+
+        // The single pooled connection was returned by the drop guard: the
+        // next read must succeed instead of panicking on an empty pool.
+        let rows = pool
+            .run(|db| db.load_received_events("s1"))
+            .await
+            .expect("pool usable after a panicking closure");
+        assert!(rows.is_empty());
     }
 
     #[tokio::test]

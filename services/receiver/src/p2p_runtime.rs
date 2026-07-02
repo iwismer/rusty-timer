@@ -1359,7 +1359,12 @@ async fn run_ui_projection_worker(
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         // Hint channel overflowed; facts were lost. Re-seed
-                        // from the durable store on the next tick.
+                        // from the durable store on the next tick. Resubscribe
+                        // first so hints still queued in the channel (whose
+                        // rows the rebuild query will already include) are not
+                        // folded a second time on top of the rebuilt state.
+                        hint_rx = hint_rx.resubscribe();
+                        pending_counts.clear();
                         needs_rebuild = true;
                         dirty = true;
                     }
@@ -1470,9 +1475,17 @@ async fn emit_stream_projection(
         });
 
     let last_read = if let Some(chip_id) = proj.last_chip_id.clone() {
+        // Resolve under the read guard — cloning the whole participant map
+        // per stream per tick is needless work at scale.
         let resolved = {
-            let snapshot = state.chip_lookup.read().await.clone();
-            SnapshotResolver { snapshot }.resolve(&chip_id)
+            let lookup = state.chip_lookup.read().await;
+            lookup.values().find_map(|chips| {
+                chips.get(&chip_id).map(|entry| ResolvedParticipant {
+                    bib: entry.bib.clone(),
+                    name: entry.name.clone(),
+                    division: entry.division.clone(),
+                })
+            })
         };
         Some(crate::ui_events::LastRead {
             forwarder_id: ui_key.forwarder_id.clone(),
@@ -1679,12 +1692,20 @@ async fn run_shared_dbf_pass(
     .await;
     match result {
         Ok((state_back, Ok(()))) => *pass_state = state_back,
-        Ok((state_back, Err(e))) => {
-            warn!(error = %e, "DBF delivery pass failed; will retry next tick");
+        Ok((mut state_back, Err(e))) => {
+            warn!(error = %e, "DBF delivery pass failed; regenerating on the next tick");
+            // A pass can fail *between* a successful file append and the
+            // delivery marking (e.g. SQLITE_BUSY past the timeout). Retrying
+            // incrementally would append the same rows again — duplicate chip
+            // reads handed to Race Director. Force the idempotent cross-stream
+            // regenerate instead, exactly like the startup crash
+            // reconciliation.
+            state_back.regenerated = false;
             *pass_state = state_back;
         }
         Err(e) => {
             warn!(error = %e, "DBF delivery task failed");
+            pass_state.regenerated = false;
         }
     }
     (true, interval_ms)
