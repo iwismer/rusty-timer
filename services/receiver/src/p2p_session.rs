@@ -425,12 +425,18 @@ pub struct EventFact {
 /// `(stream_id, seq)`), then advance and return the contiguous durable cursor
 /// together with the facts for the rows actually inserted.
 ///
+/// The whole batch — inserts, conflict checks, and the cursor advance — runs
+/// in **one `IMMEDIATE` transaction**: one fsync per `EventBatch` instead of
+/// one per row. A conflicting duplicate anywhere in the batch rolls the whole
+/// batch back (nothing persists, nothing is acked); at-least-once redelivery
+/// covers the rolled-back rows.
+///
 /// Every record's `stream_id` is validated against the subscribed stream
 /// *before* any insertion, so a batch carrying a foreign record persists
 /// nothing. A duplicate `(stream_id, seq)` whose immutable payload differs from
 /// the stored row is rejected as [`P2pSessionError::ConflictingDuplicate`].
 fn persist_batch(
-    db: &Db,
+    db: &mut Db,
     stream_id: &str,
     batch: &EventBatch,
 ) -> Result<(i64, Vec<EventFact>), P2pSessionError> {
@@ -444,6 +450,7 @@ fn persist_batch(
 
     let received_default = now_unix_ms();
     let mut facts = Vec::with_capacity(batch.records.len());
+    let tx = db.transaction()?;
     for (record, seq, epoch) in records {
         let reader_timestamp = if record.reader_timestamp == 0 {
             None
@@ -465,7 +472,7 @@ fn persist_batch(
             received_unix_ms,
             dbf_delivered_unix_ms: None,
         };
-        if db.insert_received_event(&insert)? {
+        if crate::db::insert_received_event_conn(&tx, &insert)? {
             // Parse the chip id once at persist time so downstream projections
             // never need to re-read or re-parse the raw frame.
             facts.push(EventFact {
@@ -482,7 +489,8 @@ fn persist_batch(
             // non-zero received_unix_ms is part of that payload because it is
             // persisted and used as the announcer ordering key; zero means the
             // forwarder omitted it and the receiver supplied a local default.
-            if let Some(existing) = db.load_received_event(stream_id, insert.seq)? {
+            if let Some(existing) = crate::db::load_received_event_conn(&tx, stream_id, insert.seq)?
+            {
                 let received_unix_ms_conflicts = record.received_unix_ms != 0
                     && existing.received_unix_ms != insert.received_unix_ms;
                 let conflicts = existing.epoch != insert.epoch
@@ -491,6 +499,7 @@ fn persist_batch(
                     || existing.reader_timestamp.as_deref() != insert.reader_timestamp
                     || received_unix_ms_conflicts;
                 if conflicts {
+                    // Dropping `tx` rolls back every insert in this batch.
                     return Err(P2pSessionError::ConflictingDuplicate {
                         stream_id: stream_id.to_owned(),
                         seq: insert.seq,
@@ -499,12 +508,14 @@ fn persist_batch(
             }
         }
     }
-    Ok((db.advance_cursor_contiguous_prefix(stream_id)?, facts))
+    let through_seq = crate::db::advance_cursor_contiguous_prefix_conn(&tx, stream_id)?;
+    tx.commit().map_err(crate::db::DbError::from)?;
+    Ok((through_seq, facts))
 }
 
-/// Record a gap marker and jump the cursor past the unavailable history,
-/// returning the resulting durable cursor.
-fn persist_gap(db: &Db, stream_id: &str, gap: &GapNotice) -> Result<i64, P2pSessionError> {
+/// Record a gap marker and jump the cursor past the unavailable history in one
+/// transaction, returning the resulting durable cursor.
+fn persist_gap(db: &mut Db, stream_id: &str, gap: &GapNotice) -> Result<i64, P2pSessionError> {
     check_stream_id(stream_id, &gap.stream_id)?;
     let requested_after_seq = u64_to_i64(gap.requested_after_seq, "gap.requested_after_seq")?;
     let earliest_available_seq =
@@ -518,10 +529,13 @@ fn persist_gap(db: &Db, stream_id: &str, gap: &GapNotice) -> Result<i64, P2pSess
         reason: &gap.reason,
         created_unix_ms: now_unix_ms(),
     };
-    db.save_gap_marker(&marker)?;
+    let tx = db.transaction()?;
+    crate::db::save_gap_marker_conn(&tx, &marker)?;
     let jump_to = earliest_available_seq.saturating_sub(1);
-    db.jump_stream_cursor(stream_id, jump_to)?;
-    Ok(db.load_stream_cursor(stream_id)?)
+    crate::db::jump_stream_cursor_conn(&tx, stream_id, jump_to)?;
+    let cursor = crate::db::load_stream_cursor_conn(&tx, stream_id)?;
+    tx.commit().map_err(crate::db::DbError::from)?;
+    Ok(cursor)
 }
 
 async fn send_ack(
@@ -622,8 +636,8 @@ pub async fn run_data_subscription_with_hint(
                 // cursor, then ack only through that durable cursor. The lock is
                 // released before the ack await.
                 let (through_seq, facts) = {
-                    let db = db.lock().await;
-                    persist_batch(&db, stream_id, &batch)
+                    let mut db = db.lock().await;
+                    persist_batch(&mut db, stream_id, &batch)
                 }?;
                 // Post-commit durable hint: rows are durable before the ack.
                 if let Some(tx) = durable_hint_tx {
@@ -639,8 +653,8 @@ pub async fn run_data_subscription_with_hint(
                 // then ack the jumped cursor so the forwarder will not resend
                 // the now-skipped seqs.
                 let through_seq = {
-                    let db = db.lock().await;
-                    persist_gap(&db, stream_id, &gap)
+                    let mut db = db.lock().await;
+                    persist_gap(&mut db, stream_id, &gap)
                 }?;
                 if let Some(tx) = durable_hint_tx {
                     let _ = tx.send(DurableBatch {
@@ -1279,6 +1293,60 @@ mod tests {
         })
         .await
         .expect("conflicting_duplicate_seq_rejected timed out");
+    }
+
+    #[tokio::test]
+    async fn batch_persists_atomically() {
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            let stream_id = stream_id();
+            let mut script = base_script();
+            // Record 3 of 5 is a conflicting duplicate of record 1 (same seq,
+            // divergent payload). The whole batch must roll back: zero rows
+            // persisted (previously rows 1-2 committed before the conflict was
+            // detected) and no ack sent. At-least-once redelivery covers the
+            // rolled-back rows.
+            script.batches = vec![EventBatch {
+                records: vec![
+                    record_with(1, "one"),
+                    record_with(2, "two"),
+                    record_with(1, "tampered"),
+                    record_with(4, "four"),
+                    record_with(5, "five"),
+                ],
+                replay: false,
+            }];
+
+            let forwarder = MockForwarderPeer::start([62; 32], script).await.unwrap();
+            let endpoint = test_endpoint(63).await;
+            let db = test_db();
+
+            let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
+                .await
+                .unwrap();
+            let result =
+                run_data_subscription(&session.connection, &db, stream_id, SubscribeMode::Replay)
+                    .await;
+
+            assert!(
+                matches!(
+                    result,
+                    Err(P2pSessionError::ConflictingDuplicate { seq: 1, .. })
+                ),
+                "the conflicting duplicate must abort the batch, got {result:?}"
+            );
+            let guard = db.lock().await;
+            assert!(
+                guard.load_received_events(stream_id).unwrap().is_empty(),
+                "a batch with a conflicting duplicate must persist nothing"
+            );
+            assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 0);
+            drop(guard);
+            assert!(forwarder.acks().is_empty());
+
+            forwarder.shutdown().await;
+        })
+        .await
+        .expect("batch_persists_atomically timed out");
     }
 
     #[tokio::test]

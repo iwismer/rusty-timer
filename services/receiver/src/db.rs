@@ -761,24 +761,20 @@ impl Db {
         Ok(())
     }
 
+    /// Begin an `IMMEDIATE` write transaction on the underlying connection.
+    ///
+    /// Used by the P2P persist path to make each `EventBatch` (inserts +
+    /// conflict checks + cursor advance) one atomic commit — one fsync per
+    /// batch instead of one per row. Run the row-level operations through the
+    /// `*_conn` free functions in this module.
+    pub fn transaction(&mut self) -> DbResult<rusqlite::Transaction<'_>> {
+        Ok(self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?)
+    }
+
     pub fn insert_received_event(&self, event: &ReceivedEventInsert<'_>) -> DbResult<bool> {
-        let changed = self.conn.execute(
-            "INSERT INTO received_events
-             (stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT (stream_id, seq) DO NOTHING",
-            rusqlite::params![
-                event.stream_id,
-                event.seq,
-                event.epoch,
-                event.raw_frame,
-                event.read_kind,
-                event.reader_timestamp,
-                event.received_unix_ms,
-                event.dbf_delivered_unix_ms,
-            ],
-        )?;
-        Ok(changed > 0)
+        insert_received_event_conn(&self.conn, event)
     }
 
     pub fn load_received_events(&self, stream_id: &str) -> DbResult<Vec<ReceivedEvent>> {
@@ -1022,16 +1018,7 @@ impl Db {
         stream_id: &str,
         seq: i64,
     ) -> DbResult<Option<ReceivedEvent>> {
-        self.conn
-            .query_row(
-                "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
-                 FROM received_events
-                 WHERE stream_id = ?1 AND seq = ?2",
-                rusqlite::params![stream_id, seq],
-                received_event_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
+        load_received_event_conn(&self.conn, stream_id, seq)
     }
 
     /// Read the current durable cursor (`last_seq`) for a P2P stream, or 0 when
@@ -1039,15 +1026,7 @@ impl Db {
     /// has been durably stored and acknowledged for `stream_id`; it is the
     /// `after_seq` a resuming `DataSubscribe` must request.
     pub fn load_stream_cursor(&self, stream_id: &str) -> DbResult<i64> {
-        let last_seq: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT last_seq FROM cursors WHERE stream_id = ?1",
-                rusqlite::params![stream_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(last_seq.unwrap_or(0))
+        load_stream_cursor_conn(&self.conn, stream_id)
     }
 
     /// Jump the durable cursor for `stream_id` forward to `last_seq`, used when a
@@ -1056,69 +1035,15 @@ impl Db {
     /// target at or below the current cursor is ignored so a late or duplicate
     /// gap notice cannot regress progress.
     pub fn jump_stream_cursor(&self, stream_id: &str, last_seq: i64) -> DbResult<()> {
-        self.conn.execute(
-            "INSERT INTO cursors (stream_id, last_seq) VALUES (?1, ?2)
-             ON CONFLICT (stream_id) DO UPDATE SET last_seq = excluded.last_seq
-             WHERE excluded.last_seq > cursors.last_seq",
-            rusqlite::params![stream_id, last_seq],
-        )?;
-        Ok(())
+        jump_stream_cursor_conn(&self.conn, stream_id, last_seq)
     }
 
     pub fn advance_cursor_contiguous_prefix(&self, stream_id: &str) -> DbResult<i64> {
-        let current: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT last_seq FROM cursors WHERE stream_id = ?1",
-                rusqlite::params![&stream_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let mut last_seq = current.unwrap_or(0);
-
-        let mut stmt = self.conn.prepare(
-            "SELECT seq FROM received_events WHERE stream_id = ?1 AND seq > ?2 ORDER BY seq",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![stream_id, last_seq], |r| {
-            r.get::<_, i64>(0)
-        })?;
-        for row in rows {
-            let seq = row?;
-            if seq == last_seq + 1 {
-                last_seq = seq;
-            } else if seq > last_seq + 1 {
-                break;
-            }
-        }
-
-        let updated = self.conn.execute(
-            "UPDATE cursors SET last_seq = ?2 WHERE stream_id = ?1 AND last_seq < ?2",
-            rusqlite::params![stream_id, last_seq],
-        )?;
-        if updated == 0 && current.is_none() {
-            self.conn.execute(
-                "INSERT INTO cursors (stream_id, last_seq) VALUES (?1, ?2)",
-                rusqlite::params![stream_id, last_seq],
-            )?;
-        }
-        Ok(last_seq)
+        advance_cursor_contiguous_prefix_conn(&self.conn, stream_id)
     }
 
     pub fn save_gap_marker(&self, marker: &GapMarkerInsert<'_>) -> DbResult<()> {
-        self.conn.execute(
-            "INSERT INTO gap_markers
-             (stream_id, requested_after_seq, earliest_available_seq, latest_available_seq, reason, created_unix_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                marker.stream_id,
-                marker.requested_after_seq,
-                marker.earliest_available_seq,
-                marker.latest_available_seq,
-                marker.reason,
-                marker.created_unix_ms,
-            ],
-        )?;
-        Ok(())
+        save_gap_marker_conn(&self.conn, marker)
     }
 
     pub fn load_gap_markers(&self, stream_id: &str) -> DbResult<Vec<GapMarker>> {
@@ -1719,6 +1644,124 @@ fn parse_event_type_column(raw: String, column: usize) -> rusqlite::Result<Event
 /// two user-provided strings while keeping the value human-readable in SQLite.
 fn legacy_cursor_stream_id(fwd: &str, ip: &str) -> String {
     format!("legacy:{fwd}\u{1f}{ip}")
+}
+
+/// Row-level operations usable both on a plain connection and inside a
+/// [`rusqlite::Transaction`] (which derefs to [`Connection`]). The P2P persist
+/// path runs these inside one `IMMEDIATE` transaction per `EventBatch`.
+pub fn insert_received_event_conn(
+    conn: &Connection,
+    event: &ReceivedEventInsert<'_>,
+) -> DbResult<bool> {
+    let changed = conn.execute(
+        "INSERT INTO received_events
+         (stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT (stream_id, seq) DO NOTHING",
+        rusqlite::params![
+            event.stream_id,
+            event.seq,
+            event.epoch,
+            event.raw_frame,
+            event.read_kind,
+            event.reader_timestamp,
+            event.received_unix_ms,
+            event.dbf_delivered_unix_ms,
+        ],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn load_received_event_conn(
+    conn: &Connection,
+    stream_id: &str,
+    seq: i64,
+) -> DbResult<Option<ReceivedEvent>> {
+    conn.query_row(
+        "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
+         FROM received_events
+         WHERE stream_id = ?1 AND seq = ?2",
+        rusqlite::params![stream_id, seq],
+        received_event_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn load_stream_cursor_conn(conn: &Connection, stream_id: &str) -> DbResult<i64> {
+    let last_seq: Option<i64> = conn
+        .query_row(
+            "SELECT last_seq FROM cursors WHERE stream_id = ?1",
+            rusqlite::params![stream_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(last_seq.unwrap_or(0))
+}
+
+pub fn jump_stream_cursor_conn(conn: &Connection, stream_id: &str, last_seq: i64) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO cursors (stream_id, last_seq) VALUES (?1, ?2)
+         ON CONFLICT (stream_id) DO UPDATE SET last_seq = excluded.last_seq
+         WHERE excluded.last_seq > cursors.last_seq",
+        rusqlite::params![stream_id, last_seq],
+    )?;
+    Ok(())
+}
+
+pub fn advance_cursor_contiguous_prefix_conn(conn: &Connection, stream_id: &str) -> DbResult<i64> {
+    let current: Option<i64> = conn
+        .query_row(
+            "SELECT last_seq FROM cursors WHERE stream_id = ?1",
+            rusqlite::params![&stream_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let mut last_seq = current.unwrap_or(0);
+
+    let mut stmt = conn.prepare(
+        "SELECT seq FROM received_events WHERE stream_id = ?1 AND seq > ?2 ORDER BY seq",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![stream_id, last_seq], |r| {
+        r.get::<_, i64>(0)
+    })?;
+    for row in rows {
+        let seq = row?;
+        if seq == last_seq + 1 {
+            last_seq = seq;
+        } else if seq > last_seq + 1 {
+            break;
+        }
+    }
+
+    let updated = conn.execute(
+        "UPDATE cursors SET last_seq = ?2 WHERE stream_id = ?1 AND last_seq < ?2",
+        rusqlite::params![stream_id, last_seq],
+    )?;
+    if updated == 0 && current.is_none() {
+        conn.execute(
+            "INSERT INTO cursors (stream_id, last_seq) VALUES (?1, ?2)",
+            rusqlite::params![stream_id, last_seq],
+        )?;
+    }
+    Ok(last_seq)
+}
+
+pub fn save_gap_marker_conn(conn: &Connection, marker: &GapMarkerInsert<'_>) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO gap_markers
+         (stream_id, requested_after_seq, earliest_available_seq, latest_available_seq, reason, created_unix_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            marker.stream_id,
+            marker.requested_after_seq,
+            marker.earliest_available_seq,
+            marker.latest_available_seq,
+            marker.reason,
+            marker.created_unix_ms,
+        ],
+    )?;
+    Ok(())
 }
 
 fn received_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReceivedEvent> {
