@@ -34,7 +34,7 @@
 //! * Announcer pushes run on a blocking task and resolve participants from a
 //!   snapshot of the in-memory chip lookup, searching across all forwarders.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,11 +59,12 @@ use crate::control_api::{
     AppState, DiscoveredForwarder, DiscoveredForwarders, DiscoveredStream,
     server_device_status_for_url,
 };
-use crate::db::{Db, ReceivedEvent, StreamSubscription};
+use crate::db::{Db, StreamSubscription};
 use crate::local_proxy::LocalProxy;
 use crate::p2p_forwarder::{ForwarderConnection, ForwarderDataStream};
 use crate::p2p_session::{BackoffConfig, DurableBatch, SessionStatusReporter};
 use crate::ports::{default_port, reader_addr_if_port_mappable};
+use crate::projection::StreamProjection;
 use crate::ui_events::ReceiverUiEvent;
 
 /// Capacity of each per-stream durable-hint broadcast channel.
@@ -1316,14 +1317,23 @@ fn resolve_local_port(sub: &StreamSubscription) -> Option<u16> {
         .or_else(|| ui_reader_ip(sub).as_deref().and_then(default_port))
 }
 
+/// How often the UI projection flushes dirty state to the UI event channel.
+const UI_PROJECTION_EMIT_INTERVAL: Duration = Duration::from_millis(250);
+
 async fn run_ui_projection_worker(
     state: Arc<AppState>,
-    stream_id: String,
+    _stream_id: String,
     ui_key: StreamKey,
     mut hint_rx: broadcast::Receiver<DurableBatch>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    project_stream_ui_state(&state, &stream_id, &ui_key).await;
+    let mut proj = StreamProjection::default();
+    // (epoch → seqs) folded since the last tick, mirrored into the shared
+    // `state.stream_counts` cache on emit.
+    let mut pending_counts: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut dirty = false;
+    let mut tick = tokio::time::interval(UI_PROJECTION_EMIT_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             biased;
@@ -1332,42 +1342,45 @@ async fn run_ui_projection_worker(
             }
             recv = hint_rx.recv() => {
                 match recv {
-                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                        project_stream_ui_state(&state, &stream_id, &ui_key).await;
+                    Ok(batch) => {
+                        // O(batch) fold; no DB access on the hot path.
+                        for fact in batch.inserted.iter() {
+                            proj.apply(fact);
+                            pending_counts.entry(fact.epoch).or_default().push(fact.seq);
+                        }
+                        if !batch.inserted.is_empty() {
+                            dirty = true;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        // Hint channel overflowed; facts were lost. The startup
+                        // rebuild path (Task 1.4) re-seeds from the DB.
+                        dirty = true;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
+            }
+            _ = tick.tick() => {
+                if !dirty {
+                    continue;
+                }
+                for (epoch, seqs) in pending_counts.drain() {
+                    state.stream_counts.record_batch(&ui_key, epoch, seqs);
+                }
+                emit_stream_projection(&state, &ui_key, &proj).await;
+                dirty = false;
             }
         }
     }
 }
 
-async fn project_stream_ui_state(state: &Arc<AppState>, stream_id: &str, ui_key: &StreamKey) {
-    let events = {
-        let db = state.db.lock().await;
-        match db.load_received_events(stream_id) {
-            Ok(events) => events,
-            Err(e) => {
-                warn!(error = %e, %stream_id, "failed to load P2P received events for UI projection");
-                return;
-            }
-        }
-    };
-    if events.is_empty() {
-        return;
-    }
-
-    let mut seqs_by_epoch: HashMap<i64, Vec<i64>> = HashMap::new();
-    for event in &events {
-        seqs_by_epoch
-            .entry(event.epoch)
-            .or_default()
-            .push(event.seq);
-    }
-    for (epoch, seqs) in seqs_by_epoch {
-        state.stream_counts.record_batch(ui_key, epoch, seqs);
-    }
-
+/// Emit the throttled UI events for one stream projection: counts, last read,
+/// metrics, and the streams snapshot.
+async fn emit_stream_projection(
+    state: &Arc<AppState>,
+    ui_key: &StreamKey,
+    proj: &StreamProjection,
+) {
     if let Some(counts) = state.stream_counts.get(ui_key) {
         let _ = state.ui_tx.send(ReceiverUiEvent::StreamCountsUpdated {
             updates: vec![crate::ui_events::StreamCountUpdate {
@@ -1379,8 +1392,7 @@ async fn project_stream_ui_state(state: &Arc<AppState>, stream_id: &str, ui_key:
         });
     }
 
-    if let Some(last) = events.last() {
-        let chip_id = crate::ui_events::chip_id_from_raw_frame(&last.raw_frame);
+    if let Some(chip_id) = proj.last_chip_id.clone() {
         let resolved = {
             let snapshot = state.chip_lookup.read().await.clone();
             SnapshotResolver { snapshot }.resolve(&chip_id)
@@ -1391,8 +1403,8 @@ async fn project_stream_ui_state(state: &Arc<AppState>, stream_id: &str, ui_key:
                 forwarder_id: ui_key.forwarder_id.clone(),
                 reader_ip: ui_key.reader_ip.clone(),
                 chip_id,
-                timestamp: unix_ms_to_rfc3339(last.received_unix_ms)
-                    .unwrap_or_else(|| last.received_unix_ms.to_string()),
+                timestamp: crate::ui_events::unix_ms_to_rfc3339(proj.max_received_unix_ms)
+                    .unwrap_or_else(|| proj.max_received_unix_ms.to_string()),
                 bib: resolved.as_ref().map(|participant| participant.bib.clone()),
                 name: resolved
                     .as_ref()
@@ -1401,57 +1413,12 @@ async fn project_stream_ui_state(state: &Arc<AppState>, stream_id: &str, ui_key:
             }));
     }
 
-    let metrics = stream_metrics_from_events(ui_key, &events);
+    let metrics = proj.metrics(ui_key, now_unix_ms());
     state.cache_stream_metrics(&metrics).await;
     let _ = state
         .ui_tx
         .send(ReceiverUiEvent::StreamMetricsUpdated(metrics));
     state.emit_streams_snapshot().await;
-}
-
-fn stream_metrics_from_events(
-    ui_key: &StreamKey,
-    events: &[ReceivedEvent],
-) -> crate::ui_events::StreamMetricsPayload {
-    let current_epoch = events.iter().map(|event| event.epoch).max();
-    let epoch_events = events
-        .iter()
-        .filter(|event| Some(event.epoch) == current_epoch)
-        .collect::<Vec<_>>();
-    let unique_chips = epoch_events
-        .iter()
-        .map(|event| crate::ui_events::chip_id_from_raw_frame(&event.raw_frame))
-        .collect::<HashSet<_>>()
-        .len();
-    let epoch_last_received_ms = epoch_events
-        .iter()
-        .map(|event| event.received_unix_ms)
-        .max();
-    let lag_ms = epoch_last_received_ms
-        .map(|last| u64::try_from(now_unix_ms().saturating_sub(last)).unwrap_or(0));
-
-    crate::ui_events::StreamMetricsPayload {
-        forwarder_id: ui_key.forwarder_id.clone(),
-        reader_ip: ui_key.reader_ip.clone(),
-        raw_count: i64::try_from(events.len()).unwrap_or(i64::MAX),
-        dedup_count: i64::try_from(events.len()).unwrap_or(i64::MAX),
-        retransmit_count: 0,
-        lag_ms,
-        epoch_raw_count: i64::try_from(epoch_events.len()).unwrap_or(i64::MAX),
-        epoch_dedup_count: i64::try_from(epoch_events.len()).unwrap_or(i64::MAX),
-        epoch_retransmit_count: 0,
-        unique_chips: i64::try_from(unique_chips).unwrap_or(i64::MAX),
-        epoch_last_received_at: epoch_last_received_ms.and_then(unix_ms_to_rfc3339),
-        epoch_lag_ms: lag_ms,
-    }
-}
-
-fn unix_ms_to_rfc3339(unix_ms: i64) -> Option<String> {
-    use chrono::TimeZone as _;
-    chrono::Utc
-        .timestamp_millis_opt(unix_ms)
-        .single()
-        .map(|dt| dt.to_rfc3339())
 }
 
 async fn run_dbf_worker(
@@ -2381,21 +2348,50 @@ mod tests {
         .unwrap();
     }
 
+    /// Feed facts through a hint channel into the projection worker and wait
+    /// for the throttled LastRead emit.
     async fn projected_last_read(
         state: &Arc<AppState>,
         stream_id: &str,
+        facts: Vec<crate::p2p_session::EventFact>,
     ) -> crate::ui_events::LastRead {
         let mut ui_rx = state.ui_tx.subscribe();
-        project_stream_ui_state(state, stream_id, &StreamKey::new("fwd-1", "10.0.0.1:10000")).await;
+        let through_seq = facts.iter().map(|fact| fact.seq).max().unwrap_or(0);
+        let (hint_tx, hint_rx) = broadcast::channel::<DurableBatch>(16);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let worker = tokio::spawn(run_ui_projection_worker(
+            Arc::clone(state),
+            stream_id.to_owned(),
+            StreamKey::new("fwd-1", "10.0.0.1:10000"),
+            hint_rx,
+            shutdown_rx,
+        ));
+        hint_tx
+            .send(DurableBatch {
+                through_seq,
+                inserted: std::sync::Arc::new(facts),
+            })
+            .unwrap();
 
-        while let Ok(Ok(event)) =
-            tokio::time::timeout(Duration::from_millis(25), ui_rx.recv()).await
-        {
+        let mut last_read = None;
+        while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(2), ui_rx.recv()).await {
             if let ReceiverUiEvent::LastRead(read) = event {
-                return read;
+                last_read = Some(read);
+                break;
             }
         }
-        panic!("last read event");
+        let _ = shutdown_tx.send(true);
+        let _ = worker.await;
+        last_read.expect("last read event")
+    }
+
+    fn chip_fact(seq: i64, received_unix_ms: i64) -> crate::p2p_session::EventFact {
+        crate::p2p_session::EventFact {
+            seq,
+            epoch: 1,
+            received_unix_ms,
+            chip_id: "000000012345".to_owned(),
+        }
     }
 
     #[tokio::test]
@@ -2407,12 +2403,9 @@ mod tests {
         crate::control_api::import_chips(&state, "42,000000012345\n".to_owned())
             .await
             .unwrap();
-        {
-            let db = state.db.lock().await;
-            insert_chip_event(&db, "stream-a", 1, 1_700_000_000_123);
-        }
 
-        let read = projected_last_read(&state, "stream-a").await;
+        let read =
+            projected_last_read(&state, "stream-a", vec![chip_fact(1, 1_700_000_000_123)]).await;
         assert_eq!(read.chip_id, "000000012345");
         assert_eq!(read.bib.as_deref(), Some("42"));
         assert_eq!(read.name.as_deref(), Some("Ada Lovelace"));
@@ -2424,12 +2417,9 @@ mod tests {
         crate::control_api::import_chips(&state, "1488,000000012345\n".to_owned())
             .await
             .unwrap();
-        {
-            let db = state.db.lock().await;
-            insert_chip_event(&db, "stream-a", 1, 1_700_000_000_123);
-        }
 
-        let read = projected_last_read(&state, "stream-a").await;
+        let read =
+            projected_last_read(&state, "stream-a", vec![chip_fact(1, 1_700_000_000_123)]).await;
         assert_eq!(read.chip_id, "000000012345");
         assert_eq!(read.bib.as_deref(), Some("1488"));
         assert_eq!(read.name, None);
