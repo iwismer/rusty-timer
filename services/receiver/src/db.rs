@@ -1067,7 +1067,26 @@ impl Db {
     }
 
     fn apply_pragmas(&self) -> DbResult<()> {
-        self.conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=1000; PRAGMA foreign_keys=ON;")?;
+        // `synchronous=FULL` is a durability requirement, not a tunable: the
+        // receiver acks each EventBatch only after the commit, and the
+        // forwarder prunes acked rows. With WAL + `synchronous=NORMAL` a commit
+        // does NOT fsync, so a power loss could silently lose rows that were
+        // already acked and pruned upstream — unrecoverable data loss. Do not
+        // "optimize" this to NORMAL.
+        //
+        // The remaining pragmas target the deployment hardware (old 2-core
+        // Windows laptops with slow disks): a generous busy_timeout so
+        // cross-connection writes ride out group commits instead of failing,
+        // a 16 MiB page cache, and in-memory temp tables.
+        self.conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=FULL;
+             PRAGMA wal_autocheckpoint=1000;
+             PRAGMA foreign_keys=ON;
+             PRAGMA busy_timeout=10000;
+             PRAGMA cache_size=-16384;
+             PRAGMA temp_store=MEMORY;",
+        )?;
         Ok(())
     }
     fn apply_schema(&self) -> DbResult<()> {
