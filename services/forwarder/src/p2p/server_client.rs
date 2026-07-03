@@ -760,6 +760,9 @@ mod tests {
         Ok(())
     }
 
+    // Unix-only: the failure injection relies on a read-only cache directory,
+    // which does not deny writes on Windows.
+    #[cfg(unix)]
     #[tokio::test]
     async fn pushed_apply_failure_triggers_prompt_poll_retry() -> TestResult {
         #[cfg(unix)]
