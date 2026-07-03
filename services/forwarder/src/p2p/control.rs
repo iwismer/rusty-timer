@@ -695,6 +695,10 @@ async fn run_control_loop(
                                 continue;
                             }
 
+                            // When control.allow_remote_config is false, CAP_REMOTE_CONFIG is
+                            // never advertised, so this negotiated-capability gate fires before
+                            // the handler's disabled check. The handler check remains defense in
+                            // depth.
                             let remote_config = Arc::clone(&remote_config);
                             let config_response_tx = config_response_tx.clone();
                             control_tasks.spawn(async move {
@@ -1079,6 +1083,7 @@ mod tests {
         config_json: String,
         restart_needed: bool,
         last_set: Mutex<Option<String>>,
+        get_calls: AtomicUsize,
         set_calls: AtomicUsize,
         restart_calls: AtomicUsize,
     }
@@ -1090,6 +1095,7 @@ mod tests {
                 config_json: r#"{"schema_version":1}"#.to_owned(),
                 restart_needed: false,
                 last_set: Mutex::new(None),
+                get_calls: AtomicUsize::new(0),
                 set_calls: AtomicUsize::new(0),
                 restart_calls: AtomicUsize::new(0),
             }
@@ -1110,6 +1116,7 @@ mod tests {
                         restart_needed: false,
                     };
                 }
+                self.get_calls.fetch_add(1, Ordering::SeqCst);
                 ConfigGetResponse {
                     request_id: request.request_id,
                     config_json: self.config_json.clone(),
@@ -1457,6 +1464,53 @@ mod tests {
             Some(payload),
             "handler must receive the config_json sent over the wire"
         );
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn config_get_rejected_when_capability_not_negotiated() -> TestResult {
+        let handler = Arc::new(FakeRemoteConfigHandler::new(true));
+        let (forwarder, forwarder_addr, handle) =
+            spawn_forwarder_with_remote_config([74; 32], Arc::clone(&handler) as _).await?;
+
+        let receiver = EndpointBuilder::test([75; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::ConfigGetRequest(ConfigGetRequest {
+                    request_id: "get-no-cap".to_owned(),
+                })),
+            },
+        )
+        .await?;
+
+        let frame =
+            tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::ConfigGetResponse(response)) => {
+                assert_eq!(response.request_id, "get-no-cap");
+                assert!(
+                    response.config_json.is_empty(),
+                    "config_json must be empty when remote-config capability was not negotiated"
+                );
+            }
+            other => return Err(format!("expected ConfigGetResponse, got {other:?}").into()),
+        }
+        assert_eq!(handler.get_calls.load(Ordering::SeqCst), 0);
 
         connection.close(0u32.into(), b"done");
         handle.abort();
