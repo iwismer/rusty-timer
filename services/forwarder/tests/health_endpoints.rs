@@ -466,7 +466,7 @@ target = "10.0.0.1:10000"
         cfg,
         SubsystemStatus::ready(),
         Arc::new(tokio::sync::Mutex::new(NoJournalForNameApi)),
-        Arc::new(forwarder::status_http::ConfigState::new(
+        Arc::new(forwarder::config_service::ConfigState::new(
             config_file.path().to_path_buf(),
         )),
         Arc::new(tokio::sync::Notify::new()),
@@ -518,7 +518,7 @@ target = "10.0.0.1:10000"
         cfg,
         SubsystemStatus::ready(),
         Arc::new(tokio::sync::Mutex::new(NoJournalForNameApi)),
-        Arc::new(forwarder::status_http::ConfigState::new(
+        Arc::new(forwarder::config_service::ConfigState::new(
             config_file.path().to_path_buf(),
         )),
         Arc::new(tokio::sync::Notify::new()),

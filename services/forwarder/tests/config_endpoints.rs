@@ -143,7 +143,7 @@ async fn restart_needed_flag_defaults_to_false() {
 
 #[tokio::test]
 async fn get_config_returns_json() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -199,7 +199,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_general_updates_display_name() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -270,7 +270,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_general_updates_readonly_config_via_atomic_replace() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -341,7 +341,7 @@ target = "192.168.1.100:10000"
 #[cfg(unix)]
 #[tokio::test]
 async fn post_config_general_preserves_file_mode_on_atomic_replace() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::NamedTempFile;
@@ -407,7 +407,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_general_accepts_fragmented_http_body() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -471,7 +471,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_optional_sections_reject_non_object_payloads() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -528,7 +528,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_auth_updates_token_file() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -583,7 +583,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_auth_requires_token_file() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -625,7 +625,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_auth_rejects_whitespace_token_file() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -667,7 +667,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_journal_updates_sqlite_path() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -730,7 +730,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_journal_rejects_out_of_range_prune_watermark() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -780,7 +780,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_journal_rejects_non_numeric_prune_watermark() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -832,7 +832,7 @@ target = "192.168.1.100:10000"
 /// Returns the running server and the config file guard (kept to preserve the
 /// temp file for the duration of the test).
 async fn start_config_server() -> (StatusServer, tempfile::NamedTempFile, tempfile::TempDir) {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -987,7 +987,7 @@ async fn post_config_journal_accepts_valid_retention() {
 
 #[tokio::test]
 async fn post_config_status_http_updates_bind() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1045,7 +1045,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_status_http_rejects_invalid_ipv4_and_port() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1092,7 +1092,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_status_http_rejects_hostname_bind() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1139,7 +1139,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_status_http_rejects_ipv6_bind() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1186,7 +1186,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_readers_replaces_list() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1255,7 +1255,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_readers_validates_target() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1303,7 +1303,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_readers_rejects_out_of_range_local_fallback_port() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1353,7 +1353,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_readers_requires_at_least_one() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1395,7 +1395,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_control_updates_allow_power_actions() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1462,7 +1462,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_control_rejects_non_boolean_allow_power_actions() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1515,7 +1515,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_control_action_restart_device_requires_allow_power_actions_true() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1570,7 +1570,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn restart_endpoint_returns_ok() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1645,7 +1645,7 @@ async fn restart_endpoint_returns_404_without_config() {
 
 #[tokio::test]
 async fn control_restart_service_endpoint_returns_ok() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1704,7 +1704,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn control_restart_device_requires_allow_power_actions_true() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1754,7 +1754,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn control_shutdown_device_requires_allow_power_actions_true() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1804,7 +1804,7 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn control_action_errors_are_written_to_ui_logs() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 

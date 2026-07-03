@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 pub mod config;
+pub mod config_service;
 pub mod discovery;
 pub mod local_fanout;
 pub mod p2p;

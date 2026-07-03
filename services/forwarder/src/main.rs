@@ -3,11 +3,11 @@
 // Runtime event loop: wires together journal, local fanout, IPICO TCP readers,
 // the P2P endpoint, and the status HTTP server.
 
+use forwarder::config_service::ConfigState;
 use forwarder::discovery::expand_target;
 use forwarder::local_fanout::FanoutServer;
 use forwarder::status_http::{
-    ConfigState, ForwarderStatusEvent, ReaderConnectionState, StatusConfig, StatusServer,
-    SubsystemStatus,
+    ForwarderStatusEvent, ReaderConnectionState, StatusConfig, StatusServer, SubsystemStatus,
 };
 use forwarder::storage::journal::Journal;
 use rt_ui_log::UiLogLevel;

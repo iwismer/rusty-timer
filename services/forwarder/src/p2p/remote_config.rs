@@ -3,11 +3,11 @@
 //! [`ForwarderRemoteConfigHandler`] serves the `ConfigGet` / `ConfigSet` /
 //! `Restart` verbs over the control stream, reusing the exact same config
 //! serialization, persistence, and restart mechanisms as the local status
-//! HTTP surface (see [`crate::status_http`]):
+//! HTTP surface (see [`crate::config_service`]):
 //!
-//! - get -> [`crate::status_http::config_json_string`] (same body as
+//! - get -> [`crate::config_service::config_json_string`] (same body as
 //!   `GET /api/v1/config`),
-//! - set -> [`crate::status_http::write_config_json_restricted`] (rejects
+//! - set -> [`crate::config_service::write_config_json_restricted`] (rejects
 //!   privileged section changes, parses the full config document, validates via
 //!   the canonical loader, writes the TOML file atomically, and marks a restart
 //!   as needed),
@@ -30,9 +30,8 @@ use rt_p2p_protocol::{
 };
 use tokio::sync::{Mutex, Notify, broadcast};
 
-use crate::status_http::{
-    ConfigState, SubsystemStatus, config_json_string, write_config_json_restricted,
-};
+use crate::config_service::{ConfigState, config_json_string, write_config_json_restricted};
+use crate::status_http::SubsystemStatus;
 use crate::ui_events::ForwarderUiEvent;
 
 use super::control::{

@@ -738,7 +738,7 @@ mod tests {
         }));
         let handler = Arc::new(crate::p2p::ForwarderRemoteConfigHandler::new(
             true,
-            Arc::new(crate::status_http::ConfigState::new(config_path)),
+            Arc::new(crate::config_service::ConfigState::new(config_path)),
             Arc::new(Mutex::new(SubsystemStatus::ready())),
             ui_tx,
             ui_logger,
@@ -837,7 +837,7 @@ mod tests {
         }));
         let handler = Arc::new(crate::p2p::ForwarderRemoteConfigHandler::new(
             true,
-            Arc::new(crate::status_http::ConfigState::new(config_path)),
+            Arc::new(crate::config_service::ConfigState::new(config_path)),
             Arc::new(Mutex::new(SubsystemStatus::ready())),
             ui_tx,
             ui_logger,
