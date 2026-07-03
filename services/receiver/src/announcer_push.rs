@@ -158,11 +158,10 @@ impl AnnouncerPushClient for ServerAnnouncerClient {
                 .json(&body)
                 .send()
                 .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
-            if !response.status().is_success() {
-                return Err(AnnouncerPushError::Transport(format!(
-                    "server /announcer/rows returned {}",
-                    response.status()
-                )));
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().unwrap_or_default();
+                return Err(classify_push_failure(status, body));
             }
         }
         Ok(())
@@ -341,6 +340,27 @@ pub enum AnnouncerPushError {
     Db(#[from] DbError),
     #[error("announcer push transport: {0}")]
     Transport(String),
+    /// The server rejected the push with 409: our announcer source generation
+    /// diverged from the server's (server DB reset, or another receiver took
+    /// over). The caller must re-run register + takeover to re-fence before
+    /// pushing again. Carries the server's response text for logging.
+    #[error("announcer generation stale on server: {0}")]
+    StaleGeneration(String),
+}
+
+/// Classify a non-success `/announcer/rows` response. A 409 means the server's
+/// generation fence rejected our generation ([`AnnouncerPushError::StaleGeneration`],
+/// recoverable only via re-takeover); anything else is a transient transport
+/// failure worth a plain retry.
+pub(crate) fn classify_push_failure(
+    status: reqwest::StatusCode,
+    body: String,
+) -> AnnouncerPushError {
+    if status == reqwest::StatusCode::CONFLICT {
+        AnnouncerPushError::StaleGeneration(body)
+    } else {
+        AnnouncerPushError::Transport(format!("server /announcer/rows returned {status}: {body}"))
+    }
 }
 
 /// Result of a [`push_announcer_rows`] call.
@@ -450,6 +470,18 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn conflict_status_maps_to_stale_generation() {
+        assert!(matches!(
+            classify_push_failure(reqwest::StatusCode::CONFLICT, "gen".into()),
+            AnnouncerPushError::StaleGeneration(_)
+        ));
+        assert!(matches!(
+            classify_push_failure(reqwest::StatusCode::BAD_GATEWAY, "x".into()),
+            AnnouncerPushError::Transport(_)
+        ));
+    }
 
     fn sample_raw_frame() -> Vec<u8> {
         // chip_id_from_raw_frame extracts "000000012345" from this frame.

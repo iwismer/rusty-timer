@@ -380,13 +380,15 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
     // Per-device minted-token id (nullable until a device is minted). A UNIQUE
     // index gives an indexed lookup in `authenticate_device`; SQLite treats
-    // NULLs as distinct, so pre-mint rows coexist freely.
+    // NULLs as distinct, so pre-mint rows coexist freely. The index creation is
+    // deliberately outside the column gate so a partially applied migration
+    // (column without index) self-heals on the next open.
     if !column_exists(conn, "devices", "token_id")? {
-        conn.execute_batch(
-            "ALTER TABLE devices ADD COLUMN token_id TEXT;
-             CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_token_id ON devices(token_id);",
-        )?;
+        conn.execute_batch("ALTER TABLE devices ADD COLUMN token_id TEXT;")?;
     }
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_token_id ON devices(token_id);",
+    )?;
 
     Ok(())
 }
@@ -1112,12 +1114,20 @@ pub fn takeover_announcer_source(conn: &Connection) -> Result<u64, AnnouncerStor
     current_announcer_source_generation(conn)
 }
 
+/// Persist an announcer row, fenced on the source generation.
+///
+/// The row's generation must exactly equal the current generation: any
+/// mismatch (stale *or* future) is rejected with [`StaleGeneration`]. A source
+/// whose belief diverged must call `/announcer/takeover` to re-fence before
+/// pushing again.
+///
+/// [`StaleGeneration`]: AnnouncerStorageError::StaleGeneration
 pub fn upsert_announcer_row(
     conn: &Connection,
     row: &AnnouncerRowRecord,
 ) -> Result<(), AnnouncerStorageError> {
     let current_generation = current_announcer_source_generation(conn)?;
-    if row.announcer_source_generation < current_generation {
+    if row.announcer_source_generation != current_generation {
         return Err(AnnouncerStorageError::StaleGeneration { current_generation });
     }
 
@@ -1734,6 +1744,33 @@ mod tests {
         assert!(!verify_token("x", "é$é".as_bytes()));
         assert!(!verify_token("x", "00$é".as_bytes()));
         assert!(!verify_token("x", "abcd€xyz$0011".as_bytes()));
+    }
+
+    #[test]
+    fn upsert_announcer_row_rejects_generation_above_current() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+
+        let row = AnnouncerRowRecord {
+            announcer_source_generation: 1,
+            stream_id: "finish-line".to_string(),
+            seq: 1,
+            chip_id: "chip-1".to_string(),
+            bib: Some(1001),
+            display_name: "Runner 1".to_string(),
+            reader_timestamp: None,
+            received_unix_ms: 1_000,
+            division: None,
+        };
+
+        let err = upsert_announcer_row(&conn, &row).unwrap_err();
+        assert!(matches!(
+            err,
+            AnnouncerStorageError::StaleGeneration {
+                current_generation: 0
+            }
+        ));
     }
 
     #[test]

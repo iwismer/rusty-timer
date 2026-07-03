@@ -49,9 +49,25 @@ pub struct AppState {
 impl AppState {
     #[must_use]
     pub fn new(conn: Connection, admin_proxy_trusted: bool) -> Self {
+        let announcer_runtime = Arc::new(Mutex::new(AnnouncerRuntime::new()));
+        // Rebuild the live announcer board from persisted rows so a server
+        // restart does not blank /status until the next push. The receiver's
+        // per-push max_list_size is unknown at startup; use the default cap.
+        match registry::list_announcer_rows_ordered(&conn) {
+            Ok(rows) => {
+                announcer::rebuild_runtime(
+                    &announcer_runtime,
+                    rows,
+                    announcer::DEFAULT_MAX_ANNOUNCER_ROWS,
+                );
+            }
+            Err(err) => {
+                tracing::error!(error = ?err, "failed to rebuild announcer runtime from db");
+            }
+        }
         Self {
             conn: Arc::new(Mutex::new(conn)),
-            announcer_runtime: Arc::new(Mutex::new(AnnouncerRuntime::new())),
+            announcer_runtime,
             admin_proxy_trusted,
             allowlist_version: watch::channel(0).0,
         }

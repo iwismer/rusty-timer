@@ -57,10 +57,14 @@ pub async fn receiver_allowlist(
     // Hold the request while the caller is already up to date, so an approval
     // releases it immediately. The mutex is never held across this await.
     let wait = query.wait.unwrap_or(0);
-    if wait > 0 && query.since == Some(*state.allowlist_version.borrow()) {
+    if wait > 0 {
+        // Subscribe *before* comparing so a version bump between the comparison
+        // and the wait cannot be missed (it would otherwise hold until timeout).
         let mut version_rx = state.allowlist_version.subscribe();
-        let hold = MAX_HOLD.min(Duration::from_secs(wait));
-        let _ = tokio::time::timeout(hold, version_rx.changed()).await;
+        if query.since == Some(*version_rx.borrow_and_update()) {
+            let hold = MAX_HOLD.min(Duration::from_secs(wait));
+            let _ = tokio::time::timeout(hold, version_rx.changed()).await;
+        }
     }
 
     let version = *state.allowlist_version.borrow();

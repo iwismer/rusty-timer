@@ -37,6 +37,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use rt_iroh::{
@@ -51,7 +52,8 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::announcer_push::{
-    self, AnnouncerPushClient, ParticipantResolver, ResolvedParticipant, ServerAnnouncerClient,
+    self, AnnouncerPushClient, AnnouncerPushError, ParticipantResolver, ResolvedParticipant,
+    ServerAnnouncerClient,
 };
 use crate::cache::StreamKey;
 use crate::control_api::ConnectionState;
@@ -405,6 +407,11 @@ struct StreamWorker {
     /// yet) this is `false`, and reconciliation rebuilds the worker once a
     /// generation becomes available so announcer push can start.
     announcer_active: bool,
+    /// The announcer generation this worker's push task was built with, when
+    /// one was spawned. The generation is passed by value into the worker, so
+    /// a re-takeover that changes the generation must rebuild the worker or it
+    /// would keep pushing the old generation forever.
+    announcer_generation: Option<i64>,
 }
 
 impl StreamWorker {
@@ -527,6 +534,11 @@ async fn run_reconcile_loop(
     // generation becomes available so they begin pushing pending rows. The HTTP
     // calls are bounded by the blocking client's connect/request timeouts.
     let mut announcer_generation: Option<i64> = None;
+    // Set by announcer push workers when the server 409s a push (generation
+    // diverged: server DB reset or another receiver took over). Consumed once
+    // per reconcile pass to drop the generation (forcing a re-register +
+    // re-takeover) and reset the local per-stream fences.
+    let announcer_stale = Arc::new(AtomicBool::new(false));
 
     loop {
         if let Some(target) = force_reconnect.take() {
@@ -545,6 +557,27 @@ async fn run_reconcile_loop(
                     state.clear_stream_metrics_cache().await;
                     state.emit_streams_snapshot().await;
                 }
+            }
+        }
+
+        if announcer_stale.swap(false, Ordering::SeqCst) {
+            warn!(
+                "server rejected announcer generation; re-registering and re-taking over the announcer source"
+            );
+            // Dropping the generation makes the block below re-run
+            // register + takeover, and the generation change forces the
+            // announcer workers to be rebuilt with the new fence.
+            announcer_generation = None;
+            // After re-takeover the new server generation can be *below* the
+            // persisted local per-stream fences (e.g. the server DB was
+            // reset), which would strand every push as locally stale. Reset
+            // the fences exactly like the server-change path so the new
+            // generation is accepted fresh.
+            if let Err(e) = {
+                let db = state.db.lock().await;
+                db.reset_announcer_fences()
+            } {
+                warn!(error = %e, "failed to reset announcer fences after stale generation");
             }
         }
 
@@ -608,6 +641,7 @@ async fn run_reconcile_loop(
             &endpoint,
             &reporter,
             announcer_generation,
+            &announcer_stale,
             &mut workers,
             &mut stream_workers,
         )
@@ -1045,12 +1079,14 @@ fn desired_forwarder_subscriptions(
     desired
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn reconcile_once(
     state: &Arc<AppState>,
     config: &P2pReceiverConfig,
     endpoint: &Arc<Endpoint>,
     reporter: &Arc<SessionStatusReporter>,
     announcer_generation: Option<i64>,
+    announcer_stale: &Arc<AtomicBool>,
     workers: &mut HashMap<String, ForwarderConnection>,
     stream_workers: &mut HashMap<String, StreamWorker>,
 ) {
@@ -1148,20 +1184,34 @@ async fn reconcile_once(
             // Rebuild if the announcer state for this stream needs to change
             // (turned on or off).
             let announcer_mismatch = existing.announcer_active != want_announce;
-            if !config_changed && !announcer_mismatch {
+            // Rebuild if the fenced generation changed (announcer re-takeover):
+            // the running push task holds the generation by value and would
+            // otherwise keep pushing the stale one.
+            let generation_mismatch =
+                existing.announcer_active && existing.announcer_generation != announcer_generation;
+            if !config_changed && !announcer_mismatch && !generation_mismatch {
                 continue;
             }
             if let Some(worker) = stream_workers.remove(&stream_id) {
                 if config_changed {
                     info!(%stream_id, "rebuilding p2p stream worker (subscription config changed)");
-                } else {
+                } else if announcer_mismatch {
                     info!(%stream_id, announce = want_announce, "rebuilding p2p stream worker (announcer state changed)");
+                } else {
+                    info!(%stream_id, "rebuilding p2p stream worker (announcer generation changed)");
                 }
                 worker.stop().await;
             }
         }
-        let worker =
-            start_stream_worker(state, config, announcer_generation, want_announce, &sub).await;
+        let worker = start_stream_worker(
+            state,
+            config,
+            announcer_generation,
+            announcer_stale,
+            want_announce,
+            &sub,
+        )
+        .await;
         stream_workers.insert(stream_id, worker);
     }
 
@@ -1189,6 +1239,7 @@ async fn start_stream_worker(
     state: &Arc<AppState>,
     config: &P2pReceiverConfig,
     announcer_generation: Option<i64>,
+    announcer_stale: &Arc<AtomicBool>,
     announce: bool,
     sub: &StreamSubscription,
 ) -> StreamWorker {
@@ -1265,6 +1316,7 @@ async fn start_stream_worker(
                     stream_id,
                     client,
                     generation,
+                    Arc::clone(announcer_stale),
                     config.reconcile_interval,
                     hint_rx,
                     ann_shutdown,
@@ -1284,6 +1336,7 @@ async fn start_stream_worker(
         proxy,
         tasks,
         announcer_active,
+        announcer_generation: announcer_active.then_some(announcer_generation).flatten(),
     }
 }
 
@@ -1718,6 +1771,7 @@ async fn run_announcer_worker(
     stream_id: String,
     client: Arc<dyn AnnouncerPushClient + Send + Sync>,
     generation: i64,
+    announcer_stale: Arc<AtomicBool>,
     retry_interval: Duration,
     mut hint_rx: broadcast::Receiver<DurableBatch>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -1726,7 +1780,15 @@ async fn run_announcer_worker(
     // sink. While set, the worker retries on `retry_interval` even if no new
     // durable hint arrives, so pending rows are not stranded after the last
     // hint. A successful (or stale-generation) attempt clears it.
-    let mut needs_retry = !push_announcer(&db, &chip_lookup, &stream_id, &client, generation).await;
+    let mut needs_retry = !push_announcer(
+        &db,
+        &chip_lookup,
+        &stream_id,
+        &client,
+        generation,
+        &announcer_stale,
+    )
+    .await;
     loop {
         tokio::select! {
             biased;
@@ -1737,14 +1799,14 @@ async fn run_announcer_worker(
                 match recv {
                     Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
                         needs_retry =
-                            !push_announcer(&db, &chip_lookup, &stream_id, &client, generation).await;
+                            !push_announcer(&db, &chip_lookup, &stream_id, &client, generation, &announcer_stale).await;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
             () = tokio::time::sleep(retry_interval), if needs_retry => {
                 needs_retry =
-                    !push_announcer(&db, &chip_lookup, &stream_id, &client, generation).await;
+                    !push_announcer(&db, &chip_lookup, &stream_id, &client, generation, &announcer_stale).await;
             }
         }
     }
@@ -1760,6 +1822,7 @@ async fn push_announcer(
     stream_id: &str,
     client: &Arc<dyn AnnouncerPushClient + Send + Sync>,
     generation: i64,
+    announcer_stale: &Arc<AtomicBool>,
 ) -> bool {
     // Snapshot the chip lookup so the blocking task owns Send + 'static data.
     let snapshot = chip_lookup.read().await.clone();
@@ -1782,6 +1845,15 @@ async fn push_announcer(
 
     match result {
         Ok(Ok(_outcome)) => true,
+        Ok(Err(AnnouncerPushError::StaleGeneration(detail))) => {
+            // The server's generation diverged from ours; a plain retry can
+            // never succeed. Signal the reconcile loop to re-register and
+            // re-takeover; the unpushed rows stay pending and are re-pushed
+            // once the worker is rebuilt with the new generation.
+            warn!(%detail, %stream_id, "announcer generation stale on server; requesting re-takeover");
+            announcer_stale.store(true, Ordering::SeqCst);
+            true
+        }
         Ok(Err(e)) => {
             warn!(error = %e, %stream_id, "announcer push failed; will retry");
             false
@@ -2975,6 +3047,7 @@ mod tests {
             stream_id.to_owned(),
             client_dyn,
             1,
+            Arc::new(AtomicBool::new(false)),
             Duration::from_millis(50),
             hint_rx,
             shutdown_rx,

@@ -17,7 +17,7 @@ use crate::registry::{self, AnnouncerRowRecord, AnnouncerStorageError, DeviceKin
 /// `max_list_size` (older receivers, or a malformed value). The announcer
 /// source (receiver) owns this setting; this only bounds what the server
 /// retains in the live runtime for the public feed.
-const DEFAULT_MAX_ANNOUNCER_ROWS: usize = 25;
+pub(crate) const DEFAULT_MAX_ANNOUNCER_ROWS: usize = 25;
 
 #[derive(Debug, Deserialize)]
 pub struct PushRowRequest {
@@ -149,7 +149,7 @@ pub async fn takeover(State(state): State<AppState>, headers: HeaderMap) -> Resp
     }
 }
 
-fn rebuild_runtime(
+pub(crate) fn rebuild_runtime(
     runtime: &std::sync::Mutex<AnnouncerRuntime>,
     rows: Vec<AnnouncerRowRecord>,
     max_list_size: usize,
@@ -440,6 +440,72 @@ mod tests {
 
         let rejected = app
             .oneshot(json_request("/announcer/rows", &row_body(1, 0, 1_000)))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::CONFLICT);
+
+        let conn = state.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM announcer_rows", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn status_shows_persisted_rows_after_restart() {
+        // A file-backed database so a second open (the "restart") sees the
+        // rows persisted by the first connection.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("server.sqlite");
+
+        {
+            let conn = crate::db::open(&db_path).unwrap();
+            crate::registry::upsert_announcer_row(
+                &conn,
+                &crate::registry::AnnouncerRowRecord {
+                    announcer_source_generation: 0,
+                    stream_id: "finish-line".to_string(),
+                    seq: 1,
+                    chip_id: "chip-1".to_string(),
+                    bib: Some(1001),
+                    display_name: "Runner 1".to_string(),
+                    reader_timestamp: Some("10:00:00".to_string()),
+                    received_unix_ms: 1_000,
+                    division: None,
+                },
+            )
+            .unwrap();
+        }
+
+        let conn = crate::db::open(&db_path).unwrap();
+        let state = AppState::new(conn, true);
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await;
+        assert_eq!(body["finisher_count"], 1);
+        assert_eq!(body["announcer_rows"][0]["chip_id"], "chip-1");
+    }
+
+    #[tokio::test]
+    async fn push_with_future_generation_is_rejected() {
+        let state = test_state();
+        let app = router(state.clone());
+
+        // Current generation is 0; a push claiming generation 1 must be fenced
+        // out (the source must call /announcer/takeover first).
+        let rejected = app
+            .oneshot(json_request("/announcer/rows", &row_body(1, 1, 1_000)))
             .await
             .unwrap();
         assert_eq!(rejected.status(), StatusCode::CONFLICT);
