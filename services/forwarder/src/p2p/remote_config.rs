@@ -23,7 +23,7 @@
 
 use std::sync::Arc;
 
-use rt_iroh::NodeId;
+use rt_iroh::EndpointId;
 use rt_p2p_protocol::{
     ConfigGetRequest, ConfigGetResponse, ConfigSetRequest, ConfigSetResponse, RestartRequest,
     RestartResponse,
@@ -120,7 +120,7 @@ impl RemoteConfigHandler for ForwarderRemoteConfigHandler {
         })
     }
 
-    fn set_config(&self, request: ConfigSetRequest, peer: NodeId) -> ConfigSetFuture<'_> {
+    fn set_config(&self, request: ConfigSetRequest, peer: EndpointId) -> ConfigSetFuture<'_> {
         Box::pin(async move {
             if !self.allow_remote_config {
                 return ConfigSetResponse {
@@ -255,7 +255,7 @@ mod tests {
     }
 
     /// A deterministic peer node id for attributing test config writes.
-    fn test_peer() -> NodeId {
+    fn test_peer() -> EndpointId {
         rt_iroh::SecretKey::from_bytes(&[42u8; 32]).public()
     }
 

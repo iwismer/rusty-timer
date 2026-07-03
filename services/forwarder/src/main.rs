@@ -415,6 +415,7 @@ async fn main() {
     ));
     let p2p_runtime = match forwarder::p2p::start_forwarder_p2p(
         &cfg.p2p,
+        journal_path,
         Arc::clone(&journal),
         &all_readers
             .iter()

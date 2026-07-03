@@ -192,7 +192,7 @@ impl P2pEndpoint {
                     let catalog = Arc::clone(&self.catalog);
                     let journal = Arc::clone(&self.journal);
                     let config = ConnectionConfig {
-                        data_config: self.data_config,
+                        data_config: self.data_config.clone(),
                         status_feed: self.status_feed.clone(),
                         handshake_timeout: self.handshake_timeout,
                         heartbeat: self.heartbeat,
@@ -285,7 +285,7 @@ async fn handle_connection(
             data_connection,
             journal,
             endpoint_id.to_string(),
-            config.data_config,
+            config.data_config.clone(),
         )
         .await
         {
@@ -307,7 +307,7 @@ async fn handle_connection(
     let control_result = run_control_stream_loop(
         control_send,
         control_recv,
-        node_id,
+        endpoint_id,
         capabilities,
         config.heartbeat,
         outbound_events,
@@ -536,7 +536,7 @@ mod tests {
                 allow_list,
                 catalog: empty_catalog(),
                 journal: Arc::new(Mutex::new(journal)),
-                data_config: DataConfig::default(),
+                data_config: DataConfig::default().with_read_journal_path(&journal_path),
                 status_feed: None,
                 handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
                 heartbeat: HeartbeatConfig::default(),
@@ -834,7 +834,7 @@ mod tests {
         use rt_p2p_protocol::{CAP_REMOTE_CONFIG, ConfigGetRequest, ConfigSetRequest, Pong};
 
         let receiver = EndpointBuilder::test([84; 32]).bind().await?;
-        let allow_list = AllowList::new([receiver.node_id()]);
+        let allow_list = AllowList::new([receiver.endpoint_id()]);
 
         let dir = tempfile::tempdir()?;
         let token_path = dir.path().join("token");
@@ -864,7 +864,7 @@ mod tests {
         let forwarder = P2pEndpoint::bind_test([85; 32], allow_list)
             .await?
             .with_remote_config(handler);
-        let forwarder_addr = forwarder.node_addr().await;
+        let forwarder_addr = forwarder.endpoint_addr().await;
 
         let accept = {
             let forwarder = forwarder.clone();
@@ -949,7 +949,7 @@ mod tests {
 
         // The UI event stream must carry a log entry attributing the write to
         // the receiver's node id.
-        let peer_id = receiver.node_id().to_string();
+        let peer_id = receiver.endpoint_id().to_string();
         let attributed = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match ui_rx.recv().await {

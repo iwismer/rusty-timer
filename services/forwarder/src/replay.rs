@@ -3,7 +3,7 @@
 //! Used by the P2P session to determine which events need to be
 //! (re-)transmitted after a reconnect or on initial connect.
 
-use crate::storage::journal::{Journal, JournalError, JournalEvent};
+use crate::storage::journal::{Journal, JournalError, JournalEvent, ReplayJournal};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -53,9 +53,9 @@ impl ReplayEngine {
     /// advancing the cursor and call this again after append wake-ups. If the
     /// cursor is older than the retained prefix, the batch carries a gap notice
     /// and no records so the caller can jump to `earliest - 1` explicitly.
-    pub fn read_after(
+    pub fn read_after<J: ReplayJournal + ?Sized>(
         &self,
-        journal: &Journal,
+        journal: &J,
         stream_id: &str,
         cursor: i64,
         max: usize,

@@ -104,6 +104,7 @@ impl P2pRuntime {
 #[allow(clippy::too_many_arguments)]
 pub async fn start_forwarder_p2p(
     config: &P2pConfig,
+    journal_path: &Path,
     journal: Arc<Mutex<Journal>>,
     reader_streams: &[String],
     display_name: Option<String>,
@@ -139,7 +140,7 @@ pub async fn start_forwarder_p2p(
         allow_list.clone(),
         catalog,
         Arc::clone(&journal),
-        DataConfig::default(),
+        DataConfig::default().with_read_journal_path(journal_path),
     )
     .await?
     .with_status_feed(status_feed)
@@ -687,6 +688,7 @@ mod tests {
 
         let runtime = start_forwarder_p2p(
             &p2p_config(receiver.endpoint_id().to_string()),
+            &journal_path,
             Arc::clone(&journal),
             &[stream_key.to_owned()],
             None,
@@ -798,6 +800,7 @@ mod tests {
 
         let runtime = start_forwarder_p2p(
             &p2p_config(receiver.endpoint_id().to_string()),
+            &journal_path,
             Arc::clone(&journal),
             &[stream_key.to_owned()],
             None,

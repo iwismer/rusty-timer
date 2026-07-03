@@ -5,6 +5,7 @@
 //! the journal wake registry for live records. Acknowledgements update the
 //! receiver cursor table that retention uses as its floor.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rt_iroh::{Connection, RecvStream, SendStream};
@@ -16,7 +17,7 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::replay::ReplayEngine;
-use crate::storage::journal::{Journal, JournalEvent};
+use crate::storage::journal::{Journal, JournalError, JournalEvent, ReadJournal};
 
 use super::control::{read_frame, write_frame};
 
@@ -36,17 +37,55 @@ impl Drop for AbortOnDrop {
     }
 }
 
+type ReadJournalFactory = Arc<dyn Fn() -> Result<ReadJournal, JournalError> + Send + Sync>;
+
 /// Runtime knobs for data-stream delivery.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct DataConfig {
     /// Maximum journal records sent in one [`EventBatch`].
     pub max_events_per_batch: usize,
+    read_journal_factory: ReadJournalFactory,
+}
+
+impl DataConfig {
+    #[must_use]
+    pub fn with_read_journal_path(mut self, path: impl AsRef<Path>) -> Self {
+        let path: PathBuf = path.as_ref().to_owned();
+        self.read_journal_factory = Arc::new(move || Journal::open_read_only(&path));
+        self
+    }
+
+    #[must_use]
+    pub fn with_read_journal_factory(
+        mut self,
+        factory: impl Fn() -> Result<ReadJournal, JournalError> + Send + Sync + 'static,
+    ) -> Self {
+        self.read_journal_factory = Arc::new(factory);
+        self
+    }
+
+    fn open_read_journal(&self) -> Result<ReadJournal, JournalError> {
+        (self.read_journal_factory)()
+    }
+}
+
+impl std::fmt::Debug for DataConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DataConfig")
+            .field("max_events_per_batch", &self.max_events_per_batch)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for DataConfig {
     fn default() -> Self {
         Self {
             max_events_per_batch: 256,
+            read_journal_factory: Arc::new(|| {
+                Err(JournalError::InvalidData(
+                    "read journal factory is not configured".to_owned(),
+                ))
+            }),
         }
     }
 }
@@ -80,6 +119,7 @@ pub async fn serve_data_streams(
         while tasks.try_join_next().is_some() {}
         let journal = Arc::clone(&journal);
         let receiver_id = receiver_id.clone();
+        let config = config.clone();
         tasks.spawn(async move {
             if let Err(error) = serve_data_stream(send, recv, journal, receiver_id, config).await {
                 tracing::warn!(%error, "p2p: data stream failed");
@@ -113,13 +153,11 @@ async fn serve_data_stream(
     let stream_key = wire_stream_key(&subscribe.stream_id)?;
     let stream_id = subscribe.stream_id.clone();
     let max = config.max_events_per_batch.max(1);
-    let (earliest, latest_at_open) = {
-        let journal = journal.lock().await;
-        (
-            journal.retention_state(&stream_key)?.earliest_available_seq,
-            journal.latest_committed_seq(&stream_key)?,
-        )
-    };
+    let read_journal = config.open_read_journal()?;
+    let earliest = read_journal
+        .retention_state(&stream_key)?
+        .earliest_available_seq;
+    let latest_at_open = read_journal.latest_committed_seq(&stream_key)?;
     // Only `Unspecified` falls back to replay; an unknown enum value is a
     // protocol violation and fails the stream rather than silently replaying.
     let mode = SubscribeMode::try_from(subscribe.mode)
@@ -185,10 +223,7 @@ async fn serve_data_stream(
         )
         .await?;
 
-        let batch = {
-            let journal = journal.lock().await;
-            replay.read_after(&journal, &stream_key, cursor, max)?
-        };
+        let batch = replay.read_after(&read_journal, &stream_key, cursor, max)?;
 
         if let Some(gap) = batch.gap {
             write_frame(
@@ -464,6 +499,7 @@ mod tests {
     async fn start_harness(config: DataConfig) -> TestResult<Harness> {
         let dir = tempfile::tempdir()?;
         let journal_path = dir.path().join("journal.db");
+        let config = config.with_read_journal_path(&journal_path);
         let journal = Arc::new(Mutex::new(Journal::open(&journal_path)?));
         let forwarder = EndpointBuilder::test([91; 32]).bind().await?;
         let receiver = EndpointBuilder::test([92; 32]).bind().await?;
@@ -771,6 +807,7 @@ mod tests {
     async fn epoch_started_precedes_new_epoch_events() -> TestResult {
         let harness = start_harness(DataConfig {
             max_events_per_batch: 1,
+            ..DataConfig::default()
         })
         .await?;
         {
@@ -822,6 +859,7 @@ mod tests {
     async fn slow_receiver_does_not_block_others() -> TestResult {
         let harness = start_harness(DataConfig {
             max_events_per_batch: 1,
+            ..DataConfig::default()
         })
         .await?;
         let slow_stream = OTHER_STREAM_KEY.to_owned();

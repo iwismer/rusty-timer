@@ -23,7 +23,7 @@ use std::time::Duration;
 use prost::Message;
 #[cfg(test)]
 use rt_iroh::Connection;
-use rt_iroh::{NodeId, RecvStream, SendStream};
+use rt_iroh::{EndpointId, RecvStream, SendStream};
 use rt_p2p_protocol::{
     CAP_CONTROL_EVENTS, CAP_READER_CONTROL, CAP_REMOTE_CONFIG, ConfigGetRequest, ConfigGetResponse,
     ConfigSetRequest, ConfigSetResponse, ControlC2F, ControlF2C, DownloadProgress, Hello,
@@ -223,7 +223,7 @@ pub trait RemoteConfigHandler: std::fmt::Debug + Send + Sync + 'static {
     /// `peer` is the authenticated node id of the receiver that sent the
     /// request; implementations use it to attribute the config write in
     /// UI-visible logs.
-    fn set_config(&self, request: ConfigSetRequest, peer: NodeId) -> ConfigSetFuture<'_>;
+    fn set_config(&self, request: ConfigSetRequest, peer: EndpointId) -> ConfigSetFuture<'_>;
 
     /// Triggers the same graceful restart path as the HTTP restart endpoint.
     fn restart(&self, request: RestartRequest) -> RestartFuture<'_>;
@@ -238,7 +238,7 @@ impl<C: RemoteConfigHandler + ?Sized> RemoteConfigHandler for Arc<C> {
         (**self).get_config(request)
     }
 
-    fn set_config(&self, request: ConfigSetRequest, peer: NodeId) -> ConfigSetFuture<'_> {
+    fn set_config(&self, request: ConfigSetRequest, peer: EndpointId) -> ConfigSetFuture<'_> {
         (**self).set_config(request, peer)
     }
 
@@ -275,7 +275,7 @@ impl RemoteConfigHandler for NoopRemoteConfigHandler {
         })
     }
 
-    fn set_config(&self, request: ConfigSetRequest, _peer: NodeId) -> ConfigSetFuture<'_> {
+    fn set_config(&self, request: ConfigSetRequest, _peer: EndpointId) -> ConfigSetFuture<'_> {
         Box::pin(async move {
             ConfigSetResponse {
                 request_id: request.request_id,
@@ -437,7 +437,7 @@ pub(crate) async fn negotiate_control_stream(
 pub(crate) async fn run_control_stream_loop(
     send: SendStream,
     recv: RecvStream,
-    peer: NodeId,
+    peer: EndpointId,
     capabilities: Vec<String>,
     heartbeat: HeartbeatConfig,
     outbound_events: Option<ControlEventReceiver>,
@@ -469,7 +469,7 @@ pub(crate) async fn serve_control_with_typed_control(
     outbound_events: Option<ControlEventReceiver>,
     remote_config: Arc<dyn RemoteConfigHandler>,
 ) -> Result<(), BoxError> {
-    let peer = connection.remote_node_id()?;
+    let peer = connection.remote_id();
     let (send, recv) = connection.accept_bi().await?;
     serve_control_stream_with_typed_control(
         send,
@@ -490,7 +490,7 @@ pub(crate) async fn serve_control_with_typed_control(
 pub(crate) async fn serve_control_stream_with_typed_control(
     send: SendStream,
     recv: RecvStream,
-    peer: NodeId,
+    peer: EndpointId,
     catalog: &dyn CatalogProvider,
     handshake_timeout: Duration,
     heartbeat: HeartbeatConfig,
@@ -615,7 +615,7 @@ async fn negotiate_and_serve_catalog_stream(
 async fn run_control_loop(
     mut send: SendStream,
     mut recv: RecvStream,
-    peer: NodeId,
+    peer: EndpointId,
     capabilities: Vec<String>,
     config: HeartbeatConfig,
     reader_control: Arc<dyn ReaderControlHandler>,
@@ -1188,7 +1188,7 @@ mod tests {
         config_json: String,
         restart_needed: bool,
         last_set: Mutex<Option<String>>,
-        last_set_peer: Mutex<Option<NodeId>>,
+        last_set_peer: Mutex<Option<EndpointId>>,
         get_calls: AtomicUsize,
         set_calls: AtomicUsize,
         restart_calls: AtomicUsize,
@@ -1232,7 +1232,7 @@ mod tests {
             })
         }
 
-        fn set_config(&self, request: ConfigSetRequest, peer: NodeId) -> ConfigSetFuture<'_> {
+        fn set_config(&self, request: ConfigSetRequest, peer: EndpointId) -> ConfigSetFuture<'_> {
             Box::pin(async move {
                 if !self.allow {
                     return ConfigSetResponse {
@@ -1574,7 +1574,7 @@ mod tests {
         );
         assert_eq!(
             *handler.last_set_peer.lock().unwrap(),
-            Some(receiver.node_id()),
+            Some(receiver.endpoint_id()),
             "handler must be told which peer sent the config write"
         );
 
