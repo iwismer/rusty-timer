@@ -206,6 +206,9 @@ export interface ForwarderConnectionStatus {
   available_count: number;
   readers: ReaderLiveStatus[];
   ups: UpsStatusPayload | null;
+  /** Wire stream ids whose data subscription failed terminally on the live
+   * connection; not retried until reconnect or a subscription config change. */
+  failed_stream_ids?: string[];
   restart_needed: boolean | null;
   remote_config_available: boolean;
   reader_control_available?: boolean;

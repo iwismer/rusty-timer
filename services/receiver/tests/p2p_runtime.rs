@@ -830,8 +830,8 @@ fn record_with_sid(stream_id: &[u8], seq: u64, raw: &[u8]) -> ReadRecord {
 /// A script whose `SubscribeOk` is for the subscribed stream but whose batch
 /// records carry a *different* `stream_id`. The receiver data subscription
 /// validates the record stream id and fails with a non-retryable
-/// `StreamIdMismatch`, so the forwarder connection must resubscribe the desired
-/// stream instead of leaving a finished data task in its task map.
+/// `StreamIdMismatch`; the forwarder connection must mark the stream failed
+/// instead of resubscribing it in a hot loop.
 fn script_stream_mismatch() -> ForwarderScript {
     let other = b"127.0.0.1:10001".to_vec();
     ForwarderScript {
@@ -955,11 +955,13 @@ async fn changing_local_port_rebinds_proxy_to_new_port() {
     .expect("changing_local_port_rebinds_proxy_to_new_port timed out");
 }
 
-/// A non-retryable data subscription failure exits that stream's data task.
-/// Reconciliation must keep the stream desired on the per-forwarder connection,
-/// which resubscribes instead of leaving the finished task in place forever.
+/// A non-retryable data subscription failure (stream-id mismatch) exits that
+/// stream's data task terminally. Reconciliation must NOT blindly resubscribe:
+/// the stream is marked failed on the live connection (surfaced through the
+/// connections payload) and stays down until the connection is re-established
+/// or the subscription config changes.
 #[tokio::test]
-async fn dead_session_worker_is_recreated_on_next_reconcile() {
+async fn terminally_failed_stream_is_not_resubscribed_and_reports_failed() {
     tokio::time::timeout(TEST_TIMEOUT, async {
         let forwarder = MockForwarderPeer::start([82; 32], script_stream_mismatch())
             .await
@@ -968,7 +970,7 @@ async fn dead_session_worker_is_recreated_on_next_reconcile() {
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
-        let (config, sub) = base_config(endpoint_id, direct, 83, None);
+        let (config, sub) = base_config(endpoint_id.clone(), direct, 83, None);
         state
             .db
             .lock()
@@ -980,23 +982,35 @@ async fn dead_session_worker_is_recreated_on_next_reconcile() {
             .await
             .unwrap();
 
-        // A lingering finished data task would never re-subscribe, so seeing
-        // multiple subscribes proves the desired stream is resubscribed.
+        // The terminal failure is reaped on a later reconcile pass and
+        // surfaced as a failed stream in the connections payload.
         poll_until(
-            || async { forwarder.subscribes().len() >= 3 },
+            || async {
+                receiver::control_api::get_connections(&state)
+                    .await
+                    .forwarders
+                    .iter()
+                    .find(|status| status.endpoint_id == node_id)
+                    .is_some_and(|status| status.failed_stream_ids == vec![STREAM_ID.to_owned()])
+            },
             Duration::from_secs(10),
         )
         .await;
-        assert!(
-            forwarder.subscribes().len() >= 3,
-            "finished data task must be replaced, producing repeated subscribes"
+
+        // Give the reconcile loop (50ms interval) many more passes: the
+        // terminally failed stream must not be resubscribed.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            forwarder.subscribes().len(),
+            1,
+            "a terminally failed stream must not be resubscribed on the same connection"
         );
 
         runtime.shutdown().await;
         forwarder.shutdown().await;
     })
     .await
-    .expect("dead_session_worker_is_recreated_on_next_reconcile timed out");
+    .expect("terminally_failed_stream_is_not_resubscribed_and_reports_failed timed out");
 }
 
 /// The server is unavailable when the receiver starts, so register/takeover

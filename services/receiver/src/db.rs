@@ -76,6 +76,24 @@ pub enum DbError {
     #[error("Profile missing")]
     ProfileMissing,
 }
+impl DbError {
+    /// Whether this error is a transient SQLite contention failure
+    /// (`SQLITE_BUSY` / `SQLITE_LOCKED`) that a later retry can clear, as
+    /// opposed to a durable schema/corruption/IO failure.
+    pub(crate) fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            DbError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error {
+                    code: rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked,
+                    ..
+                },
+                _,
+            ))
+        )
+    }
+}
+
 pub type DbResult<T> = Result<T, DbError>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {

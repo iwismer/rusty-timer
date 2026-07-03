@@ -14,12 +14,12 @@ use rt_p2p_protocol::{
 use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::control_api::{ConfigCommand, FORWARDER_CONFIG_TIMEOUT, ReaderCommand};
 use crate::p2p_session::{
-    BackoffConfig, DurableBatch, P2pSessionError, SessionStatusReporter, connect_and_hello,
-    read_frame, run_data_subscription_with_hint, write_frame,
+    BackoffConfig, DurableBatch, P2pSessionError, SessionOutcome, SessionStatusReporter,
+    connect_and_hello, read_frame, run_data_subscription_with_hint, write_frame,
 };
 use crate::stream_key::LocalStreamKey;
 use crate::writer::WriterHandle;
@@ -191,6 +191,12 @@ async fn run_connected_forwarder(
 ) {
     let _control_guard = reporter.on_control_connected(endpoint_id).await;
     let mut data_tasks = HashMap::new();
+    // Streams whose data task ended with a terminal (non-retryable) error on
+    // THIS connection, keyed like `data_tasks` by local stream key and holding
+    // the subscription config at failure time. A failed stream is not
+    // respawned; the marker resets on connection re-establishment (this map is
+    // scoped to one connection) or on a subscription config change.
+    let mut failed_streams = HashMap::new();
 
     let crate::p2p_session::ControlSession {
         connection,
@@ -258,6 +264,7 @@ async fn run_connected_forwarder(
         reporter,
         &desired,
         &mut data_tasks,
+        &mut failed_streams,
     )
     .await;
 
@@ -315,6 +322,7 @@ async fn run_connected_forwarder(
                     reporter,
                     &desired,
                     &mut data_tasks,
+                    &mut failed_streams,
                 ).await;
             }
             frame = frame_rx.recv() => {
@@ -679,76 +687,165 @@ async fn handle_control_frame(
     Ok(())
 }
 
+/// A live per-stream data task plus the subscription config it was spawned
+/// with (used to detect a config change that clears a terminal failure).
+struct DataTask {
+    stream: ForwarderDataStream,
+    handle: JoinHandle<Result<SessionOutcome, P2pSessionError>>,
+}
+
+/// Whether the desired subscription config differs from the config a stream
+/// was running when it failed terminally. `ForwarderDataStream` holds a
+/// broadcast sender, so this compares mode plus hint-channel identity: the
+/// per-stream worker in `p2p_runtime` is rebuilt (with a fresh hint channel)
+/// exactly when its subscription config changes, so a hint-channel swap is the
+/// config-change signal. The stream ids are equal by map key.
+fn stream_config_changed(failed: &ForwarderDataStream, desired: &ForwarderDataStream) -> bool {
+    if failed.mode != desired.mode {
+        return true;
+    }
+    match (&failed.durable_hint_tx, &desired.durable_hint_tx) {
+        (Some(previous), Some(current)) => !previous.same_channel(current),
+        (None, None) => false,
+        _ => true,
+    }
+}
+
+/// Await a finished data task and classify its result. Clean EOF/disconnect
+/// and retryable transport errors stay respawn-eligible (a later reconcile
+/// pass recreates the task from the persisted cursor). A terminal
+/// (non-retryable) error marks the stream failed: it is recorded in `failed`
+/// to suppress respawn on this connection and surfaced to the UI through the
+/// forwarder live-status map.
+async fn reap_finished_data_task(
+    endpoint_id: &str,
+    reporter: &Arc<SessionStatusReporter>,
+    stream_key: &str,
+    task: DataTask,
+    failed: &mut HashMap<String, ForwarderDataStream>,
+) {
+    match task.handle.await {
+        // Clean EOF/disconnect: respawn as before.
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) if err.is_retryable() => {
+            warn!(%endpoint_id, stream_id = %task.stream.stream_id, error = %err, "forwarder data subscription ended with transient error");
+        }
+        Ok(Err(err)) => {
+            error!(%endpoint_id, stream_id = %task.stream.stream_id, error = %err, "forwarder data subscription failed terminally; suppressing respawn until reconnect or subscription config change");
+            reporter
+                .app_state()
+                .mark_forwarder_stream_failed(endpoint_id, &task.stream.stream_id)
+                .await;
+            failed.insert(stream_key.to_owned(), task.stream);
+        }
+        // Panic/abort: treat as transient (matches the previous blind-respawn
+        // behavior for abnormal task ends).
+        Err(join_error) => {
+            warn!(%endpoint_id, stream_id = %task.stream.stream_id, %join_error, "forwarder data subscription task ended abnormally");
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn sync_data_tasks(
     endpoint_id: &str,
     connection: &rt_iroh::Connection,
     writer: &WriterHandle,
     reporter: &Arc<SessionStatusReporter>,
     desired: &HashMap<String, ForwarderDataStream>,
-    tasks: &mut HashMap<String, JoinHandle<()>>,
+    tasks: &mut HashMap<String, DataTask>,
+    failed: &mut HashMap<String, ForwarderDataStream>,
 ) {
     let finished = tasks
         .iter()
-        .filter(|(_, task)| task.is_finished())
-        .map(|(stream_id, _)| stream_id.clone())
+        .filter(|(_, task)| task.handle.is_finished())
+        .map(|(stream_key, _)| stream_key.clone())
         .collect::<Vec<_>>();
-    for stream_id in finished {
-        if let Some(task) = tasks.remove(&stream_id) {
-            let _ = task.await;
+    for stream_key in finished {
+        if let Some(task) = tasks.remove(&stream_key) {
+            reap_finished_data_task(endpoint_id, reporter, &stream_key, task, failed).await;
         }
     }
 
     let desired_ids = desired.keys().cloned().collect::<HashSet<_>>();
     let stale = tasks
         .keys()
-        .filter(|stream_id| !desired_ids.contains(*stream_id))
+        .filter(|stream_key| !desired_ids.contains(*stream_key))
         .cloned()
         .collect::<Vec<_>>();
-    for stream_id in stale {
-        if let Some(task) = tasks.remove(&stream_id) {
-            stop_data_task(task).await;
+    for stream_key in stale {
+        if let Some(task) = tasks.remove(&stream_key) {
+            stop_data_task(task.handle).await;
+        }
+    }
+    // A failed stream that is no longer desired was unsubscribed — a
+    // subscription config change — so clear its failure marker; a later
+    // resubscribe starts fresh.
+    let stale_failed = failed
+        .keys()
+        .filter(|stream_key| !desired_ids.contains(*stream_key))
+        .cloned()
+        .collect::<Vec<_>>();
+    for stream_key in stale_failed {
+        if let Some(stream) = failed.remove(&stream_key) {
+            reporter
+                .app_state()
+                .clear_forwarder_stream_failed(endpoint_id, &stream.stream_id)
+                .await;
         }
     }
 
-    for (stream_id, stream) in desired {
-        if tasks.contains_key(stream_id) {
+    for (stream_key, stream) in desired {
+        if tasks.contains_key(stream_key) {
             continue;
         }
-        let endpoint_id = endpoint_id.to_owned();
+        if let Some(failed_stream) = failed.get(stream_key) {
+            // Terminally failed: never respawn on this connection unless the
+            // subscription config changed. (A reconnect resets naturally: this
+            // state is scoped to one connection.)
+            if !stream_config_changed(failed_stream, stream) {
+                continue;
+            }
+            failed.remove(stream_key);
+            reporter
+                .app_state()
+                .clear_forwarder_stream_failed(endpoint_id, &stream.stream_id)
+                .await;
+        }
+        let task_endpoint_id = endpoint_id.to_owned();
         let connection = connection.clone();
         let writer = writer.clone();
-        let reporter = Arc::clone(reporter);
-        let stream = stream.clone();
+        let task_reporter = Arc::clone(reporter);
+        let task_stream = stream.clone();
+        let handle = tokio::spawn(async move {
+            let _data_guard = task_reporter.on_data_session(&task_endpoint_id).await;
+            run_data_subscription_with_hint(
+                &connection,
+                &writer,
+                &task_stream.stream_id,
+                &task_stream.local_stream_key,
+                task_stream.mode,
+                task_stream.durable_hint_tx.as_ref(),
+            )
+            .await
+        });
         tasks.insert(
-            stream_id.clone(),
-            tokio::spawn(async move {
-                let _data_guard = reporter.on_data_session(&endpoint_id).await;
-                let result = run_data_subscription_with_hint(
-                    &connection,
-                    &writer,
-                    &stream.stream_id,
-                    &stream.local_stream_key,
-                    stream.mode,
-                    stream.durable_hint_tx.as_ref(),
-                )
-                .await;
-                if let Err(error) = result
-                    && !matches!(error, P2pSessionError::Read(_))
-                {
-                    warn!(%endpoint_id, stream_id = %stream.stream_id, %error, "forwarder data subscription ended with error");
-                }
-            }),
+            stream_key.clone(),
+            DataTask {
+                stream: stream.clone(),
+                handle,
+            },
         );
     }
 }
 
-async fn stop_data_tasks(tasks: HashMap<String, JoinHandle<()>>) {
+async fn stop_data_tasks(tasks: HashMap<String, DataTask>) {
     for task in tasks.into_values() {
-        stop_data_task(task).await;
+        stop_data_task(task.handle).await;
     }
 }
 
-async fn stop_data_task(task: JoinHandle<()>) {
+async fn stop_data_task<T>(task: JoinHandle<T>) {
     task.abort();
     let _ = task.await;
 }
@@ -1075,6 +1172,114 @@ mod tests {
         })
         .await
         .expect("control reconnect resume test timed out");
+    }
+
+    /// A script whose `SubscribeOk` carries a mismatched stream id, so the
+    /// receiver's data session fails terminally (`StreamIdMismatch`)
+    /// immediately after subscribing while the control session stays healthy.
+    fn mismatched_subscribe_ok_script() -> ForwarderScript {
+        let mut script = base_script();
+        script.subscribe_ok.stream_id = b"10.9.9.9:9999".to_vec();
+        script.data_fault = ConnectivityFault::healthy();
+        script
+    }
+
+    #[tokio::test]
+    async fn terminal_data_error_marks_stream_failed_and_stops_respawn() {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let forwarder = MockForwarderPeer::start([46; 32], mismatched_subscribe_ok_script())
+                .await
+                .unwrap();
+            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint = Arc::new(test_endpoint(47).await);
+            let store = test_store();
+            let (state, _shutdown_rx) = AppState::new(
+                crate::db::Db::open_in_memory().unwrap(),
+                "recv-test".to_owned(),
+            );
+            let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
+
+            let connection = ForwarderConnection::start(
+                endpoint_id.clone(),
+                Arc::clone(&endpoint),
+                forwarder.node_addr(),
+                store.writer.clone(),
+                test_hello(),
+                Arc::clone(&reporter),
+                BackoffConfig {
+                    initial: Duration::from_millis(50),
+                    max: Duration::from_millis(50),
+                },
+            );
+
+            let (hint_tx, _hint_rx) = broadcast::channel(16);
+            let desired = || {
+                vec![ForwarderDataStream {
+                    stream_id: STREAM_ID.to_owned(),
+                    local_stream_key: local_stream_key(&endpoint_id),
+                    mode: SubscribeMode::Replay,
+                    durable_hint_tx: Some(hint_tx.clone()),
+                }]
+            };
+            connection.set_desired_streams(desired());
+
+            // Drive reconcile passes (production re-sends the desired set every
+            // pass) until the terminal failure is reaped and surfaced through
+            // the connections payload.
+            poll_until(
+                || {
+                    connection.set_desired_streams(desired());
+                    let state = Arc::clone(&state);
+                    let endpoint_id = endpoint_id.clone();
+                    async move {
+                        get_connections(&state)
+                            .await
+                            .forwarders
+                            .iter()
+                            .find(|forwarder| forwarder.endpoint_id == endpoint_id)
+                            .is_some_and(|forwarder| {
+                                forwarder.failed_stream_ids == vec![STREAM_ID.to_owned()]
+                            })
+                    }
+                },
+                Duration::from_secs(10),
+            )
+            .await;
+
+            // Further reconcile passes with an unchanged subscription config
+            // must not respawn the terminally failed stream: exactly one
+            // subscribe attempt on this connection.
+            for _ in 0..5 {
+                connection.set_desired_streams(desired());
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            assert_eq!(
+                forwarder.subscribes().len(),
+                1,
+                "a terminally failed stream must not be respawned on the same connection"
+            );
+
+            // A subscription config change (per-stream worker rebuild = fresh
+            // durable hint channel) clears the failure and permits a retry.
+            let (new_hint_tx, _new_hint_rx) = broadcast::channel(16);
+            connection.set_desired_streams(vec![ForwarderDataStream {
+                stream_id: STREAM_ID.to_owned(),
+                local_stream_key: local_stream_key(&endpoint_id),
+                mode: SubscribeMode::Replay,
+                durable_hint_tx: Some(new_hint_tx.clone()),
+            }]);
+            poll_until(
+                || async { forwarder.subscribes().len() >= 2 },
+                Duration::from_secs(5),
+            )
+            .await;
+
+            connection.stop().await;
+            forwarder.shutdown().await;
+            endpoint.close().await;
+        })
+        .await
+        .expect("terminal data error test timed out");
     }
 
     /// A script that, after the handshake, pushes an ignored control variant

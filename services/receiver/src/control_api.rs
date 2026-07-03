@@ -164,12 +164,19 @@ struct ForwarderConnectionsFingerprint {
     available_count: usize,
     readers: Vec<ReaderLiveStatus>,
     ups: Option<UpsStatusPayload>,
+    failed_stream_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ForwarderLiveStatus {
     readers: HashMap<String, ReaderLiveStatus>,
     ups: Option<UpsStatusPayload>,
+    /// Wire stream ids whose data subscription failed terminally on the live
+    /// connection (protocol/data-integrity error). Set by
+    /// [`AppState::mark_forwarder_stream_failed`]; cleared on control
+    /// disconnect (the whole live status is dropped) or on a subscription
+    /// config change ([`AppState::clear_forwarder_stream_failed`]).
+    failed_streams: BTreeSet<String>,
 }
 
 const FORWARDER_PENDING_GRACE: Duration = Duration::from_secs(5);
@@ -1033,6 +1040,38 @@ impl AppState {
             .collect()
     }
 
+    /// Mark a stream's data subscription as terminally failed on this
+    /// forwarder's live connection (protocol/data-integrity error, see
+    /// [`crate::p2p_session::P2pSessionError::is_retryable`]). Surfaced through
+    /// the connections payload/fingerprint so the UI sees the failed stream via
+    /// the existing `ConnectionsChanged` event.
+    pub(crate) async fn mark_forwarder_stream_failed(&self, endpoint_id: &str, stream_id: &str) {
+        {
+            let mut live_statuses = self.forwarder_live_status.lock().unwrap();
+            live_statuses
+                .entry(endpoint_id.to_owned())
+                .or_default()
+                .failed_streams
+                .insert(stream_id.to_owned());
+        }
+        self.recompute_aggregate_connection_state().await;
+    }
+
+    /// Clear a stream's terminal-failure marker (subscription config change or
+    /// unsubscribe). Control disconnect clears it wholesale through
+    /// [`Self::clear_forwarder_live_status`].
+    pub(crate) async fn clear_forwarder_stream_failed(&self, endpoint_id: &str, stream_id: &str) {
+        let removed = {
+            let mut live_statuses = self.forwarder_live_status.lock().unwrap();
+            live_statuses
+                .get_mut(endpoint_id)
+                .is_some_and(|status| status.failed_streams.remove(stream_id))
+        };
+        if removed {
+            self.recompute_aggregate_connection_state().await;
+        }
+    }
+
     pub(crate) async fn clear_forwarder_live_status(&self, endpoint_id: &str) {
         {
             self.forwarder_live_status
@@ -1180,6 +1219,7 @@ impl AppState {
                         &endpoint_id,
                     )),
                     ups: live_status.ups,
+                    failed_stream_ids: live_status.failed_streams.into_iter().collect(),
                 }
             })
             .collect();
@@ -1687,6 +1727,11 @@ pub struct ForwarderConnectionStatus {
     pub available_count: usize,
     pub readers: Vec<ReaderLiveStatus>,
     pub ups: Option<UpsStatusPayload>,
+    /// Wire stream ids whose data subscription failed terminally on the live
+    /// connection (protocol/data-integrity violation). These are not retried
+    /// until the connection is re-established or the subscription config
+    /// changes.
+    pub failed_stream_ids: Vec<String>,
     pub restart_needed: Option<bool>,
     /// `true` only when this forwarder has a live control session that
     /// negotiated `CAP_REMOTE_CONFIG`; gates the UI's view/edit/restart
@@ -2359,6 +2404,7 @@ pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
             available_count: discovered_forwarder.map_or(0, |forwarder| forwarder.streams.len()),
             readers: sorted_reader_statuses(&live_status, &local_ports, &endpoint_id),
             ups: live_status.ups,
+            failed_stream_ids: live_status.failed_streams.into_iter().collect(),
             restart_needed: None,
             remote_config_available: state.forwarder_remote_config_available(&endpoint_id),
             reader_control_available: state.forwarder_reader_control_available(&endpoint_id),

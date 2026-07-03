@@ -212,18 +212,19 @@ impl P2pSessionError {
     ///
     /// Transient transport/read/write failures (`true`) are the expected
     /// disconnect/EOF signals when a connection drops; resuming from the
-    /// persisted cursor is safe. Durable failures (`false`) — decode,
-    /// frame-size, protocol-sequencing, and data-integrity errors, plus durable
+    /// persisted cursor is safe. Durable-store errors are transient only when
+    /// the underlying SQLite failure is contention (`SQLITE_BUSY` /
+    /// `SQLITE_LOCKED`); nothing was acked, so a retry from the persisted
+    /// cursor is safe. Durable failures (`false`) — decode, frame-size,
+    /// protocol-sequencing, and data-integrity errors, plus non-contention
     /// store errors — indicate the forwarder sent something the session must
-    /// not silently ack past.
+    /// not silently ack past (or the store itself is broken).
     ///
-    /// This is a pure classifier, *not* a retry gate: the production runtime no
-    /// longer loops forever inside a single data subscription. A data task that
-    /// ends (for any reason) is logged and then recreated on the next reconcile
-    /// by [`crate::p2p_forwarder`], which reopens the subscription from the
-    /// persisted cursor. Callers use this method to decide whether an ended
-    /// subscription is a routine disconnect worth a quiet log or a durable fault
-    /// worth surfacing.
+    /// [`crate::p2p_forwarder`] uses this as its respawn gate: a data task that
+    /// ends with a retryable error (or a clean EOF) is recreated on the next
+    /// reconcile pass from the persisted cursor, while a terminal error marks
+    /// the stream failed and suppresses respawn until the connection is
+    /// re-established or the subscription config changes.
     pub fn is_retryable(&self) -> bool {
         match self {
             P2pSessionError::Iroh(_)
@@ -231,9 +232,9 @@ impl P2pSessionError {
             | P2pSessionError::Read(_)
             | P2pSessionError::Write(_)
             | P2pSessionError::Writer(_) => true,
+            P2pSessionError::Db(error) => error.is_transient(),
             P2pSessionError::Decode(_)
             | P2pSessionError::FrameTooLarge(_)
-            | P2pSessionError::Db(_)
             | P2pSessionError::UnexpectedMessage { .. }
             | P2pSessionError::StreamIdMismatch { .. }
             | P2pSessionError::ConflictingDuplicate { .. }
@@ -1738,6 +1739,21 @@ mod tests {
         assert!(P2pSessionError::Stream("x".to_owned()).is_retryable());
         assert!(P2pSessionError::Read("x".to_owned()).is_retryable());
         assert!(P2pSessionError::Write("x".to_owned()).is_retryable());
+        assert!(P2pSessionError::Writer("x".to_owned()).is_retryable());
+        // Db errors are transient only for SQLite contention (busy/locked);
+        // any other durable-store failure is terminal.
+        let sqlite_db_error = |code: std::os::raw::c_int| {
+            crate::db::DbError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ))
+        };
+        assert!(P2pSessionError::Db(sqlite_db_error(rusqlite::ffi::SQLITE_BUSY)).is_retryable());
+        assert!(P2pSessionError::Db(sqlite_db_error(rusqlite::ffi::SQLITE_LOCKED)).is_retryable());
+        assert!(
+            !P2pSessionError::Db(sqlite_db_error(rusqlite::ffi::SQLITE_CORRUPT)).is_retryable()
+        );
+        assert!(!P2pSessionError::Db(crate::db::DbError::ProfileMissing).is_retryable());
         // Durable failures are surfaced, never retried.
         assert!(!P2pSessionError::Decode("x".to_owned()).is_retryable());
         assert!(!P2pSessionError::FrameTooLarge(99).is_retryable());
