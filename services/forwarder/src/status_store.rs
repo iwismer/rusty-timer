@@ -5,6 +5,7 @@
 //! has no HTTP/axum dependencies.
 
 use rt_updater::UpdateStatus;
+use rt_updater::workflow::WorkflowState;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -275,8 +276,14 @@ pub struct StatusStore {
     subsystem: Arc<Mutex<SubsystemStatus>>,
     ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
     status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
-    display_change_tx: broadcast::Sender<()>,
     logger: Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    display_tx:
+        Arc<std::sync::Mutex<Option<tokio::sync::watch::Sender<rt_screen::state::DisplayState>>>>,
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    display_name: Arc<Mutex<Option<String>>>,
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    cpu_temp: Arc<Mutex<Option<f32>>>,
     control_clients:
         Arc<std::sync::RwLock<HashMap<String, Arc<crate::reader_control::ControlClient>>>>,
     download_trackers: Arc<
@@ -375,12 +382,109 @@ fn spawn_read_count_broadcaster(
         }
     });
 }
+
+#[cfg(any(feature = "eink", feature = "lcd"))]
+fn subsystem_to_display_state(
+    ss: &SubsystemStatus,
+    forwarder_name: Option<String>,
+    cpu_temp: Option<f32>,
+) -> rt_screen::state::DisplayState {
+    let readers = ss
+        .readers()
+        .iter()
+        .map(|(addr, r)| {
+            let ip = addr
+                .rsplit_once(':')
+                .map_or(addr.as_str(), |(ip, _)| ip)
+                .to_owned();
+            rt_screen::state::ReaderDisplayState {
+                ip,
+                state: match r.state {
+                    ReaderConnectionState::Connected => {
+                        rt_screen::state::ReaderConnectionState::Connected
+                    }
+                    ReaderConnectionState::Connecting => {
+                        rt_screen::state::ReaderConnectionState::Connecting
+                    }
+                    ReaderConnectionState::Disconnected => {
+                        rt_screen::state::ReaderConnectionState::Disconnected
+                    }
+                },
+                drift_ms: r
+                    .reader_info
+                    .as_ref()
+                    .and_then(|info| info.clock.as_ref())
+                    .map(|c| c.drift_ms),
+                session_reads: r.reads_since_restart,
+            }
+        })
+        .collect();
+
+    let total_reads: u64 = ss.readers().values().map(|r| r.reads_since_restart).sum();
+
+    rt_screen::state::DisplayState {
+        forwarder_name,
+        local_ip: ss.local_ip.clone(),
+        p2p_connected: ss.p2p_connected(),
+        readers,
+        total_reads,
+        cpu_temp_celsius: cpu_temp,
+        battery: ss.ups_status().and_then(|u| {
+            u.status.as_ref().map(|s| rt_screen::state::BatteryState {
+                percent: s.battery_percent,
+                charging: s.charging,
+            })
+        }),
+    }
+}
+
+/// Workflow state adapter over the forwarder's shared status store.
+#[derive(Clone)]
+pub(crate) struct ForwarderWorkflowAdapter {
+    store: StatusStore,
+}
+
+impl WorkflowState for ForwarderWorkflowAdapter {
+    fn current_status<'a>(
+        &'a self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = UpdateStatus> + Send + 'a>> {
+        Box::pin(async move { self.store.update_status().await })
+    }
+
+    fn set_status<'a>(
+        &'a self,
+        status: UpdateStatus,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            self.store.set_update_status_without_emit(status).await;
+        })
+    }
+
+    fn set_downloaded<'a>(
+        &'a self,
+        status: UpdateStatus,
+        path: std::path::PathBuf,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            self.store.set_downloaded_update(status, path).await;
+        })
+    }
+
+    fn emit_status_changed<'a>(
+        &'a self,
+        status: UpdateStatus,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            self.store.emit_update_status_changed(status);
+        })
+    }
+}
+
 impl StatusStore {
     /// Create a status store with fresh UI and P2P status broadcast channels.
     pub fn new(subsystem: SubsystemStatus) -> Self {
         let (ui_tx, _) = tokio::sync::broadcast::channel(256);
         let (status_event_tx, _) = broadcast::channel(256);
-        let (display_change_tx, _) = broadcast::channel(256);
         let logger = Arc::new(rt_ui_log::UiLogger::with_buffer(
             ui_tx.clone(),
             |entry| crate::ui_events::ForwarderUiEvent::LogEntry { entry },
@@ -391,8 +495,13 @@ impl StatusStore {
             subsystem: subsystem.clone(),
             ui_tx,
             status_event_tx: status_event_tx.clone(),
-            display_change_tx,
             logger,
+            #[cfg(any(feature = "eink", feature = "lcd"))]
+            display_tx: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(any(feature = "eink", feature = "lcd"))]
+            display_name: Arc::new(Mutex::new(None)),
+            #[cfg(any(feature = "eink", feature = "lcd"))]
+            cpu_temp: Arc::new(Mutex::new(None)),
             control_clients: Arc::new(std::sync::RwLock::new(HashMap::new())),
             download_trackers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             reconnect_notifies: Arc::new(std::sync::RwLock::new(HashMap::new())),
@@ -406,14 +515,6 @@ impl StatusStore {
         self.status_event_tx.clone()
     }
 
-    /// Subscribe to state changes that should refresh the optional local display.
-    pub(crate) fn subscribe_display_changes(&self) -> broadcast::Receiver<()> {
-        self.display_change_tx.subscribe()
-    }
-
-    fn notify_display_changed(&self) {
-        let _ = self.display_change_tx.send(());
-    }
     /// Return a clone of the internal subsystem status Arc.
     pub fn subsystem_arc(&self) -> Arc<Mutex<SubsystemStatus>> {
         self.subsystem.clone()
@@ -464,7 +565,7 @@ impl StatusStore {
                     restart_needed: ss.restart_needed(),
                 });
         }
-        self.notify_display_changed();
+        self.publish_display_state().await;
     }
 
     /// Mark that a restart is needed to apply saved config changes.
@@ -495,7 +596,7 @@ impl StatusStore {
                     restart_needed: ss.restart_needed(),
                 });
         }
-        self.notify_display_changed();
+        self.publish_display_state().await;
     }
 
     /// Set the forwarder ID (call once at startup).
@@ -506,7 +607,7 @@ impl StatusStore {
     /// Set the detected local IP (call once at startup).
     pub async fn set_local_ip(&self, ip: Option<String>) {
         self.subsystem.lock().await.local_ip = ip;
-        self.notify_display_changed();
+        self.publish_display_state().await;
     }
 
     /// Set the update mode (controls check-only vs check-and-download behavior).
@@ -514,18 +615,101 @@ impl StatusStore {
         self.subsystem.lock().await.update_mode = mode;
     }
 
+    /// Return the configured update mode.
+    pub async fn update_mode(&self) -> rt_updater::UpdateMode {
+        self.subsystem.lock().await.update_mode
+    }
+
+    /// Return the current rt-updater status.
+    pub async fn update_status(&self) -> UpdateStatus {
+        self.subsystem.lock().await.update_status.clone()
+    }
+
+    /// Return the staged update artifact path, if one exists.
+    pub async fn staged_update_path(&self) -> Option<std::path::PathBuf> {
+        self.subsystem.lock().await.staged_update_path.clone()
+    }
+
     /// Update the current rt-updater status (shown on `/update/status`).
     pub async fn set_update_status(&self, status: UpdateStatus) {
-        self.subsystem.lock().await.update_status = status.clone();
+        self.set_update_status_without_emit(status.clone()).await;
+        self.emit_update_status_changed(status);
+    }
+
+    async fn set_update_status_without_emit(&self, status: UpdateStatus) {
+        self.subsystem.lock().await.update_status = status;
+    }
+
+    async fn set_downloaded_update(&self, status: UpdateStatus, path: std::path::PathBuf) {
+        let mut ss = self.subsystem.lock().await;
+        ss.update_status = status;
+        ss.staged_update_path = Some(path);
+    }
+
+    fn emit_update_status_changed(&self, status: UpdateStatus) {
         let _ = self
             .ui_tx
             .send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged { status });
+    }
+
+    pub(crate) fn workflow_state(&self) -> ForwarderWorkflowAdapter {
+        ForwarderWorkflowAdapter {
+            store: self.clone(),
+        }
     }
 
     /// Record the filesystem path of a downloaded update artifact ready to apply.
     pub async fn set_staged_update_path(&self, path: std::path::PathBuf) {
         self.subsystem.lock().await.staged_update_path = Some(path);
     }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    pub fn set_display_sender(
+        &self,
+        tx: tokio::sync::watch::Sender<rt_screen::state::DisplayState>,
+    ) {
+        *self.display_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    pub async fn set_display_name(&self, name: Option<String>) {
+        *self.display_name.lock().await = name;
+        self.publish_display_state().await;
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    pub async fn set_cpu_temp(&self, temp: Option<f32>) {
+        self.set_cpu_temp_cached(temp).await;
+        self.publish_display_state().await;
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    pub async fn set_cpu_temp_cached(&self, temp: Option<f32>) {
+        *self.cpu_temp.lock().await = temp;
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    pub async fn display_state(&self) -> rt_screen::state::DisplayState {
+        let ss = self.subsystem.lock().await;
+        let forwarder_name = self.display_name.lock().await.clone();
+        let cpu_temp = *self.cpu_temp.lock().await;
+        subsystem_to_display_state(&ss, forwarder_name, cpu_temp)
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    async fn publish_display_state(&self) {
+        let tx = self
+            .display_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(tx) = tx {
+            tx.send_replace(self.display_state().await);
+        }
+    }
+
+    #[cfg(not(any(feature = "eink", feature = "lcd")))]
+    async fn publish_display_state(&self) {}
 
     /// Update the UPS status snapshot in the subsystem state.
     ///
@@ -546,7 +730,7 @@ impl StatusStore {
                     .send(ForwarderStatusEvent::UpsStatus(state));
             }
         }
-        self.notify_display_changed();
+        self.publish_display_state().await;
     }
 
     pub fn control_clients(
@@ -641,7 +825,7 @@ impl StatusStore {
                 info,
             });
         }
-        self.notify_display_changed();
+        self.publish_display_state().await;
     }
 
     /// Update reader info only if the reader has not transitioned to Disconnected.
@@ -684,7 +868,7 @@ impl StatusStore {
                 info,
             });
         }
-        self.notify_display_changed();
+        self.publish_display_state().await;
     }
 
     pub fn register_control_client(
@@ -724,7 +908,7 @@ impl StatusStore {
                 });
             }
         }
-        self.notify_display_changed();
+        self.publish_display_state().await;
     }
 
     /// Seed a reader's total historical count from durable journal state.
@@ -735,7 +919,7 @@ impl StatusStore {
                 r.reads_total = total;
             }
         }
-        self.notify_display_changed();
+        self.publish_display_state().await;
     }
 
     /// Set the current epoch name for a reader and broadcast a ReaderUpdated SSE event.
@@ -757,7 +941,7 @@ impl StatusStore {
                     });
             }
         }
-        self.notify_display_changed();
+        self.publish_display_state().await;
     }
 
     /// Update a reader's connection state.
@@ -795,7 +979,7 @@ impl StatusStore {
                 }
             }
         }
-        self.notify_display_changed();
+        self.publish_display_state().await;
     }
 
     /// Record a successful chip read for a reader.
@@ -823,7 +1007,7 @@ impl StatusStore {
                 ss.read_counts_dirty.insert(reader_ip.to_owned());
             }
         }
-        self.notify_display_changed();
+        self.publish_display_state().await;
     }
 }
 

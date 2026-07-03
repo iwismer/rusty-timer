@@ -46,7 +46,7 @@
 //! # Security
 //! No authentication in v1.
 
-use crate::config_service::ConfigState;
+use crate::config_service::{ConfigState, apply_control_action, require_object_payload};
 use crate::status_store::{
     ForwarderStatusEvent, ForwarderStatusFeed, ReaderConnectionState, StatusStore, SubsystemStatus,
     UpsStatusState,
@@ -62,13 +62,11 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use rt_updater::UpdateStatus;
-use rt_updater::workflow::{RealChecker, WorkflowState, run_check, run_download};
+use rt_updater::workflow::{RealChecker, run_check, run_download};
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::future::Future;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 #[cfg(test)]
@@ -89,62 +87,6 @@ pub struct StatusConfig {
     pub forwarder_version: String,
 }
 
-#[cfg(any(feature = "eink", feature = "lcd"))]
-fn subsystem_to_display_state(
-    ss: &SubsystemStatus,
-    forwarder_name: Option<String>,
-    cpu_temp: Option<f32>,
-) -> rt_screen::state::DisplayState {
-    let readers = ss
-        .readers()
-        .iter()
-        .map(|(addr, r)| {
-            // Reader addresses are "ip:port" — extract just the IP.
-            let ip = addr
-                .rsplit_once(':')
-                .map_or(addr.as_str(), |(ip, _)| ip)
-                .to_owned();
-            rt_screen::state::ReaderDisplayState {
-                ip,
-                state: match r.state {
-                    ReaderConnectionState::Connected => {
-                        rt_screen::state::ReaderConnectionState::Connected
-                    }
-                    ReaderConnectionState::Connecting => {
-                        rt_screen::state::ReaderConnectionState::Connecting
-                    }
-                    ReaderConnectionState::Disconnected => {
-                        rt_screen::state::ReaderConnectionState::Disconnected
-                    }
-                },
-                drift_ms: r
-                    .reader_info
-                    .as_ref()
-                    .and_then(|info| info.clock.as_ref())
-                    .map(|c| c.drift_ms),
-                session_reads: r.reads_since_restart,
-            }
-        })
-        .collect();
-
-    let total_reads: u64 = ss.readers().values().map(|r| r.reads_since_restart).sum();
-
-    rt_screen::state::DisplayState {
-        forwarder_name,
-        local_ip: ss.local_ip.clone(),
-        p2p_connected: ss.p2p_connected(),
-        readers,
-        total_reads,
-        cpu_temp_celsius: cpu_temp,
-        battery: ss.ups_status().and_then(|u| {
-            u.status.as_ref().map(|s| rt_screen::state::BatteryState {
-                percent: s.battery_percent,
-                charging: s.charging,
-            })
-        }),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // StatusServer handle
 // ---------------------------------------------------------------------------
@@ -154,15 +96,10 @@ fn subsystem_to_display_state(
 pub struct StatusServer {
     local_addr: SocketAddr,
     store: StatusStore,
-    #[cfg(any(feature = "eink", feature = "lcd"))]
-    display_tx: Option<tokio::sync::watch::Sender<rt_screen::state::DisplayState>>,
-    #[cfg(any(feature = "eink", feature = "lcd"))]
-    display_name: Arc<Mutex<Option<String>>>,
-    #[cfg(any(feature = "eink", feature = "lcd"))]
-    cpu_temp: Arc<Mutex<Option<f32>>>,
 }
 
 struct AppState<J: JournalAccess + Send + 'static> {
+    store: StatusStore,
     subsystem: Arc<Mutex<SubsystemStatus>>,
     journal: Arc<Mutex<J>>,
     version: Arc<String>,
@@ -179,10 +116,6 @@ struct AppState<J: JournalAccess + Send + 'static> {
         >,
     >,
     reconnect_notifies: Arc<std::sync::RwLock<HashMap<String, Arc<Notify>>>>,
-    #[cfg(any(feature = "eink", feature = "lcd"))]
-    display_name: Arc<Mutex<Option<String>>>,
-    #[cfg(any(feature = "eink", feature = "lcd"))]
-    cpu_temp: Arc<Mutex<Option<f32>>>,
 }
 
 impl<J: JournalAccess + Send + 'static> AppState<J> {
@@ -202,6 +135,7 @@ impl<J: JournalAccess + Send + 'static> AppState<J> {
 impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
     fn clone(&self) -> Self {
         Self {
+            store: self.store.clone(),
             subsystem: self.subsystem.clone(),
             journal: self.journal.clone(),
             version: self.version.clone(),
@@ -213,10 +147,6 @@ impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
             control_clients: self.control_clients.clone(),
             download_trackers: self.download_trackers.clone(),
             reconnect_notifies: self.reconnect_notifies.clone(),
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            display_name: self.display_name.clone(),
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            cpu_temp: self.cpu_temp.clone(),
         }
     }
 }
@@ -260,8 +190,6 @@ impl StatusServer {
     /// Mark all local subsystems as ready.
     pub async fn set_ready(&self) {
         self.store.set_ready().await;
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
     }
 
     /// Mark that a restart is needed to apply saved config changes.
@@ -281,8 +209,6 @@ impl StatusServer {
     /// Update the P2P session state (does not affect readiness).
     pub async fn set_p2p_connected(&self, connected: bool) {
         self.store.set_p2p_connected(connected).await;
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
     }
 
     /// Set the forwarder ID (call once at startup).
@@ -293,8 +219,6 @@ impl StatusServer {
     /// Set the detected local IP (at startup and on reader connect/disconnect).
     pub async fn set_local_ip(&self, ip: Option<String>) {
         self.store.set_local_ip(ip).await;
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
     }
 
     /// Set the update mode (controls check-only vs check-and-download behavior).
@@ -315,8 +239,6 @@ impl StatusServer {
     /// Update the UPS status snapshot in the subsystem state.
     pub async fn set_ups_status(&self, state: UpsStatusState) {
         self.store.set_ups_status(state).await;
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
     }
 
     pub fn control_clients(
@@ -361,58 +283,26 @@ impl StatusServer {
     }
 
     #[cfg(any(feature = "eink", feature = "lcd"))]
-    async fn publish_display_state(&self) {
-        if let Some(ref tx) = self.display_tx {
-            let subsystem = self.store.subsystem_arc();
-            let ss = subsystem.lock().await;
-            let forwarder_name = self.display_name.lock().await.clone();
-            let cpu_temp = *self.cpu_temp.lock().await;
-            let state = subsystem_to_display_state(&ss, forwarder_name, cpu_temp);
-            tx.send_replace(state);
-        }
-    }
-
-    #[cfg(any(feature = "eink", feature = "lcd"))]
     pub fn set_display_sender(
         &mut self,
         tx: tokio::sync::watch::Sender<rt_screen::state::DisplayState>,
     ) {
-        self.display_tx = Some(tx);
-        self.spawn_display_change_bridge();
-    }
-
-    #[cfg(any(feature = "eink", feature = "lcd"))]
-    fn spawn_display_change_bridge(&self) {
-        let mut display_changes = self.store.subscribe_display_changes();
-        let server = self.clone();
-        tokio::spawn(async move {
-            loop {
-                match display_changes.recv().await {
-                    Ok(()) => server.publish_display_state().await,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        server.publish_display_state().await;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
+        self.store.set_display_sender(tx);
     }
 
     #[cfg(any(feature = "eink", feature = "lcd"))]
     pub async fn set_display_name(&self, name: Option<String>) {
-        *self.display_name.lock().await = name;
-        self.publish_display_state().await;
+        self.store.set_display_name(name).await;
     }
 
     #[cfg(any(feature = "eink", feature = "lcd"))]
     pub async fn set_cpu_temp(&self, temp: Option<f32>) {
-        self.set_cpu_temp_cached(temp).await;
-        self.publish_display_state().await;
+        self.store.set_cpu_temp(temp).await;
     }
 
     #[cfg(any(feature = "eink", feature = "lcd"))]
     pub async fn set_cpu_temp_cached(&self, temp: Option<f32>) {
-        *self.cpu_temp.lock().await = temp;
+        self.store.set_cpu_temp_cached(temp).await;
     }
 
     /// Retrieve a clone of the cached reader info for a given reader IP.
@@ -429,8 +319,6 @@ impl StatusServer {
         info: crate::reader_control::ReaderInfo,
     ) {
         self.store.update_reader_info(reader_ip, info).await;
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
     }
 
     /// Update reader info only if the reader has not transitioned to Disconnected.
@@ -442,8 +330,6 @@ impl StatusServer {
         self.store
             .update_reader_info_unless_disconnected(reader_ip, info)
             .await;
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
     }
 
     pub fn register_control_client(
@@ -461,36 +347,26 @@ impl StatusServer {
     /// Pre-populate all configured reader IPs as Disconnected.
     pub async fn init_readers(&self, readers: &[(String, u16)]) {
         self.store.init_readers(readers).await;
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
     }
 
     /// Seed a reader's total historical count from durable journal state.
     pub async fn set_reader_total(&self, reader_ip: &str, total: i64) {
         self.store.set_reader_total(reader_ip, total).await;
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
     }
 
     /// Set the current epoch name for a reader and broadcast a ReaderUpdated SSE event.
     pub async fn set_reader_epoch_name(&self, reader_ip: &str, name: Option<String>) {
         self.store.set_reader_epoch_name(reader_ip, name).await;
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
     }
 
     /// Update a reader's connection state.
     pub async fn update_reader_state(&self, reader_ip: &str, state: ReaderConnectionState) {
         self.store.update_reader_state(reader_ip, state).await;
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
     }
 
     /// Record a successful chip read for a reader.
     pub async fn record_read(&self, reader_ip: &str) {
         self.store.record_read(reader_ip).await;
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
     }
 
     /// Start the status HTTP server without a journal (epoch reset returns 404).
@@ -511,11 +387,8 @@ impl StatusServer {
         let local_addr = listener.local_addr()?;
 
         let store = StatusStore::new(subsystem);
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        let display_name = Arc::new(Mutex::new(None));
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        let cpu_temp = Arc::new(Mutex::new(None));
         let state = AppState {
+            store: store.clone(),
             subsystem: store.subsystem_arc(),
             journal,
             version: Arc::new(cfg.forwarder_version),
@@ -527,10 +400,6 @@ impl StatusServer {
             control_clients: store.control_clients().clone(),
             download_trackers: store.download_trackers().clone(),
             reconnect_notifies: store.reconnect_notifies().clone(),
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            display_name: display_name.clone(),
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            cpu_temp: cpu_temp.clone(),
         };
 
         let app = build_router(state);
@@ -540,16 +409,7 @@ impl StatusServer {
             }
         });
 
-        Ok(StatusServer {
-            local_addr,
-            store,
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            display_tx: None,
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            display_name,
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            cpu_temp,
-        })
+        Ok(StatusServer { local_addr, store })
     }
 
     /// Start the status HTTP server with config editing support.
@@ -564,11 +424,8 @@ impl StatusServer {
         let local_addr = listener.local_addr()?;
 
         let store = StatusStore::new(subsystem);
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        let display_name = Arc::new(Mutex::new(None));
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        let cpu_temp = Arc::new(Mutex::new(None));
         let state = AppState {
+            store: store.clone(),
             subsystem: store.subsystem_arc(),
             journal,
             version: Arc::new(cfg.forwarder_version),
@@ -580,10 +437,6 @@ impl StatusServer {
             control_clients: store.control_clients().clone(),
             download_trackers: store.download_trackers().clone(),
             reconnect_notifies: store.reconnect_notifies().clone(),
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            display_name: display_name.clone(),
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            cpu_temp: cpu_temp.clone(),
         };
 
         let app = build_router(state);
@@ -593,16 +446,7 @@ impl StatusServer {
             }
         });
 
-        Ok(StatusServer {
-            local_addr,
-            store,
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            display_tx: None,
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            display_name,
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            cpu_temp,
-        })
+        Ok(StatusServer { local_addr, store })
     }
 }
 
@@ -679,21 +523,6 @@ fn parse_json_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, String> {
     serde_json::from_slice::<T>(body).map_err(|e| format!("Invalid JSON: {}", e))
 }
 
-pub(crate) fn bad_request_error(message: impl Into<String>) -> (u16, String) {
-    (
-        400u16,
-        serde_json::json!({"ok": false, "error": message.into()}).to_string(),
-    )
-}
-
-pub(crate) fn require_object_payload(payload: &serde_json::Value) -> Result<(), (u16, String)> {
-    if payload.is_object() {
-        Ok(())
-    } else {
-        Err(bad_request_error("payload must be a JSON object"))
-    }
-}
-
 fn config_not_available() -> Response {
     text_response(StatusCode::NOT_FOUND, "Config editing not available")
 }
@@ -718,279 +547,6 @@ async fn restart_handler<J: JournalAccess + Send + 'static>(
             }
         }
         None => config_not_available(),
-    }
-}
-
-async fn read_allow_power_actions(config_state: &ConfigState) -> Result<bool, (u16, String)> {
-    let _lock = config_state.write_lock.lock().await;
-    let toml_str = std::fs::read_to_string(&config_state.path).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
-                .to_string(),
-        )
-    })?;
-    let raw: crate::config::RawConfig = toml::from_str(&toml_str).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("TOML parse error: {}", e)})
-                .to_string(),
-        )
-    })?;
-    Ok(raw
-        .control
-        .and_then(|c| c.allow_power_actions)
-        .unwrap_or(false))
-}
-
-#[cfg(unix)]
-fn map_power_action_command_result(
-    systemctl_action: &'static str,
-    result: std::io::Result<std::process::Output>,
-    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-) -> Result<(), (u16, String)> {
-    match result {
-        Ok(output) if output.status.success() => Ok(()),
-        Ok(output) => {
-            let detail = power_action_command_detail(&output);
-            let status_code = if power_action_auth_failed(&detail) {
-                403u16
-            } else {
-                500u16
-            };
-            tracing::error!(
-                action = systemctl_action,
-                exit_status = ?output.status.code(),
-                detail = %detail,
-                "control action command exited with failure"
-            );
-            if let Some(logger) = logger {
-                logger.log_at(
-                    rt_ui_log::UiLogLevel::Error,
-                    format!(
-                        "systemctl {} exited with failure (code {:?})",
-                        systemctl_action,
-                        output.status.code(),
-                    ),
-                );
-            }
-            Err((
-                status_code,
-                serde_json::json!({
-                    "ok": false,
-                    "error": format!(
-                        "control action command exited with failure: systemctl {} ({})",
-                        systemctl_action,
-                        detail
-                    )
-                })
-                .to_string(),
-            ))
-        }
-        Err(e) => {
-            tracing::error!(action = systemctl_action, error = %e, "control action command failed");
-            if let Some(logger) = logger {
-                logger.log_at(
-                    rt_ui_log::UiLogLevel::Error,
-                    format!("systemctl {} failed: {}", systemctl_action, e),
-                );
-            }
-            Err((
-                500u16,
-                serde_json::json!({
-                    "ok": false,
-                    "error": format!("control action command failed: {}", e)
-                })
-                .to_string(),
-            ))
-        }
-    }
-}
-
-#[cfg(unix)]
-fn map_power_action_join_error(
-    systemctl_action: &'static str,
-    e: tokio::task::JoinError,
-    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-) -> (u16, String) {
-    tracing::error!(action = systemctl_action, error = %e, "control action task failed");
-    if let Some(logger) = logger {
-        logger.log_at(
-            rt_ui_log::UiLogLevel::Error,
-            format!("systemctl {} task failed: {}", systemctl_action, e),
-        );
-    }
-    (
-        500u16,
-        serde_json::json!({
-            "ok": false,
-            "error": format!("control action task failed: {}", e)
-        })
-        .to_string(),
-    )
-}
-
-#[cfg(unix)]
-async fn run_device_power_action(
-    systemctl_action: &'static str,
-    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-) -> Result<(), (u16, String)> {
-    match tokio::task::spawn_blocking(move || run_power_action_command(systemctl_action)).await {
-        Ok(result) => map_power_action_command_result(systemctl_action, result, logger),
-        Err(e) => Err(map_power_action_join_error(systemctl_action, e, logger)),
-    }
-}
-
-#[cfg(unix)]
-fn run_power_action_command(
-    systemctl_action: &'static str,
-) -> std::io::Result<std::process::Output> {
-    std::process::Command::new("systemctl")
-        .arg("--no-ask-password")
-        .arg(systemctl_action)
-        .output()
-}
-
-#[cfg(unix)]
-fn power_action_command_detail(output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if !stderr.is_empty() {
-        return stderr;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if !stdout.is_empty() {
-        return stdout;
-    }
-    "no command output".to_owned()
-}
-
-#[cfg(unix)]
-fn power_action_auth_failed(detail: &str) -> bool {
-    let lower = detail.to_ascii_lowercase();
-    lower.contains("interactive authentication required")
-        || lower.contains("authentication is required")
-        || lower.contains("not authorized")
-        || lower.contains("access denied")
-        || lower.contains("permission denied")
-        || lower.contains("a password is required")
-}
-
-#[cfg(not(unix))]
-async fn run_device_power_action(
-    _systemctl_action: &'static str,
-    _logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-) -> Result<(), (u16, String)> {
-    Err((
-        501u16,
-        serde_json::json!({
-            "ok": false,
-            "error": "power actions not supported on non-unix platforms"
-        })
-        .to_string(),
-    ))
-}
-
-pub(crate) async fn apply_control_action_from_config(
-    action: &str,
-    config_state: &ConfigState,
-    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-) -> Result<(), (u16, String)> {
-    apply_control_action_from_config_with(
-        action,
-        config_state,
-        logger,
-        |action, config_state, restart_signal, logger| {
-            Box::pin(async move {
-                apply_control_action(action, config_state, restart_signal, logger).await
-            })
-        },
-    )
-    .await
-}
-
-async fn apply_control_action_from_config_with<F>(
-    action: &str,
-    config_state: &ConfigState,
-    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-    apply_fn: F,
-) -> Result<(), (u16, String)>
-where
-    F: for<'a> FnOnce(
-        &'a str,
-        Option<&'a ConfigState>,
-        Option<&'a Arc<Notify>>,
-        Option<&'a rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), (u16, String)>> + Send + 'a>>,
-{
-    apply_fn(action, Some(config_state), None, logger).await
-}
-
-pub async fn apply_control_action(
-    action: &str,
-    config_state: Option<&ConfigState>,
-    restart_signal: Option<&Arc<Notify>>,
-    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-) -> Result<(), (u16, String)> {
-    match action {
-        "restart_service" => {
-            let signal = restart_signal.ok_or_else(|| {
-                (
-                    404u16,
-                    serde_json::json!({"ok": false, "error": "restart signal not available"})
-                        .to_string(),
-                )
-            })?;
-            if cfg!(unix) {
-                signal.notify_one();
-                Ok(())
-            } else {
-                Err((
-                    501u16,
-                    serde_json::json!({
-                        "ok": false,
-                        "error": "restart not supported on non-unix platforms"
-                    })
-                    .to_string(),
-                ))
-            }
-        }
-        "restart_device" | "shutdown_device" => {
-            let cs = config_state.ok_or_else(|| {
-                (
-                    404u16,
-                    serde_json::json!({"ok": false, "error": "Config editing not available"})
-                        .to_string(),
-                )
-            })?;
-            let allow_power_actions = read_allow_power_actions(cs).await?;
-            if !allow_power_actions {
-                return Err((
-                    403u16,
-                    serde_json::json!({"ok": false, "error": "power actions disabled"}).to_string(),
-                ));
-            }
-            if !cfg!(unix) {
-                return Err((
-                    501u16,
-                    serde_json::json!({
-                        "ok": false,
-                        "error": format!("{} not supported on non-unix platforms", action)
-                    })
-                    .to_string(),
-                ));
-            }
-            let systemctl_action = if action == "restart_device" {
-                "reboot"
-            } else {
-                "poweroff"
-            };
-            run_device_power_action(systemctl_action, logger).await?;
-            Ok(())
-        }
-        _ => Err(bad_request_error(format!(
-            "unknown control action: {}",
-            action
-        ))),
     }
 }
 
@@ -1351,19 +907,17 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
 async fn display_state_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> axum::Json<serde_json::Value> {
-    let ss = state.subsystem.lock().await;
     #[cfg(any(feature = "eink", feature = "lcd"))]
     {
-        let forwarder_name = state.display_name.lock().await.clone();
-        let cpu_temp = *state.cpu_temp.lock().await;
         return axum::Json(
-            serde_json::to_value(subsystem_to_display_state(&ss, forwarder_name, cpu_temp))
+            serde_json::to_value(state.store.display_state().await)
                 .expect("display state serializes"),
         );
     }
 
     #[cfg(not(any(feature = "eink", feature = "lcd")))]
     {
+        let ss = state.subsystem.lock().await;
         let readers: Vec<serde_json::Value> = ss
             .readers
             .iter()
@@ -1478,53 +1032,6 @@ async fn reader_info_handler<J: JournalAccess + Send + 'static>(
         },
         None => text_response(StatusCode::NOT_FOUND, "unknown reader"),
     }
-}
-
-/// Compute the target second boundary and pre-SET wait duration for clock sync.
-///
-/// Given the current wall time, one-way latency estimate, and the fixed sync delay,
-/// returns `(target_boundary, pre_set_wait)` where:
-/// - `target_boundary` is the `DateTime<Local>` whole-second that the rollover should align with
-/// - `pre_set_wait` is how long to sleep before sending SET_DATE_TIME
-pub fn compute_sync_timing(
-    wall_now: chrono::DateTime<chrono::Local>,
-    one_way: std::time::Duration,
-    sync_delay_ms: u64,
-) -> (chrono::DateTime<chrono::Local>, std::time::Duration) {
-    use chrono::Timelike;
-
-    let arrival_offset = chrono::Duration::from_std(one_way).unwrap_or_else(|_| {
-        tracing::warn!(
-            one_way_ms = one_way.as_millis(),
-            "one-way latency exceeds chrono Duration range, falling back to zero"
-        );
-        chrono::Duration::zero()
-    });
-    let sync_delay = chrono::Duration::milliseconds(sync_delay_ms as i64);
-    let wall_at_rollover_if_now = wall_now + arrival_offset + sync_delay;
-    let rollover_frac = wall_at_rollover_if_now.nanosecond() as f64 / 1_000_000_000.0;
-
-    let target = if rollover_frac >= 0.5 {
-        wall_at_rollover_if_now + chrono::Duration::seconds(1)
-    } else {
-        wall_at_rollover_if_now
-    };
-    let target_boundary_initial = target
-        .with_nanosecond(0)
-        .expect("nanosecond 0 is always valid");
-
-    let mut target_boundary = target_boundary_initial;
-    let mut ideal_send = target_boundary - arrival_offset - sync_delay;
-    if ideal_send < wall_now {
-        target_boundary += chrono::Duration::seconds(1);
-        ideal_send = target_boundary - arrival_offset - sync_delay;
-    }
-    let pre_set_wait = ideal_send
-        .signed_duration_since(wall_now)
-        .to_std()
-        .unwrap_or(std::time::Duration::ZERO);
-
-    (target_boundary, pre_set_wait)
 }
 
 /// POST /api/v1/readers/{ip}/sync-clock
@@ -2132,10 +1639,7 @@ fn status_from_u16_or_internal(status: u16) -> StatusCode {
 async fn update_status_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> Response {
-    let update_status = {
-        let ss = state.subsystem.lock().await;
-        ss.update_status.clone()
-    };
+    let update_status = state.store.update_status().await;
     let body = serde_json::to_string(&update_status)
         .unwrap_or_else(|_| r#"{"status":"failed","error":"serialization error"}"#.to_owned());
     json_response(StatusCode::OK, body)
@@ -2144,16 +1648,13 @@ async fn update_status_handler<J: JournalAccess + Send + 'static>(
 async fn update_apply_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> Response {
-    let ss = state.subsystem.lock().await;
-    match &ss.staged_update_path {
+    match state.store.staged_update_path().await {
         Some(path) => {
-            let path = path.clone();
-            drop(ss);
             if apply_via_restart_enabled() {
                 schedule_process_restart();
                 json_response(StatusCode::OK, r#"{"status":"restarting"}"#.to_owned())
             } else {
-                let sub = state.subsystem.clone();
+                let store = state.store.clone();
                 let restart = state.restart_signal.clone();
                 tokio::spawn(async move {
                     match tokio::task::spawn_blocking(move || {
@@ -2168,38 +1669,36 @@ async fn update_apply_handler<J: JournalAccess + Send + 'static>(
                         }
                         Ok(Err(e)) => {
                             tracing::error!(error = %e, "update apply failed");
-                            sub.lock().await.update_status = rt_updater::UpdateStatus::Failed {
-                                error: e.to_string(),
-                            };
+                            store
+                                .set_update_status(rt_updater::UpdateStatus::Failed {
+                                    error: e.to_string(),
+                                })
+                                .await;
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "update apply task failed");
-                            sub.lock().await.update_status = rt_updater::UpdateStatus::Failed {
-                                error: e.to_string(),
-                            };
+                            store
+                                .set_update_status(rt_updater::UpdateStatus::Failed {
+                                    error: e.to_string(),
+                                })
+                                .await;
                         }
                     }
                 });
                 json_response(StatusCode::OK, r#"{"status":"applying"}"#.to_owned())
             }
         }
-        None => {
-            drop(ss);
-            json_response(
-                StatusCode::NOT_FOUND,
-                r#"{"error":"no update staged"}"#.to_owned(),
-            )
-        }
+        None => json_response(
+            StatusCode::NOT_FOUND,
+            r#"{"error":"no update staged"}"#.to_owned(),
+        ),
     }
 }
 
 async fn update_check_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> Response {
-    let update_mode = {
-        let ss = state.subsystem.lock().await;
-        ss.update_mode
-    };
+    let update_mode = state.store.update_mode().await;
 
     let checker = match rt_updater::UpdateChecker::new(
         "iwismer",
@@ -2212,7 +1711,7 @@ async fn update_check_handler<J: JournalAccess + Send + 'static>(
             let status = rt_updater::UpdateStatus::Failed {
                 error: e.to_string(),
             };
-            state.subsystem.lock().await.update_status = status.clone();
+            state.store.set_update_status(status.clone()).await;
             let body = serde_json::to_string(&status).unwrap_or_else(|_| {
                 r#"{"status":"failed","error":"serialization error"}"#.to_owned()
             });
@@ -2220,66 +1719,11 @@ async fn update_check_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    let workflow_state =
-        ForwarderWorkflowAdapter::new(state.subsystem.clone(), state.ui_tx.clone());
+    let workflow_state = state.store.workflow_state();
     let status = run_check(&workflow_state, &checker, update_mode).await;
     let body = serde_json::to_string(&status)
         .unwrap_or_else(|_| r#"{"status":"failed","error":"serialization error"}"#.to_owned());
     json_response(StatusCode::OK, body)
-}
-
-struct ForwarderWorkflowAdapter {
-    subsystem: Arc<Mutex<SubsystemStatus>>,
-    ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
-}
-
-impl ForwarderWorkflowAdapter {
-    fn new(
-        subsystem: Arc<Mutex<SubsystemStatus>>,
-        ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
-    ) -> Self {
-        Self { subsystem, ui_tx }
-    }
-}
-
-impl WorkflowState for ForwarderWorkflowAdapter {
-    fn current_status<'a>(
-        &'a self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = UpdateStatus> + Send + 'a>> {
-        Box::pin(async move { self.subsystem.lock().await.update_status.clone() })
-    }
-
-    fn set_status<'a>(
-        &'a self,
-        status: UpdateStatus,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            self.subsystem.lock().await.update_status = status;
-        })
-    }
-
-    fn set_downloaded<'a>(
-        &'a self,
-        status: UpdateStatus,
-        path: std::path::PathBuf,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            let mut ss = self.subsystem.lock().await;
-            ss.update_status = status;
-            ss.staged_update_path = Some(path);
-        })
-    }
-
-    fn emit_status_changed<'a>(
-        &'a self,
-        status: UpdateStatus,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            let _ = self
-                .ui_tx
-                .send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged { status });
-        })
-    }
 }
 
 async fn update_download_handler<J: JournalAccess + Send + 'static>(
@@ -2296,7 +1740,7 @@ async fn update_download_handler<J: JournalAccess + Send + 'static>(
             let status = rt_updater::UpdateStatus::Failed {
                 error: e.to_string(),
             };
-            state.subsystem.lock().await.update_status = status.clone();
+            state.store.set_update_status(status.clone()).await;
             let body = serde_json::to_string(&status).unwrap_or_else(|_| {
                 r#"{"status":"failed","error":"serialization error"}"#.to_owned()
             });
@@ -2304,8 +1748,7 @@ async fn update_download_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    let workflow_state =
-        ForwarderWorkflowAdapter::new(state.subsystem.clone(), state.ui_tx.clone());
+    let workflow_state = state.store.workflow_state();
     match run_download(&workflow_state, &checker).await {
         Ok(status) => {
             let body = serde_json::to_string(&status).unwrap_or_default();
@@ -2478,11 +1921,13 @@ fn schedule_process_restart() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::config_service::map_power_action_command_result;
     use ipico_core::control::{self, Command, TagMessageFormat};
     use rt_updater::workflow::{Checker, run_check, run_download};
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::time::{Duration, sleep};
 
     struct FakeChecker {
@@ -2966,6 +2411,7 @@ mod tests {
             .await;
 
         let state = AppState {
+            store: server.store(),
             subsystem: server.subsystem_arc(),
             journal: Arc::new(Mutex::new(NoJournal)),
             version: Arc::new("0.2.0".to_owned()),
@@ -2977,10 +2423,6 @@ mod tests {
             control_clients: server.control_clients().clone(),
             download_trackers: server.download_trackers().clone(),
             reconnect_notifies: server.reconnect_notifies().clone(),
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            display_name: server.display_name.clone(),
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            cpu_temp: server.cpu_temp.clone(),
         };
         update_cached_reader_info(
             &state,
@@ -4413,8 +3855,7 @@ target = "192.168.1.100:10000"
             download_calls: Arc::clone(&download_calls),
         };
 
-        let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem_arc(), server.ui_sender());
+        let workflow_state = server.store().workflow_state();
         let status = run_check(&workflow_state, &checker, rt_updater::UpdateMode::CheckOnly).await;
 
         assert_eq!(
@@ -4446,8 +3887,7 @@ target = "192.168.1.100:10000"
             download_calls: Arc::clone(&download_calls),
         };
 
-        let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem_arc(), server.ui_sender());
+        let workflow_state = server.store().workflow_state();
         let status = run_check(&workflow_state, &checker, rt_updater::UpdateMode::Disabled).await;
 
         assert_eq!(
@@ -4479,8 +3919,7 @@ target = "192.168.1.100:10000"
             download_calls: Arc::clone(&download_calls),
         };
 
-        let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem_arc(), server.ui_sender());
+        let workflow_state = server.store().workflow_state();
         let status = run_check(
             &workflow_state,
             &checker,
@@ -4504,7 +3943,7 @@ target = "192.168.1.100:10000"
     #[cfg(unix)]
     #[test]
     fn power_action_execution_does_not_use_sudo_fallback() {
-        let source = include_str!("status_http.rs");
+        let source = include_str!("config_service.rs");
         assert!(
             !source.contains("Command::new(\"sudo\")"),
             "power actions must not invoke sudo fallback"
@@ -4629,60 +4068,6 @@ target = "192.168.1.100:10000"
         assert!(result.is_ok());
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn power_action_join_error_logs_to_ui_when_logger_present() {
-        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
-        let logger = rt_ui_log::UiLogger::new(tx, |entry| {
-            crate::ui_events::ForwarderUiEvent::LogEntry { entry }
-        });
-
-        let join_err = tokio::task::spawn_blocking(|| -> () {
-            panic!("boom");
-        })
-        .await
-        .expect_err("task must panic");
-
-        let (_status, _body) = map_power_action_join_error("reboot", join_err, Some(&logger));
-
-        let evt = rx.try_recv().expect("expected UI log event");
-        match evt {
-            crate::ui_events::ForwarderUiEvent::LogEntry { entry } => {
-                assert!(entry.contains("systemctl reboot task failed"));
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn control_action_from_config_forwards_logger_to_apply_fn() {
-        let (tx, _) = tokio::sync::broadcast::channel(16);
-        let logger = rt_ui_log::UiLogger::new(tx, |entry| {
-            crate::ui_events::ForwarderUiEvent::LogEntry { entry }
-        });
-        let config = ConfigState::new(std::path::PathBuf::from("/tmp/unused.toml"));
-
-        let saw_logger = Arc::new(AtomicBool::new(false));
-        let spy = Arc::clone(&saw_logger);
-
-        let _ = apply_control_action_from_config_with(
-            "restart_device",
-            &config,
-            Some(&logger),
-            move |_action, _config_state, _restart_signal, logger| {
-                let spy = Arc::clone(&spy);
-                let has_logger = logger.is_some();
-                Box::pin(async move {
-                    spy.store(has_logger, Ordering::SeqCst);
-                    Err((500u16, "{\"ok\":false}".to_owned()))
-                })
-            },
-        )
-        .await;
-
-        assert!(saw_logger.load(Ordering::SeqCst));
-    }
-
     #[test]
     fn apply_via_restart_env_parsing() {
         assert!(apply_via_restart_from_env(Some("1".to_owned())));
@@ -4719,8 +4104,7 @@ target = "192.168.1.100:10000"
             download_calls: Arc::clone(&download_calls),
         };
 
-        let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem_arc(), server.ui_sender());
+        let workflow_state = server.store().workflow_state();
         let status = run_download(&workflow_state, &checker).await;
 
         assert_eq!(
@@ -4761,8 +4145,7 @@ target = "192.168.1.100:10000"
             download_calls: Arc::new(AtomicUsize::new(0)),
         };
 
-        let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem_arc(), server.ui_sender());
+        let workflow_state = server.store().workflow_state();
         let status = run_download(&workflow_state, &checker).await;
         assert_eq!(
             status,
@@ -4802,8 +4185,7 @@ target = "192.168.1.100:10000"
             download_calls: Arc::new(AtomicUsize::new(0)),
         };
 
-        let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem_arc(), server.ui_sender());
+        let workflow_state = server.store().workflow_state();
         let status = run_download(&workflow_state, &checker).await;
         assert!(status.is_err());
     }
@@ -4832,8 +4214,7 @@ target = "192.168.1.100:10000"
             download_calls: Arc::new(AtomicUsize::new(0)),
         };
 
-        let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem_arc(), server.ui_sender());
+        let workflow_state = server.store().workflow_state();
         let status = run_download(&workflow_state, &checker).await;
         assert_eq!(
             status,
@@ -4988,7 +4369,7 @@ target = "192.168.1.100:10000"
 
     #[cfg(any(feature = "eink", feature = "lcd"))]
     #[tokio::test]
-    async fn set_ready_with_display_sender_does_not_deadlock() {
+    async fn set_ready_with_display_sender_publishes_once() {
         let mut server = StatusServer::start(
             StatusConfig {
                 bind: "127.0.0.1:0".to_owned(),
@@ -5003,13 +4384,25 @@ target = "192.168.1.100:10000"
             tokio::sync::watch::channel(rt_screen::state::DisplayState::initial());
         server.set_display_sender(display_tx);
 
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::channel(4);
+        let watcher = tokio::spawn(async move {
+            while display_rx.changed().await.is_ok() {
+                let _ = seen_tx.send(()).await;
+            }
+        });
+        tokio::task::yield_now().await;
+
         tokio::time::timeout(Duration::from_millis(100), server.set_ready())
             .await
             .expect("set_ready timed out");
-        tokio::time::timeout(Duration::from_millis(100), display_rx.changed())
+        tokio::time::timeout(Duration::from_millis(100), seen_rx.recv())
             .await
             .expect("display state publish timed out")
             .expect("display state sender dropped");
+        tokio::time::timeout(Duration::from_millis(100), seen_rx.recv())
+            .await
+            .expect_err("display state should publish exactly once");
+        watcher.abort();
     }
 
     #[cfg(any(feature = "eink", feature = "lcd"))]
@@ -5759,75 +5152,6 @@ target = "192.168.1.100:10000"
             .await
             .unwrap();
         assert_eq!(resp.status(), 503);
-    }
-
-    #[test]
-    fn sync_timing_rollover_frac_above_half_rounds_up() {
-        use chrono::TimeZone;
-        use chrono::Timelike;
-        // wall_now=.200, one_way=50ms, sync=500ms → rollover_if_now=.750, frac=0.75 → rounds UP
-        let wall_now = chrono::Local
-            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
-            .unwrap()
-            .with_nanosecond(200_000_000)
-            .unwrap();
-        let one_way = std::time::Duration::from_millis(50);
-        let (target, wait) = super::compute_sync_timing(wall_now, one_way, 500);
-        assert_eq!(target.second(), 1);
-        assert_eq!(target.nanosecond(), 0);
-        assert!(wait < std::time::Duration::from_secs(1));
-    }
-
-    #[test]
-    fn sync_timing_rollover_frac_below_half_stays_same_second() {
-        use chrono::TimeZone;
-        use chrono::Timelike;
-        // wall_now=.800, one_way=50ms, sync=500ms → rollover_if_now=1.350, frac=0.35 → truncates to 1.000
-        // ideal_send=1.000-0.050-0.500=0.450 < 0.800 → BUMP → target=2.000
-        let wall_now = chrono::Local
-            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
-            .unwrap()
-            .with_nanosecond(800_000_000)
-            .unwrap();
-        let one_way = std::time::Duration::from_millis(50);
-        let (target, _wait) = super::compute_sync_timing(wall_now, one_way, 500);
-        assert_eq!(target.second(), 2);
-        assert_eq!(target.nanosecond(), 0);
-    }
-
-    #[test]
-    fn sync_timing_ideal_send_past_bumps_target() {
-        use chrono::TimeZone;
-        use chrono::Timelike;
-        // wall_now=.500, one_way=1ms, sync=500ms → rollover_if_now=1.001, frac=0.001 → target=1.000
-        // ideal_send=1.000-0.001-0.500=0.499 < 0.500 → BUMP → target=2.000
-        let wall_now = chrono::Local
-            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
-            .unwrap()
-            .with_nanosecond(500_000_000)
-            .unwrap();
-        let one_way = std::time::Duration::from_millis(1);
-        let (target, wait) = super::compute_sync_timing(wall_now, one_way, 500);
-        assert_eq!(target.second(), 2);
-        assert_eq!(target.nanosecond(), 0);
-        assert!(wait > std::time::Duration::from_millis(900));
-        assert!(wait < std::time::Duration::from_millis(1100));
-    }
-
-    #[test]
-    fn sync_timing_zero_latency() {
-        use chrono::TimeZone;
-        use chrono::Timelike;
-        // wall_now=.300, one_way=0, sync=500ms → rollover_if_now=.800, frac=0.8 → rounds UP
-        let wall_now = chrono::Local
-            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
-            .unwrap()
-            .with_nanosecond(300_000_000)
-            .unwrap();
-        let one_way = std::time::Duration::ZERO;
-        let (target, _wait) = super::compute_sync_timing(wall_now, one_way, 500);
-        assert_eq!(target.second(), 1);
-        assert_eq!(target.nanosecond(), 0);
     }
 
     #[tokio::test]

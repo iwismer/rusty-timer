@@ -5,15 +5,14 @@
 //! local status HTTP surface and the P2P remote-config verbs, and the
 //! per-section update logic behind `POST /api/v1/config/{section}`.
 
+use std::future::Future;
 use std::io::Write as _;
 use std::net::SocketAddrV4;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
-use crate::status_http::{
-    apply_control_action_from_config, bad_request_error, require_object_payload,
-};
 use crate::status_store::{SubsystemStatus, mark_restart_needed_and_emit};
 
 /// Holds the config file path and a write lock for read-modify-write operations.
@@ -28,6 +27,294 @@ impl ConfigState {
             path,
             write_lock: Mutex::new(()),
         }
+    }
+}
+
+pub(crate) fn bad_request_error(message: impl Into<String>) -> (u16, String) {
+    (
+        400u16,
+        serde_json::json!({"ok": false, "error": message.into()}).to_string(),
+    )
+}
+
+pub(crate) fn require_object_payload(payload: &serde_json::Value) -> Result<(), (u16, String)> {
+    if payload.is_object() {
+        Ok(())
+    } else {
+        Err(bad_request_error("payload must be a JSON object"))
+    }
+}
+
+async fn read_allow_power_actions(config_state: &ConfigState) -> Result<bool, (u16, String)> {
+    let _lock = config_state.write_lock.lock().await;
+    let toml_str = std::fs::read_to_string(&config_state.path).map_err(|e| {
+        (
+            500u16,
+            serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
+                .to_string(),
+        )
+    })?;
+    let raw: crate::config::RawConfig = toml::from_str(&toml_str).map_err(|e| {
+        (
+            500u16,
+            serde_json::json!({"ok": false, "error": format!("TOML parse error: {}", e)})
+                .to_string(),
+        )
+    })?;
+    Ok(raw
+        .control
+        .and_then(|c| c.allow_power_actions)
+        .unwrap_or(false))
+}
+
+#[cfg(unix)]
+pub(crate) fn map_power_action_command_result(
+    systemctl_action: &'static str,
+    result: std::io::Result<std::process::Output>,
+    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+) -> Result<(), (u16, String)> {
+    match result {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            let detail = power_action_command_detail(&output);
+            let status_code = if power_action_auth_failed(&detail) {
+                403u16
+            } else {
+                500u16
+            };
+            tracing::error!(
+                action = systemctl_action,
+                exit_status = ?output.status.code(),
+                detail = %detail,
+                "control action command exited with failure"
+            );
+            if let Some(logger) = logger {
+                logger.log_at(
+                    rt_ui_log::UiLogLevel::Error,
+                    format!(
+                        "systemctl {} exited with failure (code {:?})",
+                        systemctl_action,
+                        output.status.code(),
+                    ),
+                );
+            }
+            Err((
+                status_code,
+                serde_json::json!({
+                    "ok": false,
+                    "error": format!(
+                        "control action command exited with failure: systemctl {} ({})",
+                        systemctl_action,
+                        detail
+                    )
+                })
+                .to_string(),
+            ))
+        }
+        Err(e) => {
+            tracing::error!(action = systemctl_action, error = %e, "control action command failed");
+            if let Some(logger) = logger {
+                logger.log_at(
+                    rt_ui_log::UiLogLevel::Error,
+                    format!("systemctl {} failed: {}", systemctl_action, e),
+                );
+            }
+            Err((
+                500u16,
+                serde_json::json!({
+                    "ok": false,
+                    "error": format!("control action command failed: {}", e)
+                })
+                .to_string(),
+            ))
+        }
+    }
+}
+
+#[cfg(unix)]
+fn map_power_action_join_error(
+    systemctl_action: &'static str,
+    e: tokio::task::JoinError,
+    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+) -> (u16, String) {
+    tracing::error!(action = systemctl_action, error = %e, "control action task failed");
+    if let Some(logger) = logger {
+        logger.log_at(
+            rt_ui_log::UiLogLevel::Error,
+            format!("systemctl {} task failed: {}", systemctl_action, e),
+        );
+    }
+    (
+        500u16,
+        serde_json::json!({
+            "ok": false,
+            "error": format!("control action task failed: {}", e)
+        })
+        .to_string(),
+    )
+}
+
+#[cfg(unix)]
+async fn run_device_power_action(
+    systemctl_action: &'static str,
+    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+) -> Result<(), (u16, String)> {
+    match tokio::task::spawn_blocking(move || run_power_action_command(systemctl_action)).await {
+        Ok(result) => map_power_action_command_result(systemctl_action, result, logger),
+        Err(e) => Err(map_power_action_join_error(systemctl_action, e, logger)),
+    }
+}
+
+#[cfg(unix)]
+fn run_power_action_command(
+    systemctl_action: &'static str,
+) -> std::io::Result<std::process::Output> {
+    std::process::Command::new("systemctl")
+        .arg("--no-ask-password")
+        .arg(systemctl_action)
+        .output()
+}
+
+#[cfg(unix)]
+fn power_action_command_detail(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+    "no command output".to_owned()
+}
+
+#[cfg(unix)]
+fn power_action_auth_failed(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    lower.contains("interactive authentication required")
+        || lower.contains("authentication is required")
+        || lower.contains("not authorized")
+        || lower.contains("access denied")
+        || lower.contains("permission denied")
+        || lower.contains("a password is required")
+}
+
+#[cfg(not(unix))]
+async fn run_device_power_action(
+    _systemctl_action: &'static str,
+    _logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+) -> Result<(), (u16, String)> {
+    Err((
+        501u16,
+        serde_json::json!({
+            "ok": false,
+            "error": "power actions not supported on non-unix platforms"
+        })
+        .to_string(),
+    ))
+}
+
+pub(crate) async fn apply_control_action_from_config(
+    action: &str,
+    config_state: &ConfigState,
+    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+) -> Result<(), (u16, String)> {
+    apply_control_action_from_config_with(
+        action,
+        config_state,
+        logger,
+        |action, config_state, restart_signal, logger| {
+            Box::pin(async move {
+                apply_control_action(action, config_state, restart_signal, logger).await
+            })
+        },
+    )
+    .await
+}
+
+async fn apply_control_action_from_config_with<F>(
+    action: &str,
+    config_state: &ConfigState,
+    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+    apply_fn: F,
+) -> Result<(), (u16, String)>
+where
+    F: for<'a> FnOnce(
+        &'a str,
+        Option<&'a ConfigState>,
+        Option<&'a Arc<Notify>>,
+        Option<&'a rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), (u16, String)>> + Send + 'a>>,
+{
+    apply_fn(action, Some(config_state), None, logger).await
+}
+
+pub async fn apply_control_action(
+    action: &str,
+    config_state: Option<&ConfigState>,
+    restart_signal: Option<&Arc<Notify>>,
+    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+) -> Result<(), (u16, String)> {
+    match action {
+        "restart_service" => {
+            let signal = restart_signal.ok_or_else(|| {
+                (
+                    404u16,
+                    serde_json::json!({"ok": false, "error": "restart signal not available"})
+                        .to_string(),
+                )
+            })?;
+            if cfg!(unix) {
+                signal.notify_one();
+                Ok(())
+            } else {
+                Err((
+                    501u16,
+                    serde_json::json!({
+                        "ok": false,
+                        "error": "restart not supported on non-unix platforms"
+                    })
+                    .to_string(),
+                ))
+            }
+        }
+        "restart_device" | "shutdown_device" => {
+            let cs = config_state.ok_or_else(|| {
+                (
+                    404u16,
+                    serde_json::json!({"ok": false, "error": "Config editing not available"})
+                        .to_string(),
+                )
+            })?;
+            let allow_power_actions = read_allow_power_actions(cs).await?;
+            if !allow_power_actions {
+                return Err((
+                    403u16,
+                    serde_json::json!({"ok": false, "error": "power actions disabled"}).to_string(),
+                ));
+            }
+            if !cfg!(unix) {
+                return Err((
+                    501u16,
+                    serde_json::json!({
+                        "ok": false,
+                        "error": format!("{} not supported on non-unix platforms", action)
+                    })
+                    .to_string(),
+                ));
+            }
+            let systemctl_action = if action == "restart_device" {
+                "reboot"
+            } else {
+                "poweroff"
+            };
+            run_device_power_action(systemctl_action, logger).await?;
+            Ok(())
+        }
+        _ => Err(bad_request_error(format!(
+            "unknown control action: {}",
+            action
+        ))),
     }
 }
 
@@ -731,5 +1018,65 @@ fn validate_server_url(url: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err("server_url must start with http:// or https://".to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn power_action_join_error_logs_to_ui_when_logger_present() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let logger = rt_ui_log::UiLogger::new(tx, |entry| {
+            crate::ui_events::ForwarderUiEvent::LogEntry { entry }
+        });
+
+        let join_err = tokio::task::spawn_blocking(|| -> () {
+            panic!("boom");
+        })
+        .await
+        .expect_err("task must panic");
+
+        let (_status, _body) = map_power_action_join_error("reboot", join_err, Some(&logger));
+
+        let evt = rx.try_recv().expect("expected UI log event");
+        match evt {
+            crate::ui_events::ForwarderUiEvent::LogEntry { entry } => {
+                assert!(entry.contains("systemctl reboot task failed"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn control_action_from_config_forwards_logger_to_apply_fn() {
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let logger = rt_ui_log::UiLogger::new(tx, |entry| {
+            crate::ui_events::ForwarderUiEvent::LogEntry { entry }
+        });
+        let config = ConfigState::new(std::path::PathBuf::from("/tmp/unused.toml"));
+
+        let saw_logger = Arc::new(AtomicBool::new(false));
+        let spy = Arc::clone(&saw_logger);
+
+        let _ = apply_control_action_from_config_with(
+            "restart_device",
+            &config,
+            Some(&logger),
+            move |_action, _config_state, _restart_signal, logger| {
+                let spy = Arc::clone(&spy);
+                let has_logger = logger.is_some();
+                Box::pin(async move {
+                    spy.store(has_logger, Ordering::SeqCst);
+                    Err((500u16, "{\"ok\":false}".to_owned()))
+                })
+            },
+        )
+        .await;
+
+        assert!(saw_logger.load(Ordering::SeqCst));
     }
 }
