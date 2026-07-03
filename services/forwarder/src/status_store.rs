@@ -101,12 +101,24 @@ impl ServerDeviceStatus {
     /// bookkeeping fields (`cached` and `checked_unix_ms`) that change on
     /// every poll.
     pub(crate) fn ui_meaningful_eq(&self, other: &Self) -> bool {
-        self.configured == other.configured
-            && self.endpoint_id == other.endpoint_id
-            && self.reachable == other.reachable
-            && self.approval_state == other.approval_state
-            && self.waiting_for_approval == other.waiting_for_approval
-            && self.message == other.message
+        // Destructure so adding a field to ServerDeviceStatus is a compile
+        // error here instead of a silent gating bug.
+        let Self {
+            configured,
+            endpoint_id,
+            reachable,
+            approval_state,
+            waiting_for_approval,
+            message,
+            cached: _,
+            checked_unix_ms: _,
+        } = self;
+        *configured == other.configured
+            && *endpoint_id == other.endpoint_id
+            && *reachable == other.reachable
+            && *approval_state == other.approval_state
+            && *waiting_for_approval == other.waiting_for_approval
+            && *message == other.message
     }
 }
 
@@ -810,16 +822,16 @@ impl StatusStore {
     /// Store the latest server reachability snapshot from the poll task,
     /// notifying the UI only when UI-meaningful fields changed.
     pub async fn set_server_status(&self, status: ServerDeviceStatus) {
-        let changed = self
-            .subsystem
-            .lock()
-            .await
-            .set_server_status(status.clone());
+        // Emit while holding the subsystem lock so state change and UI event
+        // stay ordered, matching set_ready/set_p2p_connected/set_ups_status.
+        let mut ss = self.subsystem.lock().await;
+        let changed = ss.set_server_status(status.clone());
         if changed {
             let _ = self
                 .ui_tx
                 .send(crate::ui_events::ForwarderUiEvent::ServerStatusChanged { server: status });
         }
+        drop(ss);
     }
 
     /// Return the cached server reachability snapshot, if any poll completed.
