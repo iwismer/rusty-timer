@@ -10,6 +10,7 @@ pub mod p2p;
 pub mod pisugar_client;
 pub mod reader_control;
 pub mod reader_control_service;
+pub mod reader_task;
 pub mod replay;
 pub mod status_http;
 pub mod storage;

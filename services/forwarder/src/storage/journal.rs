@@ -132,6 +132,16 @@ impl Journal {
         })
     }
 
+    #[cfg(test)]
+    pub fn set_query_only(&self, on: bool) -> Result<(), JournalError> {
+        self.conn.execute_batch(if on {
+            "PRAGMA query_only = ON"
+        } else {
+            "PRAGMA query_only = OFF"
+        })?;
+        Ok(())
+    }
+
     /// Return a shareable handle to this journal's per-stream wake registry.
     ///
     /// Subscribers clone the `Arc` and call

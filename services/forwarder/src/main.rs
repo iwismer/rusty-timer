@@ -3,8 +3,6 @@
 // Runtime event loop: wires together journal, local fanout, IPICO TCP readers,
 // the P2P endpoint, and the status HTTP server.
 
-mod reader_task;
-
 use forwarder::discovery::expand_target;
 use forwarder::local_fanout::FanoutServer;
 use forwarder::status_http::{
@@ -22,7 +20,7 @@ use tokio::time::{Duration, sleep};
 use tracing::{error, info, warn};
 
 // run_reader is used by main() in production; NOT cfg(test)-gated.
-use reader_task::run_reader;
+use forwarder::reader_task::run_reader;
 
 // ---------------------------------------------------------------------------
 // Helpers
