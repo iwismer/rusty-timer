@@ -1134,7 +1134,7 @@ mod tests {
     fn event_names_match() {
         use receiver::ui_events::{
             ForwarderMetricsUpdate, ForwarderReaderCounts, LastRead, StreamCountUpdate,
-            StreamMetricsPayload,
+            StreamDelta, StreamMetricsPayload,
         };
         use std::collections::BTreeSet;
 
@@ -1207,6 +1207,31 @@ mod tests {
                 epoch_last_received_at: None,
                 epoch_lag_ms: None,
             }),
+            ReceiverUiEvent::StreamDeltas {
+                updates: vec![StreamDelta {
+                    forwarder_endpoint_id: "e".to_owned(),
+                    stream_id: "s".to_owned(),
+                    forwarder_id: "f".to_owned(),
+                    reader_ip: "ip".to_owned(),
+                    reads_total: 0,
+                    reads_epoch: 0,
+                    metrics: StreamMetricsPayload {
+                        forwarder_id: "f".to_owned(),
+                        reader_ip: "ip".to_owned(),
+                        raw_count: 0,
+                        dedup_count: 0,
+                        retransmit_count: 0,
+                        lag_ms: None,
+                        epoch_raw_count: 0,
+                        epoch_dedup_count: 0,
+                        epoch_retransmit_count: 0,
+                        unique_chips: 0,
+                        epoch_last_received_at: None,
+                        epoch_lag_ms: None,
+                    },
+                    last_read: None,
+                }],
+            },
             ReceiverUiEvent::ForwarderUpsUpdated {
                 forwarder_id: "f".to_owned(),
                 available: false,

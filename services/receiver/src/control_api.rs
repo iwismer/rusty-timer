@@ -3571,6 +3571,7 @@ pub const EVENT_NAMES: &[&str] = &[
     "mode_changed",
     "last_read",
     "stream_metrics_updated",
+    "stream_deltas",
     "forwarder_ups_updated",
 ];
 
@@ -3971,22 +3972,138 @@ mod tests {
     }
 
     #[test]
-    fn event_name_maps_into_canonical_event_names() {
-        // Every variant's event_name must be present in EVENT_NAMES; the match
-        // in `event_name` is exhaustive so adding a variant forces a decision.
-        let samples = [
+    fn event_name_parity_covers_every_variant_bidirectionally() {
+        use crate::ui_events::{
+            ForwarderMetricsUpdate, ForwarderReaderCounts, LastRead, StreamCountUpdate,
+            StreamDelta, StreamMetricsPayload,
+        };
+
+        let metrics = StreamMetricsPayload {
+            forwarder_id: "f".to_owned(),
+            reader_ip: "ip".to_owned(),
+            raw_count: 0,
+            dedup_count: 0,
+            retransmit_count: 0,
+            lag_ms: None,
+            epoch_raw_count: 0,
+            epoch_dedup_count: 0,
+            epoch_retransmit_count: 0,
+            unique_chips: 0,
+            epoch_last_received_at: None,
+            epoch_lag_ms: None,
+        };
+        let last_read = LastRead {
+            forwarder_id: "f".to_owned(),
+            reader_ip: "ip".to_owned(),
+            chip_id: "c".to_owned(),
+            timestamp: "t".to_owned(),
+            bib: None,
+            name: None,
+            division: None,
+        };
+        // One constructed instance of every `ReceiverUiEvent` variant.
+        let samples = vec![
             ReceiverUiEvent::Resync,
+            ReceiverUiEvent::StatusChanged {
+                connection_state: ConnectionState::Connected,
+                streams_count: 0,
+                receiver_id: "recv".to_owned(),
+            },
+            ReceiverUiEvent::ConnectionsChanged,
+            ReceiverUiEvent::StreamsSnapshot {
+                streams: vec![],
+                degraded: false,
+                upstream_error: None,
+            },
             ReceiverUiEvent::LogEntry {
-                entry: String::new(),
+                entry: "x".to_owned(),
+            },
+            ReceiverUiEvent::StreamCountsUpdated {
+                updates: vec![StreamCountUpdate {
+                    forwarder_id: "f".to_owned(),
+                    reader_ip: "ip".to_owned(),
+                    reads_total: 0,
+                    reads_epoch: 0,
+                }],
+            },
+            ReceiverUiEvent::ForwarderMetricsUpdated(ForwarderMetricsUpdate {
+                forwarder_id: "f".to_owned(),
+                unique_chips: 0,
+                total_reads: 0,
+                last_read_at: None,
+            }),
+            ReceiverUiEvent::ForwarderReaderCountsUpdated(ForwarderReaderCounts {
+                forwarder_id: "f".to_owned(),
+                stream_id: "ip".to_owned(),
+                reads_session: 0,
+                reads_total: 0,
+                last_read_unix_ms: None,
+                last_seen_secs: None,
+            }),
+            ReceiverUiEvent::ModeChanged {
+                mode: rt_domain::ReceiverMode::Race {
+                    race_id: "r".to_owned(),
+                },
+            },
+            ReceiverUiEvent::LastRead(last_read.clone()),
+            ReceiverUiEvent::StreamMetricsUpdated(metrics.clone()),
+            ReceiverUiEvent::StreamDeltas {
+                updates: vec![StreamDelta {
+                    forwarder_endpoint_id: "e".to_owned(),
+                    stream_id: "s".to_owned(),
+                    forwarder_id: "f".to_owned(),
+                    reader_ip: "ip".to_owned(),
+                    reads_total: 0,
+                    reads_epoch: 0,
+                    metrics,
+                    last_read: Some(last_read),
+                }],
+            },
+            ReceiverUiEvent::ForwarderUpsUpdated {
+                forwarder_id: "f".to_owned(),
+                available: false,
+                status: None,
             },
         ];
+
+        // Compile-time exhaustiveness guard: adding a `ReceiverUiEvent`
+        // variant breaks this match (no wildcard arm) until it is listed
+        // here, and the bidirectional set assertion below then fails until
+        // both a sample above and an EVENT_NAMES entry exist for it.
         for event in &samples {
-            assert!(
-                EVENT_NAMES.contains(&event_name(event)),
-                "event_name produced {:?} which is missing from EVENT_NAMES",
-                event_name(event)
-            );
+            match event {
+                ReceiverUiEvent::Resync
+                | ReceiverUiEvent::StatusChanged { .. }
+                | ReceiverUiEvent::ConnectionsChanged
+                | ReceiverUiEvent::StreamsSnapshot { .. }
+                | ReceiverUiEvent::LogEntry { .. }
+                | ReceiverUiEvent::StreamCountsUpdated { .. }
+                | ReceiverUiEvent::ForwarderMetricsUpdated(_)
+                | ReceiverUiEvent::ForwarderReaderCountsUpdated(_)
+                | ReceiverUiEvent::ModeChanged { .. }
+                | ReceiverUiEvent::LastRead(_)
+                | ReceiverUiEvent::StreamMetricsUpdated(_)
+                | ReceiverUiEvent::StreamDeltas { .. }
+                | ReceiverUiEvent::ForwarderUpsUpdated { .. } => {}
+            }
         }
+
+        let emitted: BTreeSet<&str> = samples.iter().map(event_name).collect();
+        let canonical: BTreeSet<&str> = EVENT_NAMES.iter().copied().collect();
+        assert_eq!(
+            emitted,
+            canonical,
+            "event_name output and EVENT_NAMES diverged.\nEmitted-only: {:?}\nCanonical-only: {:?}",
+            emitted.difference(&canonical).collect::<Vec<_>>(),
+            canonical.difference(&emitted).collect::<Vec<_>>(),
+        );
+        // Every sample is one distinct variant; distinct variants must not
+        // share a name.
+        assert_eq!(
+            emitted.len(),
+            samples.len(),
+            "distinct variants must map to distinct event names"
+        );
     }
 
     #[test]
