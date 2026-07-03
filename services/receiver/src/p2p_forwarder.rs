@@ -17,6 +17,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{error, warn};
 
 use crate::control_api::{ConfigCommand, FORWARDER_CONFIG_TIMEOUT, ReaderCommand};
+use crate::db::StreamSubscription;
 use crate::p2p_session::{
     BackoffConfig, DurableBatch, P2pSessionError, SessionOutcome, SessionStatusReporter,
     connect_and_hello, read_frame, run_data_subscription_with_hint, write_frame,
@@ -30,6 +31,11 @@ pub struct ForwarderDataStream {
     pub local_stream_key: LocalStreamKey,
     pub mode: SubscribeMode,
     pub durable_hint_tx: Option<broadcast::Sender<DurableBatch>>,
+    /// The subscription config this stream was derived from. Compared to
+    /// detect a real subscription config change (which clears a terminal
+    /// failure marker); announcer-driven stream-worker rebuilds swap the hint
+    /// channel without changing this.
+    pub subscription: StreamSubscription,
 }
 
 /// Owns one live control session to a forwarder and opens one data bi-stream per
@@ -197,6 +203,9 @@ async fn run_connected_forwarder(
     // respawned; the marker resets on connection re-establishment (this map is
     // scoped to one connection) or on a subscription config change.
     let mut failed_streams = HashMap::new();
+    // Consecutive panic-exit counts per stream on THIS connection, feeding the
+    // panic-respawn cap in `reap_finished_data_task`.
+    let mut panic_exits = HashMap::new();
 
     let crate::p2p_session::ControlSession {
         connection,
@@ -265,6 +274,7 @@ async fn run_connected_forwarder(
         &desired,
         &mut data_tasks,
         &mut failed_streams,
+        &mut panic_exits,
     )
     .await;
 
@@ -323,6 +333,7 @@ async fn run_connected_forwarder(
                     &desired,
                     &mut data_tasks,
                     &mut failed_streams,
+                    &mut panic_exits,
                 ).await;
             }
             frame = frame_rx.recv() => {
@@ -695,21 +706,19 @@ struct DataTask {
 }
 
 /// Whether the desired subscription config differs from the config a stream
-/// was running when it failed terminally. `ForwarderDataStream` holds a
-/// broadcast sender, so this compares mode plus hint-channel identity: the
-/// per-stream worker in `p2p_runtime` is rebuilt (with a fresh hint channel)
-/// exactly when its subscription config changes, so a hint-channel swap is the
-/// config-change signal. The stream ids are equal by map key.
+/// was running when it failed terminally. Compares the actual subscription
+/// config (plus subscribe mode), NOT hint-channel identity: `p2p_runtime`
+/// also rebuilds stream workers (fresh hint channel) on announcer state or
+/// generation changes, and those must not clear a terminal-failure marker.
+/// The stream ids are equal by map key.
 fn stream_config_changed(failed: &ForwarderDataStream, desired: &ForwarderDataStream) -> bool {
-    if failed.mode != desired.mode {
-        return true;
-    }
-    match (&failed.durable_hint_tx, &desired.durable_hint_tx) {
-        (Some(previous), Some(current)) => !previous.same_channel(current),
-        (None, None) => false,
-        _ => true,
-    }
+    failed.mode != desired.mode || failed.subscription != desired.subscription
 }
+
+/// Consecutive panic exits of one stream's data task on one connection before
+/// the stream is treated as terminally failed (respawn suppressed until
+/// reconnect or subscription config change).
+const MAX_CONSECUTIVE_PANIC_EXITS: u32 = 3;
 
 /// Await a finished data task and classify its result. Clean EOF/disconnect
 /// and retryable transport errors stay respawn-eligible (a later reconcile
@@ -723,14 +732,19 @@ async fn reap_finished_data_task(
     stream_key: &str,
     task: DataTask,
     failed: &mut HashMap<String, ForwarderDataStream>,
+    panic_exits: &mut HashMap<String, u32>,
 ) {
     match task.handle.await {
         // Clean EOF/disconnect: respawn as before.
-        Ok(Ok(_)) => {}
+        Ok(Ok(_)) => {
+            panic_exits.remove(stream_key);
+        }
         Ok(Err(err)) if err.is_retryable() => {
+            panic_exits.remove(stream_key);
             warn!(%endpoint_id, stream_id = %task.stream.stream_id, error = %err, "forwarder data subscription ended with transient error");
         }
         Ok(Err(err)) => {
+            panic_exits.remove(stream_key);
             error!(%endpoint_id, stream_id = %task.stream.stream_id, error = %err, "forwarder data subscription failed terminally; suppressing respawn until reconnect or subscription config change");
             reporter
                 .app_state()
@@ -738,8 +752,27 @@ async fn reap_finished_data_task(
                 .await;
             failed.insert(stream_key.to_owned(), task.stream);
         }
-        // Panic/abort: treat as transient (matches the previous blind-respawn
-        // behavior for abnormal task ends).
+        // Panic: respawn-eligible, but capped. Consecutive panic exits of the
+        // same stream on the same connection indicate a deterministic crash;
+        // after the cap the stream is treated as terminally failed instead of
+        // panic-looping forever.
+        Err(join_error) if join_error.is_panic() => {
+            let count = panic_exits.entry(stream_key.to_owned()).or_insert(0);
+            *count += 1;
+            if *count >= MAX_CONSECUTIVE_PANIC_EXITS {
+                panic_exits.remove(stream_key);
+                error!(%endpoint_id, stream_id = %task.stream.stream_id, %join_error, panics = MAX_CONSECUTIVE_PANIC_EXITS, "forwarder data subscription task panicked repeatedly; treating as terminal and suppressing respawn until reconnect or subscription config change");
+                reporter
+                    .app_state()
+                    .mark_forwarder_stream_failed(endpoint_id, &task.stream.stream_id)
+                    .await;
+                failed.insert(stream_key.to_owned(), task.stream);
+            } else {
+                error!(%endpoint_id, stream_id = %task.stream.stream_id, %join_error, consecutive_panics = *count, "forwarder data subscription task panicked; respawning");
+            }
+        }
+        // Cancelled outside `stop_data_task` (should not happen): treat as
+        // transient, matching the previous blind-respawn behavior.
         Err(join_error) => {
             warn!(%endpoint_id, stream_id = %task.stream.stream_id, %join_error, "forwarder data subscription task ended abnormally");
         }
@@ -755,6 +788,7 @@ async fn sync_data_tasks(
     desired: &HashMap<String, ForwarderDataStream>,
     tasks: &mut HashMap<String, DataTask>,
     failed: &mut HashMap<String, ForwarderDataStream>,
+    panic_exits: &mut HashMap<String, u32>,
 ) {
     let finished = tasks
         .iter()
@@ -763,7 +797,15 @@ async fn sync_data_tasks(
         .collect::<Vec<_>>();
     for stream_key in finished {
         if let Some(task) = tasks.remove(&stream_key) {
-            reap_finished_data_task(endpoint_id, reporter, &stream_key, task, failed).await;
+            reap_finished_data_task(
+                endpoint_id,
+                reporter,
+                &stream_key,
+                task,
+                failed,
+                panic_exits,
+            )
+            .await;
         }
     }
 
@@ -794,6 +836,9 @@ async fn sync_data_tasks(
                 .await;
         }
     }
+    // Drop panic counters for streams no longer desired so an unsubscribe /
+    // resubscribe on the same connection starts a fresh count.
+    panic_exits.retain(|stream_key, _| desired_ids.contains(stream_key));
 
     for (stream_key, stream) in desired {
         if tasks.contains_key(stream_key) {
@@ -869,18 +914,30 @@ mod tests {
         AppState, ConfigCommand, ForwarderConnState, ReaderCommand, get_connections,
         get_forwarder_config, restart_forwarder, set_forwarder_config,
     };
-    use crate::p2p_session::{BackoffConfig, SessionStatusReporter};
+    use crate::p2p_session::{BackoffConfig, SessionOutcome, SessionStatusReporter};
     use crate::stream_key::LocalStreamKey;
 
     use super::{
-        FORWARDER_CONFIG_TIMEOUT, ForwarderConnection, ForwarderDataStream, PendingConfigRequest,
-        PendingConfigResponder, prune_expired_pending_config,
+        DataTask, FORWARDER_CONFIG_TIMEOUT, ForwarderConnection, ForwarderDataStream,
+        MAX_CONSECUTIVE_PANIC_EXITS, PendingConfigRequest, PendingConfigResponder,
+        prune_expired_pending_config, reap_finished_data_task,
     };
 
     const STREAM_ID: &str = "127.0.0.1:10000";
 
     fn local_stream_key(endpoint_id: &str) -> LocalStreamKey {
         LocalStreamKey::new(endpoint_id, STREAM_ID)
+    }
+
+    fn test_subscription(endpoint_id: &str) -> crate::db::StreamSubscription {
+        crate::db::StreamSubscription {
+            forwarder_endpoint_id: endpoint_id.to_owned(),
+            stream_id: STREAM_ID.to_owned(),
+            local_port_override: None,
+            event_type: crate::db::EventType::Start,
+            forwarder_id: None,
+            reader_ip: None,
+        }
     }
 
     fn test_hello() -> Hello {
@@ -993,6 +1050,7 @@ mod tests {
                 local_stream_key: local_stream_key(&endpoint_id),
                 mode: SubscribeMode::Replay,
                 durable_hint_tx: Some(hint_tx),
+                subscription: test_subscription(&endpoint_id),
             }]);
 
             poll_until(
@@ -1122,6 +1180,7 @@ mod tests {
                 local_stream_key: local_stream_key(&endpoint_id),
                 mode: SubscribeMode::Replay,
                 durable_hint_tx: Some(hint_tx),
+                subscription: test_subscription(&endpoint_id),
             }]);
 
             // The forwarder drops the control connection after the first data
@@ -1219,6 +1278,7 @@ mod tests {
                     local_stream_key: local_stream_key(&endpoint_id),
                     mode: SubscribeMode::Replay,
                     durable_hint_tx: Some(hint_tx.clone()),
+                    subscription: test_subscription(&endpoint_id),
                 }]
             };
             connection.set_desired_streams(desired());
@@ -1259,14 +1319,39 @@ mod tests {
                 "a terminally failed stream must not be respawned on the same connection"
             );
 
-            // A subscription config change (per-stream worker rebuild = fresh
-            // durable hint channel) clears the failure and permits a retry.
+            // An announcer-driven stream-worker rebuild swaps the hint channel
+            // WITHOUT changing the subscription config; that must NOT clear the
+            // failure marker or trigger a resubscribe.
+            let (rebuilt_hint_tx, _rebuilt_hint_rx) = broadcast::channel(16);
+            for _ in 0..5 {
+                connection.set_desired_streams(vec![ForwarderDataStream {
+                    stream_id: STREAM_ID.to_owned(),
+                    local_stream_key: local_stream_key(&endpoint_id),
+                    mode: SubscribeMode::Replay,
+                    durable_hint_tx: Some(rebuilt_hint_tx.clone()),
+                    subscription: test_subscription(&endpoint_id),
+                }]);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            assert_eq!(
+                forwarder.subscribes().len(),
+                1,
+                "a hint-channel swap without a subscription config change (announcer rebuild) must not clear the failure marker"
+            );
+
+            // A REAL subscription config change clears the failure and permits
+            // a retry.
             let (new_hint_tx, _new_hint_rx) = broadcast::channel(16);
+            let changed_subscription = crate::db::StreamSubscription {
+                local_port_override: Some(23456),
+                ..test_subscription(&endpoint_id)
+            };
             connection.set_desired_streams(vec![ForwarderDataStream {
                 stream_id: STREAM_ID.to_owned(),
                 local_stream_key: local_stream_key(&endpoint_id),
                 mode: SubscribeMode::Replay,
                 durable_hint_tx: Some(new_hint_tx.clone()),
+                subscription: changed_subscription,
             }]);
             poll_until(
                 || async { forwarder.subscribes().len() >= 2 },
@@ -1280,6 +1365,98 @@ mod tests {
         })
         .await
         .expect("terminal data error test timed out");
+    }
+
+    /// Consecutive panic exits of a stream's data task are capped: after
+    /// `MAX_CONSECUTIVE_PANIC_EXITS` in a row the stream is marked terminally
+    /// failed (respawn suppressed), and a normal exit resets the counter.
+    /// Panics are injected by reaping spawned panicking tasks directly, since
+    /// the mock forwarder scripts wire behavior and cannot make the receiver's
+    /// own data task panic.
+    #[tokio::test]
+    async fn consecutive_panic_exits_mark_stream_failed_after_cap() {
+        let (state, _shutdown_rx) = AppState::new(
+            crate::db::Db::open_in_memory().unwrap(),
+            "recv-test".to_owned(),
+        );
+        let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
+        let endpoint_id = "panic-cap-endpoint";
+        let stream = ForwarderDataStream {
+            stream_id: STREAM_ID.to_owned(),
+            local_stream_key: local_stream_key(endpoint_id),
+            mode: SubscribeMode::Replay,
+            durable_hint_tx: None,
+            subscription: test_subscription(endpoint_id),
+        };
+        let stream_key = stream.local_stream_key.as_str().to_owned();
+        let panicking_task = || DataTask {
+            stream: stream.clone(),
+            handle: tokio::spawn(async { panic!("injected data task panic") }),
+        };
+        let mut failed = std::collections::HashMap::new();
+        let mut panic_exits = std::collections::HashMap::new();
+
+        // Panic exits below the cap: counted, still respawn-eligible.
+        for expected in 1..MAX_CONSECUTIVE_PANIC_EXITS {
+            reap_finished_data_task(
+                endpoint_id,
+                &reporter,
+                &stream_key,
+                panicking_task(),
+                &mut failed,
+                &mut panic_exits,
+            )
+            .await;
+            assert!(
+                failed.is_empty(),
+                "below the cap a panicking stream must stay respawn-eligible"
+            );
+            assert_eq!(panic_exits.get(&stream_key), Some(&expected));
+        }
+
+        // A normal exit resets the consecutive counter.
+        reap_finished_data_task(
+            endpoint_id,
+            &reporter,
+            &stream_key,
+            DataTask {
+                stream: stream.clone(),
+                handle: tokio::spawn(async { Ok(SessionOutcome::OpenedThenDisconnected) }),
+            },
+            &mut failed,
+            &mut panic_exits,
+        )
+        .await;
+        assert!(
+            panic_exits.is_empty(),
+            "a normal exit must reset the consecutive panic counter"
+        );
+
+        // Only CONSECUTIVE panics trip the cap: a full run of panics is needed
+        // again after the reset, and the final one marks the stream failed.
+        for _ in 0..MAX_CONSECUTIVE_PANIC_EXITS {
+            assert!(
+                failed.is_empty(),
+                "the cap must not trip before {MAX_CONSECUTIVE_PANIC_EXITS} consecutive panics"
+            );
+            reap_finished_data_task(
+                endpoint_id,
+                &reporter,
+                &stream_key,
+                panicking_task(),
+                &mut failed,
+                &mut panic_exits,
+            )
+            .await;
+        }
+        assert!(
+            failed.contains_key(&stream_key),
+            "{MAX_CONSECUTIVE_PANIC_EXITS} consecutive panics must mark the stream terminally failed"
+        );
+        assert!(
+            panic_exits.is_empty(),
+            "marking failed must clear the panic counter"
+        );
     }
 
     /// A script that, after the handshake, pushes an ignored control variant
@@ -1971,6 +2148,7 @@ mod tests {
                 local_stream_key: local_stream_key(&endpoint_id),
                 mode: SubscribeMode::Replay,
                 durable_hint_tx: Some(hint_tx),
+                subscription: test_subscription(&endpoint_id),
             }]);
             poll_until(
                 || async { forwarder.connection_count() >= 2 },

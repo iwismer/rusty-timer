@@ -1264,6 +1264,7 @@ async fn reconcile_once(
                     local_stream_key,
                     mode: SubscribeMode::Replay,
                     durable_hint_tx: Some(durable_hint_tx),
+                    subscription: sub.clone(),
                 })
             })
             .collect::<Vec<_>>();
