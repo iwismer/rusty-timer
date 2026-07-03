@@ -1086,7 +1086,7 @@ async fn terminally_failed_stream_is_not_resubscribed_and_reports_failed() {
                     .await
                     .forwarders
                     .iter()
-                    .find(|status| status.endpoint_id == node_id)
+                    .find(|status| status.endpoint_id == endpoint_id)
                     .is_some_and(|status| status.failed_stream_ids == vec![STREAM_ID.to_owned()])
             },
             Duration::from_secs(10),

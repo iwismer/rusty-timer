@@ -330,6 +330,12 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     event_type            TEXT NOT NULL DEFAULT 'finish',
     forwarder_id          TEXT,
     reader_ip             TEXT,
+    -- Persisted DBF READER digit (0..=9). Mirrors
+    -- services/receiver/src/storage/schema.sql: the receiver only runs
+    -- CREATE TABLE IF NOT EXISTS, so the preseeded table must already carry
+    -- this column and seeded streams need a concrete digit (NULL is skipped
+    -- by DBF delivery).
+    dbf_reader_index      INTEGER,
     PRIMARY KEY (forwarder_endpoint_id, stream_id)
 );
 CREATE TABLE IF NOT EXISTS announcer_publish_streams (
@@ -380,8 +386,8 @@ def preseed_receiver_db(db_path: Path, forwarder_endpoint_id: str, stream_id: st
         conn.execute(
             "INSERT INTO subscriptions "
             "(forwarder_endpoint_id, stream_id, local_port_override, event_type, "
-            " forwarder_id, reader_ip) VALUES (?,?,?,?,?,?)",
-            (forwarder_endpoint_id, stream_id, proxy_port, "finish", None, stream_id),
+            " forwarder_id, reader_ip, dbf_reader_index) VALUES (?,?,?,?,?,?,?)",
+            (forwarder_endpoint_id, stream_id, proxy_port, "finish", None, stream_id, 0),
         )
         # Opt the seeded stream in to announcer publishing (opt-in default).
         # Keyed by the canonical local stream key, not the bare wire id.
