@@ -230,11 +230,7 @@ async fn handle_connection(
     journal: Arc<Mutex<Journal>>,
     config: ConnectionConfig,
 ) {
-    let Ok(node_id) = connection.remote_node_id() else {
-        tracing::warn!("p2p: rejecting connection without a remote node id");
-        connection.close(REJECT_ERROR_CODE.into(), b"missing remote node id");
-        return;
-    };
+    let node_id = connection.remote_id();
 
     let Some(_guard) = allow_list.try_register_connection(node_id, connection.clone()) else {
         tracing::warn!(%node_id, "p2p: rejecting peer not on allow-list");
@@ -598,7 +594,6 @@ mod tests {
         ),
         BoxError,
     > {
-        receiver.add_node_addr(forwarder_addr.clone())?;
         let connection = receiver.connect(forwarder_addr).await?;
 
         let mut hello = forwarder_hello();
@@ -867,7 +862,6 @@ mod tests {
             tokio::spawn(async move { forwarder.run().await })
         };
 
-        receiver.add_node_addr(forwarder_addr.clone())?;
         let connection = receiver.connect(forwarder_addr).await?;
 
         // Open the control stream first (per the ordering contract) but do NOT
@@ -1220,7 +1214,6 @@ mod tests {
         // Connect and open the control stream as an allow-listed peer, but never
         // send `Hello`. The forwarder must close the connection on its own once
         // the handshake deadline elapses rather than leaking the task/connection.
-        receiver.add_node_addr(forwarder_addr.clone())?;
         let connection = receiver.connect(forwarder_addr).await?;
         let (mut _send, mut recv) = connection.open_bi().await?;
 

@@ -8,12 +8,10 @@ description = "Thin shared iroh endpoint wrapper for Rusty Timer P2P transport"
 workspace = true
 
 [dependencies]
-iroh = "=0.92.0"
-quinn = { package = "iroh-quinn", version = "=0.14.0" }
-rand = "0.8"
+iroh = "=1.0.1"
 thiserror = "2"
 
 [dev-dependencies]
-iroh = { version = "=0.92.0", features = ["test-utils"] }
+iroh = { version = "=1.0.1", features = ["test-utils"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }

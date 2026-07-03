@@ -504,9 +504,6 @@ mod tests {
         stream_id: Vec<u8>,
         after_seq: u64,
     ) -> TestResult<(rt_iroh::SendStream, rt_iroh::RecvStream, SubscribeOk)> {
-        harness
-            .receiver
-            .add_node_addr(harness.forwarder_addr.clone())?;
         let connection = harness
             .receiver
             .connect(harness.forwarder_addr.clone())
@@ -539,9 +536,6 @@ mod tests {
         after_seq: u64,
         mode: i32,
     ) -> TestResult<()> {
-        harness
-            .receiver
-            .add_node_addr(harness.forwarder_addr.clone())?;
         let connection = harness
             .receiver
             .connect(harness.forwarder_addr.clone())
@@ -843,9 +837,6 @@ mod tests {
             journal.append_read(&fast_stream, None, b"fast", "chip")?;
         }
 
-        harness
-            .receiver
-            .add_node_addr(harness.forwarder_addr.clone())?;
         let connection = harness
             .receiver
             .connect(harness.forwarder_addr.clone())

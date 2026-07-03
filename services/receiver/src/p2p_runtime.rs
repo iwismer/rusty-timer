@@ -41,7 +41,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use rt_iroh::{
-    Endpoint, EndpointBuilder, NodeAddr, NodeId, RelayMode, SecretKey, load_or_create_secret_key,
+    Endpoint, EndpointBuilder, NodeAddr, NodeId, RelayMode, SecretKey, TransportAddr,
+    load_or_create_secret_key,
 };
 use rt_p2p_protocol::{
     CAP_CONTROL_EVENTS, CAP_READER_CONTROL, CAP_REMOTE_CONFIG, Hello, MAX_FRAME_BYTES,
@@ -316,7 +317,7 @@ pub async fn start_receiver_p2p(
     let local_addr = endpoint.node_addr().await;
     info!(
         p2p_node_id = %endpoint.node_id(),
-        direct_addresses = ?local_addr.direct_addresses,
+        direct_addresses = ?local_addr.ip_addrs().collect::<Vec<_>>(),
         "receiver p2p endpoint bound"
     );
 
@@ -1071,7 +1072,15 @@ fn resolve_forwarder_addr(
 ) -> Option<NodeAddr> {
     let forwarder = discovered.get(endpoint_id)?;
     let node_id = endpoint_id.parse::<NodeId>().ok()?;
-    Some(NodeAddr::new(node_id).with_direct_addresses(forwarder.direct_addrs.iter().copied()))
+    Some(
+        NodeAddr::new(node_id).with_addrs(
+            forwarder
+                .direct_addrs
+                .iter()
+                .copied()
+                .map(TransportAddr::Ip),
+        ),
+    )
 }
 
 fn desired_forwarder_subscriptions(

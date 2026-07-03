@@ -721,9 +721,7 @@ mod tests {
             };
             let allow = allow.clone();
             tokio::spawn(async move {
-                let Ok(node_id) = connection.remote_node_id() else {
-                    return;
-                };
+                let node_id = connection.remote_id();
                 let Some(_guard) = allow.try_register_connection(node_id, connection.clone())
                 else {
                     connection.close(1u32.into(), b"denied");
@@ -749,7 +747,6 @@ mod tests {
         receiver: &Endpoint,
         forwarder_addr: NodeAddr,
     ) -> Result<(Connection, [u8; 4]), BoxError> {
-        receiver.add_node_addr(forwarder_addr.clone())?;
         let connection = receiver.connect(forwarder_addr).await?;
         let (mut send, mut recv) = connection.open_bi().await?;
         send.write_all(SUBSCRIBE).await?;
@@ -839,7 +836,6 @@ mod tests {
         let forwarder_addr = forwarder.node_addr().await;
 
         let allow = AllowList::new([receiver.node_id()]);
-        receiver.add_node_addr(forwarder_addr.clone())?;
 
         let accept = {
             let forwarder = forwarder.clone();
@@ -849,7 +845,7 @@ mod tests {
         let server_connection = tokio::time::timeout(Duration::from_secs(5), accept)
             .await???
             .ok_or("forwarder endpoint closed before accepting connection")?;
-        let node_id = server_connection.remote_node_id()?;
+        let node_id = server_connection.remote_id();
 
         allow.apply_update([])?;
         assert!(

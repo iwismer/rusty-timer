@@ -6,8 +6,15 @@ use std::{
 };
 
 pub use iroh::endpoint::{Connection, RecvStream, SendStream};
-use iroh::{Endpoint as IrohEndpoint, Watcher};
-pub use iroh::{NodeAddr, NodeId, RelayMode, SecretKey};
+use iroh::{
+    Endpoint as IrohEndpoint, Watcher,
+    endpoint::{QuicTransportConfig, presets},
+};
+// iroh 1.0 renamed `NodeId`/`NodeAddr` to `EndpointId`/`EndpointAddr`. The
+// rest of the workspace keeps the node-oriented names via these re-exports.
+pub use iroh::{
+    EndpointAddr as NodeAddr, EndpointId as NodeId, RelayMode, SecretKey, TransportAddr,
+};
 
 pub const ALPN: &[u8] = b"rusty-timer/fwd-rcv/1";
 
@@ -21,10 +28,8 @@ pub enum Error {
     Bind(#[source] Box<iroh::endpoint::BindError>),
     #[error("failed to connect iroh endpoint")]
     Connect(#[source] Box<iroh::endpoint::ConnectError>),
-    #[error("failed to add node address")]
-    AddNodeAddr(#[source] Box<iroh::endpoint::AddNodeAddrError>),
     #[error("failed to accept incoming connection")]
-    Accept(#[source] Box<iroh::endpoint::ConnectionError>),
+    Accept(#[source] Box<iroh::endpoint::ConnectingError>),
 }
 
 impl From<iroh::endpoint::BindError> for Error {
@@ -39,14 +44,8 @@ impl From<iroh::endpoint::ConnectError> for Error {
     }
 }
 
-impl From<iroh::endpoint::AddNodeAddrError> for Error {
-    fn from(source: iroh::endpoint::AddNodeAddrError) -> Self {
-        Self::AddNodeAddr(Box::new(source))
-    }
-}
-
-impl From<iroh::endpoint::ConnectionError> for Error {
-    fn from(source: iroh::endpoint::ConnectionError) -> Self {
+impl From<iroh::endpoint::ConnectingError> for Error {
+    fn from(source: iroh::endpoint::ConnectingError) -> Self {
         Self::Accept(Box::new(source))
     }
 }
@@ -93,7 +92,7 @@ fn create_secret_key(path: &Path) -> Result<SecretKey, Error> {
         fs::create_dir_all(parent)?;
     }
 
-    let key = SecretKey::generate(rand::rngs::OsRng);
+    let key = SecretKey::generate();
     let bytes = key.to_bytes();
 
     match write_new_secret_key(path, &bytes) {
@@ -147,16 +146,24 @@ impl Endpoint {
         }
     }
 
-    pub fn add_node_addr(&self, node_addr: NodeAddr) -> Result<(), Error> {
-        Ok(self.inner.add_node_addr(node_addr)?)
-    }
-
+    /// Returns the endpoint's address, waiting until it contains at least one
+    /// transport address (iroh populates bound socket addresses shortly after
+    /// binding).
     pub async fn node_addr(&self) -> NodeAddr {
-        self.inner.node_addr().initialized().await
+        let mut watcher = self.inner.watch_addr();
+        loop {
+            let addr = watcher.get();
+            if !addr.addrs.is_empty() {
+                return addr;
+            }
+            if watcher.updated().await.is_err() {
+                return self.inner.addr();
+            }
+        }
     }
 
-    pub fn node_id(&self) -> iroh::NodeId {
-        self.inner.node_id()
+    pub fn node_id(&self) -> NodeId {
+        self.inner.id()
     }
 
     pub async fn close(&self) {
@@ -172,7 +179,7 @@ pub struct EndpointBuilder {
 impl Default for EndpointBuilder {
     fn default() -> Self {
         Self {
-            inner: IrohEndpoint::builder().alpns(vec![ALPN.to_vec()]),
+            inner: IrohEndpoint::builder(presets::N0).alpns(vec![ALPN.to_vec()]),
         }
     }
 }
@@ -195,7 +202,11 @@ impl EndpointBuilder {
 
     #[must_use]
     pub fn bind_addr_v4(mut self, bind_addr: SocketAddrV4) -> Self {
-        self.inner = self.inner.bind_addr_v4(bind_addr);
+        self.inner = self
+            .inner
+            .clear_ip_transports()
+            .bind_addr(bind_addr)
+            .expect("a SocketAddrV4 is always a valid bind address");
         self
     }
 
@@ -207,27 +218,26 @@ impl EndpointBuilder {
 
     #[must_use]
     pub fn clear_discovery(mut self) -> Self {
-        self.inner = self.inner.clear_discovery();
+        self.inner = self.inner.clear_address_lookup();
         self
     }
 
     #[cfg(test)]
     #[must_use]
     pub fn insecure_skip_relay_cert_verify(mut self, skip_verify: bool) -> Self {
-        self.inner = self.inner.insecure_skip_relay_cert_verify(skip_verify);
-        self
-    }
-
-    #[must_use]
-    pub fn known_nodes(mut self, node_addrs: impl IntoIterator<Item = NodeAddr>) -> Self {
-        self.inner = self.inner.known_nodes(node_addrs.into_iter().collect());
+        if skip_verify {
+            self.inner = self
+                .inner
+                .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify());
+        }
         self
     }
 
     #[must_use]
     pub fn max_concurrent_bidi_streams(mut self, max_streams: u32) -> Self {
-        let mut transport_config = quinn::TransportConfig::default();
-        transport_config.max_concurrent_bidi_streams(max_streams.into());
+        let transport_config = QuicTransportConfig::builder()
+            .max_concurrent_bidi_streams(max_streams.into())
+            .build();
         self.inner = self.inner.transport_config(transport_config);
         self
     }
@@ -260,8 +270,6 @@ mod tests {
         let endpoint_b = EndpointBuilder::test([2; 32]).bind().await.unwrap();
         let endpoint_b_addr = endpoint_b.node_addr().await;
 
-        endpoint_a.add_node_addr(endpoint_b_addr.clone()).unwrap();
-
         let (connected, accepted) = tokio::join!(
             endpoint_a.connect(endpoint_b_addr.clone()),
             endpoint_b.accept(),
@@ -270,8 +278,8 @@ mod tests {
         let connected = connected.unwrap();
         let accepted = accepted.unwrap().unwrap();
 
-        assert_eq!(connected.remote_node_id().unwrap(), endpoint_b_addr.node_id);
-        assert_eq!(accepted.remote_node_id().unwrap(), endpoint_a.node_id());
+        assert_eq!(connected.remote_id(), endpoint_b_addr.id);
+        assert_eq!(accepted.remote_id(), endpoint_a.node_id());
 
         endpoint_a.close().await;
         endpoint_b.close().await;
@@ -312,8 +320,8 @@ mod tests {
 
         let connected = connected.unwrap();
         let accepted = accepted.unwrap().unwrap();
-        assert_eq!(connected.remote_node_id().unwrap(), endpoint_b.node_id());
-        assert_eq!(accepted.remote_node_id().unwrap(), endpoint_a.node_id());
+        assert_eq!(connected.remote_id(), endpoint_b.node_id());
+        assert_eq!(accepted.remote_id(), endpoint_a.node_id());
 
         endpoint_a.close().await;
         endpoint_b.close().await;
@@ -347,15 +355,17 @@ mod tests {
             .unwrap();
 
         let last_known_addr = endpoint_b.node_addr().await;
+        let direct_addrs: Vec<TransportAddr> = last_known_addr
+            .addrs
+            .iter()
+            .filter(|addr| addr.is_ip())
+            .cloned()
+            .collect();
         assert!(
-            !last_known_addr.direct_addresses.is_empty(),
+            !direct_addrs.is_empty(),
             "last-known address must include a direct loopback fallback: {last_known_addr:?}"
         );
-        let direct_fallback_addr = NodeAddr::from_parts(
-            endpoint_b.node_id(),
-            None,
-            last_known_addr.direct_addresses.iter().copied(),
-        );
+        let direct_fallback_addr = NodeAddr::from_parts(endpoint_b.node_id(), direct_addrs);
         drop(relay_guard);
 
         let (connected, accepted) = tokio::join!(
@@ -365,8 +375,8 @@ mod tests {
 
         let connected = connected.unwrap();
         let accepted = accepted.unwrap().unwrap();
-        assert_eq!(connected.remote_node_id().unwrap(), endpoint_b.node_id());
-        assert_eq!(accepted.remote_node_id().unwrap(), endpoint_a.node_id());
+        assert_eq!(connected.remote_id(), endpoint_b.node_id());
+        assert_eq!(accepted.remote_id(), endpoint_a.node_id());
 
         endpoint_a.close().await;
         endpoint_b.close().await;

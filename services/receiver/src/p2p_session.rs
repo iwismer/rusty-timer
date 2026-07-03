@@ -361,7 +361,6 @@ pub async fn connect_and_hello(
     forwarder_addr: NodeAddr,
     client_hello: Hello,
 ) -> Result<ControlSession, P2pSessionError> {
-    endpoint.add_node_addr(forwarder_addr.clone())?;
     let connection = endpoint.connect(forwarder_addr).await?;
 
     let (mut send, mut recv) = connection

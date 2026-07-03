@@ -22,8 +22,6 @@ async fn exchange_hello() -> TestResult {
     let client = EndpointBuilder::test([20; 32]).bind().await?;
     let server_addr = server.node_addr().await;
 
-    client.add_node_addr(server_addr.clone())?;
-
     let server_for_task = server.clone();
     let server_task = tokio::spawn(async move {
         let connection = server_for_task

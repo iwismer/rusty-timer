@@ -32,7 +32,8 @@ fn derive_forwarder_id(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     let result = hasher.finalize();
-    let hex = format!("{:x}", result);
+    // sha2 0.11 digests no longer implement `LowerHex`; hex-encode manually.
+    let hex: String = result.iter().map(|b| format!("{b:02x}")).collect();
     format!("fwd-{}", &hex[..16])
 }
 

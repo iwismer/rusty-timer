@@ -7,11 +7,12 @@ edition = "2024"
 workspace = true
 
 [dependencies]
-self_update = { version = "0.42", default-features = false, features = [
+self_update = { version = "0.44", default-features = false, features = [
     "archive-tar",
     "archive-zip",
     "compression-flate2",
     "compression-zip-deflate",
+    "reqwest",
     "rustls",
 ] }
 self-replace = "1.5"
@@ -19,7 +20,7 @@ semver = "1"
 tracing = "0.1"
 tokio = { version = "1", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 tempfile = "3"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }

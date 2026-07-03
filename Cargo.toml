@@ -46,8 +46,8 @@ path = "src/lib.rs"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
-sha2 = "0.10"
+rusqlite = { version = "0.40", features = ["bundled"] }
+sha2 = "0.11"
 uuid = { version = "1", features = ["v4"] }
 rt-test-utils = { path = "crates/rt-test-utils" }
 receiver = { path = "services/receiver" }

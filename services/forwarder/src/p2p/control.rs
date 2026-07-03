@@ -886,7 +886,6 @@ mod tests {
         forwarder_addr: NodeAddr,
         hello: Hello,
     ) -> Result<(Connection, SendStream, RecvStream), BoxError> {
-        receiver.add_node_addr(forwarder_addr.clone())?;
         let connection = receiver.connect(forwarder_addr).await?;
         let (mut send, recv) = connection.open_bi().await?;
         write_frame(

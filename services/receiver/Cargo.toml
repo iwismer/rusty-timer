@@ -16,7 +16,7 @@ rt-domain = { path = "../../crates/rt-domain" }
 rt-server-api = { path = "../../crates/rt-server-api" }
 rt-ui-log = { path = "../../crates/rt-ui-log" }
 rt-updater = { path = "../../crates/rt-updater" }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
@@ -42,7 +42,7 @@ tempfile = "3"
 axum = { version = "0.8" }
 
 [dev-dependencies]
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 rt-test-utils = { path = "../../crates/rt-test-utils" }
 tokio = { version = "1", features = ["full", "test-util"] }
 http-body-util = "0.1"

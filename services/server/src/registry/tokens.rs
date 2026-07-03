@@ -1,4 +1,4 @@
-use rand::RngCore;
+use rand::Rng;
 use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;

@@ -448,8 +448,7 @@ async fn push_forwarder_catalog_once(
     let endpoint_id = endpoint.node_id().to_string();
     let node_addr = endpoint.node_addr().await;
     let direct_addrs = node_addr
-        .direct_addresses
-        .iter()
+        .ip_addrs()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
     let catalog = match build_forwarder_catalog(
@@ -639,7 +638,6 @@ mod tests {
         .await?
         .expect("p2p enabled");
         let forwarder_addr = runtime.node_addr().await;
-        receiver.add_node_addr(forwarder_addr.clone())?;
         let connection = receiver.connect(forwarder_addr).await?;
 
         let (mut control_send, mut control_recv) = connection.open_bi().await?;
@@ -739,7 +737,6 @@ mod tests {
         .await?
         .expect("p2p enabled");
         let forwarder_addr = runtime.node_addr().await;
-        receiver.add_node_addr(forwarder_addr.clone())?;
         let connection = receiver.connect(forwarder_addr).await?;
 
         let (mut control_send, mut control_recv) = connection.open_bi().await?;

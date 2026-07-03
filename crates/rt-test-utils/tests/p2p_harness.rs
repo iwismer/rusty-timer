@@ -305,9 +305,6 @@ async fn run_partition_ack_test() {
         .await
         .expect("start client endpoint");
     let forwarder_addr = forwarder.node_addr();
-    client
-        .add_node_addr(forwarder_addr.clone())
-        .expect("register forwarder addr");
     let connection = client
         .connect(forwarder_addr)
         .await

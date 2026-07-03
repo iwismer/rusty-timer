@@ -836,7 +836,7 @@ mod tests {
             let forwarder = MockForwarderPeer::start([40; 32], base_script())
                 .await
                 .unwrap();
-            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint_id = forwarder.node_addr().id.to_string();
             let endpoint = Arc::new(test_endpoint(41).await);
             let store = test_store();
             let (state, _shutdown_rx) = AppState::new(
@@ -977,7 +977,7 @@ mod tests {
             let forwarder = MockForwarderPeer::start([42; 32], reconnect_script())
                 .await
                 .unwrap();
-            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint_id = forwarder.node_addr().id.to_string();
             let endpoint = Arc::new(test_endpoint(43).await);
             let store = test_store();
             let (state, _shutdown_rx) = AppState::new(
@@ -1103,7 +1103,7 @@ mod tests {
             let forwarder = MockForwarderPeer::start([44; 32], live_status_heartbeat_script())
                 .await
                 .unwrap();
-            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint_id = forwarder.node_addr().id.to_string();
             let endpoint = Arc::new(test_endpoint(45).await);
             let store = test_store();
             let (state, _shutdown_rx) = AppState::new(
@@ -1252,7 +1252,7 @@ mod tests {
             let forwarder = MockForwarderPeer::start([46; 32], remote_config_script())
                 .await
                 .unwrap();
-            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint_id = forwarder.node_addr().id.to_string();
             let endpoint = Arc::new(test_endpoint(47).await);
             let store = test_store();
             let (state, _shutdown_rx) = AppState::new(
@@ -1378,7 +1378,7 @@ mod tests {
             let forwarder = MockForwarderPeer::start([52; 32], reader_control_script())
                 .await
                 .unwrap();
-            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint_id = forwarder.node_addr().id.to_string();
             let endpoint = Arc::new(test_endpoint(53).await);
             let store = test_store();
             let (state, _shutdown_rx) = AppState::new(
@@ -1505,7 +1505,7 @@ mod tests {
             let forwarder = MockForwarderPeer::start([50; 32], remote_config_no_response_script())
                 .await
                 .unwrap();
-            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint_id = forwarder.node_addr().id.to_string();
             let endpoint = Arc::new(test_endpoint(51).await);
             let store = test_store();
             let (state, _shutdown_rx) = AppState::new(
@@ -1575,7 +1575,7 @@ mod tests {
             let forwarder = MockForwarderPeer::start([52; 32], remote_config_script())
                 .await
                 .unwrap();
-            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint_id = forwarder.node_addr().id.to_string();
             let endpoint = Arc::new(test_endpoint(53).await);
             let store = test_store();
             let (state, _shutdown_rx) = AppState::new(
@@ -1637,7 +1637,7 @@ mod tests {
             let forwarder = MockForwarderPeer::start([54; 32], remote_config_script())
                 .await
                 .unwrap();
-            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint_id = forwarder.node_addr().id.to_string();
             let endpoint = Arc::new(test_endpoint(55).await);
             let store = test_store();
             let (state, _shutdown_rx) = AppState::new(
@@ -1702,7 +1702,7 @@ mod tests {
             let mut script = remote_config_script();
             script.close_connection_after_data = true;
             let forwarder = MockForwarderPeer::start([56; 32], script).await.unwrap();
-            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint_id = forwarder.node_addr().id.to_string();
             let endpoint = Arc::new(test_endpoint(57).await);
             let store = test_store();
             let (state, _shutdown_rx) = AppState::new(
@@ -1779,7 +1779,7 @@ mod tests {
             let forwarder = MockForwarderPeer::start([48; 32], base_script())
                 .await
                 .unwrap();
-            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint_id = forwarder.node_addr().id.to_string();
             let endpoint = Arc::new(test_endpoint(49).await);
             let store = test_store();
             let (state, _shutdown_rx) = AppState::new(

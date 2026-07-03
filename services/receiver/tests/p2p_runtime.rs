@@ -126,12 +126,8 @@ fn stream_subscription(
 
 fn forwarder_config(forwarder: &MockForwarderPeer) -> (String, SocketAddr) {
     let addr = forwarder.node_addr();
-    let node_id = addr.node_id.to_string();
-    let direct = *addr
-        .direct_addresses
-        .iter()
-        .next()
-        .expect("forwarder direct address");
+    let node_id = addr.id.to_string();
+    let direct = *addr.ip_addrs().next().expect("forwarder direct address");
     (node_id, direct)
 }
 

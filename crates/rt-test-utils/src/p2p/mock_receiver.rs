@@ -42,7 +42,6 @@ impl MockReceiverPeer {
         forwarder_addr: NodeAddr,
         client_hello: Hello,
     ) -> HarnessResult<ReceiverSession> {
-        self.endpoint.add_node_addr(forwarder_addr.clone())?;
         let connection = self.endpoint.connect(forwarder_addr).await?;
 
         let (mut send, mut recv) = connection.open_bi().await?;
