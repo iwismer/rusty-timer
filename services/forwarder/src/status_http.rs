@@ -1769,11 +1769,14 @@ pub async fn config_json_string(
 /// escalation — permanent and self-granting; `[journal]`, `[[readers]]`, and
 /// display fields are the operational surface remote management exists to serve
 /// — a hostile allow-listed receiver can disrupt operations through them but
-/// cannot expand its own access.
+/// cannot expand its own access. `[status_http]`, `[update]`, and `[ups]` were
+/// considered and left writable as operational surface; `status_http.bind` is
+/// the borderline case (a receiver could rebind the local admin HTTP), but it
+/// grants the receiver itself no access.
 const REMOTE_PROTECTED_SECTIONS: &[&str] = &["auth", "p2p", "control"];
 
-/// Persist a full config document (the same JSON shape `config_json_string`
-/// returns) to the TOML config file, then mark a restart as needed.
+/// Persist a full config document received from P2P remote config, rejecting
+/// any attempted change to privileged config sections before writing.
 ///
 /// The document is parsed into the same [`crate::config::RawConfig`] the get
 /// path serializes, re-serialized to TOML, and validated by running the
@@ -1781,18 +1784,11 @@ const REMOTE_PROTECTED_SECTIONS: &[&str] = &["auth", "p2p", "control"];
 /// to load on restart is rejected without corrupting the on-disk file. Reuses
 /// the same atomic writer and `restart_needed` signal as the per-section HTTP
 /// writers. Returns a plain error message on failure.
-pub async fn write_config_json(
-    config_json: &str,
-    config_state: &ConfigState,
-    subsystem: &Arc<Mutex<SubsystemStatus>>,
-    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
-) -> Result<(), String> {
-    let _lock = config_state.write_lock.lock().await;
-    write_config_json_locked(config_json, config_state, subsystem, ui_tx).await
-}
-
-/// Persist a full config document received from P2P remote config, rejecting
-/// any attempted change to privileged config sections before writing.
+///
+/// There is intentionally no unrestricted full-document writer: local
+/// (trusted) config edits go through the per-section HTTP handlers
+/// ([`apply_section_update`] / [`update_config_file`]), so every full-document
+/// write path enforces [`REMOTE_PROTECTED_SECTIONS`].
 pub async fn write_config_json_restricted(
     config_json: &str,
     config_state: &ConfigState,
@@ -1824,18 +1820,20 @@ pub async fn write_config_json_restricted(
         }
     }
 
-    write_config_json_locked(config_json, config_state, subsystem, ui_tx).await
+    write_config_json_locked(incoming, config_state, subsystem, ui_tx).await
 }
 
+/// Shared locked write body. Caller must hold `config_state.write_lock`.
+///
+/// Takes the already-parsed [`crate::config::RawConfig`] (the same value the
+/// protected-section comparison ran against) so "what was compared is what is
+/// written" holds structurally rather than by re-parsing the same string.
 async fn write_config_json_locked(
-    config_json: &str,
+    raw: crate::config::RawConfig,
     config_state: &ConfigState,
     subsystem: &Arc<Mutex<SubsystemStatus>>,
     ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
 ) -> Result<(), String> {
-    let raw: crate::config::RawConfig =
-        serde_json::from_str(config_json).map_err(|e| format!("invalid config JSON: {e}"))?;
-
     let new_toml =
         toml::to_string_pretty(&raw).map_err(|e| format!("TOML serialize error: {e}"))?;
 
@@ -1852,6 +1850,13 @@ async fn write_config_json_locked(
 
 /// A missing section, `null`, and an all-null object are equivalent RawConfig
 /// states.
+///
+/// Normalization is single-level by design: every protected raw section is a
+/// flat struct of scalars/`Vec<String>` today. If a nested struct is ever
+/// added to a protected section, an all-null nested object will not be
+/// flattened — the failure mode is a false *reject* (fail-closed), and the
+/// populated-section round-trip test in `p2p/remote_config.rs` will catch
+/// serialization drift.
 fn normalize_section(v: Option<&serde_json::Value>) -> serde_json::Value {
     match v {
         None | Some(serde_json::Value::Null) => serde_json::Value::Null,
