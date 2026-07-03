@@ -739,6 +739,18 @@ mod tests {
             "statically configured receiver must be allowed alongside the cached set"
         );
 
+        // Regression guard: the first server sync (an empty snapshot here) must
+        // never revoke the statically configured receiver.
+        let revoked = allow_list.apply_update([])?;
+        assert!(
+            allow_list.contains(&static_receiver.endpoint_id()),
+            "statically configured receiver must survive a server allow-list sync"
+        );
+        assert!(
+            !revoked.contains(&static_receiver.endpoint_id()),
+            "statically configured receiver must never be revoked by a server sync"
+        );
+
         cached.close().await;
         static_receiver.close().await;
         Ok(())

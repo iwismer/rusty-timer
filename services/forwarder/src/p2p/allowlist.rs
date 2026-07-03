@@ -7,11 +7,13 @@
 //! 1. **Authoritative in-memory set.** [`AllowList::try_register_connection`]
 //!    admits and tracks a connection under one lock, before any control or data
 //!    stream work happens.
-//! 2. **Last-known persistence.** The allowed set is cached on disk so a
-//!    refresh failure (e.g. an offline server) falls back to the previously
-//!    persisted list rather than failing open or failing closed-empty. Updates
-//!    persist *before* the in-memory swap, so a write failure leaves the
-//!    last-known set in force ([`AllowList::apply_update`]).
+//! 2. **Last-known persistence.** The server-snapshot portion of the allowed
+//!    set is cached on disk (pinned/static receivers are re-derived from
+//!    config at startup, never persisted) so a refresh failure (e.g. an
+//!    offline server) falls back to the previously persisted list rather than
+//!    failing open or failing closed-empty. Updates persist *before* the
+//!    in-memory swap, so a write failure leaves the last-known set in force
+//!    ([`AllowList::apply_update`]).
 //! 3. **Revocation / force-close.** Admitted connections are tracked by remote
 //!    endpoint id ([`AllowList::try_register_connection`]); when an update removes a
 //!    peer, its open connections are force-closed immediately.
@@ -135,14 +137,14 @@ impl AllowList {
 
     /// Pins operator-configured receivers: always allowed, never revoked by
     /// [`AllowList::apply_update`], never persisted to the server-snapshot
-    /// cache. Intended to be called once at startup; a later call with a
-    /// smaller set does not un-pin previously pinned nodes until the next
-    /// `apply_update`.
+    /// cache. Intended to be called once at startup; the pinned set itself is
+    /// replaced immediately, but endpoints removed from it remain allowed
+    /// until the next `apply_update`.
     pub fn set_pinned(&self, pinned: impl IntoIterator<Item = EndpointId>) {
         let mut state = self.lock();
+        let state = &mut *state;
         state.pinned = pinned.into_iter().collect();
-        let pinned = state.pinned.clone();
-        state.allowed.extend(pinned);
+        state.allowed.extend(state.pinned.iter().copied());
     }
 
     /// Atomically replaces the allowed set with `allowed` ∪ the pinned set,
