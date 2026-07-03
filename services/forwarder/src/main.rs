@@ -303,6 +303,7 @@ async fn main() {
         config_state.clone(),
         status_server.subsystem_arc(),
         status_server.ui_sender(),
+        status_server.logger(),
         restart_signal.clone(),
     ));
     let reader_control_handler = Arc::new(forwarder::p2p::ForwarderReaderControlHandler::new(

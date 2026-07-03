@@ -23,6 +23,7 @@
 
 use std::sync::Arc;
 
+use rt_iroh::NodeId;
 use rt_p2p_protocol::{
     ConfigGetRequest, ConfigGetResponse, ConfigSetRequest, ConfigSetResponse, RestartRequest,
     RestartResponse,
@@ -45,6 +46,7 @@ pub struct ForwarderRemoteConfigHandler {
     config_state: Arc<ConfigState>,
     subsystem: Arc<Mutex<SubsystemStatus>>,
     ui_tx: broadcast::Sender<ForwarderUiEvent>,
+    ui_logger: Arc<rt_ui_log::UiLogger<ForwarderUiEvent>>,
     restart_signal: Arc<Notify>,
 }
 
@@ -60,13 +62,15 @@ impl std::fmt::Debug for ForwarderRemoteConfigHandler {
 impl ForwarderRemoteConfigHandler {
     /// Builds a handler. `allow_remote_config` mirrors
     /// `control.allow_remote_config` and gates both capability advertisement
-    /// and every verb.
+    /// and every verb. `ui_logger` is the forwarder's shared UI logger; config
+    /// writes are logged there attributed to the requesting peer's node id.
     #[must_use]
     pub fn new(
         allow_remote_config: bool,
         config_state: Arc<ConfigState>,
         subsystem: Arc<Mutex<SubsystemStatus>>,
         ui_tx: broadcast::Sender<ForwarderUiEvent>,
+        ui_logger: Arc<rt_ui_log::UiLogger<ForwarderUiEvent>>,
         restart_signal: Arc<Notify>,
     ) -> Self {
         Self {
@@ -74,6 +78,7 @@ impl ForwarderRemoteConfigHandler {
             config_state,
             subsystem,
             ui_tx,
+            ui_logger,
             restart_signal,
         }
     }
@@ -115,7 +120,7 @@ impl RemoteConfigHandler for ForwarderRemoteConfigHandler {
         })
     }
 
-    fn set_config(&self, request: ConfigSetRequest) -> ConfigSetFuture<'_> {
+    fn set_config(&self, request: ConfigSetRequest, peer: NodeId) -> ConfigSetFuture<'_> {
         Box::pin(async move {
             if !self.allow_remote_config {
                 return ConfigSetResponse {
@@ -133,14 +138,23 @@ impl RemoteConfigHandler for ForwarderRemoteConfigHandler {
             )
             .await
             {
-                Ok(()) => ConfigSetResponse {
-                    request_id: request.request_id,
-                    ok: true,
-                    restart_needed: true,
-                    error: String::new(),
-                },
+                Ok(()) => {
+                    self.ui_logger.log(format!(
+                        "Config updated remotely by receiver {peer} (restart required)"
+                    ));
+                    ConfigSetResponse {
+                        request_id: request.request_id,
+                        ok: true,
+                        restart_needed: true,
+                        error: String::new(),
+                    }
+                }
                 Err(error) => {
-                    tracing::warn!(%error, "p2p: remote config set failed");
+                    tracing::warn!(%peer, %error, "p2p: remote config set failed");
+                    self.ui_logger.log_at(
+                        rt_ui_log::UiLogLevel::Warn,
+                        format!("Remote config write from receiver {peer} rejected: {error}"),
+                    );
                     let restart_needed = self.subsystem.lock().await.restart_needed();
                     ConfigSetResponse {
                         request_id: request.request_id,
@@ -209,14 +223,39 @@ mod tests {
         config_path: PathBuf,
         restart_signal: Arc<Notify>,
     ) -> ForwarderRemoteConfigHandler {
+        handler_with_logger(allow, config_path, restart_signal).0
+    }
+
+    /// Like [`handler`] but also returns the buffered UI logger so tests can
+    /// assert on emitted UI log entries.
+    fn handler_with_logger(
+        allow: bool,
+        config_path: PathBuf,
+        restart_signal: Arc<Notify>,
+    ) -> (
+        ForwarderRemoteConfigHandler,
+        Arc<rt_ui_log::UiLogger<ForwarderUiEvent>>,
+    ) {
         let (ui_tx, _ui_rx) = broadcast::channel(16);
-        ForwarderRemoteConfigHandler::new(
+        let logger = Arc::new(rt_ui_log::UiLogger::with_buffer(
+            ui_tx.clone(),
+            |entry| ForwarderUiEvent::LogEntry { entry },
+            32,
+        ));
+        let h = ForwarderRemoteConfigHandler::new(
             allow,
             Arc::new(ConfigState::new(config_path)),
             Arc::new(Mutex::new(SubsystemStatus::ready())),
             ui_tx,
+            Arc::clone(&logger),
             restart_signal,
-        )
+        );
+        (h, logger)
+    }
+
+    /// A deterministic peer node id for attributing test config writes.
+    fn test_peer() -> NodeId {
+        rt_iroh::SecretKey::from_bytes(&[42u8; 32]).public()
     }
 
     #[tokio::test]
@@ -285,10 +324,13 @@ mod tests {
         let edited = serde_json::to_string(&value).unwrap();
 
         let response = h
-            .set_config(ConfigSetRequest {
-                request_id: "s1".to_owned(),
-                config_json: edited,
-            })
+            .set_config(
+                ConfigSetRequest {
+                    request_id: "s1".to_owned(),
+                    config_json: edited,
+                },
+                test_peer(),
+            )
             .await;
 
         assert!(response.ok, "set should succeed: {}", response.error);
@@ -317,10 +359,13 @@ mod tests {
         .unwrap();
         value["schema_version"] = serde_json::json!(2);
         let response = h
-            .set_config(ConfigSetRequest {
-                request_id: "s2".to_owned(),
-                config_json: serde_json::to_string(&value).unwrap(),
-            })
+            .set_config(
+                ConfigSetRequest {
+                    request_id: "s2".to_owned(),
+                    config_json: serde_json::to_string(&value).unwrap(),
+                },
+                test_peer(),
+            )
             .await;
 
         assert!(!response.ok);
@@ -339,10 +384,13 @@ mod tests {
         let h = handler(false, config_path, Arc::new(Notify::new()));
 
         let response = h
-            .set_config(ConfigSetRequest {
-                request_id: "s3".to_owned(),
-                config_json: r#"{"schema_version":1}"#.to_owned(),
-            })
+            .set_config(
+                ConfigSetRequest {
+                    request_id: "s3".to_owned(),
+                    config_json: r#"{"schema_version":1}"#.to_owned(),
+                },
+                test_peer(),
+            )
             .await;
 
         assert!(!response.ok);
@@ -364,10 +412,13 @@ mod tests {
 
         value["p2p"]["static_allowed_receivers"] = serde_json::json!(["ff".repeat(32)]);
         let response = h
-            .set_config(ConfigSetRequest {
-                request_id: "s".into(),
-                config_json: serde_json::to_string(&value).unwrap(),
-            })
+            .set_config(
+                ConfigSetRequest {
+                    request_id: "s".into(),
+                    config_json: serde_json::to_string(&value).unwrap(),
+                },
+                test_peer(),
+            )
             .await;
 
         assert!(!response.ok);
@@ -397,10 +448,13 @@ mod tests {
 
         value["auth"]["token_file"] = serde_json::json!(alternate_token_path.display().to_string());
         let response = h
-            .set_config(ConfigSetRequest {
-                request_id: "s".into(),
-                config_json: serde_json::to_string(&value).unwrap(),
-            })
+            .set_config(
+                ConfigSetRequest {
+                    request_id: "s".into(),
+                    config_json: serde_json::to_string(&value).unwrap(),
+                },
+                test_peer(),
+            )
             .await;
 
         assert!(!response.ok);
@@ -428,10 +482,13 @@ mod tests {
 
         value["control"]["allow_remote_config"] = serde_json::json!(false);
         let response = h
-            .set_config(ConfigSetRequest {
-                request_id: "s".into(),
-                config_json: serde_json::to_string(&value).unwrap(),
-            })
+            .set_config(
+                ConfigSetRequest {
+                    request_id: "s".into(),
+                    config_json: serde_json::to_string(&value).unwrap(),
+                },
+                test_peer(),
+            )
             .await;
 
         assert!(!response.ok);
@@ -471,10 +528,13 @@ mod tests {
             }
         ]);
         let response = h
-            .set_config(ConfigSetRequest {
-                request_id: "s".into(),
-                config_json: serde_json::to_string(&value).unwrap(),
-            })
+            .set_config(
+                ConfigSetRequest {
+                    request_id: "s".into(),
+                    config_json: serde_json::to_string(&value).unwrap(),
+                },
+                test_peer(),
+            )
             .await;
 
         assert!(response.ok, "set should succeed: {}", response.error);
@@ -511,10 +571,13 @@ mod tests {
         // Only an operational change; protected sections round-trip untouched.
         value["display_name"] = serde_json::json!("Round Trip");
         let response = h
-            .set_config(ConfigSetRequest {
-                request_id: "s".into(),
-                config_json: serde_json::to_string(&value).unwrap(),
-            })
+            .set_config(
+                ConfigSetRequest {
+                    request_id: "s".into(),
+                    config_json: serde_json::to_string(&value).unwrap(),
+                },
+                test_peer(),
+            )
             .await;
 
         assert!(
@@ -547,10 +610,13 @@ mod tests {
             "allow_reader_control": null,
         });
         let response = h
-            .set_config(ConfigSetRequest {
-                request_id: "s".into(),
-                config_json: serde_json::to_string(&value).unwrap(),
-            })
+            .set_config(
+                ConfigSetRequest {
+                    request_id: "s".into(),
+                    config_json: serde_json::to_string(&value).unwrap(),
+                },
+                test_peer(),
+            )
             .await;
 
         assert!(response.ok, "set should succeed: {}", response.error);
@@ -571,10 +637,13 @@ mod tests {
 
         value.as_object_mut().unwrap().remove("control");
         let response = h
-            .set_config(ConfigSetRequest {
-                request_id: "s".into(),
-                config_json: serde_json::to_string(&value).unwrap(),
-            })
+            .set_config(
+                ConfigSetRequest {
+                    request_id: "s".into(),
+                    config_json: serde_json::to_string(&value).unwrap(),
+                },
+                test_peer(),
+            )
             .await;
 
         assert!(!response.ok);
@@ -585,6 +654,72 @@ mod tests {
         );
         let cfg = crate::config::load_config_from_path(&config_path).unwrap();
         assert!(cfg.control.allow_remote_config);
+    }
+
+    #[tokio::test]
+    async fn set_success_ui_log_mentions_peer_node_id() {
+        let (config_path, _dir) = temp_config("");
+        let (h, logger) = handler_with_logger(true, config_path, Arc::new(Notify::new()));
+        let mut value: serde_json::Value = serde_json::from_str(
+            &h.get_config(ConfigGetRequest {
+                request_id: "g".into(),
+            })
+            .await
+            .config_json,
+        )
+        .unwrap();
+
+        value["display_name"] = serde_json::json!("Attributed");
+        let response = h
+            .set_config(
+                ConfigSetRequest {
+                    request_id: "s".into(),
+                    config_json: serde_json::to_string(&value).unwrap(),
+                },
+                test_peer(),
+            )
+            .await;
+
+        assert!(response.ok, "set should succeed: {}", response.error);
+        let peer = test_peer().to_string();
+        let entries = logger.entries();
+        assert!(
+            entries.iter().any(|entry| entry.contains(&peer)),
+            "UI log must attribute the config write to peer {peer}, got {entries:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_rejected_ui_log_mentions_peer_node_id() {
+        let (config_path, _dir) = temp_config("[p2p]\nenabled = false\n");
+        let (h, logger) = handler_with_logger(true, config_path, Arc::new(Notify::new()));
+        let mut value: serde_json::Value = serde_json::from_str(
+            &h.get_config(ConfigGetRequest {
+                request_id: "g".into(),
+            })
+            .await
+            .config_json,
+        )
+        .unwrap();
+
+        value["p2p"]["enabled"] = serde_json::json!(true);
+        let response = h
+            .set_config(
+                ConfigSetRequest {
+                    request_id: "s".into(),
+                    config_json: serde_json::to_string(&value).unwrap(),
+                },
+                test_peer(),
+            )
+            .await;
+
+        assert!(!response.ok, "protected-section write must be rejected");
+        let peer = test_peer().to_string();
+        let entries = logger.entries();
+        assert!(
+            entries.iter().any(|entry| entry.contains(&peer)),
+            "UI log must attribute the rejected config write to peer {peer}, got {entries:?}"
+        );
     }
 
     #[cfg(unix)]

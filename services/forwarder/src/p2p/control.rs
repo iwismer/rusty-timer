@@ -23,7 +23,7 @@ use std::time::Duration;
 use prost::Message;
 #[cfg(test)]
 use rt_iroh::Connection;
-use rt_iroh::{RecvStream, SendStream};
+use rt_iroh::{NodeId, RecvStream, SendStream};
 use rt_p2p_protocol::{
     CAP_CONTROL_EVENTS, CAP_READER_CONTROL, CAP_REMOTE_CONFIG, ConfigGetRequest, ConfigGetResponse,
     ConfigSetRequest, ConfigSetResponse, ControlC2F, ControlF2C, DownloadProgress, Hello,
@@ -219,7 +219,11 @@ pub trait RemoteConfigHandler: std::fmt::Debug + Send + Sync + 'static {
     /// Persists `config_json` (same shape as get) to the forwarder's TOML
     /// config file and marks a restart as needed. On validation or IO failure
     /// returns `ok = false` with a descriptive error and never panics.
-    fn set_config(&self, request: ConfigSetRequest) -> ConfigSetFuture<'_>;
+    ///
+    /// `peer` is the authenticated node id of the receiver that sent the
+    /// request; implementations use it to attribute the config write in
+    /// UI-visible logs.
+    fn set_config(&self, request: ConfigSetRequest, peer: NodeId) -> ConfigSetFuture<'_>;
 
     /// Triggers the same graceful restart path as the HTTP restart endpoint.
     fn restart(&self, request: RestartRequest) -> RestartFuture<'_>;
@@ -234,8 +238,8 @@ impl<C: RemoteConfigHandler + ?Sized> RemoteConfigHandler for Arc<C> {
         (**self).get_config(request)
     }
 
-    fn set_config(&self, request: ConfigSetRequest) -> ConfigSetFuture<'_> {
-        (**self).set_config(request)
+    fn set_config(&self, request: ConfigSetRequest, peer: NodeId) -> ConfigSetFuture<'_> {
+        (**self).set_config(request, peer)
     }
 
     fn restart(&self, request: RestartRequest) -> RestartFuture<'_> {
@@ -271,7 +275,7 @@ impl RemoteConfigHandler for NoopRemoteConfigHandler {
         })
     }
 
-    fn set_config(&self, request: ConfigSetRequest) -> ConfigSetFuture<'_> {
+    fn set_config(&self, request: ConfigSetRequest, _peer: NodeId) -> ConfigSetFuture<'_> {
         Box::pin(async move {
             ConfigSetResponse {
                 request_id: request.request_id,
@@ -427,10 +431,13 @@ pub(crate) async fn negotiate_control_stream(
 /// control stream until the peer disconnects cleanly (`Ok`) or is declared dead
 /// (`Err`). Dispatches reader-control and remote-config requests to the
 /// supplied handlers and forwards status updates from the optional
-/// `outbound_events` channel to the peer.
+/// `outbound_events` channel to the peer. `peer` is the authenticated node id
+/// of the connected receiver; every verb dispatch is attributed to it in logs.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_control_stream_loop(
     send: SendStream,
     recv: RecvStream,
+    peer: NodeId,
     capabilities: Vec<String>,
     heartbeat: HeartbeatConfig,
     outbound_events: Option<ControlEventReceiver>,
@@ -440,6 +447,7 @@ pub(crate) async fn run_control_stream_loop(
     run_control_loop(
         send,
         recv,
+        peer,
         capabilities,
         heartbeat,
         reader_control,
@@ -461,10 +469,12 @@ pub(crate) async fn serve_control_with_typed_control(
     outbound_events: Option<ControlEventReceiver>,
     remote_config: Arc<dyn RemoteConfigHandler>,
 ) -> Result<(), BoxError> {
+    let peer = connection.remote_node_id()?;
     let (send, recv) = connection.accept_bi().await?;
     serve_control_stream_with_typed_control(
         send,
         recv,
+        peer,
         catalog,
         handshake_timeout,
         heartbeat,
@@ -480,6 +490,7 @@ pub(crate) async fn serve_control_with_typed_control(
 pub(crate) async fn serve_control_stream_with_typed_control(
     send: SendStream,
     recv: RecvStream,
+    peer: NodeId,
     catalog: &dyn CatalogProvider,
     handshake_timeout: Duration,
     heartbeat: HeartbeatConfig,
@@ -501,6 +512,7 @@ pub(crate) async fn serve_control_stream_with_typed_control(
     run_control_loop(
         send,
         recv,
+        peer,
         capabilities,
         heartbeat,
         reader_control,
@@ -595,9 +607,15 @@ async fn negotiate_and_serve_catalog_stream(
 
 /// Runs the typed control loop until the peer misses `max_missed` consecutive
 /// pongs (returns `Err`) or disconnects cleanly (returns `Ok`).
+///
+/// Every reader-control and remote-config verb dispatch emits a `tracing`
+/// event attributed to `peer` (the authenticated remote node id), including
+/// capability-gate denials, so control-plane operations are auditable.
+#[allow(clippy::too_many_arguments)]
 async fn run_control_loop(
     mut send: SendStream,
     mut recv: RecvStream,
+    peer: NodeId,
     capabilities: Vec<String>,
     config: HeartbeatConfig,
     reader_control: Arc<dyn ReaderControlHandler>,
@@ -667,6 +685,15 @@ async fn run_control_loop(
                         }
                         Some(control_c2f::Msg::ReaderControlRequest(request)) => {
                             if !reader_control_negotiated {
+                                tracing::info!(
+                                    %peer,
+                                    verb = "reader_control",
+                                    command = %request.command,
+                                    request_id = %request.request_id,
+                                    stream_id = %String::from_utf8_lossy(&request.stream_id),
+                                    outcome = "denied",
+                                    "p2p: control verb denied (capability not negotiated)"
+                                );
                                 // Denials are written inline: the response channels are
                                 // drained by other arms of this same select loop, so
                                 // sending on them from here could fill the bounded channel
@@ -686,17 +713,34 @@ async fn run_control_loop(
 
                             let stream_id = request.stream_id.clone();
                             let request_id = request.request_id.clone();
+                            let command = request.command.clone();
                             let reader_control = Arc::clone(&reader_control);
                             let control_response_tx = control_response_tx.clone();
                             control_tasks.spawn(async move {
                                 let mut response = reader_control.handle(request).await;
                                 response.stream_id = stream_id;
                                 response.request_id = request_id;
+                                tracing::info!(
+                                    %peer,
+                                    verb = "reader_control",
+                                    command = %command,
+                                    request_id = %response.request_id,
+                                    stream_id = %String::from_utf8_lossy(&response.stream_id),
+                                    outcome = if response.success { "ok" } else { "error" },
+                                    "p2p: control verb handled"
+                                );
                                 let _ = control_response_tx.send(response).await;
                             });
                         }
                         Some(control_c2f::Msg::ConfigGetRequest(request)) => {
                             if !remote_config_negotiated {
+                                tracing::info!(
+                                    %peer,
+                                    verb = "config_get",
+                                    request_id = %request.request_id,
+                                    outcome = "denied",
+                                    "p2p: control verb denied (capability not negotiated)"
+                                );
                                 let response = ConfigGetResponse {
                                     request_id: request.request_id,
                                     config_json: String::new(),
@@ -719,6 +763,17 @@ async fn run_control_loop(
                             let config_response_tx = config_response_tx.clone();
                             control_tasks.spawn(async move {
                                 let response = remote_config.get_config(request).await;
+                                tracing::info!(
+                                    %peer,
+                                    verb = "config_get",
+                                    request_id = %response.request_id,
+                                    outcome = if response.config_json.is_empty() {
+                                        "error"
+                                    } else {
+                                        "ok"
+                                    },
+                                    "p2p: control verb handled"
+                                );
                                 let frame = ControlF2C {
                                     msg: Some(control_f2c::Msg::ConfigGetResponse(response)),
                                 };
@@ -727,6 +782,13 @@ async fn run_control_loop(
                         }
                         Some(control_c2f::Msg::ConfigSetRequest(request)) => {
                             if !remote_config_negotiated {
+                                tracing::info!(
+                                    %peer,
+                                    verb = "config_set",
+                                    request_id = %request.request_id,
+                                    outcome = "denied",
+                                    "p2p: control verb denied (capability not negotiated)"
+                                );
                                 let response = ConfigSetResponse {
                                     request_id: request.request_id,
                                     ok: false,
@@ -745,7 +807,14 @@ async fn run_control_loop(
                             let remote_config = Arc::clone(&remote_config);
                             let config_response_tx = config_response_tx.clone();
                             control_tasks.spawn(async move {
-                                let response = remote_config.set_config(request).await;
+                                let response = remote_config.set_config(request, peer).await;
+                                tracing::info!(
+                                    %peer,
+                                    verb = "config_set",
+                                    request_id = %response.request_id,
+                                    outcome = if response.ok { "ok" } else { "error" },
+                                    "p2p: control verb handled"
+                                );
                                 let frame = ControlF2C {
                                     msg: Some(control_f2c::Msg::ConfigSetResponse(response)),
                                 };
@@ -754,6 +823,13 @@ async fn run_control_loop(
                         }
                         Some(control_c2f::Msg::RestartRequest(request)) => {
                             if !remote_config_negotiated {
+                                tracing::info!(
+                                    %peer,
+                                    verb = "restart",
+                                    request_id = %request.request_id,
+                                    outcome = "denied",
+                                    "p2p: control verb denied (capability not negotiated)"
+                                );
                                 let response = RestartResponse {
                                     request_id: request.request_id,
                                     accepted: false,
@@ -772,6 +848,13 @@ async fn run_control_loop(
                             let config_response_tx = config_response_tx.clone();
                             control_tasks.spawn(async move {
                                 let response = remote_config.restart(request).await;
+                                tracing::info!(
+                                    %peer,
+                                    verb = "restart",
+                                    request_id = %response.request_id,
+                                    outcome = if response.accepted { "ok" } else { "error" },
+                                    "p2p: control verb handled"
+                                );
                                 let frame = ControlF2C {
                                     msg: Some(control_f2c::Msg::RestartResponse(response)),
                                 };
@@ -1101,6 +1184,7 @@ mod tests {
         config_json: String,
         restart_needed: bool,
         last_set: Mutex<Option<String>>,
+        last_set_peer: Mutex<Option<NodeId>>,
         get_calls: AtomicUsize,
         set_calls: AtomicUsize,
         restart_calls: AtomicUsize,
@@ -1113,6 +1197,7 @@ mod tests {
                 config_json: r#"{"schema_version":1}"#.to_owned(),
                 restart_needed: false,
                 last_set: Mutex::new(None),
+                last_set_peer: Mutex::new(None),
                 get_calls: AtomicUsize::new(0),
                 set_calls: AtomicUsize::new(0),
                 restart_calls: AtomicUsize::new(0),
@@ -1143,7 +1228,7 @@ mod tests {
             })
         }
 
-        fn set_config(&self, request: ConfigSetRequest) -> ConfigSetFuture<'_> {
+        fn set_config(&self, request: ConfigSetRequest, peer: NodeId) -> ConfigSetFuture<'_> {
             Box::pin(async move {
                 if !self.allow {
                     return ConfigSetResponse {
@@ -1155,6 +1240,7 @@ mod tests {
                 }
                 self.set_calls.fetch_add(1, Ordering::SeqCst);
                 *self.last_set.lock().unwrap() = Some(request.config_json.clone());
+                *self.last_set_peer.lock().unwrap() = Some(peer);
                 ConfigSetResponse {
                     request_id: request.request_id,
                     ok: true,
@@ -1481,6 +1567,11 @@ mod tests {
             handler.last_set.lock().unwrap().as_deref(),
             Some(payload),
             "handler must receive the config_json sent over the wire"
+        );
+        assert_eq!(
+            *handler.last_set_peer.lock().unwrap(),
+            Some(receiver.node_id()),
+            "handler must be told which peer sent the config write"
         );
 
         connection.close(0u32.into(), b"done");

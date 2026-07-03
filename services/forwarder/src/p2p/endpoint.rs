@@ -307,6 +307,7 @@ async fn handle_connection(
     let control_result = run_control_stream_loop(
         control_send,
         control_recv,
+        node_id,
         capabilities,
         config.heartbeat,
         outbound_events,
@@ -749,11 +750,15 @@ mod tests {
         )?;
 
         let (ui_tx, _ui_rx) = broadcast::channel(16);
+        let ui_logger = Arc::new(rt_ui_log::UiLogger::new(ui_tx.clone(), |entry| {
+            crate::ui_events::ForwarderUiEvent::LogEntry { entry }
+        }));
         let handler = Arc::new(crate::p2p::ForwarderRemoteConfigHandler::new(
             true,
             Arc::new(crate::status_http::ConfigState::new(config_path)),
             Arc::new(Mutex::new(SubsystemStatus::ready())),
             ui_tx,
+            ui_logger,
             Arc::new(tokio::sync::Notify::new()),
         ));
 
@@ -814,6 +819,155 @@ mod tests {
         assert_eq!(response.request_id, "e2e");
         let value: serde_json::Value = serde_json::from_str(&response.config_json)?;
         assert_eq!(value["schema_version"], serde_json::json!(1));
+
+        connection.close(0u32.into(), b"done");
+        accept.abort();
+        receiver.close().await;
+        forwarder.endpoint().close().await;
+        Ok(())
+    }
+
+    /// A remote config write over P2P must surface a UI log entry that
+    /// attributes the write to the requesting receiver's node id.
+    #[tokio::test]
+    async fn remote_config_set_over_p2p_emits_ui_log_with_peer_node_id() -> TestResult {
+        use rt_p2p_protocol::{CAP_REMOTE_CONFIG, ConfigGetRequest, ConfigSetRequest, Pong};
+
+        let receiver = EndpointBuilder::test([84; 32]).bind().await?;
+        let allow_list = AllowList::new([receiver.node_id()]);
+
+        let dir = tempfile::tempdir()?;
+        let token_path = dir.path().join("token");
+        std::fs::write(&token_path, "tok\n")?;
+        let config_path = dir.path().join("forwarder.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "schema_version = 1\n\n[auth]\ntoken_file = '{}'\n\n[[readers]]\ntarget = \"192.168.1.100\"\n\n[control]\nallow_remote_config = true\n",
+                token_path.display()
+            ),
+        )?;
+
+        let (ui_tx, mut ui_rx) = broadcast::channel(64);
+        let ui_logger = Arc::new(rt_ui_log::UiLogger::new(ui_tx.clone(), |entry| {
+            crate::ui_events::ForwarderUiEvent::LogEntry { entry }
+        }));
+        let handler = Arc::new(crate::p2p::ForwarderRemoteConfigHandler::new(
+            true,
+            Arc::new(crate::status_http::ConfigState::new(config_path)),
+            Arc::new(Mutex::new(SubsystemStatus::ready())),
+            ui_tx,
+            ui_logger,
+            Arc::new(tokio::sync::Notify::new()),
+        ));
+
+        let forwarder = P2pEndpoint::bind_test([85; 32], allow_list)
+            .await?
+            .with_remote_config(handler);
+        let forwarder_addr = forwarder.node_addr().await;
+
+        let accept = {
+            let forwarder = forwarder.clone();
+            tokio::spawn(async move { forwarder.run().await })
+        };
+
+        let (connection, _hello_ok, mut send, mut recv) = tokio::time::timeout(
+            Duration::from_secs(5),
+            dial_hello_connection_with_capabilities(
+                &receiver,
+                forwarder_addr,
+                vec![CAP_CONTROL_EVENTS.to_owned(), CAP_REMOTE_CONFIG.to_owned()],
+            ),
+        )
+        .await??;
+
+        // Fetch the current config, edit an operational field, and write it
+        // back, answering heartbeat pings while waiting for responses.
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::ConfigGetRequest(ConfigGetRequest {
+                    request_id: "get".to_owned(),
+                })),
+            },
+        )
+        .await?;
+        let get_response = loop {
+            let frame =
+                tokio::time::timeout(Duration::from_secs(5), read_frame::<ControlF2C>(&mut recv))
+                    .await??;
+            match frame.msg {
+                Some(control_f2c::Msg::ConfigGetResponse(response)) => break response,
+                Some(control_f2c::Msg::Ping(ping)) => {
+                    write_frame(
+                        &mut send,
+                        &ControlC2F {
+                            msg: Some(control_c2f::Msg::Pong(Pong { nonce: ping.nonce })),
+                        },
+                    )
+                    .await?;
+                }
+                other => return Err(format!("unexpected control frame: {other:?}").into()),
+            }
+        };
+        let mut value: serde_json::Value = serde_json::from_str(&get_response.config_json)?;
+        value["display_name"] = serde_json::json!("Peer Attributed");
+
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::ConfigSetRequest(ConfigSetRequest {
+                    request_id: "set".to_owned(),
+                    config_json: serde_json::to_string(&value)?,
+                })),
+            },
+        )
+        .await?;
+        let set_response = loop {
+            let frame =
+                tokio::time::timeout(Duration::from_secs(5), read_frame::<ControlF2C>(&mut recv))
+                    .await??;
+            match frame.msg {
+                Some(control_f2c::Msg::ConfigSetResponse(response)) => break response,
+                Some(control_f2c::Msg::Ping(ping)) => {
+                    write_frame(
+                        &mut send,
+                        &ControlC2F {
+                            msg: Some(control_c2f::Msg::Pong(Pong { nonce: ping.nonce })),
+                        },
+                    )
+                    .await?;
+                }
+                other => return Err(format!("unexpected control frame: {other:?}").into()),
+            }
+        };
+        assert!(
+            set_response.ok,
+            "remote config set should succeed: {}",
+            set_response.error
+        );
+
+        // The UI event stream must carry a log entry attributing the write to
+        // the receiver's node id.
+        let peer_id = receiver.node_id().to_string();
+        let attributed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match ui_rx.recv().await {
+                    Ok(crate::ui_events::ForwarderUiEvent::LogEntry { entry })
+                        if entry.contains(&peer_id) =>
+                    {
+                        break true;
+                    }
+                    Ok(_) => {}
+                    Err(_) => break false,
+                }
+            }
+        })
+        .await?;
+        assert!(
+            attributed,
+            "UI log must attribute the remote config write to peer {peer_id}"
+        );
 
         connection.close(0u32.into(), b"done");
         accept.abort();
