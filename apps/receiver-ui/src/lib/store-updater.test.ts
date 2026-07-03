@@ -135,6 +135,37 @@ function mockSseInitWithCallbacks(): {
   return state;
 }
 
+function testStream(overrides: Record<string, unknown> = {}) {
+  return {
+    forwarder_endpoint_id: "endpoint-a",
+    stream_id: "stream-a",
+    forwarder_id: "fwd-1",
+    reader_ip: "10.0.0.1:10000",
+    subscribed: true,
+    online: false,
+    local_port: 7000,
+    ...overrides,
+  };
+}
+
+function testMetrics(overrides: Record<string, unknown> = {}) {
+  return {
+    forwarder_id: "fwd-1",
+    reader_ip: "10.0.0.1:10000",
+    raw_count: 1,
+    dedup_count: 1,
+    retransmit_count: 0,
+    lag_ms: null,
+    epoch_raw_count: 1,
+    epoch_dedup_count: 1,
+    epoch_retransmit_count: 0,
+    unique_chips: 1,
+    epoch_last_received_at: null,
+    epoch_lag_ms: null,
+    ...overrides,
+  };
+}
+
 describe("receiver updater store", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -143,6 +174,110 @@ describe("receiver updater store", () => {
     mockFetch.mockResolvedValue({
       json: async () => ({ version: "legacy-version" }),
     });
+  });
+
+  it("expires stream activity only after the recency window", async () => {
+    const { store, streamHasRecentActivity, streamIdentity } =
+      await import("./store.svelte");
+    const stream = testStream();
+    const now = 50_000;
+    store.streamActivityAt = new Map([[streamIdentity(stream), now - 10_000]]);
+
+    expect(streamHasRecentActivity(stream, now)).toBe(true);
+    expect(streamHasRecentActivity(stream, now + 1)).toBe(false);
+  });
+
+  it("expires optimistic subscribe only after the grace window", async () => {
+    const { store, streamIdentity, streamIsOptimisticallySubscribing } =
+      await import("./store.svelte");
+    const stream = testStream({ subscribed: true, online: false });
+    const now = 50_000;
+    store.streamSubscriptionPendingSince = {
+      [streamIdentity(stream)]: now - 10_000,
+    };
+
+    expect(streamIsOptimisticallySubscribing(stream, now)).toBe(true);
+    expect(streamIsOptimisticallySubscribing(stream, now + 1)).toBe(false);
+  });
+
+  it("does not show optimistic subscribe for unsubscribed streams", async () => {
+    const { store, streamIdentity, streamIsOptimisticallySubscribing } =
+      await import("./store.svelte");
+    const stream = testStream({ subscribed: false, online: false });
+    store.streamSubscriptionPendingSince = { [streamIdentity(stream)]: 1_000 };
+
+    expect(streamIsOptimisticallySubscribing(stream, 1_001)).toBe(false);
+  });
+
+  it("does not show optimistic subscribe for online streams", async () => {
+    const { store, streamIdentity, streamIsOptimisticallySubscribing } =
+      await import("./store.svelte");
+    const stream = testStream({ subscribed: true, online: true });
+    store.streamSubscriptionPendingSince = { [streamIdentity(stream)]: 1_000 };
+
+    expect(streamIsOptimisticallySubscribing(stream, 1_001)).toBe(false);
+  });
+
+  it("suppresses optimistic subscribe when the stream has recent activity", async () => {
+    const { store, streamIdentity, streamIsOptimisticallySubscribing } =
+      await import("./store.svelte");
+    const stream = testStream({ subscribed: true, online: false });
+    const now = 50_000;
+    store.streamSubscriptionPendingSince = { [streamIdentity(stream)]: now };
+    store.streamActivityAt = new Map([[streamIdentity(stream), now]]);
+
+    expect(streamIsOptimisticallySubscribing(stream, now)).toBe(false);
+  });
+
+  it("keys delta activity by canonical stream identity instead of legacy display key", async () => {
+    const sseState = mockSseInitWithCallbacks();
+    const {
+      initStore,
+      store,
+      streamHasRecentActivity,
+      streamIdentity,
+      streamKey,
+    } = await import("./store.svelte");
+    const now = 50_000;
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      const streamA = testStream({
+        forwarder_endpoint_id: "endpoint-a",
+        stream_id: "stream-a",
+      });
+      const streamB = testStream({
+        forwarder_endpoint_id: "endpoint-b",
+        stream_id: "stream-b",
+      });
+      store.streams = {
+        streams: [streamA, streamB],
+        degraded: false,
+        upstream_error: null,
+      };
+
+      initStore();
+      sseState.callbacks?.onStreamDeltas([
+        {
+          forwarder_endpoint_id: "endpoint-a",
+          stream_id: "stream-a",
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          reads_total: 1,
+          reads_epoch: 1,
+          metrics: testMetrics(),
+          last_read: null,
+        },
+      ]);
+
+      expect(store.streamActivityAt.has(streamIdentity(streamA))).toBe(true);
+      expect(
+        store.streamActivityAt.has(streamKey("fwd-1", "10.0.0.1:10000")),
+      ).toBe(false);
+      expect(streamHasRecentActivity(streamA, now)).toBe(true);
+      expect(streamHasRecentActivity(streamB, now)).toBe(false);
+    } finally {
+      dateNow.mockRestore();
+    }
   });
 
   it("loads the app version from the desktop updater instead of the receiver version endpoint", async () => {

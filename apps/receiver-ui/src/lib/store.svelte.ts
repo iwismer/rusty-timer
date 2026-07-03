@@ -315,12 +315,10 @@ export function streamIdentity(stream: {
 }
 
 export function streamHasRecentActivity(
-  stream: Pick<api.StreamEntry, "forwarder_id" | "reader_ip">,
+  stream: Pick<api.StreamEntry, "forwarder_endpoint_id" | "stream_id">,
   now = Date.now(),
 ): boolean {
-  const lastActivity = store.streamActivityAt.get(
-    streamKey(stream.forwarder_id, stream.reader_ip),
-  );
+  const lastActivity = store.streamActivityAt.get(streamIdentity(stream));
   return (
     lastActivity != null && now - lastActivity <= STREAM_ACTIVITY_RECENCY_MS
   );
@@ -377,13 +375,12 @@ function clearSubscriptionPending(streams: api.StreamEntry[]): void {
   if (changed) store.streamSubscriptionPendingSince = next;
 }
 
-function markLegacyStreamActivity(
-  forwarder_id: string,
-  reader_ip: string,
+function markStreamActivity(
+  stream: Pick<api.StreamEntry, "forwarder_endpoint_id" | "stream_id">,
   now = Date.now(),
 ): void {
   const next = new Map(store.streamActivityAt);
-  next.set(streamKey(forwarder_id, reader_ip), now);
+  next.set(streamIdentity(stream), now);
   store.streamActivityAt = next;
 }
 
@@ -796,9 +793,6 @@ export function markModeEdited(): void {
 
 function applyStreamCountUpdates(updates: StreamCountUpdate[]): boolean {
   if (updates.length === 0) return false;
-  for (const update of updates) {
-    markLegacyStreamActivity(update.forwarder_id, update.reader_ip);
-  }
   if (!store.streams) return true;
 
   const knownKeys = new Set(
@@ -1629,7 +1623,6 @@ export function initStore(): void {
       applyHydratedMode(mode);
     },
     onLastRead: (read) => {
-      markLegacyStreamActivity(read.forwarder_id, read.reader_ip);
       if (store.streams) clearSubscriptionPending(store.streams.streams);
       const key = streamKey(read.forwarder_id, read.reader_ip);
       const next = new Map(store.lastReads);
@@ -1654,6 +1647,11 @@ export function initStore(): void {
           reads_epoch: u.reads_epoch,
         })),
       );
+      // Activity is keyed by canonical stream identity so streams that share
+      // legacy display metadata do not borrow each other's optimistic windows.
+      for (const update of updates) {
+        markStreamActivity(update);
+      }
       if (store.streams) clearSubscriptionPending(store.streams.streams);
       if (needsResync) void loadAll();
       // Metrics + last read, keyed.
