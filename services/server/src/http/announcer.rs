@@ -7,7 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{TimeZone, Utc};
-use serde::{Deserialize, Serialize};
+use rt_server_api::announcer::{PushRowRequest, PushRowResponse, TakeoverResponse};
 
 use crate::announcer::{AnnouncerInputEvent, AnnouncerRuntime};
 use crate::http::validate::{MAX_ID_LEN, MAX_NAME_LEN, MAX_TIMESTAMP_LEN, check_len};
@@ -19,37 +19,6 @@ use crate::registry::{self, AnnouncerRowRecord, AnnouncerStorageError, DeviceKin
 /// source (receiver) owns this setting; this only bounds what the server
 /// retains in the live runtime for the public feed.
 pub(crate) const DEFAULT_MAX_ANNOUNCER_ROWS: usize = 25;
-
-#[derive(Debug, Deserialize)]
-pub struct PushRowRequest {
-    pub announcer_source_generation: u64,
-    pub stream_id: String,
-    pub seq: u64,
-    pub chip_id: String,
-    pub bib: Option<i32>,
-    pub display_name: String,
-    pub reader_timestamp: Option<String>,
-    pub received_unix_ms: i64,
-    /// Division display name resolved by the receiver, when known. Optional for
-    /// backward compatibility with receivers that predate division support.
-    #[serde(default)]
-    pub division: Option<String>,
-    /// Receiver-configured cap on visible announcer rows. Absent or zero falls
-    /// back to [`DEFAULT_MAX_ANNOUNCER_ROWS`].
-    #[serde(default)]
-    pub max_list_size: Option<u32>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct PushRowResponse {
-    pub announcer_source_generation: u64,
-    pub finisher_count: u64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct TakeoverResponse {
-    pub announcer_source_generation: u64,
-}
 
 pub async fn push_row(
     State(state): State<AppState>,

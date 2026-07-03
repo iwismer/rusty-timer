@@ -7,35 +7,11 @@ use axum::{
     http::{HeaderMap, StatusCode, header::AUTHORIZATION},
     response::{IntoResponse, Response},
 };
-use serde::{Deserialize, Serialize};
+use rt_server_api::register::{RegisterRequest, RegisterResponse};
 
 use crate::http::AppState;
 use crate::http::validate::{MAX_ID_LEN, MAX_NAME_LEN, check_len};
-use crate::registry::{self, ApprovalState, DeviceKind, DeviceRecord};
-
-#[derive(Debug, Deserialize)]
-pub struct RegisterRequest {
-    /// Stable endpoint identifier of the registering device.
-    pub endpoint_id: String,
-    /// `"forwarder"` or `"receiver"`.
-    pub device_kind: String,
-    /// Optional human-friendly name the device reports for itself (e.g. a
-    /// receiver's configured receiver ID). Surfaced in the admin approval UI.
-    #[serde(default)]
-    pub display_name: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RegisterResponse {
-    pub endpoint_id: String,
-    pub device_kind: DeviceKind,
-    pub approval_state: ApprovalState,
-    /// The minted per-device bearer token, returned exactly once when a token
-    /// is minted or rotated. `None` on an idempotent re-register by a device
-    /// already presenting its own token.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub device_token: Option<String>,
-}
+use crate::registry::{self, DeviceKind, DeviceRecord};
 
 /// Bootstrap/recovery registration.
 ///

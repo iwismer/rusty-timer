@@ -38,9 +38,9 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use serde::{Deserialize, Serialize};
+use rt_server_api::status as wire;
+use serde::Deserialize;
 
-use crate::announcer::AnnouncerRow;
 use crate::http::AppState;
 use crate::registry::{self, DeviceRecord, ForwarderRecord, ForwarderStreamRecord};
 
@@ -50,22 +50,6 @@ use crate::registry::{self, DeviceRecord, ForwarderRecord, ForwarderStreamRecord
 /// client-supplied copy. The node treats a non-empty value as authorization
 /// for `/admin/*` routes.
 pub const ADMIN_HEADER: &str = "Remote-User";
-
-#[derive(Debug, Serialize)]
-pub struct StatusResponse {
-    /// Current announcer source generation (fencing token).
-    pub announcer_source_generation: u64,
-    /// Unique-chip finisher count from the live announcer runtime.
-    pub finisher_count: u64,
-    /// Most recent announcer rows held in the live runtime, newest first.
-    pub announcer_rows: Vec<AnnouncerRow>,
-    /// All registered devices and their approval state.
-    pub devices: Vec<DeviceRecord>,
-    /// Latest pushed forwarder identities, if any.
-    pub forwarders: Vec<ForwarderRecord>,
-    /// Backup forwarder stream catalog rows, if any.
-    pub forwarder_streams: Vec<ForwarderStreamRecord>,
-}
 
 #[derive(Debug, Deserialize)]
 pub struct ApproveRequest {
@@ -136,16 +120,63 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> Respon
 
     (
         StatusCode::OK,
-        Json(StatusResponse {
+        Json(wire::StatusResponse {
             announcer_source_generation,
             finisher_count,
-            announcer_rows,
-            devices,
-            forwarders,
-            forwarder_streams,
+            announcer_rows: announcer_rows
+                .into_iter()
+                .map(announcer_row_to_wire)
+                .collect(),
+            devices: devices.into_iter().map(device_to_wire).collect(),
+            forwarders: forwarders.into_iter().map(forwarder_to_wire).collect(),
+            forwarder_streams: forwarder_streams
+                .into_iter()
+                .map(forwarder_stream_to_wire)
+                .collect(),
         }),
     )
         .into_response()
+}
+
+fn announcer_row_to_wire(row: crate::announcer::AnnouncerRow) -> wire::AnnouncerRow {
+    wire::AnnouncerRow {
+        stream_id: row.stream_id,
+        seq: row.seq,
+        chip_id: row.chip_id,
+        bib: row.bib,
+        display_name: row.display_name,
+        reader_timestamp: row.reader_timestamp,
+        received_at: row.received_at,
+        division: row.division,
+    }
+}
+
+fn device_to_wire(record: DeviceRecord) -> wire::DeviceRecord {
+    wire::DeviceRecord {
+        endpoint_id: record.endpoint_id,
+        device_kind: record.device_kind,
+        approval_state: record.approval_state,
+        display_name: record.display_name,
+    }
+}
+
+fn forwarder_to_wire(record: ForwarderRecord) -> wire::ForwarderRecord {
+    wire::ForwarderRecord {
+        endpoint_id: record.endpoint_id,
+        display_name: record.display_name,
+        direct_addrs: record.direct_addrs,
+        last_seen_unix_ms: record.last_seen_unix_ms,
+        approval_state: record.approval_state,
+    }
+}
+
+fn forwarder_stream_to_wire(record: ForwarderStreamRecord) -> wire::ForwarderStreamRecord {
+    wire::ForwarderStreamRecord {
+        stream_id: record.stream_id,
+        endpoint_id: record.endpoint_id,
+        epoch: record.epoch,
+        next_seq: record.next_seq,
+    }
 }
 
 /// `POST /admin/devices/approve` — admin-only device approval.
@@ -171,7 +202,7 @@ pub async fn approve_device(
             // newly approved receiver is admitted within milliseconds instead
             // of waiting for the forwarder's periodic poll backstop.
             state.bump_allowlist_version();
-            (StatusCode::OK, Json(record)).into_response()
+            (StatusCode::OK, Json(device_to_wire(record))).into_response()
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(err) => {

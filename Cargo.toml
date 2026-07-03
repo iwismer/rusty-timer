@@ -4,6 +4,7 @@ members = [
     "crates/emulator",
     "crates/ipico-core",
     "crates/rt-screen",
+    "crates/rt-server-api",
     "crates/rt-iroh",
     "crates/rt-ui-http",
     "crates/rt-domain",

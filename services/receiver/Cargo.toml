@@ -13,6 +13,7 @@ test-bridge = []
 
 [dependencies]
 rt-domain = { path = "../../crates/rt-domain" }
+rt-server-api = { path = "../../crates/rt-server-api" }
 rt-ui-log = { path = "../../crates/rt-ui-log" }
 rt-updater = { path = "../../crates/rt-updater" }
 rusqlite = { version = "0.37", features = ["bundled"] }

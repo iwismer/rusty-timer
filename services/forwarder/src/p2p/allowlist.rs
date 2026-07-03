@@ -31,7 +31,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use rt_iroh::{Connection, NodeId};
-use serde::{Deserialize, Serialize};
+pub use rt_server_api::allowlist::ReceiverAllowListResponse as ReceiverAllowListUpdate;
+pub use rt_server_api::catalog::{
+    ForwarderCatalogRequest as ForwarderCatalog, ForwarderCatalogStream,
+};
+use rt_server_api::register::{RegisterRequest, RegisterResponse};
 use tokio::sync::mpsc;
 
 /// QUIC application error code used when force-closing a revoked peer's
@@ -386,9 +390,10 @@ impl ServerCatalogClient {
             .http
             .post(url)
             .bearer_auth(self.bearer_token.as_ref())
-            .json(&RegisterForwarderRequest {
-                endpoint_id,
-                device_kind: "forwarder",
+            .json(&RegisterRequest {
+                endpoint_id: endpoint_id.to_owned(),
+                device_kind: "forwarder".to_owned(),
+                display_name: None,
             })
             .send()
             .await?
@@ -414,36 +419,6 @@ impl ServerCatalogClient {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct RegisterForwarderRequest<'a> {
-    endpoint_id: &'a str,
-    device_kind: &'static str,
-}
-
-/// Subset of the server `/register` response the forwarder needs.
-#[derive(Debug, Deserialize)]
-struct RegisterResponse {
-    #[serde(default)]
-    device_token: Option<String>,
-}
-
-/// Wire-format forwarder catalog pushed to the server.
-#[derive(Debug, Clone, Serialize)]
-pub struct ForwarderCatalog {
-    pub endpoint_id: String,
-    pub display_name: Option<String>,
-    pub direct_addrs: Vec<String>,
-    pub streams: Vec<ForwarderCatalogStream>,
-}
-
-/// Wire-format stream entry in a forwarder catalog push.
-#[derive(Debug, Clone, Serialize)]
-pub struct ForwarderCatalogStream {
-    pub stream_id: String,
-    pub epoch: u64,
-    pub next_seq: u64,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogPushError {
     // `reqwest::Error`'s `Display` covers URL/status/transport but never
@@ -452,27 +427,6 @@ pub enum CatalogPushError {
     Http(#[from] reqwest::Error),
     #[error("server /register did not return a minted device token")]
     MissingMintedToken,
-}
-
-/// Wire-format receiver allow-list snapshot distributed by the server.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ReceiverAllowListUpdate {
-    pub receiver_endpoint_ids: Vec<String>,
-    /// Monotonic allow-list version this snapshot reflects. Echoed back as
-    /// `since` on the next long-poll. Defaults to 0 for an older server that
-    /// does not emit a version, which simply degrades to immediate re-polling.
-    #[serde(default)]
-    pub version: u64,
-}
-
-impl ReceiverAllowListUpdate {
-    #[must_use]
-    pub fn replace(receiver_endpoint_ids: Vec<String>) -> Self {
-        Self {
-            receiver_endpoint_ids,
-            version: 0,
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1012,7 +966,13 @@ mod tests {
             return StatusCode::UNAUTHORIZED.into_response();
         }
         *state.received.lock().await = Some((headers.clone(), body));
-        Json(serde_json::json!({ "device_token": "rtk_minted_secret" })).into_response()
+        Json(serde_json::json!({
+            "endpoint_id": "fwd-node-1",
+            "device_kind": "forwarder",
+            "approval_state": "pending",
+            "device_token": "rtk_minted_secret"
+        }))
+        .into_response()
     }
 
     #[tokio::test]

@@ -36,6 +36,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 embedded-graphics = "0.8"
 rt-domain = { path = "../../crates/rt-domain" }
 rt-iroh = { path = "../../crates/rt-iroh" }
+rt-server-api = { path = "../../crates/rt-server-api" }
 rt-p2p-protocol = { path = "../../crates/rt-p2p-protocol" }
 prost = "0.14"
 rt-ui-log = { path = "../../crates/rt-ui-log" }

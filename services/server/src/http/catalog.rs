@@ -6,34 +6,15 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use serde::{Deserialize, Serialize};
+use rt_server_api::catalog::{
+    ForwarderCatalogRequest, ForwarderCatalogResponse, ForwarderCatalogStream,
+};
 
 use crate::http::validate::{
     MAX_ADDR_LEN, MAX_CATALOG_STREAMS, MAX_DIRECT_ADDRS, MAX_ID_LEN, MAX_NAME_LEN, check_len,
 };
 use crate::http::{AppState, authorize_forwarder_catalog};
 use crate::registry::{self, ForwarderCatalogStreamRecord};
-
-#[derive(Debug, Deserialize)]
-pub struct ForwarderCatalogRequest {
-    pub endpoint_id: String,
-    pub display_name: Option<String>,
-    pub direct_addrs: Vec<String>,
-    pub streams: Vec<ForwarderCatalogStreamRequest>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ForwarderCatalogStreamRequest {
-    pub stream_id: String,
-    pub epoch: u64,
-    pub next_seq: u64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ForwarderCatalogResponse {
-    pub endpoint_id: String,
-    pub stream_count: usize,
-}
 
 /// `POST /forwarder/catalog` — M2M forwarder identity and stream catalog push.
 ///
@@ -63,11 +44,13 @@ pub async fn push_catalog(
     let streams = req
         .streams
         .into_iter()
-        .map(|stream| ForwarderCatalogStreamRecord {
-            stream_id: stream.stream_id,
-            epoch: stream.epoch,
-            next_seq: stream.next_seq,
-        })
+        .map(
+            |stream: ForwarderCatalogStream| ForwarderCatalogStreamRecord {
+                stream_id: stream.stream_id,
+                epoch: stream.epoch,
+                next_seq: stream.next_seq,
+            },
+        )
         .collect::<Vec<_>>();
     let stream_count = streams.len();
 

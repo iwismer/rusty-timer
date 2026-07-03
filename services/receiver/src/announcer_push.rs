@@ -21,6 +21,8 @@
 //! * **Resolved participant name when available.** Names/bibs are resolved
 //!   locally from race/participant data via the injected resolver.
 
+use rt_server_api::announcer::{PushRowRequest, TakeoverResponse};
+use rt_server_api::register::{RegisterRequest, RegisterResponse};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, MutexGuard as StdMutexGuard, PoisonError};
@@ -120,24 +122,36 @@ impl ServerAnnouncerClient {
 /// row. Extracted so the wire shape (including the `division` field) is unit
 /// testable without a live server. Server `bib` is an optional integer; a
 /// non-numeric bib is sent as null rather than failing the whole push.
-fn announcer_row_request_body(row: &AnnouncerRow, max_list_size: u32) -> serde_json::Value {
+fn announcer_row_request_body(
+    row: &AnnouncerRow,
+    max_list_size: u32,
+) -> Result<serde_json::Value, AnnouncerPushError> {
     let bib = row.bib.as_deref().and_then(|b| b.parse::<i32>().ok());
-    serde_json::json!({
-        "announcer_source_generation": row.announcer_source_generation,
-        "stream_id": row.stream_id,
-        "seq": row.seq,
-        "chip_id": row.chip_id,
-        "bib": bib,
-        "display_name": row.name.clone().unwrap_or_else(|| {
+    let announcer_source_generation =
+        u64::try_from(row.announcer_source_generation).map_err(|_| {
+            AnnouncerPushError::Transport(
+                "announcer_source_generation must be non-negative".to_owned(),
+            )
+        })?;
+    let seq = u64::try_from(row.seq)
+        .map_err(|_| AnnouncerPushError::Transport("seq must be non-negative".to_owned()))?;
+    let body = PushRowRequest {
+        announcer_source_generation,
+        stream_id: row.stream_id.clone(),
+        seq,
+        chip_id: row.chip_id.clone(),
+        bib,
+        display_name: row.name.clone().unwrap_or_else(|| {
             row.bib
                 .as_deref()
                 .map_or_else(String::new, |bib| format!("Unknown Participant {bib}"))
         }),
-        "division": row.division,
-        "reader_timestamp": serde_json::Value::Null,
-        "received_unix_ms": row.received_unix_ms,
-        "max_list_size": max_list_size,
-    })
+        reader_timestamp: None,
+        received_unix_ms: row.received_unix_ms,
+        division: row.division.clone(),
+        max_list_size: Some(max_list_size),
+    };
+    serde_json::to_value(body).map_err(|e| AnnouncerPushError::Transport(e.to_string()))
 }
 
 impl AnnouncerPushClient for ServerAnnouncerClient {
@@ -151,7 +165,7 @@ impl AnnouncerPushClient for ServerAnnouncerClient {
             .build()
             .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
         for row in rows {
-            let body = announcer_row_request_body(row, max_list_size);
+            let body = announcer_row_request_body(row, max_list_size)?;
             let response = client
                 .post(&self.rows_url)
                 .bearer_auth(&self.token)
@@ -191,14 +205,13 @@ pub fn register_receiver_with_server(
         .connect_timeout(HTTP_TIMEOUT)
         .build()
         .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
-    let mut body = serde_json::json!({
-        "endpoint_id": endpoint_id,
-        "device_kind": "receiver",
-    });
     let trimmed_id = receiver_id.trim();
-    if !trimmed_id.is_empty() {
-        body["display_name"] = serde_json::Value::String(trimmed_id.to_owned());
-    }
+    let body = serde_json::to_value(RegisterRequest {
+        endpoint_id: endpoint_id.to_owned(),
+        device_kind: "receiver".to_owned(),
+        display_name: (!trimmed_id.is_empty()).then(|| trimmed_id.to_owned()),
+    })
+    .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
     let response = client
         .post(format!("{}/register", base_url.trim_end_matches('/')))
         .bearer_auth(token)
@@ -211,13 +224,10 @@ pub fn register_receiver_with_server(
             response.status()
         )));
     }
-    let value: serde_json::Value = response
+    let value: RegisterResponse = response
         .json()
         .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
-    Ok(value
-        .get("device_token")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned))
+    Ok(value.device_token)
 }
 
 /// Take over the announcer source generation via server `/announcer/takeover`
@@ -246,19 +256,14 @@ pub fn takeover_announcer_generation(
             response.status()
         )));
     }
-    let value: serde_json::Value = response
+    let value: TakeoverResponse = response
         .json()
         .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
-    let generation = value
-        .get("announcer_source_generation")
-        .and_then(serde_json::Value::as_i64)
-        .ok_or_else(|| {
-            AnnouncerPushError::Transport(
-                "server /announcer/takeover response missing announcer_source_generation"
-                    .to_owned(),
-            )
-        })?;
-    Ok(generation)
+    i64::try_from(value.announcer_source_generation).map_err(|_| {
+        AnnouncerPushError::Transport(
+            "server /announcer/takeover response generation out of range".to_owned(),
+        )
+    })
 }
 
 /// One stream entry from the server `GET /forwarders` discovery feed.
@@ -651,14 +656,14 @@ mod tests {
             name: Some("Ada Lovelace".to_owned()),
             division: Some("5k".to_owned()),
         };
-        let body = announcer_row_request_body(&row, 25);
+        let body = announcer_row_request_body(&row, 25).unwrap();
         assert_eq!(body["division"], "5k");
         assert_eq!(body["bib"], 42);
         assert_eq!(body["display_name"], "Ada Lovelace");
         // A non-numeric/absent division serializes as null rather than being dropped.
         let mut row_no_div = row;
         row_no_div.division = None;
-        let body = announcer_row_request_body(&row_no_div, 25);
+        let body = announcer_row_request_body(&row_no_div, 25).unwrap();
         assert!(body["division"].is_null());
     }
 
@@ -674,9 +679,63 @@ mod tests {
             name: None,
             division: None,
         };
-        let body = announcer_row_request_body(&row, 25);
+        let body = announcer_row_request_body(&row, 25).unwrap();
         assert_eq!(body["bib"], 1488);
         assert_eq!(body["display_name"], "Unknown Participant 1488");
+    }
+
+    fn push_single_row_to_localhost(row: AnnouncerRow) -> Result<(), AnnouncerPushError> {
+        let client = ServerAnnouncerClient::new("http://127.0.0.1:9", "token").unwrap();
+        client.push(&[row], 25)
+    }
+
+    #[test]
+    fn server_announcer_client_rejects_negative_generation_without_panicking() {
+        let row = AnnouncerRow {
+            stream_id: "finish-line".to_owned(),
+            seq: 7,
+            received_unix_ms: 1_700_000_000_100,
+            announcer_source_generation: -1,
+            chip_id: "000000012345".to_owned(),
+            bib: Some("42".to_owned()),
+            name: Some("Ada Lovelace".to_owned()),
+            division: None,
+        };
+
+        let result = std::panic::catch_unwind(|| push_single_row_to_localhost(row));
+        assert!(
+            result.is_ok(),
+            "negative generation must return an error, not panic"
+        );
+        assert!(matches!(
+            result.unwrap(),
+            Err(AnnouncerPushError::Transport(message))
+                if message.contains("announcer_source_generation")
+        ));
+    }
+
+    #[test]
+    fn server_announcer_client_rejects_negative_seq_without_panicking() {
+        let row = AnnouncerRow {
+            stream_id: "finish-line".to_owned(),
+            seq: -1,
+            received_unix_ms: 1_700_000_000_100,
+            announcer_source_generation: 3,
+            chip_id: "000000012345".to_owned(),
+            bib: Some("42".to_owned()),
+            name: Some("Ada Lovelace".to_owned()),
+            division: None,
+        };
+
+        let result = std::panic::catch_unwind(|| push_single_row_to_localhost(row));
+        assert!(
+            result.is_ok(),
+            "negative seq must return an error, not panic"
+        );
+        assert!(matches!(
+            result.unwrap(),
+            Err(AnnouncerPushError::Transport(message)) if message.contains("seq")
+        ));
     }
 
     #[test]

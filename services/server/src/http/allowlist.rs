@@ -8,7 +8,8 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use serde::{Deserialize, Serialize};
+use rt_server_api::allowlist::ReceiverAllowListResponse;
+use serde::Deserialize;
 
 use crate::http::{AppState, authorize_active_device_kind};
 use crate::registry::{self, ApprovalState, DeviceKind};
@@ -17,14 +18,6 @@ use crate::registry::{self, ApprovalState, DeviceKind};
 /// returning the current snapshot. Kept well under typical reverse-proxy idle
 /// timeouts (60s+) so a held request is never severed mid-flight by Caddy.
 const MAX_HOLD: Duration = Duration::from_secs(25);
-
-#[derive(Debug, Serialize)]
-pub struct ReceiverAllowListResponse {
-    pub receiver_endpoint_ids: Vec<String>,
-    /// Monotonic allow-list version this snapshot reflects. Forwarders echo it
-    /// back as `since` on the next request to long-poll for the next change.
-    pub version: u64,
-}
 
 /// Long-poll parameters for `GET /allowlist/receivers`.
 ///

@@ -2129,6 +2129,7 @@ dependencies = [
  "rt-iroh",
  "rt-p2p-protocol",
  "rt-screen",
+ "rt-server-api",
  "rt-test-utils",
  "rt-ui-http",
  "rt-ui-log",
@@ -5705,6 +5706,7 @@ dependencies = [
  "rt-domain",
  "rt-iroh",
  "rt-p2p-protocol",
+ "rt-server-api",
  "rt-test-utils",
  "rt-ui-log",
  "rt-updater",
@@ -6052,6 +6054,15 @@ dependencies = [
  "tokio",
  "toml 1.0.7+spec-1.1.0",
  "tracing",
+]
+
+[[package]]
+name = "rt-server-api"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -6803,6 +6814,7 @@ dependencies = [
  "axum",
  "chrono",
  "rand 0.9.2",
+ "rt-server-api",
  "rt-ui-http",
  "rusqlite",
  "rust-embed",

@@ -560,92 +560,111 @@ async fn run_reconcile_loop(
             }
         }
 
-        if announcer_stale.swap(false, Ordering::SeqCst) {
+        let skip_reconcile_pass = if announcer_stale.swap(false, Ordering::SeqCst) {
             warn!(
                 "server rejected announcer generation; re-registering and re-taking over the announcer source"
             );
-            // Dropping the generation makes the block below re-run
-            // register + takeover, and the generation change forces the
-            // announcer workers to be rebuilt with the new fence.
-            announcer_generation = None;
+            // Stop existing stream workers FIRST. Each announcer push worker
+            // holds the rejected generation by value, and each data session can
+            // still deliver durable hints into that worker. Draining them before
+            // the fence reset below is required for correctness: were an old
+            // worker still alive, it could race the reset, push with the old
+            // generation, and re-raise the fence so the next generation is
+            // permanently staled. Reconciliation rebuilds these workers after
+            // register + takeover succeeds with a fresh generation.
+            for (_stream_id, worker) in stream_workers.drain() {
+                worker.stop().await;
+            }
             // After re-takeover the new server generation can be *below* the
             // persisted local per-stream fences (e.g. the server DB was
-            // reset), which would strand every push as locally stale. Reset
-            // the fences exactly like the server-change path so the new
-            // generation is accepted fresh.
+            // reset), which would strand every push as locally stale. With all
+            // old-generation announcer workers now stopped, reset the fences so
+            // the new generation is accepted fresh.
             if let Err(e) = {
                 let db = state.db.lock().await;
                 db.reset_announcer_fences()
             } {
                 warn!(error = %e, "failed to reset announcer fences after stale generation");
-            }
-        }
-
-        if announcer_generation.is_none()
-            && let Some(thin) = config.server.clone()
-        {
-            let receiver_id = state.receiver_id.read().await.clone();
-            // If the startup overlay could not mint a token (e.g. the server was
-            // unreachable at boot), `config.server` still holds the bootstrap
-            // voucher, which `takeover`/discovery reject. Re-attempt the
-            // mint+persist here each pass until it succeeds, then adopt the
-            // minted token and rebind discovery so it stops 401-ing. This is a
-            // cheap no-op once a token is held (the comparison fails and the
-            // persisted token short-circuits resolution).
-            let thin = if config.server == server_baseline {
-                match resolve_receiver_device_token(&state, &thin, &endpoint_id).await {
-                    Some(minted) => {
-                        let minted_server = ServerClientConfig {
-                            url: thin.url.clone(),
-                            token: minted,
-                        };
-                        config.server = Some(minted_server.clone());
-                        if let Some(task) = discovery_task.take() {
-                            task.abort();
-                            let _ = task.await;
-                        }
-                        discovery_task =
-                            Some(spawn_discovery(minted_server.clone(), shutdown_rx.clone()));
-                        minted_server
-                    }
-                    None => thin,
-                }
+                announcer_stale.store(true, Ordering::SeqCst);
+                true
             } else {
-                thin
-            };
-            let status = server_device_status_for_url(&state, &thin.url).await;
-            if receiver_pending_approval(&status) {
-                tracing::trace!("server announcer startup waiting for receiver approval");
-            } else {
-                tokio::select! {
-                    biased;
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() { break; }
-                    }
-                    result = server_startup(thin, endpoint_id.clone(), receiver_id) => match result {
-                        Ok(generation) => {
-                            info!(generation, "server announcer startup succeeded");
-                            announcer_generation = Some(generation);
+                // Dropping the generation makes the block below re-run
+                // register + takeover, and the generation change forces the
+                // announcer workers to be rebuilt with the new fence.
+                announcer_generation = None;
+                false
+            }
+        } else {
+            false
+        };
+
+        if !skip_reconcile_pass {
+            if announcer_generation.is_none()
+                && let Some(thin) = config.server.clone()
+            {
+                let receiver_id = state.receiver_id.read().await.clone();
+                // If the startup overlay could not mint a token (e.g. the server was
+                // unreachable at boot), `config.server` still holds the bootstrap
+                // voucher, which `takeover`/discovery reject. Re-attempt the
+                // mint+persist here each pass until it succeeds, then adopt the
+                // minted token and rebind discovery so it stops 401-ing. This is a
+                // cheap no-op once a token is held (the comparison fails and the
+                // persisted token short-circuits resolution).
+                let thin = if config.server == server_baseline {
+                    match resolve_receiver_device_token(&state, &thin, &endpoint_id).await {
+                        Some(minted) => {
+                            let minted_server = ServerClientConfig {
+                                url: thin.url.clone(),
+                                token: minted,
+                            };
+                            config.server = Some(minted_server.clone());
+                            if let Some(task) = discovery_task.take() {
+                                task.abort();
+                                let _ = task.await;
+                            }
+                            discovery_task =
+                                Some(spawn_discovery(minted_server.clone(), shutdown_rx.clone()));
+                            minted_server
                         }
-                        Err(e) => {
-                            warn!(error = %e, "server announcer startup failed; will retry");
+                        None => thin,
+                    }
+                } else {
+                    thin
+                };
+                let status = server_device_status_for_url(&state, &thin.url).await;
+                if receiver_pending_approval(&status) {
+                    tracing::trace!("server announcer startup waiting for receiver approval");
+                } else {
+                    tokio::select! {
+                        biased;
+                        changed = shutdown_rx.changed() => {
+                            if changed.is_err() || *shutdown_rx.borrow() { break; }
+                        }
+                        result = server_startup(thin, endpoint_id.clone(), receiver_id) => match result {
+                            Ok(generation) => {
+                                info!(generation, "server announcer startup succeeded");
+                                announcer_generation = Some(generation);
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "server announcer startup failed; will retry");
+                            }
                         }
                     }
                 }
             }
-        }
 
-        reconcile_once(
-            &state,
-            &config,
-            &endpoint,
-            &reporter,
-            announcer_generation,
-            &announcer_stale,
-            &mut workers,
-            &mut stream_workers,
-        )
-        .await;
+            reconcile_once(
+                &state,
+                &config,
+                &endpoint,
+                &reporter,
+                announcer_generation,
+                &announcer_stale,
+                &mut workers,
+                &mut stream_workers,
+            )
+            .await;
+        }
 
         tokio::select! {
             biased;

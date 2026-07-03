@@ -6,15 +6,10 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
+use rt_server_api::forwarders::{ApprovedForwarder, ApprovedForwarderStream, ForwardersResponse};
 
 use crate::http::{AppState, authorize_active_device_kind};
-use crate::registry::{self, ApprovedForwarderWithStreams, DeviceKind};
-
-#[derive(Debug, Serialize)]
-pub struct ForwardersResponse {
-    pub forwarders: Vec<ApprovedForwarderWithStreams>,
-}
+use crate::registry::{self, ApprovedForwarderWithStreams, DeviceKind, DiscoveredForwarderStream};
 
 /// `GET /forwarders` — M2M discovery of approved forwarders for receivers.
 ///
@@ -36,7 +31,33 @@ pub async fn list_forwarders(State(state): State<AppState>, headers: HeaderMap) 
         }
     };
 
+    let forwarders = forwarders
+        .into_iter()
+        .map(approved_forwarder_to_wire)
+        .collect();
+
     (StatusCode::OK, Json(ForwardersResponse { forwarders })).into_response()
+}
+
+fn approved_forwarder_to_wire(forwarder: ApprovedForwarderWithStreams) -> ApprovedForwarder {
+    ApprovedForwarder {
+        endpoint_id: forwarder.endpoint_id,
+        display_name: forwarder.display_name,
+        direct_addrs: forwarder.direct_addrs,
+        streams: forwarder
+            .streams
+            .into_iter()
+            .map(discovered_stream_to_wire)
+            .collect(),
+    }
+}
+
+fn discovered_stream_to_wire(stream: DiscoveredForwarderStream) -> ApprovedForwarderStream {
+    ApprovedForwarderStream {
+        stream_id: stream.stream_id,
+        epoch: stream.epoch,
+        next_seq: stream.next_seq,
+    }
 }
 
 #[cfg(test)]
