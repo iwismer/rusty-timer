@@ -31,7 +31,7 @@ impl ConfigState {
     }
 }
 
-pub(crate) fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     let original_permissions = std::fs::metadata(path).map(|m| m.permissions()).ok();
 
     let parent = path.parent().ok_or_else(|| {
