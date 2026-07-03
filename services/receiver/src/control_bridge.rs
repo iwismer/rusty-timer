@@ -200,6 +200,7 @@ async fn local_streams_snapshot(state: &AppState) -> control_api::StreamsRespons
                         .as_deref()
                         .and_then(crate::ports::default_port)
                 }),
+                local_port_override: sub.local_port_override,
                 announcer_publish: announcer_publish_streams.contains(local_stream_key.as_str()),
                 event_type: Some(sub.event_type),
                 online: None,

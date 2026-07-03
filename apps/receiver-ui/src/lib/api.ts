@@ -44,6 +44,9 @@ export interface StreamEntry {
   reader_ip?: string | null;
   subscribed: boolean;
   local_port: number | null;
+  // Stored explicit override, separate from the resolved local_port. Always
+  // sent by the backend; optional here so older fixtures/payloads remain valid.
+  local_port_override?: number | null;
   // Whether this stream is opted in to announcer publishing. Always sent by the
   // backend; optional here so older fixtures/payloads remain valid.
   announcer_publish?: boolean;

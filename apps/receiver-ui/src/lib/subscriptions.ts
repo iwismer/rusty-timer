@@ -10,6 +10,7 @@ export interface SubscriptionBuildStream {
   reader_ip?: string | null;
   subscribed: boolean;
   local_port: number | null;
+  local_port_override?: number | null;
   event_type?: "start" | "finish";
 }
 
@@ -77,7 +78,9 @@ export function buildAllSubscriptions(
     forwarder_endpoint_id: stream.forwarder_endpoint_id,
     stream_id: stream.stream_id,
     ...legacyMetadata(stream),
-    local_port_override: stream.subscribed ? (stream.local_port ?? null) : null,
+    local_port_override: stream.subscribed
+      ? (stream.local_port_override ?? null)
+      : null,
     event_type: stream.subscribed ? (stream.event_type ?? "finish") : "finish",
   }));
 }
@@ -92,7 +95,7 @@ export function buildUpdatedSubscriptions(
       forwarder_endpoint_id: s.forwarder_endpoint_id,
       stream_id: s.stream_id,
       ...legacyMetadata(s),
-      local_port_override: s.local_port ?? null,
+      local_port_override: s.local_port_override ?? null,
       event_type: s.event_type ?? "finish",
     }));
 

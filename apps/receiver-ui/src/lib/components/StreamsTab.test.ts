@@ -300,6 +300,7 @@ describe("StreamsTab", () => {
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
           local_port: 10100,
+          local_port_override: 10100,
           event_type: "start",
         },
         {
@@ -329,6 +330,7 @@ describe("StreamsTab", () => {
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
           local_port: 10100,
+          local_port_override: 10100,
           event_type: "start",
           online: true,
           reader_connected: true,

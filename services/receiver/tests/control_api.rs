@@ -568,6 +568,51 @@ async fn admin_update_port_clears_override() {
 }
 
 #[tokio::test]
+async fn streams_response_includes_stored_port_override_separate_from_resolved_port() {
+    let state = setup();
+    {
+        let mut db = state.db.lock().await;
+        db.replace_stream_subscriptions(&[
+            StreamSubscription {
+                forwarder_endpoint_id: "endpoint-default".to_owned(),
+                stream_id: "10.0.0.5:10000".to_owned(),
+                local_port_override: None,
+                event_type: EventType::Finish,
+                forwarder_id: None,
+                reader_ip: None,
+            },
+            StreamSubscription {
+                forwarder_endpoint_id: "endpoint-explicit".to_owned(),
+                stream_id: "10.0.0.6:10000".to_owned(),
+                local_port_override: Some(9900),
+                event_type: EventType::Finish,
+                forwarder_id: None,
+                reader_ip: None,
+            },
+        ])
+        .unwrap();
+    }
+
+    let response = control_api::get_streams(&state).await;
+
+    let defaulted = response
+        .streams
+        .iter()
+        .find(|s| s.forwarder_endpoint_id == "endpoint-default")
+        .unwrap();
+    assert_eq!(defaulted.local_port, Some(10005));
+    assert_eq!(defaulted.local_port_override, None);
+
+    let explicit = response
+        .streams
+        .iter()
+        .find(|s| s.forwarder_endpoint_id == "endpoint-explicit")
+        .unwrap();
+    assert_eq!(explicit.local_port, Some(9900));
+    assert_eq!(explicit.local_port_override, Some(9900));
+}
+
+#[tokio::test]
 async fn streams_response_includes_cursor_data() {
     let state = setup();
     let stream_1 = "127.0.0.1:10000";

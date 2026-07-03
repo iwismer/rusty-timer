@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildAllSubscriptions,
   buildUpdatedSubscriptions,
   parsePortOverrideInput,
 } from "./subscriptions";
@@ -57,7 +58,97 @@ describe("parsePortOverrideInput", () => {
   });
 });
 
+describe("buildAllSubscriptions", () => {
+  it("resubmits the stored override separately from the resolved local port", () => {
+    const result = buildAllSubscriptions([
+      {
+        forwarder_endpoint_id: "endpoint-default",
+        stream_id: "10.0.0.1:10000",
+        subscribed: true,
+        local_port: 10001,
+        local_port_override: null,
+      },
+      {
+        forwarder_endpoint_id: "endpoint-explicit",
+        stream_id: "10.0.0.2:10000",
+        subscribed: true,
+        local_port: 9900,
+        local_port_override: 9900,
+      },
+    ]);
+
+    expect(result).toEqual([
+      {
+        forwarder_endpoint_id: "endpoint-default",
+        stream_id: "10.0.0.1:10000",
+        local_port_override: null,
+        event_type: "finish",
+      },
+      {
+        forwarder_endpoint_id: "endpoint-explicit",
+        stream_id: "10.0.0.2:10000",
+        local_port_override: 9900,
+        event_type: "finish",
+      },
+    ]);
+  });
+});
+
 describe("buildUpdatedSubscriptions", () => {
+  it("preserves existing stored overrides when subscribing another stream", () => {
+    const result = buildUpdatedSubscriptions({
+      allStreams: [
+        {
+          forwarder_endpoint_id: "endpoint-default",
+          stream_id: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 10001,
+          local_port_override: null,
+        },
+        {
+          forwarder_endpoint_id: "endpoint-explicit",
+          stream_id: "10.0.0.2:10000",
+          subscribed: true,
+          local_port: 9900,
+          local_port_override: 9900,
+        },
+        {
+          forwarder_endpoint_id: "endpoint-new",
+          stream_id: "10.0.0.3:10000",
+          subscribed: false,
+          local_port: null,
+        },
+      ],
+      target: {
+        forwarder_endpoint_id: "endpoint-new",
+        stream_id: "10.0.0.3:10000",
+        currentlySubscribed: false,
+      },
+    });
+
+    expect(result.error).toBeNull();
+    expect(result.subscriptions).toEqual([
+      {
+        forwarder_endpoint_id: "endpoint-default",
+        stream_id: "10.0.0.1:10000",
+        local_port_override: null,
+        event_type: "finish",
+      },
+      {
+        forwarder_endpoint_id: "endpoint-explicit",
+        stream_id: "10.0.0.2:10000",
+        local_port_override: 9900,
+        event_type: "finish",
+      },
+      {
+        forwarder_endpoint_id: "endpoint-new",
+        stream_id: "10.0.0.3:10000",
+        local_port_override: null,
+        event_type: "finish",
+      },
+    ]);
+  });
+
   it("unsubscribes by removing the target and keeping existing subscribed streams", () => {
     const result = buildUpdatedSubscriptions({
       allStreams: [
@@ -108,6 +199,7 @@ describe("buildUpdatedSubscriptions", () => {
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
           local_port: 10001,
+          local_port_override: 10001,
           event_type: "start",
         },
         {
@@ -202,6 +294,7 @@ describe("buildUpdatedSubscriptions", () => {
           stream_id: "stream-1",
           subscribed: true,
           local_port: 10001,
+          local_port_override: 10001,
           event_type: "start",
         },
         {

@@ -1354,6 +1354,7 @@ impl AppState {
                 reader_ip: display_reader_ip,
                 subscribed: true,
                 local_port: port,
+                local_port_override: sub.local_port_override,
                 announcer_publish: announcer_publish_streams.contains(local_stream_key.as_str()),
                 event_type: Some(sub.event_type),
                 online,
@@ -1405,6 +1406,7 @@ impl AppState {
                     reader_ip: None,
                     subscribed: false,
                     local_port: None,
+                    local_port_override: None,
                     announcer_publish: false,
                     event_type: None,
                     online,
@@ -1580,6 +1582,7 @@ pub struct StreamEntry {
     pub reader_ip: Option<String>,
     pub subscribed: bool,
     pub local_port: Option<u16>,
+    pub local_port_override: Option<u16>,
     /// Whether this stream is opted in to announcer publishing.
     pub announcer_publish: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
