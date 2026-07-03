@@ -40,6 +40,9 @@ pub enum ForwarderUiEvent {
         available: bool,
         status: Option<rt_domain::UpsStatus>,
     },
+    ServerStatusChanged {
+        server: crate::status_store::ServerDeviceStatus,
+    },
 }
 
 #[cfg(test)]
@@ -127,6 +130,27 @@ mod tests {
         assert_eq!(json["type"], "ups_status_changed");
         assert_eq!(json["available"], false);
         assert!(json["status"].is_null());
+    }
+
+    #[test]
+    fn server_status_changed_serializes_with_type_tag() {
+        let event = ForwarderUiEvent::ServerStatusChanged {
+            server: crate::status_store::ServerDeviceStatus {
+                configured: true,
+                endpoint_id: Some("node-1".to_owned()),
+                reachable: Some(true),
+                approval_state: Some("active".to_owned()),
+                waiting_for_approval: false,
+                message: None,
+                cached: true,
+                checked_unix_ms: Some(1_700_000_000_000),
+            },
+        };
+        let json: serde_json::Value = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "server_status_changed");
+        assert_eq!(json["server"]["configured"], true);
+        assert_eq!(json["server"]["reachable"], true);
+        assert_eq!(json["server"]["cached"], true);
     }
 
     #[test]

@@ -96,6 +96,18 @@ impl ServerDeviceStatus {
             checked_unix_ms: None,
         }
     }
+
+    /// Compare the UI-meaningful fields of two snapshots, ignoring the
+    /// bookkeeping fields (`cached` and `checked_unix_ms`) that change on
+    /// every poll.
+    pub(crate) fn ui_meaningful_eq(&self, other: &Self) -> bool {
+        self.configured == other.configured
+            && self.endpoint_id == other.endpoint_id
+            && self.reachable == other.reachable
+            && self.approval_state == other.approval_state
+            && self.waiting_for_approval == other.waiting_for_approval
+            && self.message == other.message
+    }
 }
 
 /// Forwarder-local status updates consumed by P2P control sessions.
@@ -308,8 +320,18 @@ impl SubsystemStatus {
     }
 
     /// Set the cached server reachability snapshot.
-    pub fn set_server_status(&mut self, status: ServerDeviceStatus) {
+    ///
+    /// Returns `true` when the new snapshot differs from the previous one in
+    /// UI-meaningful fields (see [`ServerDeviceStatus::ui_meaningful_eq`]).
+    /// Before the first poll the status endpoint serves the not-configured
+    /// baseline, so the first snapshot is compared against that.
+    pub fn set_server_status(&mut self, status: ServerDeviceStatus) -> bool {
+        let changed = match &self.server_status {
+            Some(prev) => !prev.ui_meaningful_eq(&status),
+            None => !ServerDeviceStatus::not_configured().ui_meaningful_eq(&status),
+        };
         self.server_status = Some(status);
+        changed
     }
 
     /// Return the cached server reachability snapshot, if any poll completed.
@@ -785,9 +807,19 @@ impl StatusStore {
         self.publish_display_state().await;
     }
 
-    /// Store the latest server reachability snapshot from the poll task.
+    /// Store the latest server reachability snapshot from the poll task,
+    /// notifying the UI only when UI-meaningful fields changed.
     pub async fn set_server_status(&self, status: ServerDeviceStatus) {
-        self.subsystem.lock().await.set_server_status(status);
+        let changed = self
+            .subsystem
+            .lock()
+            .await
+            .set_server_status(status.clone());
+        if changed {
+            let _ = self
+                .ui_tx
+                .send(crate::ui_events::ForwarderUiEvent::ServerStatusChanged { server: status });
+        }
     }
 
     /// Return the cached server reachability snapshot, if any poll completed.
@@ -1084,4 +1116,74 @@ pub(crate) async fn mark_restart_needed_and_emit(
         p2p_connected: ss.p2p_connected(),
         restart_needed: true,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::broadcast::error::TryRecvError;
+
+    fn sample_server_status(checked_unix_ms: Option<i64>) -> ServerDeviceStatus {
+        ServerDeviceStatus {
+            configured: true,
+            endpoint_id: Some("node-1".to_owned()),
+            reachable: Some(true),
+            approval_state: Some("active".to_owned()),
+            waiting_for_approval: false,
+            message: None,
+            cached: true,
+            checked_unix_ms,
+        }
+    }
+
+    #[tokio::test]
+    async fn set_server_status_emits_ui_event_only_on_meaningful_change() {
+        let store = StatusStore::new(SubsystemStatus::ready());
+        let mut rx = store.ui_sender().subscribe();
+
+        // First poll differs from the not-configured baseline: one event.
+        store
+            .set_server_status(sample_server_status(Some(1_000)))
+            .await;
+        match rx.try_recv() {
+            Ok(crate::ui_events::ForwarderUiEvent::ServerStatusChanged { server }) => {
+                assert_eq!(server.endpoint_id.as_deref(), Some("node-1"));
+            }
+            other => panic!("expected ServerStatusChanged, got {other:?}"),
+        }
+
+        // Identical snapshot except checked_unix_ms (the common 30s poll case):
+        // no event.
+        store
+            .set_server_status(sample_server_status(Some(31_000)))
+            .await;
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+
+        // UI-meaningful change (reachable flips): exactly one event.
+        let mut changed = sample_server_status(Some(61_000));
+        changed.reachable = Some(false);
+        changed.message = Some("server unreachable".to_owned());
+        store.set_server_status(changed).await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(crate::ui_events::ForwarderUiEvent::ServerStatusChanged { .. })
+        ));
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn set_server_status_no_event_when_first_poll_matches_baseline() {
+        let store = StatusStore::new(SubsystemStatus::ready());
+        let mut rx = store.ui_sender().subscribe();
+
+        // Before the first poll the status endpoint serves the not-configured
+        // baseline, so a first poll with the same UI-meaningful fields is not
+        // a change.
+        let status = ServerDeviceStatus {
+            checked_unix_ms: Some(1_000),
+            ..ServerDeviceStatus::not_configured()
+        };
+        store.set_server_status(status).await;
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
 }

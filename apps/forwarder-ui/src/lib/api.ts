@@ -50,6 +50,8 @@ export interface ServerDeviceStatus {
   approval_state: string | null;
   waiting_for_approval: boolean;
   message: string | null;
+  cached: boolean;
+  checked_unix_ms: number | null;
 }
 
 export interface ForwarderStatus {

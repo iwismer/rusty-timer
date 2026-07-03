@@ -844,6 +844,9 @@ async fn events_handler<J: JournalAccess + Send + 'static>(
                     "reader_info_updated"
                 }
                 crate::ui_events::ForwarderUiEvent::UpsStatusChanged { .. } => "ups_status_changed",
+                crate::ui_events::ForwarderUiEvent::ServerStatusChanged { .. } => {
+                    "server_status_changed"
+                }
             };
             match serde_json::to_string(&event) {
                 Ok(json) => Some(Ok(Event::default().event(event_type).data(json))),
