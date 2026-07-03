@@ -1,7 +1,7 @@
 //! Forwarder iroh endpoint and inbound accept loop.
 //!
 //! [`P2pEndpoint`] wraps an [`rt_iroh::Endpoint`] and serves inbound receiver
-//! connections. For each accepted connection the remote node id is read from
+//! connections. For each accepted connection the remote endpoint id is read from
 //! the transport handshake and checked against an [`AllowList`]; unknown peers
 //! are closed immediately. Admitted peers are handed to the control-stream
 //! handler ([`crate::p2p::control`]), which performs the `Hello`/`HelloOk`
@@ -12,7 +12,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rt_iroh::{Connection, Endpoint, EndpointBuilder, NodeAddr, NodeId, load_or_create_secret_key};
+use rt_iroh::{
+    Connection, Endpoint, EndpointAddr, EndpointBuilder, EndpointId, load_or_create_secret_key,
+};
 use rt_p2p_protocol::{CAP_CONTROL_EVENTS, has_capability};
 use tokio::sync::{Mutex, broadcast, mpsc};
 
@@ -168,14 +170,14 @@ impl P2pEndpoint {
     }
 
     /// This endpoint's dialable address.
-    pub async fn node_addr(&self) -> NodeAddr {
-        self.endpoint.node_addr().await
+    pub async fn endpoint_addr(&self) -> EndpointAddr {
+        self.endpoint.endpoint_addr().await
     }
 
-    /// This endpoint's node id.
+    /// This endpoint's endpoint id.
     #[must_use]
-    pub fn node_id(&self) -> NodeId {
-        self.endpoint.node_id()
+    pub fn endpoint_id(&self) -> EndpointId {
+        self.endpoint.endpoint_id()
     }
 
     /// Runs the accept loop until the endpoint is closed.
@@ -230,25 +232,25 @@ async fn handle_connection(
     journal: Arc<Mutex<Journal>>,
     config: ConnectionConfig,
 ) {
-    let node_id = connection.remote_id();
+    let endpoint_id = connection.remote_id();
 
-    let Some(_guard) = allow_list.try_register_connection(node_id, connection.clone()) else {
-        tracing::warn!(%node_id, "p2p: rejecting peer not on allow-list");
+    let Some(_guard) = allow_list.try_register_connection(endpoint_id, connection.clone()) else {
+        tracing::warn!(%endpoint_id, "p2p: rejecting peer not on allow-list");
         connection.close(REJECT_ERROR_CODE.into(), b"unauthorized peer");
         return;
     };
 
-    tracing::info!(%node_id, "p2p: admitted allow-listed peer");
+    tracing::info!(%endpoint_id, "p2p: admitted allow-listed peer");
     let (control_send, control_recv) =
         match tokio::time::timeout(config.handshake_timeout, connection.accept_bi()).await {
             Ok(Ok(streams)) => streams,
             Ok(Err(error)) => {
-                tracing::warn!(%node_id, %error, "p2p: failed to accept control stream");
+                tracing::warn!(%endpoint_id, %error, "p2p: failed to accept control stream");
                 connection.close(CONTROL_ERROR_CODE.into(), b"control stream failed");
                 return;
             }
             Err(_elapsed) => {
-                tracing::warn!(%node_id, "p2p: control stream accept timed out");
+                tracing::warn!(%endpoint_id, "p2p: control stream accept timed out");
                 connection.close(CONTROL_ERROR_CODE.into(), b"control stream timed out");
                 return;
             }
@@ -269,7 +271,7 @@ async fn handle_connection(
     {
         Ok(streams) => streams,
         Err(error) => {
-            tracing::warn!(%node_id, %error, "p2p: control handshake failed");
+            tracing::warn!(%endpoint_id, %error, "p2p: control handshake failed");
             connection.close(CONTROL_ERROR_CODE.into(), b"control handshake failed");
             return;
         }
@@ -282,12 +284,12 @@ async fn handle_connection(
         if let Err(error) = serve_data_streams(
             data_connection,
             journal,
-            node_id.to_string(),
+            endpoint_id.to_string(),
             config.data_config,
         )
         .await
         {
-            tracing::debug!(%node_id, %error, "p2p: data stream accept loop ended");
+            tracing::debug!(%endpoint_id, %error, "p2p: data stream accept loop ended");
         }
     });
 
@@ -315,8 +317,8 @@ async fn handle_connection(
         task.abort();
     }
     match &control_result {
-        Ok(()) => tracing::info!(%node_id, "p2p: control stream closed by peer"),
-        Err(error) => tracing::warn!(%node_id, %error, "p2p: control stream failed"),
+        Ok(()) => tracing::info!(%endpoint_id, "p2p: control stream closed by peer"),
+        Err(error) => tracing::warn!(%endpoint_id, %error, "p2p: control stream failed"),
     }
 
     // Any control-loop exit closes the connection, which ends the data accept
@@ -554,7 +556,7 @@ mod tests {
     /// returns the negotiated `HelloOk`.
     async fn dial_hello(
         receiver: &Endpoint,
-        forwarder_addr: NodeAddr,
+        forwarder_addr: EndpointAddr,
     ) -> Result<HelloOk, BoxError> {
         let (_connection, hello_ok, _control_send, _control_recv) =
             dial_hello_connection(receiver, forwarder_addr).await?;
@@ -563,7 +565,7 @@ mod tests {
 
     async fn dial_hello_connection(
         receiver: &Endpoint,
-        forwarder_addr: NodeAddr,
+        forwarder_addr: EndpointAddr,
     ) -> Result<
         (
             Connection,
@@ -583,7 +585,7 @@ mod tests {
 
     async fn dial_hello_connection_with_capabilities(
         receiver: &Endpoint,
-        forwarder_addr: NodeAddr,
+        forwarder_addr: EndpointAddr,
         capabilities: Vec<String>,
     ) -> Result<
         (
@@ -702,9 +704,9 @@ mod tests {
     #[tokio::test]
     async fn accepts_allowlisted_peer() -> TestResult {
         let receiver = EndpointBuilder::test([20; 32]).bind().await?;
-        let allow_list = AllowList::new([receiver.node_id()]);
+        let allow_list = AllowList::new([receiver.endpoint_id()]);
         let forwarder = P2pEndpoint::bind_test([21; 32], allow_list).await?;
-        let forwarder_addr = forwarder.node_addr().await;
+        let forwarder_addr = forwarder.endpoint_addr().await;
 
         let accept = {
             let forwarder = forwarder.clone();
@@ -729,7 +731,7 @@ mod tests {
         use rt_p2p_protocol::{CAP_REMOTE_CONFIG, ConfigGetRequest, Pong};
 
         let receiver = EndpointBuilder::test([80; 32]).bind().await?;
-        let allow_list = AllowList::new([receiver.node_id()]);
+        let allow_list = AllowList::new([receiver.endpoint_id()]);
 
         // Seed a minimal valid config (with a real token file) so the handler
         // can serialize it.
@@ -757,7 +759,7 @@ mod tests {
         let forwarder = P2pEndpoint::bind_test([81; 32], allow_list)
             .await?
             .with_remote_config(handler);
-        let forwarder_addr = forwarder.node_addr().await;
+        let forwarder_addr = forwarder.endpoint_addr().await;
 
         let accept = {
             let forwarder = forwarder.clone();
@@ -822,9 +824,9 @@ mod tests {
     #[tokio::test]
     async fn serves_data_streams_after_control_handshake_on_same_connection() -> TestResult {
         let receiver = EndpointBuilder::test([26; 32]).bind().await?;
-        let allow_list = AllowList::new([receiver.node_id()]);
+        let allow_list = AllowList::new([receiver.endpoint_id()]);
         let forwarder = P2pEndpoint::bind_test([27; 32], allow_list).await?;
-        let forwarder_addr = forwarder.node_addr().await;
+        let forwarder_addr = forwarder.endpoint_addr().await;
 
         let accept = {
             let forwarder = forwarder.clone();
@@ -853,9 +855,9 @@ mod tests {
     #[tokio::test]
     async fn data_not_served_before_control_handshake() -> TestResult {
         let receiver = EndpointBuilder::test([28; 32]).bind().await?;
-        let allow_list = AllowList::new([receiver.node_id()]);
+        let allow_list = AllowList::new([receiver.endpoint_id()]);
         let forwarder = P2pEndpoint::bind_test([29; 32], allow_list).await?;
-        let forwarder_addr = forwarder.node_addr().await;
+        let forwarder_addr = forwarder.endpoint_addr().await;
 
         let accept = {
             let forwarder = forwarder.clone();
@@ -922,9 +924,9 @@ mod tests {
     #[tokio::test]
     async fn data_stream_terminates_when_control_stream_closes() -> TestResult {
         let receiver = EndpointBuilder::test([30; 32]).bind().await?;
-        let allow_list = AllowList::new([receiver.node_id()]);
+        let allow_list = AllowList::new([receiver.endpoint_id()]);
         let forwarder = P2pEndpoint::bind_test([31; 32], allow_list).await?;
-        let forwarder_addr = forwarder.node_addr().await;
+        let forwarder_addr = forwarder.endpoint_addr().await;
 
         let accept = {
             let forwarder = forwarder.clone();
@@ -978,12 +980,12 @@ mod tests {
     #[tokio::test]
     async fn control_events_capability_sends_initial_snapshot_and_reader_deltas() -> TestResult {
         let receiver = EndpointBuilder::test([32; 32]).bind().await?;
-        let allow_list = AllowList::new([receiver.node_id()]);
+        let allow_list = AllowList::new([receiver.endpoint_id()]);
         let status = status_server_with_reader(ReaderConnectionState::Connected).await?;
         let forwarder = P2pEndpoint::bind_test([33; 32], allow_list)
             .await?
             .with_status_feed(status.status_feed());
-        let forwarder_addr = forwarder.node_addr().await;
+        let forwarder_addr = forwarder.endpoint_addr().await;
 
         let accept = {
             let forwarder = forwarder.clone();
@@ -1025,7 +1027,7 @@ mod tests {
     #[tokio::test]
     async fn control_events_capability_sends_reader_info_frame() -> TestResult {
         let receiver = EndpointBuilder::test([60; 32]).bind().await?;
-        let allow_list = AllowList::new([receiver.node_id()]);
+        let allow_list = AllowList::new([receiver.endpoint_id()]);
         let status = status_server_with_reader(ReaderConnectionState::Connected).await?;
         status
             .update_reader_info(
@@ -1044,7 +1046,7 @@ mod tests {
         let forwarder = P2pEndpoint::bind_test([61; 32], allow_list)
             .await?
             .with_status_feed(status.status_feed());
-        let forwarder_addr = forwarder.node_addr().await;
+        let forwarder_addr = forwarder.endpoint_addr().await;
 
         let accept = {
             let forwarder = forwarder.clone();
@@ -1107,7 +1109,7 @@ mod tests {
     #[tokio::test]
     async fn control_events_capability_sends_ups_status_frame() -> TestResult {
         let receiver = EndpointBuilder::test([62; 32]).bind().await?;
-        let allow_list = AllowList::new([receiver.node_id()]);
+        let allow_list = AllowList::new([receiver.endpoint_id()]);
         let status = status_server_with_reader(ReaderConnectionState::Connected).await?;
         status
             .set_ups_status(UpsStatusState {
@@ -1125,7 +1127,7 @@ mod tests {
         let forwarder = P2pEndpoint::bind_test([63; 32], allow_list)
             .await?
             .with_status_feed(status.status_feed());
-        let forwarder_addr = forwarder.node_addr().await;
+        let forwarder_addr = forwarder.endpoint_addr().await;
 
         let accept = {
             let forwarder = forwarder.clone();
@@ -1159,12 +1161,12 @@ mod tests {
     #[tokio::test]
     async fn control_events_not_sent_without_negotiated_capability() -> TestResult {
         let receiver = EndpointBuilder::test([34; 32]).bind().await?;
-        let allow_list = AllowList::new([receiver.node_id()]);
+        let allow_list = AllowList::new([receiver.endpoint_id()]);
         let status = status_server_with_reader(ReaderConnectionState::Connected).await?;
         let forwarder = P2pEndpoint::bind_test([35; 32], allow_list)
             .await?
             .with_status_feed(status.status_feed());
-        let forwarder_addr = forwarder.node_addr().await;
+        let forwarder_addr = forwarder.endpoint_addr().await;
 
         let accept = {
             let forwarder = forwarder.clone();
@@ -1200,11 +1202,11 @@ mod tests {
     #[tokio::test]
     async fn stalled_handshake_is_timed_out() -> TestResult {
         let receiver = EndpointBuilder::test([24; 32]).bind().await?;
-        let allow_list = AllowList::new([receiver.node_id()]);
+        let allow_list = AllowList::new([receiver.endpoint_id()]);
         let forwarder = P2pEndpoint::bind_test([25; 32], allow_list)
             .await?
             .with_handshake_timeout(Duration::from_millis(200));
-        let forwarder_addr = forwarder.node_addr().await;
+        let forwarder_addr = forwarder.endpoint_addr().await;
 
         let accept = {
             let forwarder = forwarder.clone();
@@ -1240,7 +1242,7 @@ mod tests {
     async fn rejects_unknown_peer() -> TestResult {
         let receiver = EndpointBuilder::test([22; 32]).bind().await?;
         let forwarder = P2pEndpoint::bind_test([23; 32], AllowList::default()).await?;
-        let forwarder_addr = forwarder.node_addr().await;
+        let forwarder_addr = forwarder.endpoint_addr().await;
 
         let accept = {
             let forwarder = forwarder.clone();

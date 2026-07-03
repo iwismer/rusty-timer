@@ -49,8 +49,8 @@ pub struct DiscoveredForwarder {
     pub streams: Vec<DiscoveredStream>,
 }
 
-/// Shared map of discovered forwarders keyed by their endpoint id (string node
-/// id). Populated by the discovery task and/or seeded from explicit config.
+/// Shared map of discovered forwarders keyed by their endpoint id (string
+/// form). Populated by the discovery task and/or seeded from explicit config.
 pub type DiscoveredForwarders = HashMap<String, DiscoveredForwarder>;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, mpsc::error::TrySendError, oneshot, watch};

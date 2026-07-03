@@ -254,7 +254,7 @@ bind_addr_v4 = "127.0.0.1:0"
 relay_disabled = true
 discovery_disabled = true
 max_concurrent_bidi_streams = 64
-static_allowed_receivers = ["receiver-node-id"]
+static_allowed_receivers = ["receiver-endpoint-id"]
 allowlist_cache_path = "/tmp/forwarder-p2p-allowlist.cache"
 server_url = "http://127.0.0.1:9999"
 server_token_file = "/tmp/thin-token"
@@ -269,7 +269,7 @@ allowlist_poll_interval_secs = 5
     assert!(cfg.p2p.relay_disabled);
     assert!(cfg.p2p.discovery_disabled);
     assert_eq!(cfg.p2p.max_concurrent_bidi_streams, Some(64));
-    assert_eq!(cfg.p2p.static_allowed_receivers, ["receiver-node-id"]);
+    assert_eq!(cfg.p2p.static_allowed_receivers, ["receiver-endpoint-id"]);
     assert_eq!(cfg.p2p.allowlist_poll_interval_secs, 5);
 }
 
@@ -281,7 +281,7 @@ fn p2p_rejects_mutually_exclusive_secret_key_sources() {
 enabled = true
 secret_key_path = "/tmp/key"
 secret_key_seed_hex = "0101010101010101010101010101010101010101010101010101010101010101"
-static_allowed_receivers = ["receiver-node-id"]
+static_allowed_receivers = ["receiver-endpoint-id"]
 "#,
     );
 

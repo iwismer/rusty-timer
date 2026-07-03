@@ -10,11 +10,7 @@ use iroh::{
     Endpoint as IrohEndpoint, Watcher,
     endpoint::{QuicTransportConfig, presets},
 };
-// iroh 1.0 renamed `NodeId`/`NodeAddr` to `EndpointId`/`EndpointAddr`. The
-// rest of the workspace keeps the node-oriented names via these re-exports.
-pub use iroh::{
-    EndpointAddr as NodeAddr, EndpointId as NodeId, RelayMode, SecretKey, TransportAddr,
-};
+pub use iroh::{EndpointAddr, EndpointId, RelayMode, SecretKey, TransportAddr};
 
 pub const ALPN: &[u8] = b"rusty-timer/fwd-rcv/1";
 
@@ -135,8 +131,8 @@ impl Endpoint {
         EndpointBuilder::default()
     }
 
-    pub async fn connect(&self, node_addr: impl Into<NodeAddr>) -> Result<Connection, Error> {
-        Ok(self.inner.connect(node_addr, ALPN).await?)
+    pub async fn connect(&self, addr: impl Into<EndpointAddr>) -> Result<Connection, Error> {
+        Ok(self.inner.connect(addr, ALPN).await?)
     }
 
     pub async fn accept(&self) -> Result<Option<Connection>, Error> {
@@ -149,7 +145,7 @@ impl Endpoint {
     /// Returns the endpoint's address, waiting until it contains at least one
     /// transport address (iroh populates bound socket addresses shortly after
     /// binding).
-    pub async fn node_addr(&self) -> NodeAddr {
+    pub async fn endpoint_addr(&self) -> EndpointAddr {
         let mut watcher = self.inner.watch_addr();
         loop {
             let addr = watcher.get();
@@ -162,7 +158,7 @@ impl Endpoint {
         }
     }
 
-    pub fn node_id(&self) -> NodeId {
+    pub fn endpoint_id(&self) -> EndpointId {
         self.inner.id()
     }
 
@@ -256,7 +252,7 @@ mod tests {
     #[test]
     fn secret_key_persists_across_restart() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("node.key");
+        let path = dir.path().join("endpoint.key");
 
         let first = load_or_create_secret_key(&path).unwrap();
         let second = load_or_create_secret_key(&path).unwrap();
@@ -268,7 +264,7 @@ mod tests {
     async fn test_builder_two_endpoints_connect_loopback() {
         let endpoint_a = EndpointBuilder::test([1; 32]).bind().await.unwrap();
         let endpoint_b = EndpointBuilder::test([2; 32]).bind().await.unwrap();
-        let endpoint_b_addr = endpoint_b.node_addr().await;
+        let endpoint_b_addr = endpoint_b.endpoint_addr().await;
 
         let (connected, accepted) = tokio::join!(
             endpoint_a.connect(endpoint_b_addr.clone()),
@@ -279,7 +275,7 @@ mod tests {
         let accepted = accepted.unwrap().unwrap();
 
         assert_eq!(connected.remote_id(), endpoint_b_addr.id);
-        assert_eq!(accepted.remote_id(), endpoint_a.node_id());
+        assert_eq!(accepted.remote_id(), endpoint_a.endpoint_id());
 
         endpoint_a.close().await;
         endpoint_b.close().await;
@@ -312,16 +308,16 @@ mod tests {
             .await
             .unwrap();
 
-        endpoint_b.node_addr().await;
-        let relay_only_addr = NodeAddr::new(endpoint_b.node_id()).with_relay_url(relay_url);
+        endpoint_b.endpoint_addr().await;
+        let relay_only_addr = EndpointAddr::new(endpoint_b.endpoint_id()).with_relay_url(relay_url);
 
         let (connected, accepted) =
             tokio::join!(endpoint_a.connect(relay_only_addr), endpoint_b.accept(),);
 
         let connected = connected.unwrap();
         let accepted = accepted.unwrap().unwrap();
-        assert_eq!(connected.remote_id(), endpoint_b.node_id());
-        assert_eq!(accepted.remote_id(), endpoint_a.node_id());
+        assert_eq!(connected.remote_id(), endpoint_b.endpoint_id());
+        assert_eq!(accepted.remote_id(), endpoint_a.endpoint_id());
 
         endpoint_a.close().await;
         endpoint_b.close().await;
@@ -354,7 +350,7 @@ mod tests {
             .await
             .unwrap();
 
-        let last_known_addr = endpoint_b.node_addr().await;
+        let last_known_addr = endpoint_b.endpoint_addr().await;
         let direct_addrs: Vec<TransportAddr> = last_known_addr
             .addrs
             .iter()
@@ -365,7 +361,7 @@ mod tests {
             !direct_addrs.is_empty(),
             "last-known address must include a direct loopback fallback: {last_known_addr:?}"
         );
-        let direct_fallback_addr = NodeAddr::from_parts(endpoint_b.node_id(), direct_addrs);
+        let direct_fallback_addr = EndpointAddr::from_parts(endpoint_b.endpoint_id(), direct_addrs);
         drop(relay_guard);
 
         let (connected, accepted) = tokio::join!(
@@ -375,8 +371,8 @@ mod tests {
 
         let connected = connected.unwrap();
         let accepted = accepted.unwrap().unwrap();
-        assert_eq!(connected.remote_id(), endpoint_b.node_id());
-        assert_eq!(accepted.remote_id(), endpoint_a.node_id());
+        assert_eq!(connected.remote_id(), endpoint_b.endpoint_id());
+        assert_eq!(accepted.remote_id(), endpoint_a.endpoint_id());
 
         endpoint_a.close().await;
         endpoint_b.close().await;

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use prost::Message;
-use rt_iroh::{Connection, Endpoint, EndpointBuilder, NodeAddr, RecvStream, SendStream};
+use rt_iroh::{Connection, Endpoint, EndpointAddr, EndpointBuilder, RecvStream, SendStream};
 use rt_p2p_protocol::{
     Ack, CaughtUp, ConfigGetResponse, ConfigSetRequest, ConfigSetResponse, ControlC2F, ControlF2C,
     DataC2F, DataF2C, DataSubscribe, EventBatch, GapNotice, Hello, Ping, Pong,
@@ -92,7 +92,7 @@ pub struct ForwarderScript {
 #[derive(Debug)]
 pub struct MockForwarderPeer {
     endpoint: Endpoint,
-    node_addr: NodeAddr,
+    endpoint_addr: EndpointAddr,
     accept_task: JoinHandle<()>,
     acks: Arc<Mutex<Vec<Ack>>>,
     subscribes: Arc<Mutex<Vec<DataSubscribe>>>,
@@ -106,7 +106,7 @@ impl MockForwarderPeer {
     /// Binds a loopback endpoint seeded with `seed` and starts serving `script`.
     pub async fn start(seed: [u8; 32], script: ForwarderScript) -> HarnessResult<Self> {
         let endpoint = EndpointBuilder::test(seed).bind().await?;
-        let node_addr = endpoint.node_addr().await;
+        let endpoint_addr = endpoint.endpoint_addr().await;
 
         let acks = Arc::new(Mutex::new(Vec::new()));
         let subscribes = Arc::new(Mutex::new(Vec::new()));
@@ -139,7 +139,7 @@ impl MockForwarderPeer {
 
         Ok(Self {
             endpoint,
-            node_addr,
+            endpoint_addr,
             accept_task,
             acks,
             subscribes,
@@ -151,8 +151,8 @@ impl MockForwarderPeer {
     }
 
     /// The dialable address of this forwarder peer.
-    pub fn node_addr(&self) -> NodeAddr {
-        self.node_addr.clone()
+    pub fn endpoint_addr(&self) -> EndpointAddr {
+        self.endpoint_addr.clone()
     }
 
     /// A snapshot of the acks received from connected receivers.

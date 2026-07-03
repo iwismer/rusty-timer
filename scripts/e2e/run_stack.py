@@ -12,10 +12,10 @@ facts (not just process startup):
 The stack is configured for determinism:
 
 * relay disabled, discovery off, injected direct addresses, seeded keys
-  (forwarder and receiver share the same seed->node-id derivation);
+  (forwarder and receiver share the same seed->endpoint-id derivation);
 * the emulator emits a fixed, finite set of byte-for-byte frames once
   (``--verbatim --once``), so every raw frame, seq, and count is known up front;
-* a static forwarder allow-list admits exactly the seeded receiver node id.
+* a static forwarder allow-list admits exactly the seeded receiver endpoint id.
 
 Assertions (all must be green):
 
@@ -70,7 +70,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TARGET_DIR = REPO_ROOT / "target" / "debug"
 
 # Deterministic 32-byte secret-key seeds (hex). Distinct so the two endpoints
-# get distinct node ids.
+# get distinct endpoint ids.
 FORWARDER_SEED_HEX = "cd" * 32
 RECEIVER_SEED_HEX = "ab" * 32
 
@@ -247,7 +247,7 @@ class Stack:
 
 
 # ---------------------------------------------------------------------------
-# Build + node-id derivation
+# Build + endpoint-id derivation
 # ---------------------------------------------------------------------------
 def cargo_build(*, agent_ui: bool = False, lcd_sim: bool = False):
     del agent_ui  # The bridge is now required by first-class E2E assertions.
@@ -282,19 +282,19 @@ def bin_path(name: str) -> Path:
     return path
 
 
-def derive_node_id(seed_hex: str) -> str:
+def derive_endpoint_id(seed_hex: str) -> str:
     out = subprocess.run(
-        [str(bin_path("receiver-headless")), "print-node-id",
+        [str(bin_path("receiver-headless")), "print-endpoint-id",
          "--p2p-secret-key-seed-hex", seed_hex],
         cwd=str(REPO_ROOT),
         check=True,
         capture_output=True,
         text=True,
     )
-    node_id = out.stdout.strip()
-    if len(node_id) != 64:
-        raise RuntimeError(f"unexpected node id for seed {seed_hex}: {node_id!r}")
-    return node_id
+    endpoint_id = out.stdout.strip()
+    if len(endpoint_id) != 64:
+        raise RuntimeError(f"unexpected endpoint id for seed {seed_hex}: {endpoint_id!r}")
+    return endpoint_id
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +340,7 @@ CREATE TABLE IF NOT EXISTS bib_chips (
 """
 
 
-def preseed_receiver_db(db_path: Path, forwarder_node_id: str, stream_id: str,
+def preseed_receiver_db(db_path: Path, forwarder_endpoint_id: str, stream_id: str,
                         proxy_port: int, dbf_path: Path, *,
                         server_url: str = "p2p://loopback",
                         server_token: str = "e2e-token"):
@@ -362,7 +362,7 @@ def preseed_receiver_db(db_path: Path, forwarder_node_id: str, stream_id: str,
             "INSERT INTO subscriptions "
             "(forwarder_endpoint_id, stream_id, local_port_override, event_type, "
             " forwarder_id, reader_ip) VALUES (?,?,?,?,?,?)",
-            (forwarder_node_id, stream_id, proxy_port, "finish", None, stream_id),
+            (forwarder_endpoint_id, stream_id, proxy_port, "finish", None, stream_id),
         )
         # Opt the seeded stream in to announcer publishing (opt-in default).
         conn.execute(
@@ -695,10 +695,10 @@ def run_connection_scenarios(
     stream_id = f"127.0.0.1:{emulator_port}"
     server_url = f"http://127.0.0.1:{server_port}"
 
-    # --- Deterministic node ids (shared seed->id derivation) ---
-    forwarder_node_id = derive_node_id(FORWARDER_SEED_HEX)
-    receiver_node_id = derive_node_id(RECEIVER_SEED_HEX)
-    print(f"[ids] forwarder={forwarder_node_id[:16]}…  receiver={receiver_node_id[:16]}…")
+    # --- Deterministic endpoint ids (shared seed->id derivation) ---
+    forwarder_endpoint_id = derive_endpoint_id(FORWARDER_SEED_HEX)
+    receiver_endpoint_id = derive_endpoint_id(RECEIVER_SEED_HEX)
+    print(f"[ids] forwarder={forwarder_endpoint_id[:16]}…  receiver={receiver_endpoint_id[:16]}…")
 
     # --- Files ---
     reads_file = tmp / "reads.txt"
@@ -759,7 +759,7 @@ allowlist_request_timeout_secs = 2
     # --- Preseed receiver DB (canonical subscription + DBF profile) ---
     preseed_receiver_db(
         receiver_db_path,
-        forwarder_node_id,
+        forwarder_endpoint_id,
         stream_id,
         proxy_port,
         dbf_path,
@@ -825,9 +825,9 @@ allowlist_request_timeout_secs = 2
 
     # Approve the forwarder so it may fetch the receiver allow-list (an active
     # forwarder is required; the receiver is approved later in the scenario).
-    wait_until(lambda: server_device_approval(server_url, forwarder_node_id) is not None,
+    wait_until(lambda: server_device_approval(server_url, forwarder_endpoint_id) is not None,
                timeout=15, what="forwarder self-registration")
-    server_approve_device(server_url, forwarder_node_id)
+    server_approve_device(server_url, forwarder_endpoint_id)
     print("[up] forwarder approved")
 
     # --- 4. receiver-headless (bridge + P2P + server announcer) ---
@@ -838,7 +838,7 @@ allowlist_request_timeout_secs = 2
             "--data-dir", str(receiver_data_dir),
             "--bind-addr", "127.0.0.1:0",
             "--receiver-id", "rx-e2e",
-            "--p2p-forwarder-node-id", forwarder_node_id,
+            "--p2p-forwarder-endpoint-id", forwarder_endpoint_id,
             "--p2p-forwarder-direct-addr", f"127.0.0.1:{forwarder_p2p_port}",
             "--p2p-secret-key-seed-hex", RECEIVER_SEED_HEX,
             "--p2p-server-url", server_url,
@@ -857,9 +857,9 @@ allowlist_request_timeout_secs = 2
     def pending_receiver_connections():
         connections = bridge_invoke(bridge_url, "get_connections")
         server = connections.get("server", {})
-        forwarder_status = forwarder_connection(connections, forwarder_node_id)
+        forwarder_status = forwarder_connection(connections, forwarder_endpoint_id)
         if (server.get("approval_state") == "pending"
-                and server_device_approval(server_url, receiver_node_id) == "pending"
+                and server_device_approval(server_url, receiver_endpoint_id) == "pending"
                 and forwarder_status is not None
                 and forwarder_status.get("state") != "subscribed"):
             return connections
@@ -870,25 +870,25 @@ allowlist_request_timeout_secs = 2
         timeout=30,
         what="receiver to be pending approval and not subscribed",
     )
-    pending_forwarder = forwarder_connection(pending_connections, forwarder_node_id) or {}
+    pending_forwarder = forwarder_connection(pending_connections, forwarder_endpoint_id) or {}
     results.expect_eq("connections: receiver starts pending server approval",
                       pending_connections.get("server", {}).get("approval_state"), "pending")
     results.expect_eq("connections: server status has receiver pending",
-                      server_device_approval(server_url, receiver_node_id), "pending")
+                      server_device_approval(server_url, receiver_endpoint_id), "pending")
     results.check("connections: unapproved receiver is not subscribed",
                   pending_forwarder.get("state") != "subscribed",
                   f"state={pending_forwarder.get('state')} pending={pending_forwarder.get('pending')}")
 
-    approved = server_approve_device(server_url, receiver_node_id)
+    approved = server_approve_device(server_url, receiver_endpoint_id)
     results.expect_eq("connections: admin approval returns active receiver",
                       approved.get("approval_state"), "active")
 
     def subscribed_after_approval():
         connections = bridge_invoke(bridge_url, "get_connections")
         server = connections.get("server", {})
-        forwarder_status = forwarder_connection(connections, forwarder_node_id)
+        forwarder_status = forwarder_connection(connections, forwarder_endpoint_id)
         if (server.get("approval_state") == "active"
-                and server_device_approval(server_url, receiver_node_id) == "active"
+                and server_device_approval(server_url, receiver_endpoint_id) == "active"
                 and forwarder_status is not None
                 and forwarder_status.get("state") == "subscribed"
                 and forwarder_status.get("subscribed_count") == 1
@@ -901,7 +901,7 @@ allowlist_request_timeout_secs = 2
         timeout=45,
         what="receiver to auto-connect after server approval",
     )
-    active_forwarder = forwarder_connection(active_connections, forwarder_node_id) or {}
+    active_forwarder = forwarder_connection(active_connections, forwarder_endpoint_id) or {}
     results.expect_eq("connections: receiver server approval is active",
                       active_connections.get("server", {}).get("approval_state"), "active")
     results.expect_eq("connections: approved receiver auto-connects/subscribes",
@@ -953,11 +953,11 @@ allowlist_request_timeout_secs = 2
             ok,
         )
 
-    bridge_invoke(bridge_url, "disconnect_forwarder", {"endpoint_id": forwarder_node_id})
+    bridge_invoke(bridge_url, "disconnect_forwarder", {"endpoint_id": forwarder_endpoint_id})
 
     def forwarder_disconnected():
         connections = bridge_invoke(bridge_url, "get_connections")
-        forwarder_status = forwarder_connection(connections, forwarder_node_id)
+        forwarder_status = forwarder_connection(connections, forwarder_endpoint_id)
         if (forwarder_status is not None
                 and forwarder_status.get("state") == "disconnected"
                 and forwarder_status.get("pending") is False
@@ -975,20 +975,20 @@ allowlist_request_timeout_secs = 2
     results.expect_eq("connections: disconnected forwarder drops remote config session",
                       disconnected.get("remote_config_available"), False)
 
-    bridge_invoke(bridge_url, "connect_forwarder", {"endpoint_id": forwarder_node_id})
+    bridge_invoke(bridge_url, "connect_forwarder", {"endpoint_id": forwarder_endpoint_id})
     reconnected = wait_until(
         subscribed_after_approval,
         timeout=45,
         what="forwarder to reconnect via per-forwarder control",
     )
-    reconnected_forwarder = forwarder_connection(reconnected, forwarder_node_id) or {}
+    reconnected_forwarder = forwarder_connection(reconnected, forwarder_endpoint_id) or {}
     results.expect_eq("connections: connect_forwarder restores subscription",
                       reconnected_forwarder.get("state"), "subscribed")
 
     config_response = bridge_invoke(
         bridge_url,
         "get_forwarder_config",
-        {"endpoint_id": forwarder_node_id},
+        {"endpoint_id": forwarder_endpoint_id},
     )
     config_json = config_response.get("config_json")
     results.check("remote config: get returns non-empty config_json",
@@ -1001,7 +1001,7 @@ allowlist_request_timeout_secs = 2
     set_response = bridge_invoke(
         bridge_url,
         "set_forwarder_config",
-        {"endpoint_id": forwarder_node_id, "config_json": json.dumps(config_doc)},
+        {"endpoint_id": forwarder_endpoint_id, "config_json": json.dumps(config_doc)},
     )
     results.expect_eq("remote config: set full document succeeds",
                       set_response.get("ok"), True)
@@ -1011,7 +1011,7 @@ allowlist_request_timeout_secs = 2
     updated_config_response = bridge_invoke(
         bridge_url,
         "get_forwarder_config",
-        {"endpoint_id": forwarder_node_id},
+        {"endpoint_id": forwarder_endpoint_id},
     )
     updated_doc = json.loads(updated_config_response.get("config_json", "{}"))
     results.expect_eq("remote config: updated document is readable",
@@ -1021,7 +1021,7 @@ allowlist_request_timeout_secs = 2
     disable_response = bridge_invoke(
         bridge_url,
         "set_forwarder_config",
-        {"endpoint_id": forwarder_node_id, "config_json": json.dumps(updated_doc)},
+        {"endpoint_id": forwarder_endpoint_id, "config_json": json.dumps(updated_doc)},
     )
     results.expect_eq("remote config gating: disabling remote config succeeds",
                       disable_response.get("ok"), True)
@@ -1034,11 +1034,11 @@ allowlist_request_timeout_secs = 2
     wait_for_log(forwarder2.log_path, "p2p iroh server started", timeout=30,
                  what="forwarder restart with remote config disabled")
     forwarder2.assert_alive()
-    bridge_invoke(bridge_url, "reconnect_forwarder", {"endpoint_id": forwarder_node_id})
+    bridge_invoke(bridge_url, "reconnect_forwarder", {"endpoint_id": forwarder_endpoint_id})
 
     def remote_config_gated():
         connections = bridge_invoke(bridge_url, "get_connections")
-        forwarder_status = forwarder_connection(connections, forwarder_node_id)
+        forwarder_status = forwarder_connection(connections, forwarder_endpoint_id)
         if (forwarder_status is not None
                 and forwarder_status.get("state") in {"connected", "subscribed"}
                 and forwarder_status.get("remote_config_available") is False):
@@ -1055,7 +1055,7 @@ allowlist_request_timeout_secs = 2
     error_status, error_body = bridge_invoke_error(
         bridge_url,
         "set_forwarder_config",
-        {"endpoint_id": forwarder_node_id, "config_json": json.dumps(updated_doc)},
+        {"endpoint_id": forwarder_endpoint_id, "config_json": json.dumps(updated_doc)},
     )
     results.expect_eq("remote config gating: set is rejected when disabled",
                       error_status, 409)
@@ -1090,10 +1090,10 @@ def run(
     stream_id = f"127.0.0.1:{emulator_port}"
     server_url = f"http://127.0.0.1:{server_port}"
 
-    # --- Deterministic node ids (shared seed->id derivation) ---
-    forwarder_node_id = derive_node_id(FORWARDER_SEED_HEX)
-    receiver_node_id = derive_node_id(RECEIVER_SEED_HEX)
-    print(f"[ids] forwarder={forwarder_node_id[:16]}…  receiver={receiver_node_id[:16]}…")
+    # --- Deterministic endpoint ids (shared seed->id derivation) ---
+    forwarder_endpoint_id = derive_endpoint_id(FORWARDER_SEED_HEX)
+    receiver_endpoint_id = derive_endpoint_id(RECEIVER_SEED_HEX)
+    print(f"[ids] forwarder={forwarder_endpoint_id[:16]}…  receiver={receiver_endpoint_id[:16]}…")
 
     # --- Files ---
     reads_file = tmp / "reads.txt"
@@ -1134,12 +1134,12 @@ bind_addr_v4 = "127.0.0.1:{forwarder_p2p_port}"
 relay_disabled = true
 discovery_disabled = true
 max_concurrent_bidi_streams = 256
-static_allowed_receivers = ["{receiver_node_id}"]
+static_allowed_receivers = ["{receiver_endpoint_id}"]
 """
     )
 
     # --- Preseed receiver DB (canonical subscription + DBF profile) ---
-    preseed_receiver_db(receiver_db_path, forwarder_node_id, stream_id, proxy_port, dbf_path)
+    preseed_receiver_db(receiver_db_path, forwarder_endpoint_id, stream_id, proxy_port, dbf_path)
 
     # --- 1. server ---
     thin = stack.add(Managed(
@@ -1210,7 +1210,7 @@ static_allowed_receivers = ["{receiver_node_id}"]
         "--data-dir", str(receiver_data_dir),
         "--bind-addr", "127.0.0.1:0",
         "--receiver-id", "rx-e2e",
-        "--p2p-forwarder-node-id", forwarder_node_id,
+        "--p2p-forwarder-endpoint-id", forwarder_endpoint_id,
         "--p2p-forwarder-direct-addr", f"127.0.0.1:{forwarder_p2p_port}",
         "--p2p-secret-key-seed-hex", RECEIVER_SEED_HEX,
         # Loopback transport: explicit (a seed already implies this, but state it).
@@ -1231,16 +1231,16 @@ static_allowed_receivers = ["{receiver_node_id}"]
 
     receiver = stack.add(make_receiver("1"))
     receiver.start()
-    wait_for_log(receiver.log_path, "p2p_node_id=", timeout=30,
+    wait_for_log(receiver.log_path, "p2p_endpoint_id=", timeout=30,
                  what="receiver p2p startup")
     print("[up] receiver-headless p2p running")
 
     # Approve the receiver so it can take over the announcer generation and push
     # rows (an active receiver is required). The static forwarder allow-list
     # admits it on the data plane regardless; this gates only the server plane.
-    wait_until(lambda: server_device_approval(server_url, receiver_node_id) is not None,
+    wait_until(lambda: server_device_approval(server_url, receiver_endpoint_id) is not None,
                timeout=15, what="receiver self-registration")
-    server_approve_device(server_url, receiver_node_id)
+    server_approve_device(server_url, receiver_endpoint_id)
     print("[up] receiver approved")
 
     # --- Power-loss lane: SIGKILL the target mid-stream, then restart ---
@@ -1256,7 +1256,7 @@ static_allowed_receivers = ["{receiver_node_id}"]
 
         receiver2 = stack.add(make_receiver("2"))
         receiver2.start()
-        wait_for_log(receiver2.log_path, "p2p_node_id=", timeout=30,
+        wait_for_log(receiver2.log_path, "p2p_endpoint_id=", timeout=30,
                      what="receiver restart p2p startup")
         active_receiver = receiver2
         print("[up] receiver-headless restarted")

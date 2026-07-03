@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use prost::Message;
-use rt_iroh::{Connection, Endpoint, NodeAddr, RecvStream, SendStream};
+use rt_iroh::{Connection, Endpoint, EndpointAddr, RecvStream, SendStream};
 use rt_p2p_protocol::{
     Ack, ControlC2F, ControlF2C, DataC2F, DataF2C, DataSubscribe, EventBatch, GapNotice, Hello,
     HelloOk, MAX_FRAME_BYTES, StreamCatalog, SubscribeMode, control_c2f, control_f2c, data_c2f,
@@ -358,7 +358,7 @@ where
 /// reads back the negotiated `HelloOk` plus the `StreamCatalog`.
 pub async fn connect_and_hello(
     endpoint: &Endpoint,
-    forwarder_addr: NodeAddr,
+    forwarder_addr: EndpointAddr,
     client_hello: Hello,
 ) -> Result<ControlSession, P2pSessionError> {
     let connection = endpoint.connect(forwarder_addr).await?;
@@ -865,7 +865,7 @@ mod tests {
             let endpoint = test_endpoint(11).await;
             let store = test_store();
 
-            let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
+            let session = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
                 .await
                 .unwrap();
             run_data_subscription(
@@ -925,7 +925,7 @@ mod tests {
             let endpoint = test_endpoint(13).await;
             let store = test_store();
 
-            let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
+            let session = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
                 .await
                 .unwrap();
             run_data_subscription(
@@ -966,7 +966,7 @@ mod tests {
             let store = test_store();
 
             // First connection: receive [1, 2], cursor advances to 2.
-            let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
+            let session = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
                 .await
                 .unwrap();
             run_data_subscription(
@@ -984,7 +984,7 @@ mod tests {
             drop(session);
 
             // Reconnect: a fresh connection must resume from the persisted cursor.
-            let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
+            let session = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
                 .await
                 .unwrap();
             run_data_subscription(
@@ -1034,7 +1034,7 @@ mod tests {
             let endpoint = test_endpoint(17).await;
             let store = test_store();
 
-            let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
+            let session = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
                 .await
                 .unwrap();
             run_data_subscription(
@@ -1091,7 +1091,7 @@ mod tests {
             let store = test_store();
             let (hint_tx, mut hint_rx) = broadcast::channel(16);
 
-            let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
+            let session = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
                 .await
                 .unwrap();
             run_data_subscription_with_hint(
@@ -1162,7 +1162,7 @@ mod tests {
             let endpoint = test_endpoint(21).await;
             let store = test_store();
 
-            let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
+            let session = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
                 .await
                 .unwrap();
             let result = run_data_subscription(
@@ -1207,7 +1207,7 @@ mod tests {
             let endpoint = test_endpoint(23).await;
             let store = test_store();
 
-            let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
+            let session = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
                 .await
                 .unwrap();
             let result = run_data_subscription(
@@ -1248,7 +1248,7 @@ mod tests {
             let endpoint = test_endpoint(25).await;
             let store = test_store();
 
-            let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
+            let session = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
                 .await
                 .unwrap();
             let result = run_data_subscription(
@@ -1286,7 +1286,7 @@ mod tests {
             let endpoint = test_endpoint(27).await;
             let store = test_store();
 
-            let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
+            let session = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
                 .await
                 .unwrap();
             let result = run_data_subscription(
@@ -1338,7 +1338,7 @@ mod tests {
             let endpoint = test_endpoint(63).await;
             let store = test_store();
 
-            let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
+            let session = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
                 .await
                 .unwrap();
             let result = run_data_subscription(
@@ -1388,7 +1388,7 @@ mod tests {
             let endpoint = test_endpoint(29).await;
             let store = test_store();
 
-            let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
+            let session = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
                 .await
                 .unwrap();
             run_data_subscription(
@@ -1428,7 +1428,7 @@ mod tests {
             let endpoint = test_endpoint(35).await;
             let store = test_store();
 
-            let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
+            let session = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
                 .await
                 .unwrap();
             let result = run_data_subscription(
@@ -1471,7 +1471,7 @@ mod tests {
             let endpoint = test_endpoint(37).await;
             let store = test_store();
 
-            let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
+            let session = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
                 .await
                 .unwrap();
             let result = run_data_subscription(
@@ -1521,7 +1521,7 @@ mod tests {
             let endpoint = test_endpoint(39).await;
             let store = test_store();
 
-            let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
+            let session = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
                 .await
                 .unwrap();
             let result = run_data_subscription(
@@ -1566,7 +1566,7 @@ mod tests {
             let endpoint = test_endpoint(31).await;
             let store = test_store();
 
-            let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
+            let session = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
                 .await
                 .unwrap();
             let outcome = run_data_subscription(

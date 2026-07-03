@@ -1,6 +1,6 @@
 //! Receiver peer for loopback P2P tests.
 
-use rt_iroh::{Connection, Endpoint, EndpointBuilder, NodeAddr, RecvStream, SendStream};
+use rt_iroh::{Connection, Endpoint, EndpointAddr, EndpointBuilder, RecvStream, SendStream};
 use rt_p2p_protocol::{
     Ack, ControlC2F, ControlF2C, DataC2F, DataF2C, DataSubscribe, EventBatch, Hello, HelloOk,
     StreamCatalog, SubscribeOk, control_c2f, control_f2c, data_c2f, data_f2c,
@@ -16,30 +16,30 @@ use super::{HarnessResult, read_frame, write_frame};
 #[derive(Debug)]
 pub struct MockReceiverPeer {
     endpoint: Endpoint,
-    node_addr: NodeAddr,
+    endpoint_addr: EndpointAddr,
 }
 
 impl MockReceiverPeer {
     /// Binds a loopback endpoint seeded with `seed`.
     pub async fn start(seed: [u8; 32]) -> HarnessResult<Self> {
         let endpoint = EndpointBuilder::test(seed).bind().await?;
-        let node_addr = endpoint.node_addr().await;
+        let endpoint_addr = endpoint.endpoint_addr().await;
         Ok(Self {
             endpoint,
-            node_addr,
+            endpoint_addr,
         })
     }
 
     /// The dialable address of this receiver peer.
-    pub fn node_addr(&self) -> NodeAddr {
-        self.node_addr.clone()
+    pub fn endpoint_addr(&self) -> EndpointAddr {
+        self.endpoint_addr.clone()
     }
 
     /// Dials `forwarder_addr`, opens the control stream, sends `client_hello`,
     /// and reads back the negotiated `HelloOk` plus the `StreamCatalog`.
     pub async fn hello(
         &self,
-        forwarder_addr: NodeAddr,
+        forwarder_addr: EndpointAddr,
         client_hello: Hello,
     ) -> HarnessResult<ReceiverSession> {
         let connection = self.endpoint.connect(forwarder_addr).await?;

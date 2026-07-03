@@ -886,10 +886,10 @@ fn main() {
                     }
                 }
                 "refresh" => {
-                    if let Some(window) = app_handle.get_webview_window("main") {
-                        if let Err(e) = window.reload() {
-                            warn!(error = %e, "failed to reload webview");
-                        }
+                    if let Some(window) = app_handle.get_webview_window("main")
+                        && let Err(e) = window.reload()
+                    {
+                        warn!(error = %e, "failed to reload webview");
                     }
                 }
                 "toggle-theme" => {
@@ -901,10 +901,10 @@ fn main() {
                     if let Some(level) = app_handle.try_state::<ZoomLevel>() {
                         let mut zoom = level.0.lock().unwrap();
                         *zoom = (*zoom + 0.1).min(3.0);
-                        if let Some(window) = app_handle.get_webview_window("main") {
-                            if let Err(e) = window.set_zoom(*zoom) {
-                                warn!(error = %e, "failed to set zoom level");
-                            }
+                        if let Some(window) = app_handle.get_webview_window("main")
+                            && let Err(e) = window.set_zoom(*zoom)
+                        {
+                            warn!(error = %e, "failed to set zoom level");
                         }
                     }
                 }
@@ -912,10 +912,10 @@ fn main() {
                     if let Some(level) = app_handle.try_state::<ZoomLevel>() {
                         let mut zoom = level.0.lock().unwrap();
                         *zoom = (*zoom - 0.1).max(0.5);
-                        if let Some(window) = app_handle.get_webview_window("main") {
-                            if let Err(e) = window.set_zoom(*zoom) {
-                                warn!(error = %e, "failed to set zoom level");
-                            }
+                        if let Some(window) = app_handle.get_webview_window("main")
+                            && let Err(e) = window.set_zoom(*zoom)
+                        {
+                            warn!(error = %e, "failed to set zoom level");
                         }
                     }
                 }
@@ -923,10 +923,10 @@ fn main() {
                     if let Some(level) = app_handle.try_state::<ZoomLevel>() {
                         let mut zoom = level.0.lock().unwrap();
                         *zoom = 1.0;
-                        if let Some(window) = app_handle.get_webview_window("main") {
-                            if let Err(e) = window.set_zoom(1.0) {
-                                warn!(error = %e, "failed to reset zoom level");
-                            }
+                        if let Some(window) = app_handle.get_webview_window("main")
+                            && let Err(e) = window.set_zoom(1.0)
+                        {
+                            warn!(error = %e, "failed to reset zoom level");
                         }
                     }
                 }
@@ -1069,13 +1069,12 @@ fn main() {
             }
             // Wait for receiver runtime to finish graceful cleanup
             // (cancel P2P sessions, stop local proxies) before the process exits.
-            if let Some(guard) = app_handle.try_state::<Mutex<Option<JoinHandle<()>>>>() {
-                if let Some(handle) = guard.lock().ok().and_then(|mut g| g.take()) {
-                    tauri::async_runtime::block_on(async {
-                        let _ =
-                            tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
-                    });
-                }
+            if let Some(guard) = app_handle.try_state::<Mutex<Option<JoinHandle<()>>>>()
+                && let Some(handle) = guard.lock().ok().and_then(|mut g| g.take())
+            {
+                tauri::async_runtime::block_on(async {
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+                });
             }
         }
     });

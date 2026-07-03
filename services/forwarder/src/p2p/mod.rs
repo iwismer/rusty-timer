@@ -2,7 +2,7 @@
 //!
 //! This module owns the forwarder's [`rt_iroh`] endpoint and the accept loop
 //! that admits inbound receiver connections. Admission is gated by a persistent
-//! [`AllowList`] keyed on the remote peer's iroh node id (the transport-layer
+//! [`AllowList`] keyed on the remote peer's iroh endpoint id (the transport-layer
 //! `EndpointId`): connections from peers that are not on the allow-list are
 //! closed before any control-plane work happens. The allow-list caches its set
 //! on disk (fail-to-last-known on refresh failures) and force-closes a peer's
@@ -32,7 +32,7 @@ use std::time::Duration;
 use crate::config::P2pConfig;
 use crate::status_http::ForwarderStatusFeed;
 use crate::storage::journal::Journal;
-use rt_iroh::{EndpointBuilder, NodeAddr, NodeId, RelayMode, SecretKey};
+use rt_iroh::{EndpointAddr, EndpointBuilder, EndpointId, RelayMode, SecretKey};
 use rt_p2p_protocol::{StreamCatalog, StreamEntry};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
@@ -66,15 +66,15 @@ pub struct P2pRuntime {
 }
 
 impl P2pRuntime {
-    /// This forwarder's dialable iroh node address.
-    pub async fn node_addr(&self) -> NodeAddr {
-        self.endpoint.node_addr().await
+    /// This forwarder's dialable iroh endpoint address.
+    pub async fn endpoint_addr(&self) -> EndpointAddr {
+        self.endpoint.endpoint_addr().await
     }
 
-    /// This forwarder's iroh node id / endpoint id.
+    /// This forwarder's iroh endpoint id / endpoint id.
     #[must_use]
-    pub fn node_id(&self) -> NodeId {
-        self.endpoint.node_id()
+    pub fn endpoint_id(&self) -> EndpointId {
+        self.endpoint.endpoint_id()
     }
 
     /// Closes the endpoint and aborts background P2P tasks.
@@ -143,7 +143,7 @@ pub async fn start_forwarder_p2p(
     if let Some((base_url, voucher)) = server_credentials(config)? {
         let request_timeout = Duration::from_secs(config.allowlist_request_timeout_secs);
         let poll_interval = Duration::from_secs(config.allowlist_poll_interval_secs);
-        let endpoint_id = endpoint.node_id().to_string();
+        let endpoint_id = endpoint.endpoint_id().to_string();
 
         // Resolve the minted per-device token (load persisted, else bootstrap
         // via the voucher) BEFORE starting any server-facing task, so every
@@ -203,8 +203,8 @@ pub enum P2pStartError {
     MissingAllowList,
     #[error("p2p server URL and token file must be configured together")]
     IncompleteServerConfig,
-    #[error("invalid p2p receiver node id '{value}': {source}")]
-    InvalidReceiverNodeId {
+    #[error("invalid p2p receiver endpoint id '{value}': {source}")]
+    InvalidReceiverEndpointId {
         value: String,
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -287,7 +287,7 @@ fn build_allow_list(config: &P2pConfig) -> Result<AllowList, P2pStartError> {
         return Err(P2pStartError::MissingAllowList);
     }
 
-    let static_receivers = parse_node_ids(&config.static_allowed_receivers)?;
+    let static_receivers = parse_endpoint_ids(&config.static_allowed_receivers)?;
     let allow_list = match &config.allowlist_cache_path {
         Some(path) => {
             // Static receivers are additive: union them on top of the cached
@@ -445,9 +445,9 @@ async fn push_forwarder_catalog_once(
     journal: Arc<Mutex<Journal>>,
     reader_streams: &[String],
 ) {
-    let endpoint_id = endpoint.node_id().to_string();
-    let node_addr = endpoint.node_addr().await;
-    let direct_addrs = node_addr
+    let endpoint_id = endpoint.endpoint_id().to_string();
+    let endpoint_addr = endpoint.endpoint_addr().await;
+    let direct_addrs = endpoint_addr
         .ip_addrs()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
@@ -498,11 +498,11 @@ async fn build_forwarder_catalog(
     })
 }
 
-fn parse_node_ids(values: &[String]) -> Result<Vec<NodeId>, P2pStartError> {
+fn parse_endpoint_ids(values: &[String]) -> Result<Vec<EndpointId>, P2pStartError> {
     values
         .iter()
         .map(|value| {
-            NodeId::from_str(value).map_err(|source| P2pStartError::InvalidReceiverNodeId {
+            EndpointId::from_str(value).map_err(|source| P2pStartError::InvalidReceiverEndpointId {
                 value: value.clone(),
                 source: Box::new(source),
             })
@@ -627,7 +627,7 @@ mod tests {
         let journal = Arc::new(Mutex::new(journal));
 
         let runtime = start_forwarder_p2p(
-            &p2p_config(receiver.node_id().to_string()),
+            &p2p_config(receiver.endpoint_id().to_string()),
             Arc::clone(&journal),
             &[stream_key.to_owned()],
             None,
@@ -637,7 +637,7 @@ mod tests {
         )
         .await?
         .expect("p2p enabled");
-        let forwarder_addr = runtime.node_addr().await;
+        let forwarder_addr = runtime.endpoint_addr().await;
         let connection = receiver.connect(forwarder_addr).await?;
 
         let (mut control_send, mut control_recv) = connection.open_bi().await?;
@@ -694,18 +694,18 @@ mod tests {
 
         let dir = tempfile::tempdir()?;
         let cache_path = dir.path().join("allowlist.cache");
-        std::fs::write(&cache_path, format!("{}\n", cached.node_id()))?;
+        std::fs::write(&cache_path, format!("{}\n", cached.endpoint_id()))?;
 
-        let mut config = p2p_config(static_receiver.node_id().to_string());
+        let mut config = p2p_config(static_receiver.endpoint_id().to_string());
         config.allowlist_cache_path = Some(cache_path.to_string_lossy().into_owned());
 
         let allow_list = build_allow_list(&config)?;
         assert!(
-            allow_list.contains(&cached.node_id()),
+            allow_list.contains(&cached.endpoint_id()),
             "cached last-known receiver must remain allowed when static receivers are configured"
         );
         assert!(
-            allow_list.contains(&static_receiver.node_id()),
+            allow_list.contains(&static_receiver.endpoint_id()),
             "statically configured receiver must be allowed alongside the cached set"
         );
 
@@ -726,7 +726,7 @@ mod tests {
         let stream_key = "10.0.0.5:10000";
 
         let runtime = start_forwarder_p2p(
-            &p2p_config(receiver.node_id().to_string()),
+            &p2p_config(receiver.endpoint_id().to_string()),
             Arc::clone(&journal),
             &[stream_key.to_owned()],
             None,
@@ -736,7 +736,7 @@ mod tests {
         )
         .await?
         .expect("p2p enabled");
-        let forwarder_addr = runtime.node_addr().await;
+        let forwarder_addr = runtime.endpoint_addr().await;
         let connection = receiver.connect(forwarder_addr).await?;
 
         let (mut control_send, mut control_recv) = connection.open_bi().await?;

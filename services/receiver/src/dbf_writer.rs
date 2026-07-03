@@ -214,6 +214,7 @@ fn serialize_record(record: &DbfRecord) -> [u8; RECORD_DATA_LEN] {
     buf
 }
 
+#[cfg(test)]
 fn template_writer_with_dest<W: Write + Seek>(dest: W) -> std::io::Result<dbase::TableWriter<W>> {
     let reader = dbase::Reader::new(Cursor::new(DBF_TEMPLATE_BYTES))
         .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -501,6 +502,7 @@ fn validate_reader_index_for_rebuild(reader_index: u8) -> Result<(), DbError> {
     Ok(())
 }
 
+#[cfg(test)]
 fn collect_dbf_records(
     events: &[ReceivedEvent],
     event_type: EventType,
@@ -528,6 +530,7 @@ fn collect_dbf_records(
     (records, delivered_seqs)
 }
 
+#[cfg(test)]
 fn write_replacement_dbf(path: &Path, records: &[DbfRecord]) -> std::io::Result<()> {
     let parent = path
         .parent()
@@ -573,6 +576,7 @@ fn sync_parent_dir(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn mark_dbf_delivered_or_confirm(
     db: &Db,
     stream_id: &str,
@@ -614,6 +618,7 @@ fn mark_dbf_delivered_or_confirm(
 /// * **Reader timestamp is authoritative.** The DBF TIME/DAYCODE fields are
 ///   derived from the reader timestamp embedded in the frame, never from the
 ///   receiver receipt time (`received_unix_ms`).
+///
 /// Test-only since the single cross-stream worker (`run_dbf_delivery_pass`)
 /// replaced per-stream delivery: this rebuilds one stream's rows into the
 /// whole file (clobbering other streams') with an O(n²) pending filter. Kept
@@ -884,7 +889,7 @@ fn regenerate_dbf_cross_stream(
             }
             append_points.insert(spec.stream_id.clone(), max_seq);
         }
-        all.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+        all.sort_by_key(|a| (a.0, a.1, a.2));
         tracing::info!(
             records = all.len(),
             streams = streams.len(),

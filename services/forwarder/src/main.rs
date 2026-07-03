@@ -276,13 +276,13 @@ async fn main() {
     {
         Ok(Some(runtime)) => {
             status_server
-                .set_p2p_endpoint_id(runtime.node_id().to_string())
+                .set_p2p_endpoint_id(runtime.endpoint_id().to_string())
                 .await;
             status_server.set_p2p_connected(true).await;
-            let node_addr = runtime.node_addr().await;
+            let endpoint_addr = runtime.endpoint_addr().await;
             info!(
-                p2p_node_id = %runtime.node_id(),
-                p2p_node_addr = ?node_addr,
+                p2p_endpoint_id = %runtime.endpoint_id(),
+                p2p_endpoint_addr = ?endpoint_addr,
                 "p2p iroh server started"
             );
             Some(runtime)

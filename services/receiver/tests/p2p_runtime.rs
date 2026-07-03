@@ -125,19 +125,19 @@ fn stream_subscription(
 }
 
 fn forwarder_config(forwarder: &MockForwarderPeer) -> (String, SocketAddr) {
-    let addr = forwarder.node_addr();
-    let node_id = addr.id.to_string();
+    let addr = forwarder.endpoint_addr();
+    let endpoint_id = addr.id.to_string();
     let direct = *addr.ip_addrs().next().expect("forwarder direct address");
-    (node_id, direct)
+    (endpoint_id, direct)
 }
 
 fn base_config(
-    node_id: String,
+    endpoint_id: String,
     direct: SocketAddr,
     seed: u8,
     local_port_override: Option<u16>,
 ) -> (P2pReceiverConfig, StreamSubscription) {
-    let sub = stream_subscription(&node_id, local_port_override);
+    let sub = stream_subscription(&endpoint_id, local_port_override);
     let config = P2pReceiverConfig {
         identity: ReceiverIdentity::Seed([seed; 32]),
         relay_disabled: true,
@@ -147,7 +147,7 @@ fn base_config(
             0,
         )),
         forwarder: Some(ForwarderPeerConfig {
-            node_id,
+            endpoint_id,
             direct_addr: direct,
         }),
         server: None,
@@ -163,11 +163,11 @@ async fn runtime_projects_canonical_stream_address_events_to_ui_state() {
         let forwarder = MockForwarderPeer::start([68; 32], script_two(VALID_FRAME))
             .await
             .unwrap();
-        let (node_id, direct) = forwarder_config(&forwarder);
+        let (endpoint_id, direct) = forwarder_config(&forwarder);
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
-        let (config, mut sub) = base_config(node_id.clone(), direct, 69, None);
+        let (config, mut sub) = base_config(endpoint_id.clone(), direct, 69, None);
         sub.reader_ip = None;
         sub.forwarder_id = None;
         state
@@ -184,10 +184,10 @@ async fn runtime_projects_canonical_stream_address_events_to_ui_state() {
         poll_until(
             || {
                 let state = Arc::clone(&state);
-                let node_id = node_id.clone();
+                let endpoint_id = endpoint_id.clone();
                 async move {
                     state.get_stream_metrics_snapshot().await.iter().any(|m| {
-                        m.forwarder_id == node_id
+                        m.forwarder_id == endpoint_id
                             && m.reader_ip == STREAM_ID
                             && m.raw_count == 2
                             && m.dedup_count == 2
@@ -205,7 +205,7 @@ async fn runtime_projects_canonical_stream_address_events_to_ui_state() {
             .iter()
             .find(|stream| stream.stream_id == STREAM_ID)
             .expect("subscribed stream present");
-        assert_eq!(stream.forwarder_id.as_deref(), Some(node_id.as_str()));
+        assert_eq!(stream.forwarder_id.as_deref(), Some(endpoint_id.as_str()));
         assert_eq!(stream.reader_ip.as_deref(), Some(STREAM_ID));
         assert_eq!(stream.reads_total, Some(2));
         assert_eq!(
@@ -227,11 +227,11 @@ async fn runtime_persists_events_and_advances_cursor() {
         let forwarder = MockForwarderPeer::start([70; 32], script_two(b"frame"))
             .await
             .unwrap();
-        let (node_id, direct) = forwarder_config(&forwarder);
+        let (endpoint_id, direct) = forwarder_config(&forwarder);
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
-        let (config, sub) = base_config(node_id, direct, 71, None);
+        let (config, sub) = base_config(endpoint_id, direct, 71, None);
         state
             .db
             .lock()
@@ -294,7 +294,7 @@ async fn durable_local_proxy_replays_exact_frames() {
         let forwarder = MockForwarderPeer::start([72; 32], script_two(b"frame"))
             .await
             .unwrap();
-        let (node_id, direct) = forwarder_config(&forwarder);
+        let (endpoint_id, direct) = forwarder_config(&forwarder);
 
         // Reserve an ephemeral port for the durable proxy so the test can dial it.
         let port = {
@@ -306,7 +306,7 @@ async fn durable_local_proxy_replays_exact_frames() {
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
-        let (config, sub) = base_config(node_id, direct, 73, Some(port));
+        let (config, sub) = base_config(endpoint_id, direct, 73, Some(port));
         state
             .db
             .lock()
@@ -383,7 +383,7 @@ async fn dbf_feed_delivers_from_received_events_without_duplicates() {
         let forwarder = MockForwarderPeer::start([74; 32], script_two(VALID_FRAME))
             .await
             .unwrap();
-        let (node_id, direct) = forwarder_config(&forwarder);
+        let (endpoint_id, direct) = forwarder_config(&forwarder);
 
         let dir = tempfile::tempdir().unwrap();
         let dbf_path = dir.path().join("IPICO.DBF");
@@ -401,11 +401,11 @@ async fn dbf_feed_delivers_from_received_events_without_duplicates() {
                 flush_interval_ms: receiver::db::DEFAULT_DBF_FLUSH_INTERVAL_MS,
             })
             .unwrap();
-            db.replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
+            db.replace_stream_subscriptions(&[stream_subscription(&endpoint_id, None)])
                 .unwrap();
         }
 
-        let (config, _sub) = base_config(node_id, direct, 75, None);
+        let (config, _sub) = base_config(endpoint_id, direct, 75, None);
         let runtime = start_receiver_p2p(Arc::clone(&state), config)
             .await
             .unwrap();
@@ -544,21 +544,21 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
         let forwarder = MockForwarderPeer::start([76; 32], script_two(VALID_FRAME))
             .await
             .unwrap();
-        let (node_id, direct) = forwarder_config(&forwarder);
+        let (endpoint_id, direct) = forwarder_config(&forwarder);
         let (thin_url, thin_state) = start_mock_server().await;
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
         {
             let mut db = state.db.lock().await;
-            db.replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
+            db.replace_stream_subscriptions(&[stream_subscription(&endpoint_id, None)])
                 .unwrap();
             // Opt this stream in to announcer publishing (global + per-stream).
             db.set_announcer_enabled(true).unwrap();
             db.set_stream_announcer_publish(STREAM_ID, true).unwrap();
         }
 
-        let (mut config, _sub) = base_config(node_id, direct, 77, None);
+        let (mut config, _sub) = base_config(endpoint_id, direct, 77, None);
         config.server = Some(ServerClientConfig {
             url: thin_url,
             token: "secret-token".to_owned(),
@@ -612,20 +612,20 @@ async fn announcer_does_not_push_when_stream_not_opted_in() {
         let forwarder = MockForwarderPeer::start([88; 32], script_two(VALID_FRAME))
             .await
             .unwrap();
-        let (node_id, direct) = forwarder_config(&forwarder);
+        let (endpoint_id, direct) = forwarder_config(&forwarder);
         let (thin_url, thin_state) = start_mock_server().await;
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
         {
             let mut db = state.db.lock().await;
-            db.replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
+            db.replace_stream_subscriptions(&[stream_subscription(&endpoint_id, None)])
                 .unwrap();
             // Global toggle on, but the stream is NOT opted in.
             db.set_announcer_enabled(true).unwrap();
         }
 
-        let (mut config, _sub) = base_config(node_id, direct, 89, None);
+        let (mut config, _sub) = base_config(endpoint_id, direct, 89, None);
         config.server = Some(ServerClientConfig {
             url: thin_url,
             token: "secret-token".to_owned(),
@@ -735,14 +735,14 @@ async fn changing_local_port_rebinds_proxy_to_new_port() {
         let forwarder = MockForwarderPeer::start([80; 32], script_two(b"frame"))
             .await
             .unwrap();
-        let (node_id, direct) = forwarder_config(&forwarder);
+        let (endpoint_id, direct) = forwarder_config(&forwarder);
 
         let old_port = reserve_port().await;
         let new_port = reserve_port().await;
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
-        let (config, sub) = base_config(node_id.clone(), direct, 81, Some(old_port));
+        let (config, sub) = base_config(endpoint_id.clone(), direct, 81, Some(old_port));
         state
             .db
             .lock()
@@ -768,7 +768,7 @@ async fn changing_local_port_rebinds_proxy_to_new_port() {
             .db
             .lock()
             .await
-            .replace_stream_subscriptions(&[stream_subscription(&node_id, Some(new_port))])
+            .replace_stream_subscriptions(&[stream_subscription(&endpoint_id, Some(new_port))])
             .unwrap();
 
         // The new port must come up and serve the durable replay.
@@ -819,11 +819,11 @@ async fn dead_session_worker_is_recreated_on_next_reconcile() {
         let forwarder = MockForwarderPeer::start([82; 32], script_stream_mismatch())
             .await
             .unwrap();
-        let (node_id, direct) = forwarder_config(&forwarder);
+        let (endpoint_id, direct) = forwarder_config(&forwarder);
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
-        let (config, sub) = base_config(node_id, direct, 83, None);
+        let (config, sub) = base_config(endpoint_id, direct, 83, None);
         state
             .db
             .lock()
@@ -865,7 +865,7 @@ async fn announcer_push_recovers_when_server_starts_late() {
         let forwarder = MockForwarderPeer::start([84; 32], script_two(VALID_FRAME))
             .await
             .unwrap();
-        let (node_id, direct) = forwarder_config(&forwarder);
+        let (endpoint_id, direct) = forwarder_config(&forwarder);
 
         // Reserve a port for the server but do NOT start it yet, so initial
         // register/takeover fails with connection-refused.
@@ -876,13 +876,13 @@ async fn announcer_push_recovers_when_server_starts_late() {
         let state = init_state(dir.path()).await;
         {
             let mut db = state.db.lock().await;
-            db.replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
+            db.replace_stream_subscriptions(&[stream_subscription(&endpoint_id, None)])
                 .unwrap();
             db.set_announcer_enabled(true).unwrap();
             db.set_stream_announcer_publish(STREAM_ID, true).unwrap();
         }
 
-        let (mut config, _sub) = base_config(node_id, direct, 85, None);
+        let (mut config, _sub) = base_config(endpoint_id, direct, 85, None);
         config.server = Some(ServerClientConfig {
             url: thin_url,
             token: "secret-token".to_owned(),
@@ -955,11 +955,11 @@ async fn start_receiver_p2p_rejects_tiny_reconcile_interval() {
     let forwarder = MockForwarderPeer::start([88; 32], script_two(b"frame"))
         .await
         .unwrap();
-    let (node_id, direct) = forwarder_config(&forwarder);
+    let (endpoint_id, direct) = forwarder_config(&forwarder);
 
     let dir = tempfile::tempdir().unwrap();
     let state = init_state(dir.path()).await;
-    let (mut config, _sub) = base_config(node_id, direct, 89, None);
+    let (mut config, _sub) = base_config(endpoint_id, direct, 89, None);
     config.reconcile_interval = Duration::from_millis(0);
 
     let err = match start_receiver_p2p(Arc::clone(&state), config).await {
@@ -983,11 +983,11 @@ async fn connection_state_reflects_p2p_session_lifecycle() {
         let forwarder = MockForwarderPeer::start([90; 32], script_two(b"frame"))
             .await
             .unwrap();
-        let (node_id, direct) = forwarder_config(&forwarder);
+        let (endpoint_id, direct) = forwarder_config(&forwarder);
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
-        let (config, sub) = base_config(node_id, direct, 91, None);
+        let (config, sub) = base_config(endpoint_id, direct, 91, None);
         state
             .db
             .lock()
@@ -1106,14 +1106,14 @@ async fn discovered_forwarder_is_dialed_and_persists_events() {
         let forwarder = MockForwarderPeer::start([92; 32], script_two(b"frame"))
             .await
             .unwrap();
-        let (node_id, direct) = forwarder_config(&forwarder);
+        let (endpoint_id, direct) = forwarder_config(&forwarder);
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
 
         // Populate discovery WITHOUT any explicit forwarder config.
         state.discovered_forwarders.write().await.insert(
-            node_id.clone(),
+            endpoint_id.clone(),
             DiscoveredForwarder {
                 display_name: Some("Finish".to_owned()),
                 direct_addrs: vec![direct],
@@ -1129,7 +1129,7 @@ async fn discovered_forwarder_is_dialed_and_persists_events() {
             .db
             .lock()
             .await
-            .replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
+            .replace_stream_subscriptions(&[stream_subscription(&endpoint_id, None)])
             .unwrap();
 
         let config = P2pReceiverConfig {
@@ -1186,7 +1186,7 @@ async fn shutdown_cancels_runtime_promptly() {
         let forwarder = MockForwarderPeer::start([78; 32], script_two(b"frame"))
             .await
             .unwrap();
-        let (node_id, direct) = forwarder_config(&forwarder);
+        let (endpoint_id, direct) = forwarder_config(&forwarder);
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
@@ -1194,10 +1194,10 @@ async fn shutdown_cancels_runtime_promptly() {
             .db
             .lock()
             .await
-            .replace_stream_subscriptions(&[stream_subscription(&node_id, None)])
+            .replace_stream_subscriptions(&[stream_subscription(&endpoint_id, None)])
             .unwrap();
 
-        let (config, _sub) = base_config(node_id, direct, 79, None);
+        let (config, _sub) = base_config(endpoint_id, direct, 79, None);
         let runtime = start_receiver_p2p(Arc::clone(&state), config)
             .await
             .unwrap();
@@ -1264,18 +1264,18 @@ async fn one_connection_multiplexes_multiple_data_streams() {
         let forwarder = MockForwarderPeer::start([92; 32], script_two_echo(VALID_FRAME))
             .await
             .unwrap();
-        let (node_id, direct) = forwarder_config(&forwarder);
+        let (endpoint_id, direct) = forwarder_config(&forwarder);
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
-        let (config, _sub) = base_config(node_id.clone(), direct, 93, None);
+        let (config, _sub) = base_config(endpoint_id.clone(), direct, 93, None);
         state
             .db
             .lock()
             .await
             .replace_stream_subscriptions(&[
-                stream_subscription_for(&node_id, STREAM_ID),
-                stream_subscription_for(&node_id, STREAM_ID_2),
+                stream_subscription_for(&endpoint_id, STREAM_ID),
+                stream_subscription_for(&endpoint_id, STREAM_ID_2),
             ])
             .unwrap();
 
@@ -1322,7 +1322,7 @@ async fn one_connection_multiplexes_multiple_data_streams() {
             .db
             .lock()
             .await
-            .replace_stream_subscriptions(&[stream_subscription_for(&node_id, STREAM_ID)])
+            .replace_stream_subscriptions(&[stream_subscription_for(&endpoint_id, STREAM_ID)])
             .unwrap();
 
         // Let reconcile drop the removed stream worker; the remaining stream's
@@ -1349,7 +1349,7 @@ async fn one_connection_multiplexes_multiple_data_streams() {
 
         // The control session is intact: the forwarder still reads as connected
         // (control up; the data replays have completed).
-        let snapshot = state.forwarder_state(&node_id).await;
+        let snapshot = state.forwarder_state(&endpoint_id).await;
         assert!(
             matches!(
                 snapshot.state,

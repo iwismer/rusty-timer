@@ -165,7 +165,7 @@ async fn p2p_startup_failure_does_not_leak_control_server() {
                 0,
             )),
             forwarder: Some(ForwarderPeerConfig {
-                node_id: "not-a-valid-node-id".to_owned(),
+                endpoint_id: "not-a-valid-endpoint-id".to_owned(),
                 direct_addr: "127.0.0.1:5000".parse().expect("parse addr"),
             }),
             server: None,
@@ -175,12 +175,12 @@ async fn p2p_startup_failure_does_not_leak_control_server() {
     };
 
     let err = match HeadlessHost::start(config).await {
-        Ok(_) => panic!("invalid forwarder node id must fail P2P startup"),
+        Ok(_) => panic!("invalid forwarder endpoint id must fail P2P startup"),
         Err(err) => err,
     };
     assert!(
-        err.contains("forwarder node id"),
-        "error should describe the invalid forwarder node id, got: {err}"
+        err.contains("forwarder endpoint id"),
+        "error should describe the invalid forwarder endpoint id, got: {err}"
     );
 
     let rebound = tokio::net::TcpListener::bind(bind_addr)
