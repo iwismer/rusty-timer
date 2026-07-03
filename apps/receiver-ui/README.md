@@ -22,7 +22,7 @@ npm run format
 
 ## Deployment
 
-The build output is embedded in the receiver binary via `rust-embed` behind the `embed-ui` feature flag.
+The SvelteKit build output is packaged by Tauri via `src-tauri/tauri.conf.json` (`frontendDist = "../build"`) when building the Windows desktop app.
 
 ## Receiver mode UX (v1.2)
 

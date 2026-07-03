@@ -14,11 +14,17 @@ It is compatible with timing software that accepts IPICO TCP streams
 ## How It Works
 
 ```
-             ┌─── Field ───┐        ┌── Coordination ─┐        ┌── Timing Tent ──┐
-IPICO Reader ──TCP──► Forwarder ──iroh/P2P──► Server ◄──HTTP── Receiver ──TCP──► Timing Software
-                         │                 (registry,
-                   SQLite journal       allow-list,
-                  + replay cursor       status board)
+             ┌─── Field ───┐                                  ┌── Timing Tent ──┐
+IPICO Reader ──TCP──► Forwarder ───────iroh/P2P──────────────► Receiver ──TCP──► Timing Software
+                         │                                      │
+                   SQLite journal                         received-events DB
+                  + replay cursor                         + replay cursor
+                         │                                      │
+                         └────────HTTP coordination─────────────┘
+                                      │
+                                      ▼
+                           Server (registry, allow-list,
+                              status board, announcer)
 ```
 
 The **[Forwarder](services/forwarder/)** runs next to each IPICO reader.
@@ -46,11 +52,11 @@ reported as explicit gap markers.
   out local TCP streams without the remote forwarding stack.
 - **[Emulator](services/emulator/)** simulates IPICO readers for local
   development and deterministic tests.
-- **[Forwarder UI](apps/forwarder-ui/)** and
-  **[Receiver UI](apps/receiver-ui/)** are SvelteKit frontends embedded
-  in their service binaries.
-- **[Shared UI](apps/shared-ui/)** contains reusable UI components and
-  validation logic.
+- **[Forwarder UI](apps/forwarder-ui/)**, **[Receiver UI](apps/receiver-ui/)**,
+  and **[Server UI](apps/server-ui/)** are SvelteKit frontends embedded in their
+  service binaries or desktop shell.
+- **[Shared UI](apps/shared-ui/)** contains reusable UI components, help
+  metadata, and validation logic.
 
 ## Compatibility
 

@@ -73,9 +73,10 @@ hand-writing cloud-init files:
 6. Copy both files to the Raspberry Pi boot partition and boot the SBC.
 7. After the forwarder registers, approve it in the Server UI `Admin` tab.
 
-Revoking an unused token prevents first registration. Revoking a used token also
-blocks future per-device forwarder requests that authenticate with that token.
-Revocation does not delete existing forwarder status or approval records.
+Revoking an unused enrollment token prevents first registration. Revoking a used
+enrollment token blocks recovery/re-registration with that voucher; a forwarder
+that already persisted a minted per-device token continues to authenticate with
+that minted token unless the device itself is deactivated or re-enrolled.
 
 ## Agent UI Harness
 

@@ -1,26 +1,37 @@
 # shared-ui
 
-Shared Svelte component library (`@rusty-timer/shared-ui`) used by all three frontend apps.
+Shared Svelte component library (`@rusty-timer/shared-ui`) used by the
+forwarder, receiver, and server frontend apps.
 
 ## Exported Components
 
-- `UpdateBanner`
-- `LogViewer`
-- `StatusBadge`
-- `NavBar`
 - `AlertBanner`
+- `BatteryIndicator`
 - `Card`
-- `DataTable`
-- `StatCard`
-- `ForwarderConfig`
 - `ConfirmDialog`
+- `DataTable`
+- `ForwarderConfig`
+- `ForwarderConfigPage`
+- `HelpDialog`
+- `HelpSearch`
+- `HelpTip`
+- `LogViewer`
+- `LowBatteryBanner`
+- `NavBar`
+- `ReaderControlPanel`
+- `StatCard`
+- `StatusBadge`
+- `UpdateBanner`
 
-## Exported Types
+## Exported Types and Utilities
 
 - `ConfigApi`
 - `ConfigLoadResult`
 - `ConfigSaveResult`
-- `ConfigRestartResult`
+- `ConfigActionResult`
+- Reader view-model helpers
+- Read-mode form helpers
+- Help metadata lookup helpers
 
 ## Development
 

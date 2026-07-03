@@ -16,7 +16,7 @@ not require a database container.
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets
+cargo clippy --workspace --all-targets --exclude receiver-tauri
 cargo test --workspace --lib
 cargo test --workspace
 ```
@@ -24,8 +24,8 @@ cargo test --workspace
 ## Frontend Checks
 
 ```bash
-cd apps/forwarder-ui && npm test && npm run check
-cd apps/receiver-ui && npm test && npm run check
+npm test --workspaces --if-present
+npm run check --workspaces --if-present
 ```
 
 ## Deterministic P2P Stack
@@ -63,11 +63,14 @@ and server serve their embedded web UIs) and launches the desktop receiver
 app via `cargo tauri dev`. It follows the **prod-like flow** — no static
 allow-list, no preseeded subscription, no hand-fed node ids:
 
-1. The forwarder and receiver self-register with the server (TOFU).
-2. Open the server admin UI and **approve both** the forwarder and receiver.
-3. The forwarder fetches the receiver allow-list; the receiver discovers the
+1. The dev stack creates forwarder and receiver enrollment vouchers through the
+   server admin API.
+2. The forwarder and receiver present those vouchers to register and mint their
+   per-device tokens.
+3. Open the server admin UI and **approve both** the forwarder and receiver.
+4. The forwarder fetches the receiver allow-list; the receiver discovers the
    approved forwarder.
-4. In the receiver app's Streams tab, the discovered stream appears as
+5. In the receiver app's Streams tab, the discovered stream appears as
    **Available** — click Subscribe and reads start flowing.
 
 The startup banner prints the server UI, admin, and announcer URLs, the

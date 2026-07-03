@@ -24,7 +24,7 @@
 
 - **[Forwarder](../services/forwarder/)** — IPICO reader ingestion, SQLite journal, status/control HTTP, and P2P iroh endpoint.
 - **[Receiver](../services/receiver/)** — Durable received-events store, `receiver-headless`, local TCP proxy, DBF writer, and receiver UI IPC.
-- **[Server](../services/server/)** — SQLite registry, receiver allow-list distribution, announcer push, and status board.
+- **[Server](../services/server/)** — SQLite registry, receiver allow-list distribution, announcer push, embedded server UI, and status board.
 - **[Streamer](../services/streamer/)** — TCP fanout utility for IPICO readers.
 - **[Emulator](../services/emulator/)** — Synthetic IPICO reader for local and E2E tests.
 
@@ -32,7 +32,8 @@
 
 - **[Receiver UI](../apps/receiver-ui/)** — Tauri v2 + SvelteKit desktop app.
 - **[Forwarder UI](../apps/forwarder-ui/)** — SvelteKit web UI for forwarder status/control.
-- **[Shared UI](../apps/shared-ui/)** — Shared Svelte components and help metadata.
+- **[Server UI](../apps/server-ui/)** — SvelteKit web UI embedded in the server for admin, SBC setup, and status views.
+- **[Shared UI](../apps/shared-ui/)** — Shared Svelte components, help metadata, and validation logic.
 
 ## Protocol & Internals
 
@@ -44,6 +45,9 @@
 - **[emulator](../crates/emulator/)** — IPICO reader emulator library.
 - **[rt-test-utils](../crates/rt-test-utils/)** — P2P loopback harness utilities.
 - **[rt-updater](../crates/rt-updater/)** — Auto-updater workflow.
+- **[rt-screen](../crates/rt-screen/)** — Forwarder screen/e-ink/LCD state and rendering helpers.
+- **[rt-ui-http](../crates/rt-ui-http/)** — Shared static UI serving helpers for embedded web apps.
+- **[rt-ui-log](../crates/rt-ui-log/)** — Shared in-memory UI log buffer types.
 - **[IPICO control protocol](ipico-protocol/ipico-control-protocol.md)** — Reader control commands.
 
 ## Testing

@@ -4,7 +4,7 @@ Core IPICO chip-read parsing and validation library.
 
 ## Purpose
 
-Provides the shared data types and parsing logic for IPICO timing system chip reads. The parser accepts UTF-8 strings, validates the checksum and structure, and returns typed values. Used by the forwarder, server, streamer, and emulator services.
+Provides the shared data types and parsing logic for IPICO timing system chip reads. The parser accepts UTF-8 strings, validates the checksum and structure, and returns typed values. Used by the forwarder, receiver DBF writer, streamer, emulator service, `rt-emulator` crate, and `timer-core` re-exports.
 
 The parser accepts both legacy ASCII `aa...FS` / `aa...LS` suffixes used in this repo's fixtures and TTO-enabled ASCII `aa` frames where the reader appends index/page/tamper bytes before the checksum.
 

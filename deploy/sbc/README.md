@@ -14,7 +14,7 @@ values, and installs the systemd service.
 - An SD card (16 GB+ recommended)
 - [Raspberry Pi Imager](https://www.raspberrypi.com/software/) 2.0 or later
 - A computer on the same network as the Pi
-- A forwarder auth token from the server operator
+- A forwarder enrollment voucher from the server operator
 
 ## Step 1 -- Flash the SD Card
 
@@ -53,15 +53,16 @@ To enable fully automatic first boot (no SSH setup commands), use:
 uv run scripts/sbc_cloud_init.py --auto-first-boot
 ```
 
-This mode also asks for forwarder setup values (server URL, token, reader
-targets), then embeds a one-time non-interactive `rt-setup.sh` run in
+This mode also asks for forwarder setup values (server URL, enrollment voucher,
+reader targets), then embeds a one-time non-interactive `rt-setup.sh` run in
 `user-data`.
 The setup writes `display_name` to match the configured hostname.
 It also enables forwarder device power controls by default
 (`RT_SETUP_ALLOW_POWER_ACTIONS=1`).
 
-> **Security note:** `--auto-first-boot` stores the forwarder token in cloud-init
-> data on the SD card. Use a scoped per-device token and rotate/revoke as needed.
+> **Security note:** `--auto-first-boot` stores the forwarder enrollment voucher
+> in cloud-init data on the SD card. Use a scoped voucher and revoke/rotate as
+> needed.
 >
 > **Network trust model:** LAN-accessible unauthenticated status/control endpoints
 > are expected in this deployment model. Treat the forwarder network as trusted
@@ -162,7 +163,7 @@ The wizard will prompt you for:
 | Prompt | Example | Notes |
 |---|---|---|
 | Server URL | `https://server.example.com` | Must start with `http://` or `https://` |
-| Auth token | *(hidden input)* | Bearer token for server registration and allow-list fetches |
+| Auth token | *(hidden input)* | Enrollment voucher used to register with the server and mint a per-device token |
 | Reader target(s) | `192.168.1.100:10000` | IP:PORT of each IPICO reader; enter one per line, blank line to finish |
 | Status HTTP bind address | `0.0.0.0:80` | Press Enter to accept the default |
 
@@ -256,5 +257,5 @@ for full configuration options and operational procedures.
 | Setup script fails to download binary | No internet access on Pi | Check the network connection. Ensure the Pi can reach the internet. |
 | Forwarder won't start | Bad config or unreachable readers | Check logs: `journalctl -u rt-forwarder -n 50` |
 | "permission denied" errors | Script not running as root | Run with `sudo bash rt-setup.sh` |
-| Forwarder starts but no receiver gets events | Wrong server URL, token, or allow-list | Verify `p2p.server_url` in `/etc/rusty-timer/forwarder.toml`, check the token in `/etc/rusty-timer/forwarder.token`, and confirm receiver allow-list entries on the server. |
+| Forwarder starts but no receiver gets events | Wrong server URL, voucher/device token, or allow-list | Verify `p2p.server_url` in `/etc/rusty-timer/forwarder.toml`, check the token files in `/etc/rusty-timer/forwarder.token` and `/var/lib/rusty-timer/p2p-device-token`, and confirm receiver allow-list entries on the server. |
 | Can't reach Pi after setting static IP | Wrong subnet or IP conflict | Verify the IP/subnet in `network-config` matches your network. Check for IP conflicts. Connect a monitor to see boot logs. |

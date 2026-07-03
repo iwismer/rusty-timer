@@ -27,18 +27,19 @@ The forwarder:
 5. Copy both files to the Raspberry Pi boot partition and boot the SBC.
 6. Approve the newly registered forwarder in the Server UI `Admin` tab.
 
-Revoking an unused token prevents first registration. Revoking a used token
-blocks future per-device forwarder catalog and allow-list requests made with
-that token. Revocation does not delete existing forwarder status or approval
-records.
+Revoking an unused enrollment token prevents first registration. Revoking a
+used enrollment token blocks recovery/re-registration with that voucher; a
+forwarder that already persisted a minted per-device token continues to
+authenticate with that minted token unless the device itself is deactivated or
+re-enrolled.
 
 ## Startup
 
 1. Confirm the reader is reachable from the SBC LAN.
 2. Confirm `forwarder.toml` points at the local reader address and the intended
    data directory.
-3. Confirm the server URL and M2M token are configured for registration and
-   allow-list polling.
+3. Confirm the server URL, enrollment voucher, and writable minted-token cache
+   path are configured for registration and allow-list polling.
 4. Start or restart the service:
 
    ```bash

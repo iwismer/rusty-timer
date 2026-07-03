@@ -23,11 +23,11 @@ cargo test --workspace
 # Deterministic loopback P2P stack assertions
 uv run scripts/e2e/run_stack.py
 
-# Receiver UI tests
-(cd apps/receiver-ui && npm test)
+# Frontend tests for every npm workspace that defines a test script
+npm test --workspaces --if-present
 
-# Forwarder UI tests
-(cd apps/forwarder-ui && npm test)
+# Frontend type checks for every npm workspace that defines a check script
+npm run check --workspaces --if-present
 
 # Packaging validation
 (cd "$(git rev-parse --show-toplevel)" && bash scripts/validate-packaging.sh)
@@ -39,12 +39,11 @@ uv run scripts/e2e/run_stack.py
 # Format Rust
 cargo fmt --all
 
-# Lint Rust
-cargo clippy --workspace --all-targets
+# Lint Rust (matches the pre-commit hook's shipped-crate scope)
+cargo clippy --workspace --all-targets --exclude receiver-tauri
 
 # Format JS/TS
-(cd apps/receiver-ui && npm run format)
-(cd apps/forwarder-ui && npm run format)
+npm run format --workspaces --if-present
 ```
 
 ## Git Hooks
@@ -55,4 +54,4 @@ Run once per clone:
 git config core.hooksPath .githooks
 ```
 
-The pre-commit hook checks Rust formatting, runs Clippy, and for touched frontend apps runs `npm run lint` and `npm run check`.
+The pre-commit hook checks Rust formatting, runs Clippy with `receiver-tauri` excluded, and for touched forwarder/receiver frontend apps runs `npm run lint` and `npm run check`.

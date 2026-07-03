@@ -24,8 +24,11 @@ npm run format
 
 The build output is embedded in the forwarder binary via `rust-embed` behind the `embed-ui` feature flag.
 
-## Epoch name controls
+## Reader controls
 
-- The UI supports setting a current epoch name via the server-backed API path.
-- The UI supports clearing the current epoch name via the same server-backed API path.
-- These controls are available through server-backed race epoch APIs.
+- The UI supports setting and clearing a reader's current epoch name through the
+  forwarder's local `PUT /api/v1/streams/{reader_ip}/current-epoch/name` API.
+- The UI supports advancing/resetting a stream epoch through the forwarder's
+  local `POST /api/v1/streams/{reader_ip}/reset-epoch` API.
+- Reader detail controls also cover clock sync, read mode, TTO state, record
+  download, and record clearing through local forwarder APIs.
