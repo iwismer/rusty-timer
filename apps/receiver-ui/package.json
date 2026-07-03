@@ -20,7 +20,6 @@
     "@tauri-apps/plugin-updater": "^2.9.1"
   },
   "devDependencies": {
-    "@playwright/test": "^1.40.0",
     "@rusty-timer/shared-ui": "*",
     "@sveltejs/adapter-static": "^3.0.0",
     "@sveltejs/kit": "^2.0.0",
