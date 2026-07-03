@@ -27,6 +27,21 @@ pub struct AnnouncerRow {
     pub division: Option<String>,
 }
 
+impl From<AnnouncerInputEvent> for AnnouncerRow {
+    fn from(event: AnnouncerInputEvent) -> Self {
+        Self {
+            stream_id: event.stream_id,
+            seq: event.seq,
+            chip_id: event.chip_id,
+            bib: event.bib,
+            display_name: event.display_name,
+            reader_timestamp: event.reader_timestamp,
+            received_at: event.received_at,
+            division: event.division,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AnnouncerDelta {
     pub row: AnnouncerRow,
@@ -79,16 +94,7 @@ impl AnnouncerRuntime {
 
         self.finisher_count += 1;
 
-        let row = AnnouncerRow {
-            stream_id: event.stream_id,
-            seq: event.seq,
-            chip_id: event.chip_id,
-            bib: event.bib,
-            display_name: event.display_name,
-            reader_timestamp: event.reader_timestamp,
-            received_at: event.received_at,
-            division: event.division,
-        };
+        let row = AnnouncerRow::from(event);
 
         self.rows.push_front(row.clone());
         while self.rows.len() > max_list_size {

@@ -525,10 +525,10 @@ def post_json(url: str, body: dict, *, headers: dict[str, str] | None = None) ->
     return json.loads(payload) if payload else {}
 
 
-def server_approve_device(base_url: str, endpoint_id: str, display_name: str) -> dict:
+def server_approve_device(base_url: str, endpoint_id: str) -> dict:
     return post_json(
         f"{base_url}/admin/devices/approve",
-        {"endpoint_id": endpoint_id, "display_name": display_name},
+        {"endpoint_id": endpoint_id},
         headers={"Remote-User": "rt-e2e-admin"},
     )
 
@@ -827,7 +827,7 @@ allowlist_request_timeout_secs = 2
     # forwarder is required; the receiver is approved later in the scenario).
     wait_until(lambda: server_device_approval(server_url, forwarder_node_id) is not None,
                timeout=15, what="forwarder self-registration")
-    server_approve_device(server_url, forwarder_node_id, "E2E Forwarder")
+    server_approve_device(server_url, forwarder_node_id)
     print("[up] forwarder approved")
 
     # --- 4. receiver-headless (bridge + P2P + server announcer) ---
@@ -879,7 +879,7 @@ allowlist_request_timeout_secs = 2
                   pending_forwarder.get("state") != "subscribed",
                   f"state={pending_forwarder.get('state')} pending={pending_forwarder.get('pending')}")
 
-    approved = server_approve_device(server_url, receiver_node_id, "E2E Receiver")
+    approved = server_approve_device(server_url, receiver_node_id)
     results.expect_eq("connections: admin approval returns active receiver",
                       approved.get("approval_state"), "active")
 
@@ -1240,7 +1240,7 @@ static_allowed_receivers = ["{receiver_node_id}"]
     # admits it on the data plane regardless; this gates only the server plane.
     wait_until(lambda: server_device_approval(server_url, receiver_node_id) is not None,
                timeout=15, what="receiver self-registration")
-    server_approve_device(server_url, receiver_node_id, "E2E Receiver")
+    server_approve_device(server_url, receiver_node_id)
     print("[up] receiver approved")
 
     # --- Power-loss lane: SIGKILL the target mid-stream, then restart ---
