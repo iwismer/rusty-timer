@@ -21,6 +21,7 @@ mod data;
 mod endpoint;
 mod reader_control;
 mod remote_config;
+mod server_client;
 
 use std::net::SocketAddrV4;
 use std::num::TryFromIntError;
@@ -37,12 +38,7 @@ use rt_p2p_protocol::{StreamCatalog, StreamEntry};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 
-pub use allowlist::{
-    ALLOWLIST_PUSH_HOLD, AllowList, AllowListRefreshError, CatalogPushError,
-    DEFAULT_ALLOWLIST_POLL_INTERVAL, ForwarderCatalog, ForwarderCatalogStream,
-    ReceiverAllowListUpdate, ServerAllowListClient, ServerCatalogClient, apply_receiver_update,
-    fetch_and_apply_once, run_allowlist_distribution, run_allowlist_push_subscription,
-};
+pub use allowlist::AllowList;
 pub use control::{
     CatalogProvider, ConfigGetFuture, ConfigSetFuture, ControlEvent, ControlEventReceiver,
     ControlEventSender, HeartbeatConfig, NoopReaderControlHandler, NoopRemoteConfigHandler,
@@ -54,6 +50,12 @@ pub use data::{DataConfig, serve_data_streams};
 pub use endpoint::P2pEndpoint;
 pub use reader_control::ForwarderReaderControlHandler;
 pub use remote_config::ForwarderRemoteConfigHandler;
+pub use server_client::{
+    ALLOWLIST_PUSH_HOLD, AllowListRefreshError, CatalogPushError, DEFAULT_ALLOWLIST_POLL_INTERVAL,
+    ForwarderCatalog, ForwarderCatalogStream, ReceiverAllowListUpdate, ServerAllowListClient,
+    ServerCatalogClient, apply_receiver_update, fetch_and_apply_once, run_allowlist_distribution,
+    run_allowlist_push_subscription,
+};
 
 const DEFAULT_P2P_SECRET_KEY_PATH: &str = "/var/lib/rusty-timer/p2p-secret.key";
 const DEFAULT_FORWARDER_CATALOG_PUSH_INTERVAL: Duration = Duration::from_secs(30);
