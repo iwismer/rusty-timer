@@ -1154,7 +1154,21 @@ impl AppState {
         let statuses = self.forwarder_runtime.lock().unwrap().clone();
         let (intents, subscriptions) = {
             let db = self.db.lock().await;
-            let intents = db.load_forwarder_intents().unwrap_or_default();
+            let intents = match db.load_forwarder_intents() {
+                Ok(intents) => intents,
+                Err(error) => {
+                    warn!(error = %error, "failed to load forwarder intents for connection state");
+                    // Match the sync fallback's error-time source of truth: the
+                    // cache contains only explicit disconnect intents; missing
+                    // endpoints still default to connect below.
+                    self.disconnected_intents
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|endpoint_id| (endpoint_id.clone(), false))
+                        .collect()
+                }
+            };
             let subscriptions = match db.load_stream_subscriptions() {
                 Ok(subscriptions) => subscriptions,
                 Err(error) => {
@@ -4820,14 +4834,39 @@ mod tests {
         // Restart-shaped: the intent cache must be seeded from persisted
         // intents during AppState construction, so a forwarder disconnected
         // before a restart never shows Connecting through the sync fallback.
-        let db = Db::open_in_memory().unwrap();
-        db.set_forwarder_intent("endpoint-1", false).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("receiver-test.sqlite3");
+        {
+            let db = Db::open(&db_path).unwrap();
+            db.set_forwarder_intent("endpoint-1", false).unwrap();
+        }
+        let db = Db::open(&db_path).unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
 
         // Runtime status entry with no live sessions, as the reconcile loop
         // would leave behind for a known forwarder.
         state.update_forwarder_runtime_sync("endpoint-1", |_status| {});
         state.recompute_aggregate_connection_state_sync_default_trying();
+
+        assert_eq!(
+            *state.connection_state.borrow(),
+            ConnectionState::Disconnected
+        );
+    }
+
+    #[tokio::test]
+    async fn async_recompute_uses_intent_cache_when_intent_load_fails() {
+        let db = Db::open_in_memory().unwrap();
+        db.set_forwarder_intent("endpoint-1", false).unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        state.update_forwarder_runtime_sync("endpoint-1", |_status| {});
+        {
+            let db = state.db.lock().await;
+            db.raw_execute_for_test("DROP TABLE forwarder_intent", rusqlite::params![])
+                .unwrap();
+        }
+
+        state.recompute_aggregate_connection_state().await;
 
         assert_eq!(
             *state.connection_state.borrow(),
