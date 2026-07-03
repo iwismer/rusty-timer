@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use prost::Message;
 use rt_iroh::{RecvStream, SendStream};
-use rt_p2p_protocol::{MAX_FRAME_BYTES, encode_frame};
+use rt_p2p_protocol::{decode_frame_len, decode_frame_payload, encode_frame};
 
 pub use mock_forwarder::{ForwarderScript, MockForwarderPeer};
 pub use mock_receiver::{DataSubscription, MockReceiverPeer, ReceiverSession};
@@ -47,14 +47,10 @@ where
 {
     let mut len_buf = [0u8; 4];
     recv.read_exact(&mut len_buf).await?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    if len > MAX_FRAME_BYTES {
-        return Err(format!("frame length {len} exceeds MAX_FRAME_BYTES {MAX_FRAME_BYTES}").into());
-    }
-
+    let len = decode_frame_len(len_buf)?;
     let mut payload = vec![0u8; len];
     recv.read_exact(&mut payload).await?;
-    Ok(M::decode(payload.as_slice())?)
+    Ok(decode_frame_payload(len_buf, payload.as_slice())?)
 }
 
 /// Test-only connectivity fault shim.

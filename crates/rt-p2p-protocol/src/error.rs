@@ -103,6 +103,8 @@ pub enum ProtocolError {
         retryable: bool,
         /// Stream the error pertains to, if any.
         stream_id: Option<Vec<u8>>,
+        /// Advertised payload length.
+        length: usize,
     },
     /// A protobuf payload could not be decoded.
     #[error("decode error: {source}")]
@@ -188,8 +190,16 @@ impl ProtocolError {
         }
     }
 
-    pub(crate) fn frame_too_large() -> Self {
+    pub(crate) fn frame_too_large(length: usize) -> Self {
         Self::FrameTooLarge {
+            retryable: false,
+            stream_id: None,
+            length,
+        }
+    }
+
+    pub(crate) fn protocol_violation() -> Self {
+        Self::ProtocolViolation {
             retryable: false,
             stream_id: None,
         }

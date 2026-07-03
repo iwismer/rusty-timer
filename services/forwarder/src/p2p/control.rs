@@ -29,8 +29,8 @@ use rt_p2p_protocol::{
     ConfigSetRequest, ConfigSetResponse, ControlC2F, ControlF2C, DownloadProgress, Hello,
     MAX_FRAME_BYTES, Ping, Pong, ProtocolError, ProtocolErrorCode, ReaderControlRequest,
     ReaderControlResponse, ReaderInfo, ReaderStatus, RestartRequest, RestartResponse,
-    StreamCatalog, SyncClock, UpsStatus, WireProtocolError, control_c2f, control_f2c, encode_frame,
-    has_capability, negotiate,
+    StreamCatalog, SyncClock, UpsStatus, WireProtocolError, control_c2f, control_f2c,
+    decode_frame_len, decode_frame_payload, encode_frame, has_capability, negotiate,
 };
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
@@ -949,14 +949,10 @@ where
 {
     let mut len_buf = [0u8; 4];
     recv.read_exact(&mut len_buf).await?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    if len > MAX_FRAME_BYTES {
-        return Err(format!("frame length {len} exceeds MAX_FRAME_BYTES {MAX_FRAME_BYTES}").into());
-    }
-
+    let len = decode_frame_len(len_buf)?;
     let mut payload = vec![0u8; len];
     recv.read_exact(&mut payload).await?;
-    Ok(M::decode(payload.as_slice())?)
+    Ok(decode_frame_payload(len_buf, payload.as_slice())?)
 }
 
 #[cfg(test)]
