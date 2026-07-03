@@ -554,7 +554,6 @@ async fn run_reconcile_loop(
                     for (_endpoint_id, worker) in workers.drain() {
                         worker.stop().await;
                     }
-                    state.clear_stream_metrics_cache().await;
                     state.emit_streams_snapshot().await;
                 }
             }

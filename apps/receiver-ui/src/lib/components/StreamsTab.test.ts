@@ -27,6 +27,8 @@ describe("StreamsTab", () => {
     });
     apiMocks.putSubscriptions.mockResolvedValue(undefined);
     store.streamActionBusy = false;
+    store.streamSubscriptionPendingSince = {};
+    store.streamActivityAt = new Map();
     store.streamEventTypeBusy = {};
     store.earliestEpochOptions = {};
     store.earliestEpochLoading = {};
@@ -318,6 +320,41 @@ describe("StreamsTab", () => {
       degraded: false,
       upstream_error: null,
     };
+    apiMocks.getStreams.mockResolvedValue({
+      streams: [
+        {
+          forwarder_endpoint_id: "endpoint-existing",
+          stream_id: "reader-existing",
+          forwarder_id: "fwd-existing",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 10100,
+          event_type: "start",
+          online: true,
+          reader_connected: true,
+        },
+        {
+          forwarder_endpoint_id: "endpoint-available",
+          stream_id: "reader-available",
+          forwarder_id: "fwd-available",
+          reader_ip: "10.0.0.2:10000",
+          subscribed: true,
+          local_port: null,
+          online: false,
+          reader_connected: null,
+        },
+        {
+          forwarder_endpoint_id: "endpoint-canonical",
+          stream_id: "reader-canonical",
+          subscribed: true,
+          local_port: null,
+          online: false,
+          reader_connected: null,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
 
     render(StreamsTab);
 
@@ -350,6 +387,9 @@ describe("StreamsTab", () => {
           event_type: "finish",
         },
       ]);
+    });
+    await waitFor(() => {
+      expect(screen.getAllByText("Subscribing…")).toHaveLength(2);
     });
   });
 

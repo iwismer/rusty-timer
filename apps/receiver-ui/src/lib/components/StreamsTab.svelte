@@ -6,6 +6,8 @@
     store,
     streamKey,
     streamIdentity,
+    streamHasRecentActivity,
+    streamIsOptimisticallySubscribing,
     toggleSubscription,
     subscribeAllAvailable,
     setStreamAnnouncerPublish,
@@ -21,6 +23,12 @@
   } from "$lib/store.svelte";
   import type { StreamEntry } from "$lib/api";
   import { btnPrimary, btnSecondary } from "$lib/ui-classes";
+  import {
+    deriveStreamDisplayStatus,
+    streamDisplayBadge,
+    streamDisplayDotClass,
+    streamDisplayLabel,
+  } from "$lib/stream-status";
 
   let tableWidth = $state(0);
   let expandedKey = $state<string | null>(null);
@@ -47,16 +55,6 @@
 
   function showLastReadCol(): boolean {
     return availableLastReadWidth() >= TIME_W;
-  }
-
-  function dotClass(
-    online: boolean | undefined | null,
-    readerConnected: boolean | undefined | null,
-  ): string {
-    if (online === true && readerConnected === true) return "bg-status-ok";
-    if (online === true && readerConnected !== true) return "bg-status-warn";
-    if (online === false) return "bg-status-err";
-    return "bg-status-warn";
   }
 
   function toggleExpand(stream: StreamEntry) {
@@ -256,6 +254,11 @@
             )}
             {@const primaryLabel = streamPrimaryLabel(stream)}
             {@const secondaryLabel = streamSecondaryLabel(stream)}
+            {@const displayStatus = deriveStreamDisplayStatus(stream, {
+              recentActivity: streamHasRecentActivity(stream),
+              optimisticSubscribing: streamIsOptimisticallySubscribing(stream),
+            })}
+            {@const displayBadge = streamDisplayBadge(displayStatus)}
             <tr
               class="border-b border-border/50 hover:bg-surface-1/50 cursor-pointer {stream.subscribed
                 ? ''
@@ -273,10 +276,11 @@
               <td class="w-px whitespace-nowrap py-2 px-4">
                 <div class="flex items-center gap-2 min-w-0">
                   <span
-                    class="w-2.5 h-2.5 rounded-full shrink-0 {dotClass(
-                      stream.online,
-                      stream.reader_connected,
+                    class="w-2.5 h-2.5 rounded-full shrink-0 {streamDisplayDotClass(
+                      displayStatus,
                     )}"
+                    title={streamDisplayLabel(displayStatus)}
+                    aria-label={streamDisplayLabel(displayStatus)}
                   ></span>
                   <div class="min-w-0">
                     <div class="flex items-center gap-2">
@@ -292,6 +296,12 @@
                           class="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-muted"
                         >
                           Available
+                        </span>
+                      {:else if displayBadge}
+                        <span
+                          class="rounded border border-status-warn-border bg-status-warn-bg px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-status-warn"
+                        >
+                          {displayBadge}
                         </span>
                       {/if}
                     </div>

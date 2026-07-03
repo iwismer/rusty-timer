@@ -61,6 +61,7 @@ export const store = $state({
   streams: null as StreamsResponse | null,
   lastReads: new Map<string, LastRead>(),
   streamMetrics: new Map<string, api.StreamMetrics>(),
+  streamActivityAt: new Map<string, number>(),
 
   // Forwarders
   forwarders: null as api.ForwarderEntry[] | null,
@@ -136,6 +137,7 @@ export const store = $state({
 
   // Stream action state
   streamActionBusy: false,
+  streamSubscriptionPendingSince: {} as Record<string, number>,
   streamEventTypeBusy: {} as Record<string, boolean>,
   streamAnnouncerBusy: {} as Record<string, boolean>,
 
@@ -155,6 +157,8 @@ let modeEditVersion = 0;
 let modeMutationVersion = 0;
 let streamRefreshVersion = 0;
 let lastConcreteEpochByKey = new Map<string, number>();
+const STREAM_ACTIVITY_RECENCY_MS = 10_000;
+const STREAM_SUBSCRIBE_GRACE_MS = 10_000;
 
 // Load queue
 let loadAllInFlight = false;
@@ -298,6 +302,79 @@ export function streamIdentity(stream: {
   stream_id: string;
 }): string {
   return `${stream.forwarder_endpoint_id}/${stream.stream_id}`;
+}
+
+export function streamHasRecentActivity(
+  stream: Pick<api.StreamEntry, "forwarder_id" | "reader_ip">,
+  now = Date.now(),
+): boolean {
+  const lastActivity = store.streamActivityAt.get(
+    streamKey(stream.forwarder_id, stream.reader_ip),
+  );
+  return (
+    lastActivity != null && now - lastActivity <= STREAM_ACTIVITY_RECENCY_MS
+  );
+}
+
+export function streamIsOptimisticallySubscribing(
+  stream: Pick<
+    api.StreamEntry,
+    | "forwarder_endpoint_id"
+    | "stream_id"
+    | "subscribed"
+    | "online"
+    | "forwarder_id"
+    | "reader_ip"
+  >,
+  now = Date.now(),
+): boolean {
+  if (!stream.subscribed || stream.online === true) return false;
+  if (streamHasRecentActivity(stream, now)) return false;
+  const pendingSince =
+    store.streamSubscriptionPendingSince[streamIdentity(stream)];
+  return (
+    pendingSince != null && now - pendingSince <= STREAM_SUBSCRIBE_GRACE_MS
+  );
+}
+
+function markSubscriptionPending(streams: api.StreamEntry[]): void {
+  const now = Date.now();
+  store.streamSubscriptionPendingSince = {
+    ...store.streamSubscriptionPendingSince,
+    ...Object.fromEntries(
+      streams.map((stream) => [streamIdentity(stream), now]),
+    ),
+  };
+}
+
+function clearSubscriptionPending(streams: api.StreamEntry[]): void {
+  const next = { ...store.streamSubscriptionPendingSince };
+  let changed = false;
+  const now = Date.now();
+  for (const stream of streams) {
+    const key = streamIdentity(stream);
+    const settled =
+      !stream.subscribed ||
+      stream.online === true ||
+      streamHasRecentActivity(stream, now);
+    const expired =
+      next[key] != null && now - next[key] > STREAM_SUBSCRIBE_GRACE_MS;
+    if ((settled || expired) && key in next) {
+      delete next[key];
+      changed = true;
+    }
+  }
+  if (changed) store.streamSubscriptionPendingSince = next;
+}
+
+function markLegacyStreamActivity(
+  forwarder_id: string,
+  reader_ip: string,
+  now = Date.now(),
+): void {
+  const next = new Map(store.streamActivityAt);
+  next.set(streamKey(forwarder_id, reader_ip), now);
+  store.streamActivityAt = next;
 }
 
 /// Build a lookup from canonical stream identity to the live `StreamEntry`,
@@ -708,6 +785,9 @@ export function markModeEdited(): void {
 
 function applyStreamCountUpdates(updates: StreamCountUpdate[]): boolean {
   if (updates.length === 0) return false;
+  for (const update of updates) {
+    markLegacyStreamActivity(update.forwarder_id, update.reader_ip);
+  }
   if (!store.streams) return true;
 
   const knownKeys = new Set(
@@ -786,6 +866,7 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
     }
     if (streamRefreshVersion === streamRefreshVersionAtStart) {
       store.streams = nextStreams;
+      clearSubscriptionPending(nextStreams.streams);
       lastConcreteEpochByKey = nextConcreteEpochs(
         lastConcreteEpochByKey,
         nextStreams.streams,
@@ -928,13 +1009,22 @@ export async function toggleSubscription(
       store.error = result.error;
       return;
     }
+    if (!stream.subscribed) {
+      markSubscriptionPending([stream]);
+    } else {
+      clearSubscriptionPending([{ ...stream, subscribed: false }]);
+    }
     await api.putSubscriptions(result.subscriptions!);
     const latestStreams = await api.getStreams();
     if (refreshVersion === streamRefreshVersion) {
       store.streams = latestStreams;
+      clearSubscriptionPending(latestStreams.streams);
       void prefetchEarliestEpochOptions(latestStreams.streams);
     }
   } catch (e) {
+    if (!stream.subscribed) {
+      clearSubscriptionPending([{ ...stream, subscribed: false }]);
+    }
     store.error = String(e);
   } finally {
     store.streamActionBusy = false;
@@ -945,17 +1035,23 @@ export async function subscribeAllAvailable(): Promise<void> {
   if (store.streamActionBusy || !store.streams) return;
   if (!store.streams.streams.some((stream) => !stream.subscribed)) return;
 
+  const pendingStreams = store.streams.streams.filter(
+    (stream) => !stream.subscribed,
+  );
   store.streamActionBusy = true;
   const refreshVersion = ++streamRefreshVersion;
   try {
     store.error = null;
+    markSubscriptionPending(pendingStreams);
     await api.putSubscriptions(buildAllSubscriptions(store.streams.streams));
     const latestStreams = await api.getStreams();
     if (refreshVersion === streamRefreshVersion) {
       store.streams = latestStreams;
+      clearSubscriptionPending(latestStreams.streams);
       void prefetchEarliestEpochOptions(latestStreams.streams);
     }
   } catch (e) {
+    clearSubscriptionPending(pendingStreams);
     store.error = String(e);
   } finally {
     store.streamActionBusy = false;
@@ -1467,6 +1563,7 @@ export function initStore(): void {
       }
       streamRefreshVersion += 1;
       store.streams = s;
+      clearSubscriptionPending(s.streams);
       void prefetchEarliestEpochOptions(s.streams, refreshEpochOptionKeys);
       // Prune stale metrics
       const currentKeys = new Set(
@@ -1515,6 +1612,8 @@ export function initStore(): void {
       applyHydratedMode(mode);
     },
     onLastRead: (read) => {
+      markLegacyStreamActivity(read.forwarder_id, read.reader_ip);
+      if (store.streams) clearSubscriptionPending(store.streams.streams);
       const key = streamKey(read.forwarder_id, read.reader_ip);
       const next = new Map(store.lastReads);
       next.set(key, read);
@@ -1538,6 +1637,7 @@ export function initStore(): void {
           reads_epoch: u.reads_epoch,
         })),
       );
+      if (store.streams) clearSubscriptionPending(store.streams.streams);
       if (needsResync) void loadAll();
       // Metrics + last read, keyed.
       const nextMetrics = new Map(store.streamMetrics);
