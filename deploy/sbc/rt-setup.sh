@@ -794,7 +794,7 @@ enabled = true
 backend = "lcd"
 
 [screen.lcd]
-rotation = "portrait"
+rotation = "portrait_inverted"
 min_refresh_interval_ms = 250
 telemetry_interval_secs = 10
 spi_bus = 0
