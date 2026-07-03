@@ -7,9 +7,10 @@
 //!
 //! - get -> [`crate::status_http::config_json_string`] (same body as
 //!   `GET /api/v1/config`),
-//! - set -> [`crate::status_http::write_config_json`] (parses the full config
-//!   document, validates via the canonical loader, writes the TOML file
-//!   atomically, and marks a restart as needed),
+//! - set -> [`crate::status_http::write_config_json_restricted`] (rejects
+//!   privileged section changes, parses the full config document, validates via
+//!   the canonical loader, writes the TOML file atomically, and marks a restart
+//!   as needed),
 //! - restart -> the same `restart_signal` [`Notify`] the HTTP restart endpoint
 //!   triggers.
 //!
@@ -28,7 +29,9 @@ use rt_p2p_protocol::{
 };
 use tokio::sync::{Mutex, Notify, broadcast};
 
-use crate::status_http::{ConfigState, SubsystemStatus, config_json_string, write_config_json};
+use crate::status_http::{
+    ConfigState, SubsystemStatus, config_json_string, write_config_json_restricted,
+};
 use crate::ui_events::ForwarderUiEvent;
 
 use super::control::{
@@ -122,7 +125,7 @@ impl RemoteConfigHandler for ForwarderRemoteConfigHandler {
                     error: REMOTE_CONFIG_DISABLED.to_owned(),
                 };
             }
-            match write_config_json(
+            match write_config_json_restricted(
                 &request.config_json,
                 &self.config_state,
                 &self.subsystem,
@@ -302,11 +305,21 @@ mod tests {
         let (config_path, _dir) = temp_config("");
         let h = handler(true, config_path.clone(), Arc::new(Notify::new()));
 
-        // schema_version 2 is rejected by the canonical loader.
+        // schema_version 2 is rejected by the canonical loader; keep protected
+        // sections unchanged so this remains a validation test.
+        let mut value: serde_json::Value = serde_json::from_str(
+            &h.get_config(ConfigGetRequest {
+                request_id: "g".into(),
+            })
+            .await
+            .config_json,
+        )
+        .unwrap();
+        value["schema_version"] = serde_json::json!(2);
         let response = h
             .set_config(ConfigSetRequest {
                 request_id: "s2".to_owned(),
-                config_json: r#"{"schema_version":2}"#.to_owned(),
+                config_json: serde_json::to_string(&value).unwrap(),
             })
             .await;
 
@@ -334,6 +347,204 @@ mod tests {
 
         assert!(!response.ok);
         assert_eq!(response.error, REMOTE_CONFIG_DISABLED);
+    }
+
+    #[tokio::test]
+    async fn set_rejects_p2p_section_changes() {
+        let (config_path, _dir) = temp_config("[p2p]\nenabled = false\n");
+        let h = handler(true, config_path.clone(), Arc::new(Notify::new()));
+        let mut value: serde_json::Value = serde_json::from_str(
+            &h.get_config(ConfigGetRequest {
+                request_id: "g".into(),
+            })
+            .await
+            .config_json,
+        )
+        .unwrap();
+
+        value["p2p"]["static_allowed_receivers"] = serde_json::json!(["ff".repeat(32)]);
+        let response = h
+            .set_config(ConfigSetRequest {
+                request_id: "s".into(),
+                config_json: serde_json::to_string(&value).unwrap(),
+            })
+            .await;
+
+        assert!(!response.ok);
+        assert!(
+            response.error.contains("p2p"),
+            "error must name the protected section: {}",
+            response.error
+        );
+        let cfg = crate::config::load_config_from_path(&config_path).unwrap();
+        assert!(cfg.p2p.static_allowed_receivers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_rejects_auth_section_changes() {
+        let (config_path, dir) = temp_config("");
+        let alternate_token_path = dir.path().join("alternate-token");
+        std::fs::write(&alternate_token_path, "alternate-token\n").expect("write alternate token");
+        let h = handler(true, config_path.clone(), Arc::new(Notify::new()));
+        let mut value: serde_json::Value = serde_json::from_str(
+            &h.get_config(ConfigGetRequest {
+                request_id: "g".into(),
+            })
+            .await
+            .config_json,
+        )
+        .unwrap();
+
+        value["auth"]["token_file"] = serde_json::json!(alternate_token_path.display().to_string());
+        let response = h
+            .set_config(ConfigSetRequest {
+                request_id: "s".into(),
+                config_json: serde_json::to_string(&value).unwrap(),
+            })
+            .await;
+
+        assert!(!response.ok);
+        assert!(
+            response.error.contains("auth"),
+            "error must name the protected section: {}",
+            response.error
+        );
+        let cfg = crate::config::load_config_from_path(&config_path).unwrap();
+        assert_eq!(cfg.token, "test-token");
+    }
+
+    #[tokio::test]
+    async fn set_rejects_control_section_changes() {
+        let (config_path, _dir) = temp_config("[control]\nallow_remote_config = true\n");
+        let h = handler(true, config_path.clone(), Arc::new(Notify::new()));
+        let mut value: serde_json::Value = serde_json::from_str(
+            &h.get_config(ConfigGetRequest {
+                request_id: "g".into(),
+            })
+            .await
+            .config_json,
+        )
+        .unwrap();
+
+        value["control"]["allow_remote_config"] = serde_json::json!(false);
+        let response = h
+            .set_config(ConfigSetRequest {
+                request_id: "s".into(),
+                config_json: serde_json::to_string(&value).unwrap(),
+            })
+            .await;
+
+        assert!(!response.ok);
+        assert!(
+            response.error.contains("control"),
+            "error must name the protected section: {}",
+            response.error
+        );
+        let cfg = crate::config::load_config_from_path(&config_path).unwrap();
+        assert!(cfg.control.allow_remote_config);
+    }
+
+    #[tokio::test]
+    async fn set_allows_operational_section_changes() {
+        let (config_path, dir) = temp_config("");
+        let h = handler(true, config_path.clone(), Arc::new(Notify::new()));
+        let mut value: serde_json::Value = serde_json::from_str(
+            &h.get_config(ConfigGetRequest {
+                request_id: "g".into(),
+            })
+            .await
+            .config_json,
+        )
+        .unwrap();
+        let sqlite_path = dir.path().join("edited.sqlite3");
+
+        value["display_name"] = serde_json::json!("Remote Edited Forwarder");
+        value["journal"] = serde_json::json!({
+            "sqlite_path": sqlite_path.display().to_string(),
+            "prune_watermark_pct": 80,
+        });
+        value["readers"] = serde_json::json!([
+            {
+                "target": "192.168.1.101",
+                "enabled": false,
+                "local_fallback_port": 10101,
+            }
+        ]);
+        let response = h
+            .set_config(ConfigSetRequest {
+                request_id: "s".into(),
+                config_json: serde_json::to_string(&value).unwrap(),
+            })
+            .await;
+
+        assert!(response.ok, "set should succeed: {}", response.error);
+        let cfg = crate::config::load_config_from_path(&config_path).unwrap();
+        assert_eq!(cfg.display_name.as_deref(), Some("Remote Edited Forwarder"));
+        assert_eq!(cfg.journal.sqlite_path, sqlite_path.display().to_string());
+        assert_eq!(cfg.journal.prune_watermark_pct, 80);
+        assert_eq!(cfg.readers.len(), 1);
+        assert_eq!(cfg.readers[0].target, "192.168.1.101");
+        assert!(!cfg.readers[0].enabled);
+        assert_eq!(cfg.readers[0].local_fallback_port, Some(10101));
+    }
+
+    #[tokio::test]
+    async fn set_allows_missing_control_to_all_null_control() {
+        let (config_path, _dir) = temp_config("");
+        let h = handler(true, config_path, Arc::new(Notify::new()));
+        let mut value: serde_json::Value = serde_json::from_str(
+            &h.get_config(ConfigGetRequest {
+                request_id: "g".into(),
+            })
+            .await
+            .config_json,
+        )
+        .unwrap();
+
+        value["control"] = serde_json::json!({
+            "allow_power_actions": null,
+            "allow_remote_config": null,
+            "allow_reader_control": null,
+        });
+        let response = h
+            .set_config(ConfigSetRequest {
+                request_id: "s".into(),
+                config_json: serde_json::to_string(&value).unwrap(),
+            })
+            .await;
+
+        assert!(response.ok, "set should succeed: {}", response.error);
+    }
+
+    #[tokio::test]
+    async fn set_rejects_populated_control_to_missing_control() {
+        let (config_path, _dir) = temp_config("[control]\nallow_remote_config = true\n");
+        let h = handler(true, config_path.clone(), Arc::new(Notify::new()));
+        let mut value: serde_json::Value = serde_json::from_str(
+            &h.get_config(ConfigGetRequest {
+                request_id: "g".into(),
+            })
+            .await
+            .config_json,
+        )
+        .unwrap();
+
+        value.as_object_mut().unwrap().remove("control");
+        let response = h
+            .set_config(ConfigSetRequest {
+                request_id: "s".into(),
+                config_json: serde_json::to_string(&value).unwrap(),
+            })
+            .await;
+
+        assert!(!response.ok);
+        assert!(
+            response.error.contains("control"),
+            "error must name the protected section: {}",
+            response.error
+        );
+        let cfg = crate::config::load_config_from_path(&config_path).unwrap();
+        assert!(cfg.control.allow_remote_config);
     }
 
     #[cfg(unix)]

@@ -86,6 +86,8 @@ or `server_url`.
 | `allow_remote_config` | `bool` | No | `true` | Allows receivers to read/write forwarder config over the P2P control plane. |
 | `allow_reader_control` | `bool` | No | `true` | Allows receivers to execute reader-control verbs (status, download, clear, epoch) over the P2P control plane. |
 
+Remote (P2P) config writes may not modify `[auth]`, `[p2p]`, or `[control]`; those sections are only editable locally.
+
 ### `[update]`
 
 | Field | Type | Required | Default | Description |

@@ -1762,6 +1762,16 @@ pub async fn config_json_string(
     Ok((json, restart_needed))
 }
 
+/// Sections a P2P peer may never change: identity/credentials (`auth`),
+/// transport trust (`p2p`), and the gates themselves (`control`).
+///
+/// Boundary rationale: `[auth]`/`[p2p]`/`[control]` changes are trust/identity
+/// escalation — permanent and self-granting; `[journal]`, `[[readers]]`, and
+/// display fields are the operational surface remote management exists to serve
+/// — a hostile allow-listed receiver can disrupt operations through them but
+/// cannot expand its own access.
+const REMOTE_PROTECTED_SECTIONS: &[&str] = &["auth", "p2p", "control"];
+
 /// Persist a full config document (the same JSON shape `config_json_string`
 /// returns) to the TOML config file, then mark a restart as needed.
 ///
@@ -1777,10 +1787,54 @@ pub async fn write_config_json(
     subsystem: &Arc<Mutex<SubsystemStatus>>,
     ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
 ) -> Result<(), String> {
-    let raw: crate::config::RawConfig =
+    let _lock = config_state.write_lock.lock().await;
+    write_config_json_locked(config_json, config_state, subsystem, ui_tx).await
+}
+
+/// Persist a full config document received from P2P remote config, rejecting
+/// any attempted change to privileged config sections before writing.
+pub async fn write_config_json_restricted(
+    config_json: &str,
+    config_state: &ConfigState,
+    subsystem: &Arc<Mutex<SubsystemStatus>>,
+    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
+) -> Result<(), String> {
+    let incoming: crate::config::RawConfig =
         serde_json::from_str(config_json).map_err(|e| format!("invalid config JSON: {e}"))?;
 
     let _lock = config_state.write_lock.lock().await;
+
+    let current_toml =
+        std::fs::read_to_string(&config_state.path).map_err(|e| format!("File read error: {e}"))?;
+    let current: crate::config::RawConfig =
+        toml::from_str(&current_toml).map_err(|e| format!("TOML parse error: {e}"))?;
+
+    let incoming_value =
+        serde_json::to_value(&incoming).map_err(|e| format!("JSON serialize error: {e}"))?;
+    let current_value =
+        serde_json::to_value(&current).map_err(|e| format!("JSON serialize error: {e}"))?;
+
+    for section in REMOTE_PROTECTED_SECTIONS {
+        if normalize_section(incoming_value.get(section))
+            != normalize_section(current_value.get(section))
+        {
+            return Err(format!(
+                "remote config may not modify the protected [{section}] section"
+            ));
+        }
+    }
+
+    write_config_json_locked(config_json, config_state, subsystem, ui_tx).await
+}
+
+async fn write_config_json_locked(
+    config_json: &str,
+    config_state: &ConfigState,
+    subsystem: &Arc<Mutex<SubsystemStatus>>,
+    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
+) -> Result<(), String> {
+    let raw: crate::config::RawConfig =
+        serde_json::from_str(config_json).map_err(|e| format!("invalid config JSON: {e}"))?;
 
     let new_toml =
         toml::to_string_pretty(&raw).map_err(|e| format!("TOML serialize error: {e}"))?;
@@ -1794,6 +1848,18 @@ pub async fn write_config_json(
 
     mark_restart_needed_and_emit(subsystem, ui_tx).await;
     Ok(())
+}
+
+/// A missing section, `null`, and an all-null object are equivalent RawConfig
+/// states.
+fn normalize_section(v: Option<&serde_json::Value>) -> serde_json::Value {
+    match v {
+        None | Some(serde_json::Value::Null) => serde_json::Value::Null,
+        Some(serde_json::Value::Object(map)) if map.values().all(serde_json::Value::is_null) => {
+            serde_json::Value::Null
+        }
+        Some(other) => other.clone(),
+    }
 }
 
 fn text_response(status: StatusCode, body: impl Into<String>) -> Response {
