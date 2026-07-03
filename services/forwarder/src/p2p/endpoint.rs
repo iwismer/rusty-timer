@@ -8,13 +8,10 @@
 //! negotiation, serves the [`StreamCatalog`](rt_p2p_protocol::StreamCatalog),
 //! and runs the heartbeat until the peer disconnects or is declared dead.
 
-use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rt_iroh::{
-    Connection, Endpoint, EndpointAddr, EndpointBuilder, EndpointId, load_or_create_secret_key,
-};
+use rt_iroh::{Connection, Endpoint, EndpointAddr, EndpointBuilder, EndpointId};
 use rt_p2p_protocol::{CAP_CONTROL_EVENTS, has_capability};
 use tokio::sync::{Mutex, broadcast, mpsc};
 
@@ -91,28 +88,14 @@ impl std::fmt::Debug for P2pEndpoint {
 }
 
 impl P2pEndpoint {
-    /// Binds the endpoint, loading or creating the persistent secret key at
-    /// `secret_key_path`. Admitted peers are served the catalog from `catalog`.
-    pub async fn bind(
-        secret_key_path: impl AsRef<Path>,
-        allow_list: AllowList,
-        catalog: Arc<dyn CatalogProvider>,
-        journal: Arc<Mutex<Journal>>,
-    ) -> Result<Self, rt_iroh::Error> {
-        let secret_key = load_or_create_secret_key(secret_key_path)?;
-        Self::bind_with_builder(
-            EndpointBuilder::default().secret_key(secret_key),
-            allow_list,
-            catalog,
-            journal,
-            DataConfig::default(),
-        )
-        .await
-    }
-
     /// Binds an endpoint from an explicit builder. Production startup uses this
     /// to apply loopback/test transport knobs from config without exposing raw
     /// iroh APIs to the binary.
+    ///
+    /// This is the only constructor: it forces callers to supply a
+    /// [`DataConfig`], whose read-journal factory the data plane requires
+    /// (a default config would serve an endpoint whose data subscriptions
+    /// always fail).
     pub async fn bind_with_builder(
         builder: EndpointBuilder,
         allow_list: AllowList,

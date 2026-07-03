@@ -146,12 +146,6 @@ impl ReadJournal {
         &self.conn
     }
 
-    pub fn current_epoch_and_next_seq(&self, stream_key: &str) -> Result<(i64, i64), JournalError> {
-        let epoch = current_epoch(&self.conn, stream_key)?;
-        let next_seq = next_seq(&self.conn, stream_key)?;
-        Ok((epoch, next_seq))
-    }
-
     pub fn retention_state(&self, stream_key: &str) -> Result<RetentionState, JournalError> {
         retention_state(&self.conn, stream_key)
     }
@@ -992,9 +986,11 @@ fn delete_candidates(
 }
 
 fn apply_read_pragmas(conn: &Connection) -> Result<(), JournalError> {
+    // No journal_mode here: the writer sets WAL, and a read-only connection
+    // cannot change it. wal_autocheckpoint is also omitted: read-only
+    // connections never commit, so they never trigger autocheckpoints.
     conn.execute_batch(
         "PRAGMA query_only=ON;
-         PRAGMA wal_autocheckpoint=1000;
          PRAGMA busy_timeout=5000;
          PRAGMA foreign_keys=ON;",
     )?;
@@ -1137,11 +1133,6 @@ mod tests {
         let retention = read.retention_state("stream-a").expect("retention");
         assert_eq!(retention.earliest_available_seq, 1);
         assert_eq!(read.latest_committed_seq("stream-a").expect("latest"), 1);
-        assert_eq!(
-            read.current_epoch_and_next_seq("stream-a")
-                .expect("epoch and next seq"),
-            (7, 2)
-        );
         let events = read
             .read_events_after("stream-a", 0, 10)
             .expect("read events");
