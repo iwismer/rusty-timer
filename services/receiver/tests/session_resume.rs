@@ -1,3 +1,4 @@
+use receiver::stream_key::LocalStreamKey;
 use rt_domain::{ReceiverMode, ReplayTarget};
 use rusqlite::Connection;
 use std::path::Path;
@@ -94,13 +95,20 @@ fn earliest_epochs_survive_reopen() {
 
     {
         let db = receiver::db::Db::open(&db_path).unwrap();
-        db.save_earliest_epoch("f1", "10.0.0.1", 3).unwrap();
+        db.save_stream_earliest_epoch("endpoint-1", "10.0.0.1", 3)
+            .unwrap();
     }
 
     let reopened = receiver::db::Db::open(&db_path).unwrap();
     assert_eq!(
-        reopened.load_earliest_epochs().unwrap(),
-        vec![("f1".to_owned(), "10.0.0.1".to_owned(), 3)]
+        reopened.load_stream_earliest_epochs().unwrap(),
+        vec![receiver::db::StreamEarliestEpoch {
+            stream_id: LocalStreamKey::new("endpoint-1", "10.0.0.1")
+                .as_str()
+                .to_owned(),
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            earliest_epoch: 3,
+        }]
     );
 }
 

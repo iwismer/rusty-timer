@@ -1,5 +1,5 @@
+use receiver::Subscription;
 use receiver::ports::{PortAssignment, default_port, last_octet, resolve_ports, stream_key};
-use receiver::{Db, Subscription};
 
 #[test]
 fn default_port_mapping_100() {
@@ -182,35 +182,4 @@ fn collision_via_override_ports() {
         r[&stream_key("f", "10.0.0.2:10000")],
         PortAssignment::Collision { wanted: 8000, .. }
     ));
-}
-#[test]
-fn port_assignments_loaded_from_db() {
-    let db = Db::open_in_memory().unwrap();
-    db.save_subscription("f", "192.168.1.100:10000", None, None)
-        .unwrap();
-    db.save_subscription("f", "192.168.1.200:10000", None, None)
-        .unwrap();
-    let subs = db.load_subscriptions().unwrap();
-    let r = resolve_ports(&subs);
-    assert_eq!(r.len(), 2);
-    assert!(matches!(
-        r[&stream_key("f", "192.168.1.100:10000")],
-        PortAssignment::Assigned(10100)
-    ));
-    assert!(matches!(
-        r[&stream_key("f", "192.168.1.200:10000")],
-        PortAssignment::Assigned(10200)
-    ));
-}
-#[test]
-fn port_override_from_db_subscription() {
-    let db = Db::open_in_memory().unwrap();
-    db.save_subscription("f", "192.168.1.100:10000", Some(7777), None)
-        .unwrap();
-    let subs = db.load_subscriptions().unwrap();
-    let r = resolve_ports(&subs);
-    assert_eq!(
-        r[&stream_key("f", "192.168.1.100:10000")],
-        PortAssignment::Assigned(7777)
-    );
 }

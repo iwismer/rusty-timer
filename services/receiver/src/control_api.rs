@@ -211,6 +211,28 @@ fn optional_non_empty(value: String) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
+fn validate_stream_identity(
+    forwarder_endpoint_id: &str,
+    stream_id: &str,
+) -> Result<(), ReceiverError> {
+    if forwarder_endpoint_id.trim().is_empty() {
+        return Err(ReceiverError::BadRequest(
+            "forwarder_endpoint_id must not be empty".to_owned(),
+        ));
+    }
+    if forwarder_endpoint_id.contains('\u{1f}') {
+        return Err(ReceiverError::BadRequest(
+            "forwarder_endpoint_id must not contain the stream key separator".to_owned(),
+        ));
+    }
+    if stream_id.trim().is_empty() {
+        return Err(ReceiverError::BadRequest(
+            "stream_id must not be empty".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_reader_info_json(
     reader_info_json: Option<&str>,
     endpoint_id: &str,
@@ -1916,6 +1938,7 @@ pub async fn set_stream_announcer_publish(
     stream_id: &str,
     publish: bool,
 ) -> Result<(), ReceiverError> {
+    validate_stream_identity(forwarder_endpoint_id, stream_id)?;
     let local_stream_key = LocalStreamKey::new(forwarder_endpoint_id, stream_id);
     {
         let db = state.db.lock().await;
@@ -2119,6 +2142,7 @@ pub async fn put_earliest_epoch(
             "earliest_epoch must be a non-negative integer".to_owned(),
         ));
     }
+    validate_stream_identity(&body.forwarder_endpoint_id, &body.stream_id)?;
 
     let db = state.db.lock().await;
     match db.save_stream_earliest_epoch(
@@ -2148,6 +2172,7 @@ pub async fn get_replay_target_epochs(
     forwarder_endpoint_id: String,
     stream_id: String,
 ) -> Result<ReplayTargetEpochsResponse, ReceiverError> {
+    validate_stream_identity(&forwarder_endpoint_id, &stream_id)?;
     let local_stream_key = LocalStreamKey::new(&forwarder_endpoint_id, &stream_id);
     let db = state.db.lock().await;
     let rows = db
@@ -2172,6 +2197,7 @@ pub async fn put_subscriptions(
 ) -> Result<(), ReceiverError> {
     let mut seen = std::collections::HashSet::new();
     for s in &body.subscriptions {
+        validate_stream_identity(&s.forwarder_endpoint_id, &s.stream_id)?;
         if !seen.insert((s.forwarder_endpoint_id.clone(), s.stream_id.clone())) {
             return Err(ReceiverError::BadRequest(
                 "duplicate subscriptions".to_owned(),
@@ -2979,6 +3005,7 @@ pub async fn update_subscription_event_type(
 }
 
 pub async fn admin_reset_cursor(state: &AppState, body: StreamRef) -> Result<(), ReceiverError> {
+    validate_stream_identity(&body.forwarder_endpoint_id, &body.stream_id)?;
     let local_stream_key = LocalStreamKey::new(&body.forwarder_endpoint_id, &body.stream_id);
     let db = state.db.lock().await;
     match db.delete_stream_cursor(local_stream_key.as_str()) {
@@ -3009,6 +3036,7 @@ pub async fn admin_reset_earliest_epoch(
     state: &AppState,
     body: StreamRef,
 ) -> Result<(), ReceiverError> {
+    validate_stream_identity(&body.forwarder_endpoint_id, &body.stream_id)?;
     let local_stream_key = LocalStreamKey::new(&body.forwarder_endpoint_id, &body.stream_id);
     let db = state.db.lock().await;
     match db.delete_stream_earliest_epoch(local_stream_key.as_str()) {
@@ -3387,6 +3415,10 @@ mod tests {
             update_mode: String::new(),
             receiver_id: Some("recv-1".to_owned()),
         }
+    }
+
+    fn assert_bad_request<T>(result: Result<T, ReceiverError>) {
+        assert!(matches!(result, Err(ReceiverError::BadRequest(_))));
     }
 
     #[test]
@@ -4686,6 +4718,110 @@ mod tests {
         assert_eq!(subs[0].reader_ip, None);
         assert_eq!(subs[0].local_port_override, Some(9100));
         assert_eq!(subs[0].event_type, crate::db::EventType::Start);
+    }
+
+    #[tokio::test]
+    async fn put_subscriptions_rejects_blank_stream_identity_fields_without_persisting() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+
+        for (forwarder_endpoint_id, stream_id) in [
+            ("", "stream-1"),
+            ("  ", "stream-1"),
+            ("endpoint-1", ""),
+            ("endpoint-1", "  "),
+        ] {
+            assert_bad_request(
+                put_subscriptions(
+                    &state,
+                    SubscriptionsBody {
+                        subscriptions: vec![SubscriptionRequest {
+                            forwarder_endpoint_id: forwarder_endpoint_id.to_owned(),
+                            stream_id: stream_id.to_owned(),
+                            local_port_override: None,
+                            event_type: Some(crate::db::EventType::Finish),
+                            forwarder_id: None,
+                            reader_ip: None,
+                        }],
+                    },
+                )
+                .await,
+            );
+        }
+
+        let db = state.db.lock().await;
+        assert!(db.load_stream_subscriptions().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn put_subscriptions_rejects_endpoint_separator_without_persisting() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+
+        assert_bad_request(
+            put_subscriptions(
+                &state,
+                SubscriptionsBody {
+                    subscriptions: vec![SubscriptionRequest {
+                        forwarder_endpoint_id: "endpoint\u{1f}bad".to_owned(),
+                        stream_id: "stream-1".to_owned(),
+                        local_port_override: None,
+                        event_type: Some(crate::db::EventType::Finish),
+                        forwarder_id: None,
+                        reader_ip: None,
+                    }],
+                },
+            )
+            .await,
+        );
+
+        let db = state.db.lock().await;
+        assert!(db.load_stream_subscriptions().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stream_identity_handlers_reject_blank_fields() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+
+        for (forwarder_endpoint_id, stream_id) in [
+            ("", "stream-1"),
+            ("  ", "stream-1"),
+            ("endpoint-1", ""),
+            ("endpoint-1", "  "),
+        ] {
+            assert_bad_request(
+                get_replay_target_epochs(
+                    &state,
+                    forwarder_endpoint_id.to_owned(),
+                    stream_id.to_owned(),
+                )
+                .await,
+            );
+            assert_bad_request(
+                set_stream_announcer_publish(&state, forwarder_endpoint_id, stream_id, true).await,
+            );
+            assert_bad_request(
+                admin_reset_cursor(
+                    &state,
+                    StreamRef {
+                        forwarder_endpoint_id: forwarder_endpoint_id.to_owned(),
+                        stream_id: stream_id.to_owned(),
+                    },
+                )
+                .await,
+            );
+            assert_bad_request(
+                admin_reset_earliest_epoch(
+                    &state,
+                    StreamRef {
+                        forwarder_endpoint_id: forwarder_endpoint_id.to_owned(),
+                        stream_id: stream_id.to_owned(),
+                    },
+                )
+                .await,
+            );
+        }
     }
 
     #[tokio::test]

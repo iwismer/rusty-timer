@@ -193,9 +193,7 @@ async fn run_retention_pass(
                         Ok(Some((idx, _))) if idx <= 9
                     );
                 (
-                    LocalStreamKey::new(&sub.forwarder_endpoint_id, &sub.stream_id)
-                        .as_str()
-                        .to_owned(),
+                    LocalStreamKey::new(&sub.forwarder_endpoint_id, &sub.stream_id),
                     dbf_active,
                 )
             })
@@ -210,7 +208,8 @@ async fn run_retention_pass(
             .unwrap_or(0),
     )
     .unwrap_or(i64::MAX);
-    for (stream_id, dbf_active) in streams {
+    for (local_stream_key, dbf_active) in streams {
+        let stream_id = local_stream_key.as_str().to_owned();
         let announcer_active =
             announcer_enabled && announcer_streams.iter().any(|s| s == &stream_id);
         let proxy_floor = min_proxy_cursor(&state.proxy_consumer_cursors, &stream_id);
@@ -273,7 +272,7 @@ async fn run_retention_pass(
         match state.writer.prune(stream_id.clone(), bounded_target).await {
             Ok(deleted) => {
                 info!(
-                    %stream_id,
+                    stream_id = %local_stream_key,
                     through_seq = bounded_target,
                     deleted,
                     "pruned received_events behind the delivery low-water mark"
@@ -281,7 +280,7 @@ async fn run_retention_pass(
                 // Reclaim the freed WAL/db pages opportunistically.
                 let _ = state.writer.checkpoint().await;
             }
-            Err(e) => warn!(error = %e, %stream_id, "prune command failed"),
+            Err(e) => warn!(error = %e, stream_id = %local_stream_key, "prune command failed"),
         }
     }
     Ok(())

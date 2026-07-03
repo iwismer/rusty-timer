@@ -533,6 +533,14 @@ pub async fn run_data_subscription(
     local_stream_key: &LocalStreamKey,
     mode: SubscribeMode,
 ) -> Result<SessionOutcome, P2pSessionError> {
+    // The caller supplies both the forwarder wire stream id and the local
+    // durable key; they must describe the same stream so data is not requested
+    // under one identity and persisted under another.
+    debug_assert_eq!(
+        local_stream_key.wire_stream_id(),
+        wire_stream_id,
+        "local stream key wire stream id must match subscription wire stream id"
+    );
     run_data_subscription_with_hint(
         connection,
         writer,
@@ -557,6 +565,14 @@ pub async fn run_data_subscription_with_hint(
     mode: SubscribeMode,
     durable_hint_tx: Option<&broadcast::Sender<DurableBatch>>,
 ) -> Result<SessionOutcome, P2pSessionError> {
+    // The caller supplies both the forwarder wire stream id and the local
+    // durable key; they must describe the same stream so data is not requested
+    // under one identity and persisted under another.
+    debug_assert_eq!(
+        local_stream_key.wire_stream_id(),
+        wire_stream_id,
+        "local stream key wire stream id must match subscription wire stream id"
+    );
     let after_seq = writer
         .load_cursor(local_stream_key.as_str().to_owned())
         .await

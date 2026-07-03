@@ -17,8 +17,8 @@
 -- parseable UUIDs.
 --
 -- Versioning: `PRAGMA user_version = 1` is stamped when the schema is applied.
--- A database that has tables but user_version == 0 predates the canonical
--- stream key and is rejected at startup (no migration; delete and recreate).
+-- A database that has tables but user_version != 1 is rejected at startup: 0
+-- predates canonical stream keys, and future versions must not be restamped down.
 
 CREATE TABLE IF NOT EXISTS profile (
     server_url  TEXT NOT NULL,

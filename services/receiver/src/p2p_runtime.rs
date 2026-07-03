@@ -1254,17 +1254,17 @@ async fn reconcile_once(
             .into_iter()
             .flatten()
             .filter_map(|sub| {
-                stream_workers
-                    .get(LocalStreamKey::new(&sub.forwarder_endpoint_id, &sub.stream_id).as_str())
-                    .map(|stream_worker| ForwarderDataStream {
-                        stream_id: sub.stream_id.clone(),
-                        local_stream_key: LocalStreamKey::new(
-                            &sub.forwarder_endpoint_id,
-                            &sub.stream_id,
-                        ),
-                        mode: SubscribeMode::Replay,
-                        durable_hint_tx: Some(stream_worker.hint_tx.clone()),
-                    })
+                let local_stream_key =
+                    LocalStreamKey::new(&sub.forwarder_endpoint_id, &sub.stream_id);
+                let durable_hint_tx = stream_workers
+                    .get(local_stream_key.as_str())
+                    .map(|stream_worker| stream_worker.hint_tx.clone())?;
+                Some(ForwarderDataStream {
+                    stream_id: sub.stream_id.clone(),
+                    local_stream_key,
+                    mode: SubscribeMode::Replay,
+                    durable_hint_tx: Some(durable_hint_tx),
+                })
             })
             .collect::<Vec<_>>();
         worker.set_desired_streams(streams);
@@ -1283,7 +1283,8 @@ async fn start_stream_worker(
 ) -> StreamWorker {
     let wire_stream_id = sub.stream_id.clone();
     let stream_id = local_stream_key.as_str().to_owned();
-    info!(%stream_id, wire_stream_id = %wire_stream_id, "starting p2p stream worker");
+    let stream_id_for_log = local_stream_key.to_string();
+    info!(stream_id = %stream_id_for_log, wire_stream_id = %wire_stream_id, "starting p2p stream worker");
 
     let (hint_tx, _hint_rx) = broadcast::channel::<DurableBatch>(HINT_CHANNEL_CAPACITY);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -1305,13 +1306,13 @@ async fn start_stream_worker(
             {
                 Ok(proxy) => Some(proxy),
                 Err(e) => {
-                    warn!(error = %e, %stream_id, port, "failed to bind durable local proxy; skipping proxy");
+                    warn!(error = %e, stream_id = %stream_id_for_log, port, "failed to bind durable local proxy; skipping proxy");
                     None
                 }
             }
         }
         None => {
-            warn!(%stream_id, "no local port could be resolved; running session without local proxy");
+            warn!(stream_id = %stream_id_for_log, "no local port could be resolved; running session without local proxy");
             None
         }
     };
@@ -1363,7 +1364,7 @@ async fn start_stream_worker(
                 announcer_active = true;
             }
             Err(e) => {
-                warn!(error = %e, %stream_id, "failed to build announcer client; skipping announcer push");
+                warn!(error = %e, stream_id = %stream_id_for_log, "failed to build announcer client; skipping announcer push");
             }
         }
     }

@@ -8,6 +8,9 @@ const SEPARATOR: char = '\u{1f}';
 /// columns and map keys. The unit separator cannot appear in an iroh endpoint
 /// id (hex/z-base32); the wire stream_id is arbitrary UTF-8 and lives after the
 /// first separator, so `split_once` is unambiguous.
+///
+/// Keep `scripts/e2e/run_stack.py` in sync: the E2E harness mirrors this
+/// encoding in Python when asserting receiver database state.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LocalStreamKey(String);
 
@@ -16,19 +19,14 @@ impl LocalStreamKey {
     pub fn new(endpoint_id: &str, wire_stream_id: &str) -> Self {
         assert!(!endpoint_id.is_empty(), "endpoint_id must not be empty");
         assert!(
+            !endpoint_id.contains(SEPARATOR),
+            "endpoint_id must not contain separator"
+        );
+        assert!(
             !wire_stream_id.is_empty(),
             "wire_stream_id must not be empty"
         );
         Self(format!("{endpoint_id}{SEPARATOR}{wire_stream_id}"))
-    }
-
-    #[must_use]
-    pub fn from_encoded(encoded: String) -> Self {
-        assert!(
-            encoded.split_once(SEPARATOR).is_some(),
-            "local stream key is missing endpoint/stream separator"
-        );
-        Self(encoded)
     }
 
     #[must_use]
@@ -66,7 +64,11 @@ impl Borrow<str> for LocalStreamKey {
 }
 
 impl std::fmt::Display for LocalStreamKey {
+    /// Renders the encoded key with U+241F (SYMBOL FOR UNIT SEPARATOR) so logs
+    /// remain readable and never carry raw U+001F control characters. The
+    /// persisted/key encoding returned by [`LocalStreamKey::as_str`] is
+    /// unchanged.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+        f.write_str(&self.as_str().replace(SEPARATOR, "␟"))
     }
 }

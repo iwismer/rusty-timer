@@ -1145,8 +1145,20 @@ pub async fn run_dbf_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{Db, ReceivedEventInsert};
+    use crate::db::{Db, ReceivedEventInsert, StreamSubscription};
     use dbase::FieldValue;
+
+    fn seed_subscription(db: &mut Db, forwarder_id: &str, reader_ip: &str, event_type: EventType) {
+        db.replace_stream_subscriptions(&[StreamSubscription {
+            forwarder_endpoint_id: format!("endpoint-{forwarder_id}"),
+            stream_id: format!("stream-{reader_ip}"),
+            local_port_override: None,
+            event_type,
+            forwarder_id: Some(forwarder_id.to_owned()),
+            reader_ip: Some(reader_ip.to_owned()),
+        }])
+        .unwrap();
+    }
 
     fn sample_raw_frame() -> Vec<u8> {
         b"aa400000000123450a2a01123018455927a7".to_vec()
@@ -1927,8 +1939,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let dbf_path = dir.path().join("test.dbf");
-        let db = crate::db::Db::open(&db_path).unwrap();
-        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
+        let mut db = crate::db::Db::open(&db_path).unwrap();
+        seed_subscription(&mut db, "f1", "10.0.0.1", EventType::Finish);
 
         let db = Arc::new(Mutex::new(db));
         let (tx, _) = broadcast::channel::<rt_domain::ReadEvent>(16);
@@ -1972,8 +1984,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let dbf_path = dir.path().join("test.dbf");
-        let db = crate::db::Db::open(&db_path).unwrap();
-        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
+        let mut db = crate::db::Db::open(&db_path).unwrap();
+        seed_subscription(&mut db, "f1", "10.0.0.1", EventType::Finish);
 
         let db = Arc::new(Mutex::new(db));
         let (tx, _) = broadcast::channel::<rt_domain::ReadEvent>(16);
@@ -2028,9 +2040,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let dbf_path = dir.path().join("test.dbf");
-        let db = crate::db::Db::open(&db_path).unwrap();
-        db.save_subscription("f1", "10.0.0.1", None, Some(EventType::Finish))
-            .unwrap();
+        let mut db = crate::db::Db::open(&db_path).unwrap();
+        seed_subscription(&mut db, "f1", "10.0.0.1", EventType::Finish);
 
         let db = Arc::new(Mutex::new(db));
         let (tx, _) = broadcast::channel::<rt_domain::ReadEvent>(16);
@@ -2194,8 +2205,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let dbf_path = dir.path().join("test.dbf");
-        let db = crate::db::Db::open(&db_path).unwrap();
-        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
+        let mut db = crate::db::Db::open(&db_path).unwrap();
+        seed_subscription(&mut db, "f1", "10.0.0.1", EventType::Finish);
 
         let db = Arc::new(Mutex::new(db));
         let (tx, _) = broadcast::channel::<rt_domain::ReadEvent>(16);

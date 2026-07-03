@@ -325,8 +325,16 @@ async fn admin_reset_all_cursors_deletes_all() {
     let state = setup();
     {
         let db = state.db.lock().await;
-        db.save_cursor("f1", "10.0.0.1:10000", 1, 10).unwrap();
-        db.save_cursor("f2", "10.0.0.2:10000", 2, 20).unwrap();
+        db.jump_stream_cursor(
+            LocalStreamKey::new("endpoint-1", "10.0.0.1:10000").as_str(),
+            10,
+        )
+        .unwrap();
+        db.jump_stream_cursor(
+            LocalStreamKey::new("endpoint-2", "10.0.0.2:10000").as_str(),
+            20,
+        )
+        .unwrap();
     }
     let result = control_api::admin_reset_all_cursors(&state).await.unwrap();
     assert_eq!(result["deleted"], 2);
@@ -337,7 +345,8 @@ async fn admin_reset_all_earliest_epochs_deletes_all() {
     let state = setup();
     {
         let db = state.db.lock().await;
-        db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
+        db.save_stream_earliest_epoch("endpoint-1", "10.0.0.1", 7)
+            .unwrap();
     }
     let result = control_api::admin_reset_all_earliest_epochs(&state)
         .await
@@ -378,8 +387,16 @@ async fn admin_reset_earliest_epoch_per_stream() {
 async fn admin_purge_subscriptions_deletes_all() {
     let state = setup();
     {
-        let db = state.db.lock().await;
-        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
+        let mut db = state.db.lock().await;
+        db.replace_stream_subscriptions(&[StreamSubscription {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: "10.0.0.1".to_owned(),
+            local_port_override: None,
+            event_type: EventType::Finish,
+            forwarder_id: Some("f1".to_owned()),
+            reader_ip: Some("10.0.0.1".to_owned()),
+        }])
+        .unwrap();
     }
     let result = control_api::admin_purge_subscriptions(&state)
         .await
@@ -391,8 +408,16 @@ async fn admin_purge_subscriptions_deletes_all() {
 async fn admin_purge_subscriptions_requests_reconnect_when_connected() {
     let state = setup();
     {
-        let db = state.db.lock().await;
-        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
+        let mut db = state.db.lock().await;
+        db.replace_stream_subscriptions(&[StreamSubscription {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: "10.0.0.1".to_owned(),
+            local_port_override: None,
+            event_type: EventType::Finish,
+            forwarder_id: Some("f1".to_owned()),
+            reader_ip: Some("10.0.0.1".to_owned()),
+        }])
+        .unwrap();
     }
     state.set_connection_state(ConnectionState::Connected).await;
 
@@ -443,9 +468,22 @@ async fn admin_factory_reset_clears_everything() {
         let mut db = state.db.lock().await;
         db.save_profile("https://thin.test", "tok", "check-only", Some("recv-1"))
             .unwrap();
-        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
-        db.save_cursor("f1", "10.0.0.1:10000", 1, 10).unwrap();
-        db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
+        db.replace_stream_subscriptions(&[StreamSubscription {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: "10.0.0.1".to_owned(),
+            local_port_override: None,
+            event_type: EventType::Finish,
+            forwarder_id: Some("f1".to_owned()),
+            reader_ip: Some("10.0.0.1".to_owned()),
+        }])
+        .unwrap();
+        db.jump_stream_cursor(
+            LocalStreamKey::new("endpoint-1", "10.0.0.1:10000").as_str(),
+            10,
+        )
+        .unwrap();
+        db.save_stream_earliest_epoch("endpoint-1", "10.0.0.1", 7)
+            .unwrap();
     }
     control_api::admin_factory_reset(&state).await.unwrap();
 

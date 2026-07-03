@@ -1,5 +1,5 @@
 use crate::stream_key::LocalStreamKey;
-use rt_domain::{ReceiverMode, ResumeCursor};
+use rt_domain::ReceiverMode;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -70,9 +70,9 @@ pub enum DbError {
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error(
-        "Existing receiver database at {path} has schema user_version=0; delete receiver.sqlite3 and restart"
+        "Existing receiver database at {path} has unsupported schema user_version={user_version}; delete receiver.sqlite3 and restart"
     )]
-    LegacyDatabase { path: String },
+    LegacyDatabase { path: String, user_version: i64 },
     #[error("Profile missing")]
     ProfileMissing,
 }
@@ -175,14 +175,6 @@ impl RdImportConfig {
         Ok(())
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CursorRecord {
-    pub forwarder_id: String,
-    pub reader_ip: String,
-    pub stream_epoch: i64,
-    pub last_seq: i64,
-}
-
 /// New P2P event payload to persist. `stream_id` is an arbitrary UTF-8 stream
 /// key (e.g. the forwarder journal key `ip:port`) stored verbatim as TEXT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -428,53 +420,6 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Compatibility writer keyed by `(forwarder_id, reader_ip)`. Stores a
-    /// deterministic synthetic `stream_id` so the canonical-keyed table can hold
-    /// display-metadata rows, and records the real metadata in the compatibility
-    /// columns.
-    pub fn save_earliest_epoch(&self, fwd: &str, ip: &str, epoch: i64) -> DbResult<()> {
-        let stream_id = LocalStreamKey::new(fwd, ip).as_str().to_owned();
-        self.conn.execute(
-            "INSERT OR REPLACE INTO earliest_epochs
-             (stream_id, forwarder_endpoint_id, earliest_epoch, forwarder_id, reader_ip)
-             VALUES (?1, ?2, ?3, ?2, ?4)",
-            rusqlite::params![stream_id, fwd, epoch, ip],
-        )?;
-        Ok(())
-    }
-
-    pub fn delete_earliest_epoch(&self, fwd: &str, ip: &str) -> DbResult<()> {
-        self.conn.execute(
-            "DELETE FROM earliest_epochs WHERE forwarder_id = ?1 AND reader_ip = ?2",
-            rusqlite::params![fwd, ip],
-        )?;
-        Ok(())
-    }
-    /// Compatibility loader returning `(forwarder_id, reader_ip)`-keyed
-    /// subscriptions. Canonical-only rows (`forwarder_id`/`reader_ip` NULL) are
-    /// filtered out rather than substituting `forwarder_endpoint_id`/
-    /// `stream_id`, so callers never receive fabricated display keys.
-    pub fn load_subscriptions(&self) -> DbResult<Vec<Subscription>> {
-        let mut s = self.conn.prepare(
-            "SELECT forwarder_id,
-                    reader_ip,
-                    local_port_override,
-                    event_type
-             FROM subscriptions
-             WHERE forwarder_id IS NOT NULL AND reader_ip IS NOT NULL
-             ORDER BY forwarder_id, reader_ip",
-        )?;
-        let rows = s.query_map([], |r| {
-            Ok(Subscription {
-                forwarder_id: r.get(0)?,
-                reader_ip: r.get(1)?,
-                local_port_override: r.get::<_, Option<i64>>(2)?.map(|p| p as u16),
-                event_type: parse_event_type_column(r.get::<_, String>(3)?, 3)?,
-            })
-        })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-
     pub fn load_stream_subscriptions(&self) -> DbResult<Vec<StreamSubscription>> {
         let mut s = self.conn.prepare(
             "SELECT forwarder_endpoint_id,
@@ -498,36 +443,6 @@ impl Db {
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
-    pub fn save_subscription(
-        &self,
-        fwd: &str,
-        ip: &str,
-        port: Option<u16>,
-        event_type: Option<EventType>,
-    ) -> DbResult<()> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO subscriptions
-             (forwarder_endpoint_id, stream_id, local_port_override, event_type, forwarder_id, reader_ip)
-             VALUES (?1, ?2, ?3, ?4, ?1, ?2)",
-            rusqlite::params![fwd, ip, port.map(|p| p as i64), event_type.unwrap_or(EventType::Finish).as_str()],
-        )?;
-        Ok(())
-    }
-    pub fn replace_subscriptions(&mut self, subs: &[Subscription]) -> DbResult<()> {
-        let tx = self.conn.transaction()?;
-        tx.execute_batch("DELETE FROM subscriptions")?;
-        for s in subs {
-            tx.execute(
-                "INSERT INTO subscriptions
-                 (forwarder_endpoint_id, stream_id, local_port_override, event_type, forwarder_id, reader_ip)
-                 VALUES (?1, ?2, ?3, ?4, ?1, ?2)",
-                rusqlite::params![&s.forwarder_id, &s.reader_ip, s.local_port_override.map(|p| p as i64), s.event_type.as_str()],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
     pub fn replace_stream_subscriptions(&mut self, subs: &[StreamSubscription]) -> DbResult<()> {
         let tx = self.conn.transaction()?;
         tx.execute_batch("DELETE FROM subscriptions")?;
@@ -707,36 +622,6 @@ impl Db {
         })
     }
 
-    pub fn load_resume_cursors(&self) -> DbResult<Vec<ResumeCursor>> {
-        Ok(self
-            .load_cursors()?
-            .into_iter()
-            .map(|c| ResumeCursor {
-                forwarder_id: c.forwarder_id,
-                reader_ip: c.reader_ip,
-                stream_epoch: c.stream_epoch,
-                last_seq: c.last_seq,
-            })
-            .collect())
-    }
-    pub fn load_cursors(&self) -> DbResult<Vec<CursorRecord>> {
-        let mut s = self.conn.prepare(
-            "SELECT forwarder_id, reader_ip, COALESCE(stream_epoch, 0), last_seq
-             FROM cursors
-             WHERE forwarder_id IS NOT NULL AND reader_ip IS NOT NULL
-             ORDER BY forwarder_id, reader_ip",
-        )?;
-        let rows = s.query_map([], |r| {
-            Ok(CursorRecord {
-                forwarder_id: r.get(0)?,
-                reader_ip: r.get(1)?,
-                stream_epoch: r.get::<_, i64>(2)?,
-                last_seq: r.get::<_, i64>(3)?,
-            })
-        })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-
     pub fn load_stream_cursors(&self) -> DbResult<Vec<StreamCursorRecord>> {
         let mut s = self.conn.prepare(
             "SELECT stream_id, stream_epoch, last_seq, forwarder_id, reader_ip
@@ -754,51 +639,6 @@ impl Db {
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
-    pub fn save_cursor(&self, fwd: &str, ip: &str, epoch: i64, seq: i64) -> DbResult<()> {
-        let stream_id = LocalStreamKey::new(fwd, ip).as_str().to_owned();
-        let existing: Option<(i64, i64)> = self
-            .conn
-            .query_row(
-                "SELECT COALESCE(stream_epoch, 0), last_seq
-                 FROM cursors
-                 WHERE stream_id = ?1 OR (forwarder_id = ?2 AND reader_ip = ?3)
-                 LIMIT 1",
-                rusqlite::params![&stream_id, fwd, ip],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-
-        match existing {
-            Some((stored_epoch, stored_seq))
-                if epoch > stored_epoch || (epoch == stored_epoch && seq > stored_seq) =>
-            {
-                self.conn.execute(
-                    "UPDATE cursors
-                     SET stream_id = ?1, last_seq = ?5, forwarder_id = ?2, reader_ip = ?3, stream_epoch = ?4
-                     WHERE stream_id = ?1 OR (forwarder_id = ?2 AND reader_ip = ?3)",
-                    rusqlite::params![stream_id, fwd, ip, epoch, seq],
-                )?;
-            }
-            None => {
-                self.conn.execute(
-                    "INSERT INTO cursors (stream_id, last_seq, forwarder_id, reader_ip, stream_epoch)
-                     VALUES (?1, ?5, ?2, ?3, ?4)",
-                    rusqlite::params![stream_id, fwd, ip, epoch, seq],
-                )?;
-            }
-            Some(_) => {}
-        }
-        Ok(())
-    }
-    pub fn delete_cursor(&self, fwd: &str, ip: &str) -> DbResult<()> {
-        let stream_id = LocalStreamKey::new(fwd, ip).as_str().to_owned();
-        self.conn.execute(
-            "DELETE FROM cursors WHERE stream_id = ?1 OR (forwarder_id = ?2 AND reader_ip = ?3)",
-            rusqlite::params![stream_id, fwd, ip],
-        )?;
-        Ok(())
-    }
-
     pub fn delete_stream_cursor(&self, stream_id: &str) -> DbResult<()> {
         self.conn.execute(
             "DELETE FROM cursors WHERE stream_id = ?1",
@@ -1412,21 +1252,33 @@ impl Db {
             [],
             |row| row.get(0),
         )?;
-        if existing_tables > 0 && user_version == 0 {
+        if existing_tables > 0 && user_version != 1 {
             return Err(DbError::LegacyDatabase {
                 path: path
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| ":memory:".to_owned()),
+                user_version,
             });
         }
 
-        self.conn.execute_batch(SCHEMA_SQL)?;
-        self.conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_received_announcer_unpushed
-                 ON received_events(stream_id, received_unix_ms, seq)
-                 WHERE announcer_pushed_unix_ms IS NULL;
-             PRAGMA user_version = 1;",
-        )?;
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> DbResult<()> {
+            self.conn.execute_batch(SCHEMA_SQL)?;
+            self.conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_received_announcer_unpushed
+                     ON received_events(stream_id, received_unix_ms, seq)
+                     WHERE announcer_pushed_unix_ms IS NULL;
+                 PRAGMA user_version = 1;",
+            )?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.conn.execute_batch("COMMIT")?,
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(error);
+            }
+        }
         Ok(())
     }
 
@@ -2143,6 +1995,36 @@ mod tests {
     }
 
     #[test]
+    fn non_empty_future_user_version_database_is_rejected_without_restamping() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("receiver.sqlite3");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE profile (
+                     server_url TEXT NOT NULL,
+                     token TEXT NOT NULL
+                 );
+                 PRAGMA user_version = 2;",
+            )
+            .unwrap();
+        }
+
+        let message = match Db::open(&path) {
+            Ok(_) => panic!("future database should be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert!(message.contains(&path.display().to_string()));
+        assert!(message.contains("user_version=2"));
+
+        let conn = Connection::open(&path).unwrap();
+        let user_version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version, 2);
+    }
+
+    #[test]
     fn profile_round_trip_with_update_mode() {
         let mut db = Db::open_in_memory().unwrap();
         db.save_profile("https://example.com", "tok", "check-only", None)
@@ -2243,19 +2125,6 @@ mod tests {
     }
 
     #[test]
-    fn earliest_epoch_round_trip() {
-        let db = Db::open_in_memory().unwrap();
-        db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
-        assert_eq!(
-            db.load_earliest_epochs().unwrap(),
-            vec![("f1".to_owned(), "10.0.0.1".to_owned(), 7)]
-        );
-
-        db.delete_earliest_epoch("f1", "10.0.0.1").unwrap();
-        assert!(db.load_earliest_epochs().unwrap().is_empty());
-    }
-
-    #[test]
     fn save_stream_earliest_epoch_does_not_fabricate_legacy_reader_ip() {
         let db = Db::open_in_memory().unwrap();
         db.save_stream_earliest_epoch("endpoint-1", "22222222-2222-2222-2222-222222222222", 7)
@@ -2332,59 +2201,6 @@ mod tests {
     }
 
     #[test]
-    fn load_subscriptions_excludes_canonical_only_rows() {
-        let mut db = Db::open_in_memory().unwrap();
-        db.replace_stream_subscriptions(&[
-            // Canonical-only row: must NOT appear in the legacy view.
-            StreamSubscription {
-                forwarder_endpoint_id: "endpoint-1".to_owned(),
-                stream_id: "11111111-1111-1111-1111-111111111111".to_owned(),
-                local_port_override: Some(9000),
-                event_type: EventType::Start,
-                forwarder_id: None,
-                reader_ip: None,
-            },
-            // Row carrying real legacy metadata: must appear with those values.
-            StreamSubscription {
-                forwarder_endpoint_id: "endpoint-2".to_owned(),
-                stream_id: "22222222-2222-2222-2222-222222222222".to_owned(),
-                local_port_override: Some(9100),
-                event_type: EventType::Finish,
-                forwarder_id: Some("legacy-fwd".to_owned()),
-                reader_ip: Some("10.0.0.1:10000".to_owned()),
-            },
-        ])
-        .unwrap();
-
-        let legacy = db.load_subscriptions().unwrap();
-        assert_eq!(legacy.len(), 1);
-        assert_eq!(legacy[0].forwarder_id, "legacy-fwd");
-        assert_eq!(legacy[0].reader_ip, "10.0.0.1:10000");
-        assert_eq!(legacy[0].local_port_override, Some(9100));
-        assert_eq!(legacy[0].event_type, EventType::Finish);
-        // The canonical-only stream_id must never be surfaced as a reader_ip.
-        assert!(
-            !legacy
-                .iter()
-                .any(|s| s.reader_ip == "11111111-1111-1111-1111-111111111111")
-        );
-    }
-
-    #[test]
-    fn delete_cursor_removes_only_matching_stream() {
-        let db = Db::open_in_memory().unwrap();
-        db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
-        db.save_cursor("f2", "10.0.0.2:10000", 3, 9).unwrap();
-
-        db.delete_cursor("f1", "10.0.0.1:10000").unwrap();
-
-        let rows = db.load_cursors().unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].forwarder_id, "f2");
-        assert_eq!(rows[0].reader_ip, "10.0.0.2:10000");
-    }
-
-    #[test]
     fn save_receiver_id_on_empty_db_creates_minimal_profile() {
         let db = Db::open_in_memory().unwrap();
         db.save_receiver_id("recv-test1234").unwrap();
@@ -2456,11 +2272,13 @@ mod tests {
     #[test]
     fn delete_all_cursors_removes_every_row() {
         let db = Db::open_in_memory().unwrap();
-        db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
-        db.save_cursor("f2", "10.0.0.2:10000", 3, 9).unwrap();
+        db.jump_stream_cursor("endpoint-1\u{1f}10.0.0.1:10000", 42)
+            .unwrap();
+        db.jump_stream_cursor("endpoint-2\u{1f}10.0.0.2:10000", 9)
+            .unwrap();
         let count = db.delete_all_cursors().unwrap();
         assert_eq!(count, 2);
-        assert!(db.load_cursors().unwrap().is_empty());
+        assert!(db.load_stream_cursors().unwrap().is_empty());
     }
 
     #[test]
@@ -2473,11 +2291,13 @@ mod tests {
     #[test]
     fn delete_all_earliest_epochs_removes_every_row() {
         let db = Db::open_in_memory().unwrap();
-        db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
-        db.save_earliest_epoch("f2", "10.0.0.2", 3).unwrap();
+        db.save_stream_earliest_epoch("endpoint-1", "10.0.0.1", 7)
+            .unwrap();
+        db.save_stream_earliest_epoch("endpoint-2", "10.0.0.2", 3)
+            .unwrap();
         let count = db.delete_all_earliest_epochs().unwrap();
         assert_eq!(count, 2);
-        assert!(db.load_earliest_epochs().unwrap().is_empty());
+        assert!(db.load_stream_earliest_epochs().unwrap().is_empty());
     }
 
     #[test]
@@ -2489,13 +2309,29 @@ mod tests {
 
     #[test]
     fn delete_all_subscriptions_removes_every_row() {
-        let db = Db::open_in_memory().unwrap();
-        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
-        db.save_subscription("f2", "10.0.0.2", Some(9000), None)
-            .unwrap();
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[
+            StreamSubscription {
+                forwarder_endpoint_id: "endpoint-1".to_owned(),
+                stream_id: "10.0.0.1".to_owned(),
+                local_port_override: None,
+                event_type: EventType::Finish,
+                forwarder_id: Some("f1".to_owned()),
+                reader_ip: Some("10.0.0.1".to_owned()),
+            },
+            StreamSubscription {
+                forwarder_endpoint_id: "endpoint-2".to_owned(),
+                stream_id: "10.0.0.2".to_owned(),
+                local_port_override: Some(9000),
+                event_type: EventType::Finish,
+                forwarder_id: Some("f2".to_owned()),
+                reader_ip: Some("10.0.0.2".to_owned()),
+            },
+        ])
+        .unwrap();
         let count = db.delete_all_subscriptions().unwrap();
         assert_eq!(count, 2);
-        assert!(db.load_subscriptions().unwrap().is_empty());
+        assert!(db.load_stream_subscriptions().unwrap().is_empty());
     }
 
     #[test]
@@ -2530,9 +2366,19 @@ mod tests {
         let mut db = Db::open_in_memory().unwrap();
         db.save_profile("https://example.com", "tok", "check-only", Some("recv-1"))
             .unwrap();
-        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
-        db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
-        db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
+        db.replace_stream_subscriptions(&[StreamSubscription {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: "10.0.0.1".to_owned(),
+            local_port_override: None,
+            event_type: EventType::Finish,
+            forwarder_id: Some("f1".to_owned()),
+            reader_ip: Some("10.0.0.1".to_owned()),
+        }])
+        .unwrap();
+        db.jump_stream_cursor("endpoint-1\u{1f}10.0.0.1:10000", 42)
+            .unwrap();
+        db.save_stream_earliest_epoch("endpoint-1", "10.0.0.1", 7)
+            .unwrap();
         db.set_forwarder_intent("f1", false).unwrap();
         db.set_announcer_enabled(true).unwrap();
         db.set_stream_announcer_publish("10.0.0.1:10000", true)
@@ -2552,9 +2398,9 @@ mod tests {
         assert_eq!(p.server_url, "");
         assert_eq!(p.token, "");
         assert_eq!(p.receiver_id, None);
-        assert!(db.load_subscriptions().unwrap().is_empty());
-        assert!(db.load_cursors().unwrap().is_empty());
-        assert!(db.load_earliest_epochs().unwrap().is_empty());
+        assert!(db.load_stream_subscriptions().unwrap().is_empty());
+        assert!(db.load_stream_cursors().unwrap().is_empty());
+        assert!(db.load_stream_earliest_epochs().unwrap().is_empty());
         // forwarder_intent is cleared, so the default-true contract is restored.
         assert!(db.load_forwarder_intents().unwrap().is_empty());
         assert!(db.forwarder_should_connect("f1").unwrap());
@@ -2594,9 +2440,19 @@ mod tests {
             flush_interval_ms: DEFAULT_DBF_FLUSH_INTERVAL_MS,
         })
         .unwrap();
-        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
-        db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
-        db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
+        db.replace_stream_subscriptions(&[StreamSubscription {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: "10.0.0.1".to_owned(),
+            local_port_override: None,
+            event_type: EventType::Finish,
+            forwarder_id: Some("f1".to_owned()),
+            reader_ip: Some("10.0.0.1".to_owned()),
+        }])
+        .unwrap();
+        db.jump_stream_cursor("endpoint-1\u{1f}10.0.0.1:10000", 42)
+            .unwrap();
+        db.save_stream_earliest_epoch("endpoint-1", "10.0.0.1", 7)
+            .unwrap();
         db.clear_data().unwrap();
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.server_url, "https://example.com");
@@ -2605,9 +2461,9 @@ mod tests {
         // Non-profile fields should be reset
         let dbf = db.load_dbf_config().unwrap();
         assert!(!dbf.enabled);
-        assert!(db.load_subscriptions().unwrap().is_empty());
-        assert!(db.load_cursors().unwrap().is_empty());
-        assert!(db.load_earliest_epochs().unwrap().is_empty());
+        assert!(db.load_stream_subscriptions().unwrap().is_empty());
+        assert!(db.load_stream_cursors().unwrap().is_empty());
+        assert!(db.load_stream_earliest_epochs().unwrap().is_empty());
     }
 
     #[test]
@@ -2676,24 +2532,39 @@ mod tests {
 
     #[test]
     fn update_subscription_port_changes_existing() {
-        let db = Db::open_in_memory().unwrap();
-        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[StreamSubscription {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: "stream-1".to_owned(),
+            local_port_override: None,
+            event_type: EventType::Finish,
+            forwarder_id: Some("f1".to_owned()),
+            reader_ip: Some("10.0.0.1".to_owned()),
+        }])
+        .unwrap();
         let updated = db
             .update_subscription_port("f1", "10.0.0.1", Some(9000))
             .unwrap();
         assert!(updated);
-        let subs = db.load_subscriptions().unwrap();
+        let subs = db.load_stream_subscriptions().unwrap();
         assert_eq!(subs[0].local_port_override, Some(9000));
     }
 
     #[test]
     fn update_subscription_port_clears_override() {
-        let db = Db::open_in_memory().unwrap();
-        db.save_subscription("f1", "10.0.0.1", Some(9000), None)
-            .unwrap();
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[StreamSubscription {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: "stream-1".to_owned(),
+            local_port_override: Some(9000),
+            event_type: EventType::Finish,
+            forwarder_id: Some("f1".to_owned()),
+            reader_ip: Some("10.0.0.1".to_owned()),
+        }])
+        .unwrap();
         let updated = db.update_subscription_port("f1", "10.0.0.1", None).unwrap();
         assert!(updated);
-        let subs = db.load_subscriptions().unwrap();
+        let subs = db.load_stream_subscriptions().unwrap();
         assert_eq!(subs[0].local_port_override, None);
     }
 
@@ -2733,54 +2604,6 @@ mod tests {
 
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.receiver_id, Some("id-2".to_owned()));
-    }
-
-    #[test]
-    fn save_cursor_rejects_same_epoch_lower_seq() {
-        let db = Db::open_in_memory().unwrap();
-        db.save_cursor("f1", "10.0.0.1:10000", 5, 10).unwrap();
-        db.save_cursor("f1", "10.0.0.1:10000", 5, 5).unwrap();
-        let rows = db.load_cursors().unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].stream_epoch, 5);
-        assert_eq!(rows[0].last_seq, 10, "cursor must not regress to lower seq");
-    }
-
-    #[test]
-    fn save_cursor_rejects_lower_epoch() {
-        let db = Db::open_in_memory().unwrap();
-        db.save_cursor("f1", "10.0.0.1:10000", 5, 10).unwrap();
-        db.save_cursor("f1", "10.0.0.1:10000", 4, 100).unwrap();
-        let rows = db.load_cursors().unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(
-            rows[0].stream_epoch, 5,
-            "cursor must not regress to lower epoch"
-        );
-        assert_eq!(rows[0].last_seq, 10);
-    }
-
-    #[test]
-    fn save_cursor_accepts_same_epoch_higher_seq() {
-        let db = Db::open_in_memory().unwrap();
-        db.save_cursor("f1", "10.0.0.1:10000", 5, 10).unwrap();
-        db.save_cursor("f1", "10.0.0.1:10000", 5, 15).unwrap();
-        let rows = db.load_cursors().unwrap();
-        assert_eq!(rows[0].stream_epoch, 5);
-        assert_eq!(rows[0].last_seq, 15, "cursor must advance to higher seq");
-    }
-
-    #[test]
-    fn save_cursor_accepts_higher_epoch() {
-        let db = Db::open_in_memory().unwrap();
-        db.save_cursor("f1", "10.0.0.1:10000", 5, 10).unwrap();
-        db.save_cursor("f1", "10.0.0.1:10000", 6, 1).unwrap();
-        let rows = db.load_cursors().unwrap();
-        assert_eq!(
-            rows[0].stream_epoch, 6,
-            "cursor must advance to higher epoch"
-        );
-        assert_eq!(rows[0].last_seq, 1);
     }
 
     #[test]
@@ -2845,32 +2668,27 @@ mod tests {
     }
 
     #[test]
-    fn subscription_event_type_defaults_and_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut db = Db::open(dir.path().join("test.db").as_path()).unwrap();
-        db.save_subscription("fwd1", "10.0.0.1", None, None)
-            .unwrap();
-        let subs = db.load_subscriptions().unwrap();
-        assert_eq!(subs.len(), 1);
-        assert_eq!(subs[0].event_type, EventType::Finish);
-        db.replace_subscriptions(&[Subscription {
-            forwarder_id: "fwd1".to_owned(),
-            reader_ip: "10.0.0.1".to_owned(),
-            local_port_override: None,
-            event_type: EventType::Start,
-        }])
-        .unwrap();
-        let subs = db.load_subscriptions().unwrap();
-        assert_eq!(subs[0].event_type, EventType::Start);
-    }
-
-    #[test]
     fn load_subscription_dbf_details_returns_latest_index_and_event_type() {
-        let db = Db::open_in_memory().unwrap();
-        db.save_subscription("fwd2", "10.0.0.2", None, Some(EventType::Finish))
-            .unwrap();
-        db.save_subscription("fwd1", "10.0.0.1", None, Some(EventType::Start))
-            .unwrap();
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[
+            StreamSubscription {
+                forwarder_endpoint_id: "endpoint-2".to_owned(),
+                stream_id: "stream-2".to_owned(),
+                local_port_override: None,
+                event_type: EventType::Finish,
+                forwarder_id: Some("fwd2".to_owned()),
+                reader_ip: Some("10.0.0.2".to_owned()),
+            },
+            StreamSubscription {
+                forwarder_endpoint_id: "endpoint-1".to_owned(),
+                stream_id: "stream-1".to_owned(),
+                local_port_override: None,
+                event_type: EventType::Start,
+                forwarder_id: Some("fwd1".to_owned()),
+                reader_ip: Some("10.0.0.1".to_owned()),
+            },
+        ])
+        .unwrap();
 
         let details = db
             .load_subscription_dbf_details("fwd2", "10.0.0.2")

@@ -75,7 +75,18 @@ impl ForwarderConnection {
     pub fn set_desired_streams(&self, streams: Vec<ForwarderDataStream>) {
         let desired = streams
             .into_iter()
-            .map(|stream| (stream.local_stream_key.as_str().to_owned(), stream))
+            .map(|stream| {
+                // The caller supplies both the forwarder wire stream id and the
+                // local durable key; they must describe the same stream so data
+                // is not requested under one identity and persisted under
+                // another.
+                debug_assert_eq!(
+                    stream.local_stream_key.wire_stream_id(),
+                    stream.stream_id,
+                    "local stream key wire stream id must match subscription wire stream id"
+                );
+                (stream.local_stream_key.as_str().to_owned(), stream)
+            })
             .collect();
         let _ = self.desired_tx.send(desired);
     }
