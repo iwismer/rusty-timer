@@ -422,19 +422,37 @@ impl StreamWorker {
         if let Some(proxy) = self.proxy {
             proxy.shutdown();
         }
-        let tasks = self.tasks;
-        for mut task in tasks {
+        for mut task in self.tasks {
             // Give each task a bounded window to observe the shutdown signal,
             // then abort and drain so a wedged task cannot delay shutdown.
             if tokio::time::timeout(Duration::from_secs(2), &mut task)
                 .await
                 .is_err()
             {
+                warn!(
+                    forwarder_endpoint_id = %self.sub.forwarder_endpoint_id,
+                    stream_id = %self.sub.stream_id,
+                    "stream worker task did not observe shutdown within 2s; aborting"
+                );
                 task.abort();
                 let _ = task.await;
             }
         }
     }
+}
+
+/// Stop a batch of stream workers concurrently. Each worker's [`StreamWorker::stop`]
+/// bounds wedged tasks with a 2s abort timeout, so a batch of stale workers
+/// costs one timeout window instead of the serial sum. Workers are independent
+/// (each owns its own shutdown channel, proxy, and tasks), so joining them is
+/// safe; individual stop timeouts are logged inside `stop`.
+async fn stop_stream_workers(workers: impl IntoIterator<Item = StreamWorker>) {
+    futures_util::future::join_all(workers.into_iter().map(StreamWorker::stop)).await;
+}
+
+/// Stop a batch of forwarder connections concurrently; see [`stop_stream_workers`].
+async fn stop_forwarder_workers(workers: impl IntoIterator<Item = ForwarderConnection>) {
+    futures_util::future::join_all(workers.into_iter().map(ForwarderConnection::stop)).await;
 }
 
 async fn run_reconcile_loop(
@@ -553,9 +571,7 @@ async fn run_reconcile_loop(
                 }
                 None => {
                     info!("receiver p2p reconnect requested; restarting forwarder workers");
-                    for (_endpoint_id, worker) in workers.drain() {
-                        worker.stop().await;
-                    }
+                    stop_forwarder_workers(workers.drain().map(|(_, worker)| worker)).await;
                     state.emit_streams_snapshot().await;
                 }
             }
@@ -573,9 +589,7 @@ async fn run_reconcile_loop(
             // generation, and re-raise the fence so the next generation is
             // permanently staled. Reconciliation rebuilds these workers after
             // register + takeover succeeds with a fresh generation.
-            for (_stream_id, worker) in stream_workers.drain() {
-                worker.stop().await;
-            }
+            stop_stream_workers(stream_workers.drain().map(|(_, worker)| worker)).await;
             // After re-takeover the new server generation can be *below* the
             // persisted local per-stream fences (e.g. the server DB was
             // reset), which would strand every push as locally stale. With all
@@ -710,12 +724,10 @@ async fn run_reconcile_loop(
                         // the fence so the new (possibly lower) generation is
                         // permanently staled. Drain both the forwarder
                         // connections and the per-stream (announcer) workers.
-                        for (_endpoint_id, worker) in workers.drain() {
-                            worker.stop().await;
-                        }
-                        for (_stream_id, worker) in stream_workers.drain() {
-                            worker.stop().await;
-                        }
+                        tokio::join!(
+                            stop_forwarder_workers(workers.drain().map(|(_, worker)| worker)),
+                            stop_stream_workers(stream_workers.drain().map(|(_, worker)| worker)),
+                        );
                         // Abort the server-bound discovery + approval-watch
                         // tasks here; both are respawned after the reseed +
                         // fence reset below so they bind to the new server.
@@ -782,12 +794,10 @@ async fn run_reconcile_loop(
         }
     }
 
-    for (_endpoint_id, worker) in workers.drain() {
-        worker.stop().await;
-    }
-    for (_stream_id, worker) in stream_workers.drain() {
-        worker.stop().await;
-    }
+    tokio::join!(
+        stop_forwarder_workers(workers.drain().map(|(_, worker)| worker)),
+        stop_stream_workers(stream_workers.drain().map(|(_, worker)| worker)),
+    );
     if let Some(task) = discovery_task {
         task.abort();
         let _ = task.await;
@@ -1149,12 +1159,14 @@ async fn reconcile_once(
         .filter(|endpoint_id| !desired_forwarders.contains_key(*endpoint_id))
         .cloned()
         .collect::<Vec<_>>();
+    let mut removed_forwarders = Vec::with_capacity(stale_forwarders.len());
     for endpoint_id in stale_forwarders {
         if let Some(worker) = workers.remove(&endpoint_id) {
             info!(%endpoint_id, "stopping p2p forwarder worker");
-            worker.stop().await;
+            removed_forwarders.push(worker);
         }
     }
+    stop_forwarder_workers(removed_forwarders).await;
 
     for endpoint_id in desired_forwarders.keys() {
         // The pending grace clock is driven by the `ForwarderConnection` state
@@ -1194,12 +1206,14 @@ async fn reconcile_once(
         .filter(|stream_id| !desired_streams.contains_key(stream_id.as_str()))
         .cloned()
         .collect::<Vec<_>>();
+    let mut removed_streams = Vec::with_capacity(stale_streams.len());
     for stream_id in stale_streams {
         if let Some(worker) = stream_workers.remove(&stream_id) {
             info!(%stream_id, "stopping p2p stream worker (subscription removed)");
-            worker.stop().await;
+            removed_streams.push(worker);
         }
     }
+    stop_stream_workers(removed_streams).await;
 
     // Whether announcer push may run at all this pass: a server is configured,
     // a fenced generation was acquired, and the global toggle is on. Per-stream
@@ -1208,6 +1222,13 @@ async fn reconcile_once(
         config.server.is_some() && announcer_generation.is_some() && announcer_enabled;
     let should_announce =
         |stream_id: &str| announcer_available && announcer_publish_streams.contains(stream_id);
+    // Two-phase (re)build: collect every worker that must be replaced, stop
+    // them all concurrently, then start the replacements. Old-before-new is
+    // preserved per stream (the announcer fence and local proxy port must be
+    // released before the replacement starts), while the stops themselves
+    // share one timeout window instead of the serial sum.
+    let mut rebuilt_workers = Vec::new();
+    let mut streams_to_start = Vec::new();
     for (local_stream_key, sub) in desired_streams {
         let stream_id = local_stream_key.as_str().to_owned();
         let want_announce = should_announce(&stream_id);
@@ -1232,9 +1253,13 @@ async fn reconcile_once(
                 } else {
                     info!(%stream_id, "rebuilding p2p stream worker (announcer generation changed)");
                 }
-                worker.stop().await;
+                rebuilt_workers.push(worker);
             }
         }
+        streams_to_start.push((local_stream_key, sub, want_announce));
+    }
+    stop_stream_workers(rebuilt_workers).await;
+    for (local_stream_key, sub, want_announce) in streams_to_start {
         let worker = start_stream_worker(
             state,
             config,
@@ -1245,7 +1270,7 @@ async fn reconcile_once(
             &local_stream_key,
         )
         .await;
-        stream_workers.insert(stream_id, worker);
+        stream_workers.insert(local_stream_key.as_str().to_owned(), worker);
     }
 
     for (endpoint_id, worker) in workers.iter() {
@@ -2174,6 +2199,50 @@ mod tests {
 
     /// A valid IPICO chip-read frame (chip id `000000012345`).
     const SAMPLE_FRAME: &[u8] = b"aa400000000123450a2a01123018455927a7";
+
+    /// A [`StreamWorker`] whose only task ignores the shutdown signal, so
+    /// `stop` must ride out its full 2s abort timeout.
+    fn wedged_stream_worker(index: usize) -> StreamWorker {
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let (hint_tx, _hint_rx) = broadcast::channel(4);
+        StreamWorker {
+            sub: crate::db::StreamSubscription {
+                forwarder_endpoint_id: format!("fwd-{index}"),
+                stream_id: format!("stream-{index}"),
+                local_port_override: None,
+                event_type: EventType::Finish,
+                forwarder_id: None,
+                reader_ip: None,
+            },
+            shutdown_tx,
+            hint_tx,
+            proxy: None,
+            tasks: vec![tokio::spawn(std::future::pending::<()>())],
+            announcer_active: false,
+            announcer_generation: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_stream_workers_stop_concurrently() {
+        // Three workers that each hit the full 2s per-task stop timeout.
+        // Concurrent shutdown costs one timeout window (~2s of virtual time);
+        // the old serial loop would take the 6s sum.
+        let workers: Vec<StreamWorker> = (0..3).map(wedged_stream_worker).collect();
+
+        let started = tokio::time::Instant::now();
+        stop_stream_workers(workers).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= Duration::from_secs(2),
+            "wedged workers must ride out the stop timeout, got {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "stops must run concurrently (serial would be >= 6s), got {elapsed:?}"
+        );
+    }
 
     #[test]
     fn config_supports_keypath_and_seed_identities_independent_of_transport() {

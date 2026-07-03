@@ -42,6 +42,8 @@ pub struct ForwarderDataStream {
 /// desired stream on that same QUIC connection.
 #[derive(Debug)]
 pub struct ForwarderConnection {
+    /// The forwarder this connection dials; kept for stop-timeout logging.
+    endpoint_id: String,
     desired_tx: watch::Sender<HashMap<String, ForwarderDataStream>>,
     shutdown_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
@@ -61,7 +63,7 @@ impl ForwarderConnection {
         let (desired_tx, desired_rx) = watch::channel(HashMap::new());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let task = tokio::spawn(run_forwarder_connection(
-            endpoint_id,
+            endpoint_id.clone(),
             endpoint,
             forwarder_addr,
             writer,
@@ -72,6 +74,7 @@ impl ForwarderConnection {
             shutdown_rx,
         ));
         Self {
+            endpoint_id,
             desired_tx,
             shutdown_tx,
             task,
@@ -109,6 +112,10 @@ impl ForwarderConnection {
             .await
             .is_err()
         {
+            warn!(
+                endpoint_id = %self.endpoint_id,
+                "forwarder connection task did not observe shutdown within 2s; aborting"
+            );
             task.abort();
             let _ = task.await;
         }
