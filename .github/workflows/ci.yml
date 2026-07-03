@@ -54,12 +54,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      # Match the local pre-commit posture for now: receiver-tauri is a shipped
-      # desktop binary that needs platform WebView dependencies, and the
-      # workspace still has pre-existing pedantic warnings outside the P2P
-      # changes. Restore `-- -D warnings` once that baseline is clean.
+      # receiver-tauri is a shipped desktop binary that needs platform WebView
+      # dependencies, so it stays excluded here. The warning baseline is clean,
+      # so warnings are denied to keep it that way.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --exclude receiver-tauri
+        run: cargo clippy --workspace --all-targets --exclude receiver-tauri -- -D warnings
 
       - name: Run library tests
         run: cargo test --workspace --lib
