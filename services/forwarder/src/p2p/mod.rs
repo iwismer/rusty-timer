@@ -31,11 +31,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::P2pConfig;
-use crate::status_store::ForwarderStatusFeed;
+use crate::status_store::{
+    ForwarderStatusEvent, ForwarderStatusFeed, ForwarderStatusSnapshot, ReaderConnectionState,
+};
 use crate::storage::journal::Journal;
 use rt_iroh::{EndpointAddr, EndpointBuilder, EndpointId, RelayMode, SecretKey};
 use rt_p2p_protocol::{StreamCatalog, StreamEntry};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
 pub use allowlist::AllowList;
@@ -142,7 +144,19 @@ pub async fn start_forwarder_p2p(
         }
     }
 
-    let catalog = Arc::new(ReaderCatalog::new(reader_streams));
+    // Seed the catalog from the status store's current reader states: main.rs
+    // initializes reader status (init_readers) before starting P2P, so the
+    // snapshot already knows every configured reader's connectivity. The
+    // returned delta receiver is handed to the catalog task so no state change
+    // between snapshot and task startup can be missed.
+    let (status_rx, status_snapshot) = status_feed.subscribe_and_snapshot().await;
+    let (catalog, catalog_task) = LiveReaderCatalog::start(
+        reader_streams,
+        status_feed.clone(),
+        &status_snapshot,
+        status_rx,
+    );
+    let catalog = Arc::new(catalog);
     let endpoint = P2pEndpoint::bind_with_builder(
         endpoint_builder(config)?,
         allow_list.clone(),
@@ -156,7 +170,10 @@ pub async fn start_forwarder_p2p(
     .with_reader_control(reader_control);
 
     let run_endpoint = endpoint.clone();
-    let mut tasks = vec![tokio::spawn(async move { run_endpoint.run().await })];
+    let mut tasks = vec![
+        tokio::spawn(async move { run_endpoint.run().await }),
+        catalog_task,
+    ];
 
     if let Some((base_url, voucher)) = server_credentials(config)? {
         let request_timeout = Duration::from_secs(config.allowlist_request_timeout_secs);
@@ -272,35 +289,122 @@ pub enum P2pStartError {
     CatalogValueOutOfRange(#[from] TryFromIntError),
 }
 
+/// Live [`CatalogProvider`]: serves the forwarder's advertised streams with
+/// current per-reader connectivity.
+///
+/// A background task (tracked in [`P2pRuntime`] tasks) observes the status
+/// feed and updates `reader_connected` per entry, bumping `generation`
+/// monotonically on every real connectivity change, so a receiver that
+/// (re)connects sees fresh state and a changed `HelloOk.catalog_generation`.
+/// Mid-connection catalog pushes are out of scope: peers observe changes at
+/// connect time only.
 #[derive(Debug)]
-struct ReaderCatalog {
-    catalog: StreamCatalog,
+struct LiveReaderCatalog {
+    rx: watch::Receiver<StreamCatalog>,
 }
 
-impl ReaderCatalog {
-    fn new(reader_streams: &[String]) -> Self {
-        Self {
-            catalog: StreamCatalog {
-                generation: 1,
-                entries: reader_streams
-                    .iter()
-                    .map(|stream| StreamEntry {
-                        stream_id: stream.as_bytes().to_vec(),
-                        display_name: stream.clone(),
-                        network_addr: stream.clone(),
-                        reader_connected: true,
-                        hardware_reader_id: stream.clone(),
-                    })
-                    .collect(),
-            },
+impl LiveReaderCatalog {
+    /// Builds the initial catalog (generation 1) seeded from `snapshot` and
+    /// spawns the task that applies status-feed deltas.
+    fn start(
+        reader_streams: &[String],
+        feed: ForwarderStatusFeed,
+        snapshot: &ForwarderStatusSnapshot,
+        status_rx: broadcast::Receiver<ForwarderStatusEvent>,
+    ) -> (Self, JoinHandle<()>) {
+        let initial = StreamCatalog {
+            generation: 1,
+            entries: reader_streams
+                .iter()
+                .map(|stream| StreamEntry {
+                    stream_id: stream.as_bytes().to_vec(),
+                    display_name: stream.clone(),
+                    network_addr: stream.clone(),
+                    reader_connected: snapshot_reader_connected(snapshot, stream),
+                    hardware_reader_id: stream.clone(),
+                })
+                .collect(),
+        };
+        let (tx, rx) = watch::channel(initial);
+        let task = tokio::spawn(run_catalog_updates(feed, status_rx, tx));
+        (Self { rx }, task)
+    }
+}
+
+impl CatalogProvider for LiveReaderCatalog {
+    fn catalog(&self) -> StreamCatalog {
+        self.rx.borrow().clone()
+    }
+}
+
+fn snapshot_reader_connected(snapshot: &ForwarderStatusSnapshot, stream: &str) -> bool {
+    snapshot
+        .readers
+        .iter()
+        .any(|(id, status)| id == stream && status.state == ReaderConnectionState::Connected)
+}
+
+/// Applies reader connectivity deltas from the status feed to the catalog.
+///
+/// Exits when the status feed closes; otherwise runs until aborted at P2P
+/// shutdown.
+async fn run_catalog_updates(
+    feed: ForwarderStatusFeed,
+    mut status_rx: broadcast::Receiver<ForwarderStatusEvent>,
+    tx: watch::Sender<StreamCatalog>,
+) {
+    loop {
+        match status_rx.recv().await {
+            Ok(ForwarderStatusEvent::ReaderStatus { stream_id, status }) => {
+                apply_reader_connectivity(
+                    &tx,
+                    &stream_id,
+                    status.state == ReaderConnectionState::Connected,
+                );
+            }
+            Ok(_) => {}
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                tracing::warn!(
+                    skipped,
+                    "p2p: catalog status receiver lagged; reseeding from snapshot"
+                );
+                // A dropped delta could be a connect/disconnect; re-subscribe
+                // atomically with a fresh snapshot so the catalog cannot stay
+                // stale.
+                let (new_rx, snapshot) = feed.subscribe_and_snapshot().await;
+                status_rx = new_rx;
+                for (stream_id, status) in &snapshot.readers {
+                    apply_reader_connectivity(
+                        &tx,
+                        stream_id,
+                        status.state == ReaderConnectionState::Connected,
+                    );
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
         }
     }
 }
 
-impl CatalogProvider for ReaderCatalog {
-    fn catalog(&self) -> StreamCatalog {
-        self.catalog.clone()
-    }
+/// Sets `reader_connected` for the entry matching `stream_id`, bumping the
+/// catalog generation only on an actual change. Events for unknown streams or
+/// with unchanged connectivity are no-ops (no generation bump).
+fn apply_reader_connectivity(tx: &watch::Sender<StreamCatalog>, stream_id: &str, connected: bool) {
+    tx.send_if_modified(|catalog| {
+        let Some(entry) = catalog
+            .entries
+            .iter_mut()
+            .find(|entry| entry.stream_id == stream_id.as_bytes())
+        else {
+            return false;
+        };
+        if entry.reader_connected == connected {
+            return false;
+        }
+        entry.reader_connected = connected;
+        catalog.generation += 1;
+        true
+    });
 }
 
 fn endpoint_builder(config: &P2pConfig) -> Result<EndpointBuilder, P2pStartError> {
@@ -933,6 +1037,120 @@ mod tests {
 
         cached.close().await;
         static_receiver.close().await;
+        Ok(())
+    }
+
+    /// Connects, performs the control-plane Hello handshake, and returns the
+    /// negotiated `HelloOk.catalog_generation` together with the served
+    /// `StreamCatalog` frame, then drops the connection.
+    async fn hello_and_catalog(
+        receiver: &rt_iroh::Endpoint,
+        forwarder_addr: &NodeAddr,
+    ) -> Result<(u64, StreamCatalog), BoxError> {
+        let connection = receiver.connect(forwarder_addr.clone()).await?;
+        let (mut control_send, mut control_recv) = connection.open_bi().await?;
+        control::write_frame(
+            &mut control_send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::Hello(control::forwarder_hello())),
+            },
+        )
+        .await?;
+        let hello_generation = match control::read_frame::<ControlF2C>(&mut control_recv)
+            .await?
+            .msg
+        {
+            Some(control_f2c::Msg::HelloOk(hello_ok)) => hello_ok.catalog_generation,
+            other => return Err(format!("expected HelloOk, got {other:?}").into()),
+        };
+        let catalog = match control::read_frame::<ControlF2C>(&mut control_recv)
+            .await?
+            .msg
+        {
+            Some(control_f2c::Msg::StreamCatalog(catalog)) => catalog,
+            other => return Err(format!("expected StreamCatalog, got {other:?}").into()),
+        };
+        connection.close(0u32.into(), b"test done");
+        Ok((hello_generation, catalog))
+    }
+
+    #[tokio::test]
+    async fn reconnect_serves_current_reader_connectivity_and_bumped_generation() -> TestResult {
+        let receiver = EndpointBuilder::test([63; 32]).bind().await?;
+        let dir = tempfile::tempdir()?;
+        let journal_path = dir.path().join("journal.sqlite3");
+        let journal = Arc::new(Mutex::new(Journal::open(&journal_path)?));
+        let stream_key = "10.0.0.5:10000";
+
+        // Reader is already Connected before P2P starts (main.rs initializes
+        // reader status before start_forwarder_p2p), so the initial catalog
+        // must be seeded from the status snapshot, not hardcoded.
+        let store = crate::status_store::StatusStore::new(SubsystemStatus::ready());
+        store.init_readers(&[(stream_key.to_owned(), 10001)]).await;
+        store
+            .update_reader_state(
+                stream_key,
+                crate::status_store::ReaderConnectionState::Connected,
+            )
+            .await;
+
+        let runtime = start_forwarder_p2p(
+            &p2p_config(receiver.node_id().to_string()),
+            &journal_path,
+            Arc::clone(&journal),
+            &[stream_key.to_owned()],
+            None,
+            store.status_feed(),
+            Arc::new(NoopRemoteConfigHandler),
+            Arc::new(NoopReaderControlHandler),
+        )
+        .await?
+        .expect("p2p enabled");
+        let forwarder_addr = runtime.node_addr().await;
+        receiver.add_node_addr(forwarder_addr.clone())?;
+
+        let (g1, catalog) = hello_and_catalog(&receiver, &forwarder_addr).await?;
+        assert_eq!(
+            g1, catalog.generation,
+            "HelloOk.catalog_generation must match the served StreamCatalog generation"
+        );
+        assert!(
+            catalog.entries[0].reader_connected,
+            "initial catalog must reflect the reader's Connected state at p2p start"
+        );
+
+        store
+            .update_reader_state(
+                stream_key,
+                crate::status_store::ReaderConnectionState::Disconnected,
+            )
+            .await;
+
+        // The catalog task observes the status feed asynchronously: poll with
+        // fresh connections until the disconnect is visible at connect time.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let (g2, catalog) = hello_and_catalog(&receiver, &forwarder_addr).await?;
+            assert_eq!(
+                g2, catalog.generation,
+                "HelloOk.catalog_generation must match the served StreamCatalog generation"
+            );
+            if g2 > g1 && !catalog.entries[0].reader_connected {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "catalog never reflected reader disconnect: generation {g2} (initial {g1}), \
+                     reader_connected {}",
+                    catalog.entries[0].reader_connected
+                )
+                .into());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        runtime.shutdown().await;
+        receiver.close().await;
         Ok(())
     }
 
