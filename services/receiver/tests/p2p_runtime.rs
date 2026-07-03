@@ -104,6 +104,26 @@ fn script_two(raw: &[u8]) -> ForwarderScript {
     }
 }
 
+/// A delayed two-batch script. The delay gives the test a deterministic window
+/// to force a reconnect after seqs 1-2 are projected but before seqs 3-4 arrive.
+fn script_four_in_two_delayed_batches(raw: &[u8]) -> ForwarderScript {
+    let mut script = script_two(raw);
+    script.subscribe_ok.latest_seq_at_open = 4;
+    script.batches = vec![
+        EventBatch {
+            records: vec![record(1, raw), record(2, raw)],
+            replay: false,
+        },
+        EventBatch {
+            records: vec![record(3, raw), record(4, raw)],
+            replay: false,
+        },
+    ];
+    script.caught_up_through = Some(4);
+    script.data_fault = ConnectivityFault::delayed(Duration::from_millis(750));
+    script
+}
+
 async fn init_state(data_dir: &std::path::Path) -> Arc<receiver::control_api::AppState> {
     let (state, _shutdown_rx) = receiver::runtime::init_with_data_dir(None, data_dir)
         .await
@@ -134,6 +154,19 @@ fn forwarder_config(forwarder: &MockForwarderPeer) -> (String, SocketAddr) {
     let endpoint_id = addr.id.to_string();
     let direct = *addr.ip_addrs().next().expect("forwarder direct address");
     (endpoint_id, direct)
+}
+
+async fn stream_raw_count(
+    state: &receiver::control_api::AppState,
+    forwarder_id: &str,
+    reader_ip: &str,
+) -> Option<i64> {
+    state
+        .get_stream_metrics_snapshot()
+        .await
+        .into_iter()
+        .find(|metrics| metrics.forwarder_id == forwarder_id && metrics.reader_ip == reader_ip)
+        .map(|metrics| metrics.raw_count)
 }
 
 fn base_config(
@@ -351,6 +384,69 @@ async fn runtime_projects_canonical_stream_address_events_to_ui_state() {
     })
     .await
     .expect("runtime_projects_canonical_stream_address_events_to_ui_state timed out");
+}
+
+#[tokio::test]
+async fn reconnect_all_preserves_stream_metrics_and_continues_counting() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let forwarder =
+            MockForwarderPeer::start([86; 32], script_four_in_two_delayed_batches(VALID_FRAME))
+                .await
+                .unwrap();
+        let (node_id, direct) = forwarder_config(&forwarder);
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_state(dir.path()).await;
+        let (config, sub) = base_config(node_id.clone(), direct, 87, None);
+        state
+            .db
+            .lock()
+            .await
+            .replace_stream_subscriptions(&[sub])
+            .unwrap();
+
+        let runtime = start_receiver_p2p(Arc::clone(&state), config)
+            .await
+            .unwrap();
+
+        poll_until(
+            || {
+                let state = Arc::clone(&state);
+                let node_id = node_id.clone();
+                async move { stream_raw_count(&state, &node_id, STREAM_ID).await == Some(2) }
+            },
+            Duration::from_secs(10),
+        )
+        .await;
+
+        state.request_connect().await;
+
+        poll_until(
+            || async { forwarder.connection_count() >= 2 && forwarder.subscribes().len() >= 2 },
+            Duration::from_secs(10),
+        )
+        .await;
+        assert_eq!(
+            stream_raw_count(&state, &node_id, STREAM_ID).await,
+            Some(2),
+            "forced reconnect-all must not clear the user-visible metrics cache"
+        );
+
+        poll_until(
+            || {
+                let state = Arc::clone(&state);
+                let node_id = node_id.clone();
+                async move { stream_raw_count(&state, &node_id, STREAM_ID).await == Some(4) }
+            },
+            Duration::from_secs(10),
+        )
+        .await;
+
+        runtime.shutdown().await;
+        forwarder.shutdown().await;
+    })
+    .await
+    .expect("reconnect_all_preserves_stream_metrics_and_continues_counting timed out");
 }
 
 #[tokio::test]
