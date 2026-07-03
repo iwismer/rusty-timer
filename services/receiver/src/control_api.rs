@@ -1000,6 +1000,9 @@ impl AppState {
 
     /// Whether the forwarder's live session negotiated `CAP_REMOTE_CONFIG`
     /// (mirrors the presence of its registered remote-config channel).
+    /// Production callers consume the batched [`Self::forwarder_config_endpoints`]
+    /// snapshot instead; this per-endpoint probe remains for tests.
+    #[cfg(test)]
     pub(crate) fn forwarder_remote_config_available(&self, endpoint_id: &str) -> bool {
         self.forwarder_config_tx
             .lock()
@@ -1060,13 +1063,6 @@ impl AppState {
             .unwrap()
             .get(endpoint_id)
             .cloned()
-    }
-
-    pub(crate) fn forwarder_reader_control_available(&self, endpoint_id: &str) -> bool {
-        self.forwarder_reader_control_tx
-            .lock()
-            .unwrap()
-            .contains_key(endpoint_id)
     }
 
     fn forwarder_reader_control_endpoints(&self) -> Vec<String> {
@@ -2422,22 +2418,44 @@ pub async fn get_status(state: &AppState) -> StatusResponse {
 pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
     let server = server_device_status(state).await;
     let discovered = state.discovered_forwarders.read().await.clone();
-    let subscriptions = {
+    let (subscriptions, intents) = {
         let db = state.db.lock().await;
-        match db.load_stream_subscriptions() {
+        let subscriptions = match db.load_stream_subscriptions() {
             Ok(subscriptions) => subscriptions,
             Err(error) => {
                 warn!(error = %error, "failed to load subscriptions for connections response");
                 Vec::new()
             }
-        }
+        };
+        // Single batched intent load per response: every per-forwarder state
+        // below derives from this one map instead of a per-endpoint DB read
+        // (N+1). The DB is authoritative in this async context; on a load
+        // failure fall back to the sync-fallback cache of explicit disconnect
+        // intents, matching `recompute_aggregate_connection_state`.
+        let intents = match db.load_forwarder_intents() {
+            Ok(intents) => intents,
+            Err(error) => {
+                warn!(error = %error, "failed to load forwarder intents for connections response");
+                state
+                    .disconnected_intents
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|endpoint_id| (endpoint_id.clone(), false))
+                    .collect()
+            }
+        };
+        (subscriptions, intents)
     };
 
+    let runtime_statuses = state.forwarder_runtime.lock().unwrap().clone();
     let live_statuses = state.forwarder_live_status.lock().unwrap().clone();
+    let config_endpoints = state.forwarder_config_endpoints();
+    let reader_control_endpoints = state.forwarder_reader_control_endpoints();
     let mut endpoints: BTreeSet<String> = discovered.keys().cloned().collect();
     endpoints.extend(live_statuses.keys().cloned());
-    endpoints.extend(state.forwarder_config_endpoints());
-    endpoints.extend(state.forwarder_reader_control_endpoints());
+    endpoints.extend(config_endpoints.iter().cloned());
+    endpoints.extend(reader_control_endpoints.iter().cloned());
     let mut subscribed_counts: HashMap<String, usize> = HashMap::new();
     let local_ports = subscription_local_ports(&subscriptions);
     for subscription in &subscriptions {
@@ -2447,10 +2465,46 @@ pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
             .or_default() += 1;
     }
 
+    let forwarders = assemble_forwarder_connection_statuses(
+        endpoints,
+        &discovered,
+        &runtime_statuses,
+        &intents,
+        &live_statuses,
+        &subscribed_counts,
+        &local_ports,
+        &config_endpoints,
+        &reader_control_endpoints,
+    );
+
+    ConnectionsResponse { server, forwarders }
+}
+
+/// Assemble the per-forwarder entries of a [`ConnectionsResponse`] from
+/// pre-loaded snapshots. Pure by construction: forwarder intent comes only
+/// from the batch-loaded `intents` map (endpoints absent from the map default
+/// to connect), so the response cannot re-read the DB per endpoint.
+#[allow(clippy::too_many_arguments)]
+fn assemble_forwarder_connection_statuses(
+    endpoints: BTreeSet<String>,
+    discovered: &DiscoveredForwarders,
+    runtime_statuses: &HashMap<String, ForwarderRuntimeStatus>,
+    intents: &HashMap<String, bool>,
+    live_statuses: &HashMap<String, ForwarderLiveStatus>,
+    subscribed_counts: &HashMap<String, usize>,
+    local_ports: &HashMap<(String, String), Option<u16>>,
+    config_endpoints: &[String],
+    reader_control_endpoints: &[String],
+) -> Vec<ForwarderConnectionStatus> {
     let mut forwarders = Vec::with_capacity(endpoints.len());
     for endpoint_id in endpoints {
         let discovered_forwarder = discovered.get(&endpoint_id);
-        let snapshot = state.forwarder_state(&endpoint_id).await;
+        let runtime = runtime_statuses
+            .get(&endpoint_id)
+            .copied()
+            .unwrap_or_default();
+        let intent = *intents.get(&endpoint_id).unwrap_or(&true);
+        let snapshot = derive_forwarder_state(runtime, intent);
         let live_status = live_statuses.get(&endpoint_id).cloned().unwrap_or_default();
         forwarders.push(ForwarderConnectionStatus {
             endpoint_id: endpoint_id.clone(),
@@ -2459,16 +2513,15 @@ pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
             pending: snapshot.pending,
             subscribed_count: subscribed_counts.get(&endpoint_id).copied().unwrap_or(0),
             available_count: discovered_forwarder.map_or(0, |forwarder| forwarder.streams.len()),
-            readers: sorted_reader_statuses(&live_status, &local_ports, &endpoint_id),
+            readers: sorted_reader_statuses(&live_status, local_ports, &endpoint_id),
             ups: live_status.ups,
             failed_stream_ids: live_status.failed_streams.into_iter().collect(),
             restart_needed: None,
-            remote_config_available: state.forwarder_remote_config_available(&endpoint_id),
-            reader_control_available: state.forwarder_reader_control_available(&endpoint_id),
+            remote_config_available: config_endpoints.contains(&endpoint_id),
+            reader_control_available: reader_control_endpoints.contains(&endpoint_id),
         });
     }
-
-    ConnectionsResponse { server, forwarders }
+    forwarders
 }
 
 #[derive(Debug, Deserialize)]
@@ -3958,6 +4011,93 @@ mod tests {
             event_name(&ReceiverUiEvent::ConnectionsChanged),
             "connections_changed"
         );
+    }
+
+    #[test]
+    fn assemble_forwarder_connection_statuses_derives_state_from_batched_intents() {
+        let endpoints: BTreeSet<String> = ["endpoint-a", "endpoint-b", "endpoint-c"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let discovered = DiscoveredForwarders::new();
+        let mut runtime_statuses = HashMap::new();
+        runtime_statuses.insert(
+            "endpoint-c".to_owned(),
+            ForwarderRuntimeStatus {
+                control_up: true,
+                data_sessions: 0,
+                pending_started_at: None,
+            },
+        );
+        // The batch-loaded intent map is the only intent source: an explicit
+        // disconnect intent yields Disconnected; endpoints absent from the map
+        // default to connect.
+        let mut intents = HashMap::new();
+        intents.insert("endpoint-a".to_owned(), false);
+        let live_statuses = HashMap::new();
+        let mut subscribed_counts = HashMap::new();
+        subscribed_counts.insert("endpoint-b".to_owned(), 2usize);
+        let local_ports = HashMap::new();
+
+        let forwarders = assemble_forwarder_connection_statuses(
+            endpoints,
+            &discovered,
+            &runtime_statuses,
+            &intents,
+            &live_statuses,
+            &subscribed_counts,
+            &local_ports,
+            &["endpoint-c".to_owned()],
+            &[],
+        );
+
+        assert_eq!(forwarders.len(), 3);
+        assert_eq!(forwarders[0].endpoint_id, "endpoint-a");
+        assert_eq!(forwarders[0].state, ForwarderConnState::Disconnected);
+        assert_eq!(forwarders[1].endpoint_id, "endpoint-b");
+        assert_eq!(forwarders[1].state, ForwarderConnState::Unavailable);
+        assert_eq!(forwarders[1].subscribed_count, 2);
+        assert_eq!(forwarders[2].endpoint_id, "endpoint-c");
+        assert_eq!(forwarders[2].state, ForwarderConnState::Connected);
+        assert!(forwarders[2].remote_config_available);
+        assert!(!forwarders[2].reader_control_available);
+    }
+
+    #[tokio::test]
+    async fn get_connections_reports_disconnect_intent_from_single_batch_load() {
+        let db = Db::open_in_memory().unwrap();
+        db.set_forwarder_intent("endpoint-a", false).unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        state.discovered_forwarders.write().await.extend([
+            (
+                "endpoint-a".to_owned(),
+                DiscoveredForwarder {
+                    display_name: None,
+                    direct_addrs: Vec::new(),
+                    streams: Vec::new(),
+                },
+            ),
+            (
+                "endpoint-b".to_owned(),
+                DiscoveredForwarder {
+                    display_name: None,
+                    direct_addrs: Vec::new(),
+                    streams: Vec::new(),
+                },
+            ),
+        ]);
+
+        let response = get_connections(&state).await;
+
+        let by_id = |id: &str| {
+            response
+                .forwarders
+                .iter()
+                .find(|f| f.endpoint_id == id)
+                .unwrap_or_else(|| panic!("forwarder {id} missing from response"))
+        };
+        assert_eq!(by_id("endpoint-a").state, ForwarderConnState::Disconnected);
+        assert_eq!(by_id("endpoint-b").state, ForwarderConnState::Unavailable);
     }
 
     #[tokio::test]
