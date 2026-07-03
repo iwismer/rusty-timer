@@ -3849,6 +3849,15 @@ mod tests {
         format!("ab{body}{lrc:02x}")
     }
 
+    fn temp_token_file() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("create temp token dir");
+        let path = dir.path().join("fake-token");
+        std::fs::write(&path, "test-token\n")
+            .unwrap_or_else(|e| panic!("write token {}: {e}", path.display()));
+        let token_path = path.display().to_string().replace('\\', "/");
+        (dir, token_path)
+    }
+
     #[tokio::test]
     async fn update_apply_sets_failed_status_when_staged_file_missing() {
         let server = StatusServer::start(
@@ -5342,6 +5351,7 @@ mod tests {
         use tempfile::NamedTempFile;
 
         let mut config_file = NamedTempFile::new().expect("create temp config");
+        let (_token_dir, token_path) = temp_token_file();
         write!(
             config_file,
             r#"schema_version = 1
@@ -5349,7 +5359,7 @@ display_name = "Start Line"
 [p2p]
 server_url = "https://timing.example.com"
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -5402,13 +5412,14 @@ target = "192.168.1.100:10000"
         use tempfile::NamedTempFile;
 
         let mut config_file = NamedTempFile::new().expect("create temp config");
+        let (_token_dir, token_path) = temp_token_file();
         write!(
             config_file,
             r#"schema_version = 1
 [p2p]
 server_url = "https://timing.example.com"
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -5462,13 +5473,14 @@ target = "192.168.1.100:10000"
         use tempfile::NamedTempFile;
 
         let mut config_file = NamedTempFile::new().expect("create temp config");
+        let (_token_dir, token_path) = temp_token_file();
         write!(
             config_file,
             r#"schema_version = 1
 [p2p]
 server_url = "https://timing.example.com"
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -5575,13 +5587,14 @@ target = "192.168.1.100:10000"
         use tempfile::NamedTempFile;
 
         let mut config_file = NamedTempFile::new().expect("create temp config");
+        let (_token_dir, token_path) = temp_token_file();
         write!(
             config_file,
             r#"schema_version = 1
 [p2p]
 server_url = "https://timing.example.com"
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -5636,13 +5649,14 @@ target = "192.168.1.100:10000"
         use tempfile::NamedTempFile;
 
         let mut config_file = NamedTempFile::new().expect("create temp config");
+        let (_token_dir, token_path) = temp_token_file();
         write!(
             config_file,
             r#"schema_version = 1
 [p2p]
 server_url = "https://timing.example.com"
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -7126,13 +7140,14 @@ target = "192.168.1.100:10000"
         use tempfile::NamedTempFile;
 
         let mut config_file = NamedTempFile::new().expect("create temp config");
+        let (_token_dir, token_path) = temp_token_file();
         write!(
             config_file,
             r#"schema_version = 1
 [p2p]
 server_url = "https://timing.example.com"
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -7173,13 +7188,14 @@ target = "192.168.1.100:10000"
         use tempfile::NamedTempFile;
 
         let mut config_file = NamedTempFile::new().expect("create temp config");
+        let (_token_dir, token_path) = temp_token_file();
         write!(
             config_file,
             r#"schema_version = 1
 [p2p]
 server_url = "https://timing.example.com"
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -7217,13 +7233,14 @@ target = "192.168.1.100:10000"
         use tempfile::NamedTempFile;
 
         let mut config_file = NamedTempFile::new().expect("create temp config");
+        let (_token_dir, token_path) = temp_token_file();
         write!(
             config_file,
             r#"schema_version = 1
 [p2p]
 server_url = "https://timing.example.com"
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
