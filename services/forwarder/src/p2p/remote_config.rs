@@ -488,6 +488,46 @@ mod tests {
         assert_eq!(cfg.readers[0].local_fallback_port, Some(10101));
     }
 
+    /// Regression guard against serialization drift (e.g. a future
+    /// `skip_serializing_if` on a protected raw section) causing false
+    /// rejections: a pure get -> set round-trip of a config with populated
+    /// `[p2p]` and `[control]` sections must be accepted when only
+    /// operational fields change.
+    #[tokio::test]
+    async fn set_roundtrip_with_populated_protected_sections_is_accepted() {
+        let (config_path, _dir) = temp_config(
+            "[p2p]\nenabled = false\n\n[control]\nallow_power_actions = false\nallow_remote_config = true\n",
+        );
+        let h = handler(true, config_path.clone(), Arc::new(Notify::new()));
+        let mut value: serde_json::Value = serde_json::from_str(
+            &h.get_config(ConfigGetRequest {
+                request_id: "g".into(),
+            })
+            .await
+            .config_json,
+        )
+        .unwrap();
+
+        // Only an operational change; protected sections round-trip untouched.
+        value["display_name"] = serde_json::json!("Round Trip");
+        let response = h
+            .set_config(ConfigSetRequest {
+                request_id: "s".into(),
+                config_json: serde_json::to_string(&value).unwrap(),
+            })
+            .await;
+
+        assert!(
+            response.ok,
+            "round-trip with populated protected sections must be accepted: {}",
+            response.error
+        );
+        let cfg = crate::config::load_config_from_path(&config_path).unwrap();
+        assert_eq!(cfg.display_name.as_deref(), Some("Round Trip"));
+        assert!(!cfg.p2p.enabled);
+        assert!(cfg.control.allow_remote_config);
+    }
+
     #[tokio::test]
     async fn set_allows_missing_control_to_all_null_control() {
         let (config_path, _dir) = temp_config("");
