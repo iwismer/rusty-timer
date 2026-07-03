@@ -47,6 +47,12 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     event_type            TEXT NOT NULL DEFAULT 'finish',
     forwarder_id          TEXT,
     reader_ip             TEXT,
+    -- Persisted DBF READER digit (0..=9; the DBF READER field is one
+    -- character). Assigned when the subscription set is replaced and
+    -- preserved for surviving subscriptions so a stream's digit stays stable
+    -- across set edits. NULL when all ten digits were taken at assignment
+    -- time; DBF delivery skips such streams.
+    dbf_reader_index      INTEGER,
     PRIMARY KEY (forwarder_endpoint_id, stream_id)
 );
 

@@ -1669,6 +1669,7 @@ async fn run_stream_delta_emitter(state: Arc<AppState>, mut shutdown_rx: watch::
 /// passes automatically on the next tick.
 async fn run_shared_dbf_worker(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<bool>) {
     let mut pass_state = crate::dbf_writer::DbfPassState::default();
+    let mut subscriptions_rx = state.subscriptions_rx();
     let mut was_enabled = false;
     let mut interval_ms = u64::from(crate::db::DEFAULT_DBF_FLUSH_INTERVAL_MS);
     let mut tick = tokio::time::interval(Duration::from_millis(interval_ms));
@@ -1680,6 +1681,15 @@ async fn run_shared_dbf_worker(state: Arc<AppState>, mut shutdown_rx: watch::Rec
                 if changed.is_err() || *shutdown_rx.borrow() { break; }
             }
             _ = tick.tick() => {
+                // A subscription-set change can hand a freed reader index to a
+                // different stream while rows already in the file still carry
+                // the old digit. Reset pass state so this pass regenerates
+                // cross-stream from the persisted indices instead of
+                // appending against a stale file.
+                if subscriptions_rx.has_changed().unwrap_or(false) {
+                    let _ = subscriptions_rx.borrow_and_update();
+                    pass_state = crate::dbf_writer::DbfPassState::default();
+                }
                 let (enabled, configured_ms) =
                     run_shared_dbf_pass(&state, &mut pass_state, was_enabled).await;
                 was_enabled = enabled;
@@ -1732,27 +1742,24 @@ async fn run_shared_dbf_pass(
                             &sub.forwarder_endpoint_id,
                             &sub.stream_id,
                         ) {
-                            Ok(Some((idx, event_type))) => match u8::try_from(idx) {
-                                Ok(reader_index) if reader_index <= 9 => {
-                                    specs.push(crate::dbf_writer::DbfStreamSpec {
-                                        stream_id: LocalStreamKey::new(
-                                            &sub.forwarder_endpoint_id,
-                                            &sub.stream_id,
-                                        )
-                                        .as_str()
-                                        .to_owned(),
-                                        event_type,
-                                        reader_index,
-                                    });
-                                }
-                                _ => {
-                                    warn!(
-                                        stream_id = %sub.stream_id,
-                                        idx,
-                                        "subscription index exceeds DBF reader range; skipping stream"
-                                    );
-                                }
-                            },
+                            Ok(Some((Some(reader_index), event_type))) => {
+                                specs.push(crate::dbf_writer::DbfStreamSpec {
+                                    stream_id: LocalStreamKey::new(
+                                        &sub.forwarder_endpoint_id,
+                                        &sub.stream_id,
+                                    )
+                                    .as_str()
+                                    .to_owned(),
+                                    event_type,
+                                    reader_index,
+                                });
+                            }
+                            Ok(Some((None, _))) => {
+                                warn!(
+                                    stream_id = %sub.stream_id,
+                                    "subscription has no DBF reader index (all ten digits in use); skipping stream"
+                                );
+                            }
                             Ok(None) => {}
                             Err(e) => {
                                 warn!(error = %e, stream_id = %sub.stream_id, "failed to load DBF subscription details");
@@ -3075,6 +3082,178 @@ mod tests {
 
         let _ = shutdown_tx.send(true);
         let _ = handle.await;
+    }
+
+    fn test_sub(endpoint: &str, stream: &str) -> StreamSubscription {
+        StreamSubscription {
+            forwarder_endpoint_id: endpoint.to_owned(),
+            stream_id: stream.to_owned(),
+            local_port_override: None,
+            event_type: EventType::Finish,
+            forwarder_id: None,
+            reader_ip: None,
+        }
+    }
+
+    /// READER digits of every row currently in the DBF file, sorted. Returns
+    /// an empty list when the file is missing or mid-write (callers poll).
+    fn dbf_reader_digits(path: &std::path::Path) -> Vec<String> {
+        let Ok(mut reader) = dbase::Reader::from_path(path) else {
+            return Vec::new();
+        };
+        let Ok(records) = reader.read() else {
+            return Vec::new();
+        };
+        let mut digits: Vec<String> = records
+            .iter()
+            .filter_map(|r| match r.get("READER") {
+                Some(dbase::FieldValue::Character(Some(s))) => Some(s.trim().to_owned()),
+                _ => None,
+            })
+            .collect();
+        digits.sort();
+        digits
+    }
+
+    /// Removing stream A frees its reader index for a new stream C. The
+    /// subscription-change signal must force a cross-stream regenerate so A's
+    /// stale rows (carrying the freed digit) are dropped, while B keeps its
+    /// persisted digit and C reuses A's.
+    #[tokio::test]
+    async fn shared_dbf_worker_regenerates_with_stable_indices_on_subscription_change() {
+        let key_a = LocalStreamKey::new("fwd-a", "127.0.0.1:11001");
+        let key_b = LocalStreamKey::new("fwd-b", "127.0.0.1:11002");
+        let key_c = LocalStreamKey::new("fwd-c", "127.0.0.1:11003");
+
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let tmp = tempfile::tempdir().unwrap();
+        {
+            let mut db = state.db.lock().await;
+            db.save_profile("http://server", "tok", "check-and-download", None)
+                .unwrap();
+            db.save_dbf_config(&crate::db::DbfConfig {
+                enabled: true,
+                flush_interval_ms: crate::db::DBF_FLUSH_INTERVAL_MIN_MS,
+            })
+            .unwrap();
+            db.save_rd_import_config(&crate::db::RdImportConfig {
+                enabled: false,
+                dir: tmp.path().to_string_lossy().into_owned(),
+                interval_secs: 15,
+            })
+            .unwrap();
+            db.replace_stream_subscriptions(&[
+                test_sub("fwd-a", "127.0.0.1:11001"),
+                test_sub("fwd-b", "127.0.0.1:11002"),
+            ])
+            .unwrap();
+            insert_chip_event(&db, key_a.as_str(), 1, 1_700_000_000_100);
+            insert_chip_event(&db, key_a.as_str(), 2, 1_700_000_000_200);
+            insert_chip_event(&db, key_b.as_str(), 1, 1_700_000_000_300);
+        }
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let handle = tokio::spawn(run_shared_dbf_worker(Arc::clone(&state), shutdown_rx));
+
+        let dbf_path = tmp.path().join("IPICO.DBF");
+        let initial = poll_async(Duration::from_secs(10), || {
+            let dbf_path = dbf_path.clone();
+            async move { dbf_reader_digits(&dbf_path) == ["0", "0", "1"] }
+        })
+        .await;
+        assert!(
+            initial,
+            "initial pass must deliver A with digit 0 and B with digit 1, got {:?}",
+            dbf_reader_digits(&dbf_path)
+        );
+
+        // Drop A, keep B, add C — then signal the subscription change.
+        {
+            let mut db = state.db.lock().await;
+            db.replace_stream_subscriptions(&[
+                test_sub("fwd-b", "127.0.0.1:11002"),
+                test_sub("fwd-c", "127.0.0.1:11003"),
+            ])
+            .unwrap();
+            insert_chip_event(&db, key_c.as_str(), 1, 1_700_000_000_400);
+        }
+        state.notify_subscriptions_changed();
+
+        // The regenerate drops A's two stale rows; B keeps digit 1 and C
+        // reuses the freed digit 0.
+        let regenerated = poll_async(Duration::from_secs(10), || {
+            let dbf_path = dbf_path.clone();
+            async move { dbf_reader_digits(&dbf_path) == ["0", "1"] }
+        })
+        .await;
+        assert!(
+            regenerated,
+            "subscription change must regenerate with stable indices, got {:?}",
+            dbf_reader_digits(&dbf_path)
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = handle.await;
+    }
+
+    /// With eleven subscriptions the eleventh has no reader index (all ten
+    /// DBF digits taken) and must be skipped by delivery while indexed
+    /// streams still deliver.
+    #[tokio::test]
+    async fn shared_dbf_pass_skips_streams_without_reader_index() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let tmp = tempfile::tempdir().unwrap();
+        {
+            let mut db = state.db.lock().await;
+            db.save_profile("http://server", "tok", "check-and-download", None)
+                .unwrap();
+            db.save_dbf_config(&crate::db::DbfConfig {
+                enabled: true,
+                flush_interval_ms: crate::db::DBF_FLUSH_INTERVAL_MIN_MS,
+            })
+            .unwrap();
+            db.save_rd_import_config(&crate::db::RdImportConfig {
+                enabled: false,
+                dir: tmp.path().to_string_lossy().into_owned(),
+                interval_secs: 15,
+            })
+            .unwrap();
+            let subs: Vec<StreamSubscription> = (0..11)
+                .map(|i| test_sub(&format!("ep-{i}"), &format!("s-{i}")))
+                .collect();
+            db.replace_stream_subscriptions(&subs).unwrap();
+            insert_chip_event(
+                &db,
+                LocalStreamKey::new("ep-0", "s-0").as_str(),
+                1,
+                1_700_000_000_100,
+            );
+            insert_chip_event(
+                &db,
+                LocalStreamKey::new("ep-10", "s-10").as_str(),
+                1,
+                1_700_000_000_200,
+            );
+        }
+
+        let mut pass_state = crate::dbf_writer::DbfPassState::default();
+        let (enabled, _interval) = run_shared_dbf_pass(&state, &mut pass_state, false).await;
+        assert!(enabled);
+
+        let db = state.db.lock().await;
+        assert!(
+            db.load_undelivered_received_events(LocalStreamKey::new("ep-0", "s-0").as_str())
+                .unwrap()
+                .is_empty(),
+            "indexed stream must deliver"
+        );
+        assert_eq!(
+            db.load_undelivered_received_events(LocalStreamKey::new("ep-10", "s-10").as_str())
+                .unwrap()
+                .len(),
+            1,
+            "stream without a reader index must be skipped"
+        );
     }
 
     /// An announcer push that fails (simulated transport outage) must be retried

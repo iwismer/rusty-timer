@@ -388,6 +388,16 @@ pub struct AppState {
     /// Keepalive receiver to prevent the watch channel from being dropped
     /// when no external subscribers exist.
     _dbf_config_keepalive: watch::Receiver<u64>,
+    /// Monotonic counter incremented when the subscription set changes; the
+    /// shared DBF worker uses this to reset its pass state and force a
+    /// cross-stream regenerate, since a set change can reassign a freed
+    /// reader index to a different stream while rows already in the file
+    /// still carry the old digit. Use `notify_subscriptions_changed()` and
+    /// `subscriptions_rx()` to interact.
+    subscriptions_version: watch::Sender<u64>,
+    /// Keepalive receiver so the subscriptions watch channel is not dropped
+    /// when no subscriber is active.
+    _subscriptions_keepalive: watch::Receiver<u64>,
     /// Monotonic counter incremented when the Race Director import config
     /// changes; the background poller (runtime.rs) uses this to pick up a new
     /// directory/interval/toggle without waiting a full interval.
@@ -461,6 +471,7 @@ impl AppState {
                 restart: false,
             });
         let (dbf_config_version, _dbf_config_keepalive) = watch::channel(0u64);
+        let (subscriptions_version, _subscriptions_keepalive) = watch::channel(0u64);
         let (rd_import_config_version, _rd_import_config_keepalive) = watch::channel(0u64);
         let (server_config_version, _server_config_keepalive) = watch::channel(0u64);
         let http_client = reqwest::Client::builder()
@@ -506,6 +517,8 @@ impl AppState {
             retry_streak: AtomicU64::new(0),
             dbf_config_version,
             _dbf_config_keepalive,
+            subscriptions_version,
+            _subscriptions_keepalive,
             rd_import_config_version,
             _rd_import_config_keepalive,
             server_config_version,
@@ -537,6 +550,16 @@ impl AppState {
 
     pub fn dbf_config_rx(&self) -> watch::Receiver<u64> {
         self.dbf_config_version.subscribe()
+    }
+
+    /// Signal that the subscription set changed so the shared DBF worker
+    /// regenerates the file with the current per-subscription reader indices.
+    pub fn notify_subscriptions_changed(&self) {
+        self.subscriptions_version.send_modify(|v| *v += 1);
+    }
+
+    pub fn subscriptions_rx(&self) -> watch::Receiver<u64> {
+        self.subscriptions_version.subscribe()
     }
 
     pub fn notify_rd_import_config_changed(&self) {
@@ -2221,6 +2244,7 @@ pub async fn put_subscriptions(
     match db.replace_stream_subscriptions(&subs) {
         Ok(()) => {
             drop(db);
+            state.notify_subscriptions_changed();
             let conn_for_status = state.connection_state.borrow().clone();
             let db = state.db.lock().await;
             let streams_count = db.load_stream_subscriptions().map(|s| s.len()).unwrap_or(0);
@@ -3052,6 +3076,7 @@ pub async fn admin_purge_subscriptions(
     match db.delete_all_subscriptions() {
         Ok(count) => {
             drop(db);
+            state.notify_subscriptions_changed();
             let conn_for_status = state.connection_state.borrow().clone();
             let db = state.db.lock().await;
             let streams_count = db.load_stream_subscriptions().map(|s| s.len()).unwrap_or(0);
@@ -4718,6 +4743,34 @@ mod tests {
         assert_eq!(subs[0].reader_ip, None);
         assert_eq!(subs[0].local_port_override, Some(9100));
         assert_eq!(subs[0].event_type, crate::db::EventType::Start);
+    }
+
+    #[tokio::test]
+    async fn put_subscriptions_signals_subscription_change() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        let rx = state.subscriptions_rx();
+
+        put_subscriptions(
+            &state,
+            SubscriptionsBody {
+                subscriptions: vec![SubscriptionRequest {
+                    forwarder_endpoint_id: "endpoint-1".to_owned(),
+                    stream_id: "stream-1".to_owned(),
+                    local_port_override: None,
+                    event_type: None,
+                    forwarder_id: None,
+                    reader_ip: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            rx.has_changed().unwrap(),
+            "replacing subscriptions must signal the DBF worker to regenerate"
+        );
     }
 
     #[tokio::test]

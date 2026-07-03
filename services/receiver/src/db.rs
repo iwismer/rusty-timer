@@ -144,6 +144,44 @@ fn default_dbf_flush_interval_ms() -> u32 {
 /// Default Race Director working directory containing participant/chip DBF files.
 pub const DEFAULT_RD_IMPORT_DIR: &str = r"C:\Winrace\Files";
 
+/// Highest valid DBF reader index: the DBF READER field is one character.
+const DBF_READER_INDEX_MAX: u8 = 9;
+
+/// Assign one DBF reader index per subscription for a set replace. Surviving
+/// subscriptions keep their existing persisted index; the rest take the
+/// smallest unused digit in 0..=9, or `None` when all ten are taken.
+fn assign_dbf_reader_indices(
+    subs: &[StreamSubscription],
+    existing: &std::collections::HashMap<(String, String), i64>,
+) -> Vec<Option<u8>> {
+    let mut used = [false; DBF_READER_INDEX_MAX as usize + 1];
+    let mut assigned: Vec<Option<u8>> = vec![None; subs.len()];
+    // First pass: survivors keep their digit so DBF rows already written
+    // with it stay consistent.
+    for (slot, s) in assigned.iter_mut().zip(subs) {
+        let key = (s.forwarder_endpoint_id.clone(), s.stream_id.clone());
+        if let Some(&idx) = existing.get(&key)
+            && let Ok(idx) = u8::try_from(idx)
+            && let Some(taken) = used.get_mut(usize::from(idx))
+            && !*taken
+        {
+            *taken = true;
+            *slot = Some(idx);
+        }
+    }
+    // Second pass: everyone else takes the smallest free digit; NULL when
+    // the ten digits are exhausted (DBF delivery skips those streams).
+    for slot in &mut assigned {
+        if slot.is_none()
+            && let Some(free) = used.iter().position(|&taken| !taken)
+        {
+            used[free] = true;
+            *slot = u8::try_from(free).ok();
+        }
+    }
+    assigned
+}
+
 /// Default poll cadence for the Race Director background import (seconds).
 pub const DEFAULT_RD_IMPORT_INTERVAL_SECS: u32 = 15;
 
@@ -443,14 +481,35 @@ impl Db {
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
+    /// Replace the whole subscription set (delete-all-and-reinsert), keeping
+    /// each surviving subscription's persisted DBF reader index stable: rows
+    /// already written to the DBF file carry that digit, so a survivor's
+    /// digit must not move when the set is edited. New subscriptions take the
+    /// smallest free digit in 0..=9; when all ten are taken the index is NULL
+    /// and DBF delivery skips the stream.
     pub fn replace_stream_subscriptions(&mut self, subs: &[StreamSubscription]) -> DbResult<()> {
         let tx = self.conn.transaction()?;
+        let existing: std::collections::HashMap<(String, String), i64> = {
+            let mut stmt = tx.prepare(
+                "SELECT forwarder_endpoint_id, stream_id, dbf_reader_index
+                 FROM subscriptions
+                 WHERE dbf_reader_index IS NOT NULL",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
+                    r.get::<_, i64>(2)?,
+                ))
+            })?;
+            rows.collect::<Result<_, _>>()?
+        };
         tx.execute_batch("DELETE FROM subscriptions")?;
-        for s in subs {
+        let indices = assign_dbf_reader_indices(subs, &existing);
+        for (s, idx) in subs.iter().zip(indices) {
             tx.execute(
                 "INSERT INTO subscriptions
-                 (forwarder_endpoint_id, stream_id, local_port_override, event_type, forwarder_id, reader_ip)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (forwarder_endpoint_id, stream_id, local_port_override, event_type, forwarder_id, reader_ip, dbf_reader_index)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
                     &s.forwarder_endpoint_id,
                     &s.stream_id,
@@ -458,6 +517,7 @@ impl Db {
                     s.event_type.as_str(),
                     s.forwarder_id.as_deref(),
                     s.reader_ip.as_deref(),
+                    idx.map(i64::from),
                 ],
             )?;
         }
@@ -1648,25 +1708,21 @@ impl Db {
         Ok(count > 0)
     }
 
+    /// Resolve a subscription's DBF delivery parameters: the persisted
+    /// single-digit READER index (None when all ten digits were taken at
+    /// assignment time; DBF delivery skips such streams) and event type.
     pub fn load_subscription_dbf_details(
         &self,
         fwd: &str,
         ip: &str,
-    ) -> DbResult<Option<(usize, EventType)>> {
-        let result: Option<(String, i64)> = self
+    ) -> DbResult<Option<(Option<u8>, EventType)>> {
+        let result: Option<(String, Option<i64>)> = self
             .conn
             .query_row(
-                "SELECT s1.event_type,
-                        (
-                            SELECT COUNT(*)
-                            FROM subscriptions s2
-                            WHERE COALESCE(s2.forwarder_id, s2.forwarder_endpoint_id) < COALESCE(s1.forwarder_id, s1.forwarder_endpoint_id)
-                               OR (COALESCE(s2.forwarder_id, s2.forwarder_endpoint_id) = COALESCE(s1.forwarder_id, s1.forwarder_endpoint_id)
-                                   AND COALESCE(s2.reader_ip, s2.stream_id) < COALESCE(s1.reader_ip, s1.stream_id))
-                        ) AS subscription_index
-                 FROM subscriptions s1
-                 WHERE (s1.forwarder_endpoint_id = ?1 AND s1.stream_id = ?2)
-                    OR (s1.forwarder_id = ?1 AND s1.reader_ip = ?2)",
+                "SELECT event_type, dbf_reader_index
+                 FROM subscriptions
+                 WHERE (forwarder_endpoint_id = ?1 AND stream_id = ?2)
+                    OR (forwarder_id = ?1 AND reader_ip = ?2)",
                 rusqlite::params![fwd, ip],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -1677,9 +1733,19 @@ impl Db {
                 let event_type = raw_event_type.parse::<EventType>().map_err(|e| {
                     DbError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
                 })?;
-                let idx = usize::try_from(idx).map_err(|e| {
-                    DbError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-                })?;
+                let idx = idx
+                    .map(|raw| {
+                        u8::try_from(raw)
+                            .ok()
+                            .filter(|i| *i <= DBF_READER_INDEX_MAX)
+                            .ok_or_else(|| {
+                                DbError::Io(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    format!("dbf_reader_index {raw} outside 0..=9"),
+                                ))
+                            })
+                    })
+                    .transpose()?;
                 Ok((idx, event_type))
             })
             .transpose()
@@ -2668,7 +2734,7 @@ mod tests {
     }
 
     #[test]
-    fn load_subscription_dbf_details_returns_latest_index_and_event_type() {
+    fn load_subscription_dbf_details_returns_persisted_index_and_event_type() {
         let mut db = Db::open_in_memory().unwrap();
         db.replace_stream_subscriptions(&[
             StreamSubscription {
@@ -2690,11 +2756,91 @@ mod tests {
         ])
         .unwrap();
 
+        // Indices are assigned in input order (endpoint-2 first), and the
+        // legacy (forwarder_id, reader_ip) lookup resolves the same row.
         let details = db
             .load_subscription_dbf_details("fwd2", "10.0.0.2")
             .unwrap()
             .unwrap();
-        assert_eq!(details, (1, EventType::Finish));
+        assert_eq!(details, (Some(0), EventType::Finish));
+        let details = db
+            .load_subscription_dbf_details("endpoint-1", "stream-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(details, (Some(1), EventType::Start));
+    }
+
+    fn bare_sub(endpoint: &str, stream: &str) -> StreamSubscription {
+        StreamSubscription {
+            forwarder_endpoint_id: endpoint.to_owned(),
+            stream_id: stream.to_owned(),
+            local_port_override: None,
+            event_type: EventType::Finish,
+            forwarder_id: None,
+            reader_ip: None,
+        }
+    }
+
+    fn reader_index(db: &Db, endpoint: &str, stream: &str) -> Option<u8> {
+        db.load_subscription_dbf_details(endpoint, stream)
+            .unwrap()
+            .expect("subscription must exist")
+            .0
+    }
+
+    #[test]
+    fn dbf_reader_index_stable_when_adding_streams() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[bare_sub("ep-m", "s-a")])
+            .unwrap();
+        assert_eq!(reader_index(&db, "ep-m", "s-a"), Some(0));
+
+        // Adding stream B — even one that sorts before A — must not move A's
+        // persisted index.
+        db.replace_stream_subscriptions(&[bare_sub("ep-a", "s-b"), bare_sub("ep-m", "s-a")])
+            .unwrap();
+        assert_eq!(reader_index(&db, "ep-m", "s-a"), Some(0));
+        assert_eq!(reader_index(&db, "ep-a", "s-b"), Some(1));
+    }
+
+    #[test]
+    fn dbf_reader_index_reuses_freed_index_for_new_stream() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[bare_sub("ep-a", "s-a"), bare_sub("ep-b", "s-b")])
+            .unwrap();
+        assert_eq!(reader_index(&db, "ep-a", "s-a"), Some(0));
+        assert_eq!(reader_index(&db, "ep-b", "s-b"), Some(1));
+
+        // Remove A, add C: B keeps its index; C takes the freed smallest.
+        db.replace_stream_subscriptions(&[bare_sub("ep-b", "s-b"), bare_sub("ep-c", "s-c")])
+            .unwrap();
+        assert_eq!(reader_index(&db, "ep-b", "s-b"), Some(1));
+        assert_eq!(reader_index(&db, "ep-c", "s-c"), Some(0));
+    }
+
+    #[test]
+    fn dbf_reader_index_null_when_all_ten_digits_taken() {
+        let mut db = Db::open_in_memory().unwrap();
+        let subs: Vec<StreamSubscription> = (0..11)
+            .map(|i| bare_sub(&format!("ep-{i}"), &format!("s-{i}")))
+            .collect();
+        db.replace_stream_subscriptions(&subs).unwrap();
+        for i in 0..10u8 {
+            assert_eq!(
+                reader_index(&db, &format!("ep-{i}"), &format!("s-{i}")),
+                Some(i)
+            );
+        }
+        assert_eq!(reader_index(&db, "ep-10", "s-10"), None);
+
+        // Dropping one indexed subscription frees its digit for a formerly
+        // index-less survivor on the next replace.
+        let survivors: Vec<StreamSubscription> = (1..11)
+            .map(|i| bare_sub(&format!("ep-{i}"), &format!("s-{i}")))
+            .collect();
+        db.replace_stream_subscriptions(&survivors).unwrap();
+        assert_eq!(reader_index(&db, "ep-10", "s-10"), Some(0));
+        assert_eq!(reader_index(&db, "ep-1", "s-1"), Some(1));
     }
 
     #[test]

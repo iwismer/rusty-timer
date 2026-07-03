@@ -852,8 +852,9 @@ struct RegenerateScan {
 ///
 /// Memory-bounded: rows are loaded in seq-ordered chunks and immediately
 /// serialized to their fixed 40-byte DBF form, so the in-memory working set
-/// is ~64 bytes/row (not raw frames + field strings) even at 1M+ retained
-/// rows on the low-RAM target hardware.
+/// is ~72 bytes/row — the 40-byte record plus its sort key in `rows` and an
+/// 8-byte seq in `scanned_seqs` — (not raw frames + field strings) even at
+/// 1M+ retained rows on the low-RAM target hardware.
 fn scan_regenerate_rows(db: &Db, streams: &[DbfStreamSpec]) -> Result<RegenerateScan, DbError> {
     let mut rows: Vec<(i64, usize, i64, [u8; RECORD_DATA_LEN])> = Vec::new();
     let mut scanned_seqs: Vec<Vec<i64>> = vec![Vec::new(); streams.len()];
@@ -934,6 +935,9 @@ fn write_and_mark_regenerated(
     for (spec, seqs) in streams.iter().zip(&scan.scanned_seqs) {
         // Mark exactly what the scan processed, in bounded chunks. Streams
         // with zero scanned rows produce no chunks, so nothing is marked.
+        // Two chunking layers: DBF_APPEND_CHUNK_ROWS bounds one mark
+        // *transaction* here, while mark_dbf_delivered_batch further splits
+        // each transaction's seqs into 500-parameter SQL IN-lists internally.
         for chunk in seqs.chunks(DBF_APPEND_CHUNK_ROWS) {
             db.mark_dbf_delivered_batch(&spec.stream_id, chunk, delivered_unix_ms)?;
         }
@@ -1039,7 +1043,7 @@ pub async fn run_dbf_writer(
                             db.load_subscription_dbf_details(&event.forwarder_id, &event.reader_ip)
                         };
 
-                        let Some((idx, event_type)) = (match sub_details {
+                        let Some((idx_opt, event_type)) = (match sub_details {
                             Ok(details) => details,
                             Err(e) => {
                                 tracing::warn!(
@@ -1055,18 +1059,17 @@ pub async fn run_dbf_writer(
                             continue;
                         };
 
-                        // Guard against subscription index exceeding the
-                        // single-character READER field limit (0-9).
-                        if idx > 9 {
+                        // A subscription without a persisted reader index
+                        // (all ten digits were taken at assignment) cannot be
+                        // represented in the single-character READER field.
+                        let Some(reader_index) = idx_opt else {
                             tracing::warn!(
                                 forwarder_id = %event.forwarder_id,
                                 reader_ip = %event.reader_ip,
-                                subscription_index = idx,
-                                "subscription index exceeds DBF READER field limit (max 9), skipping DBF write for this stream"
+                                "subscription has no DBF reader index (all ten digits in use), skipping DBF write for this stream"
                             );
                             continue;
-                        }
-                        let reader_index = idx as u8;
+                        };
 
                         match map_to_dbf_fields(&event.raw_frame, event_type, reader_index) {
                             Ok(record) => {

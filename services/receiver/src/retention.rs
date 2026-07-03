@@ -172,9 +172,9 @@ async fn run_retention_pass(
 ) -> Result<(), crate::db::DbError> {
     // Stream list + global toggles from the cold connection (tiny queries).
     // `dbf_active` mirrors the DBF worker's per-stream eligibility rule
-    // (details resolvable, reader index <= 9): a stream the DBF worker never
-    // delivers must not carry a DBF floor, or its floor pins near 0 and the
-    // stream is silently never pruned.
+    // (details resolvable, persisted reader index present): a stream the DBF
+    // worker never delivers must not carry a DBF floor, or its floor pins
+    // near 0 and the stream is silently never pruned.
     let (streams, announcer_enabled, announcer_streams) = {
         let db = state.db.lock().await;
         let subs = db.load_stream_subscriptions()?;
@@ -190,7 +190,7 @@ async fn run_retention_pass(
                             &sub.forwarder_endpoint_id,
                             &sub.stream_id,
                         ),
-                        Ok(Some((idx, _))) if idx <= 9
+                        Ok(Some((Some(_), _)))
                     );
                 (
                     LocalStreamKey::new(&sub.forwarder_endpoint_id, &sub.stream_id),
