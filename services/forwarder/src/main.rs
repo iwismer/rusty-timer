@@ -181,7 +181,7 @@ async fn main() {
                 .unwrap_or_else(|| ep.default_local_fallback_port());
 
             let bind_addr = format!("0.0.0.0:{}", local_port);
-            let fanout = match FanoutServer::bind(&bind_addr).await {
+            let mut fanout = match FanoutServer::bind(&bind_addr).await {
                 Ok(f) => f,
                 Err(e) => {
                     eprintln!(
@@ -191,6 +191,9 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
+
+            // Surface lag-induced consumer drops in the status JSON.
+            fanout.set_drop_counter(status_server.store().fanout_drop_counter());
 
             let fanout_addr = fanout.local_addr();
             info!(

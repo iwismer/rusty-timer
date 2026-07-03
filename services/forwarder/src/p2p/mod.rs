@@ -346,8 +346,8 @@ fn snapshot_reader_connected(snapshot: &ForwarderStatusSnapshot, stream: &str) -
 
 /// Applies reader connectivity deltas from the status feed to the catalog.
 ///
-/// Exits when the status feed closes; otherwise runs until aborted at P2P
-/// shutdown.
+/// Runs until aborted at P2P shutdown: this task holds a feed clone (and thus
+/// a sender clone) itself, so the status channel never closes underneath it.
 async fn run_catalog_updates(
     feed: ForwarderStatusFeed,
     mut status_rx: broadcast::Receiver<ForwarderStatusEvent>,

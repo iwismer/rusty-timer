@@ -9,6 +9,7 @@ use rt_updater::workflow::WorkflowState;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify, broadcast};
 
@@ -378,6 +379,9 @@ pub struct StatusStore {
         >,
     >,
     reconnect_notifies: Arc<std::sync::RwLock<HashMap<String, Arc<Notify>>>>,
+    /// Running total of local-fanout messages dropped because consumers
+    /// lagged (see `local_fanout::serve_consumer`).
+    fanout_dropped_total: Arc<AtomicU64>,
 }
 
 fn bridge_download_progress_events(
@@ -591,6 +595,7 @@ impl StatusStore {
             control_clients: Arc::new(std::sync::RwLock::new(HashMap::new())),
             download_trackers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             reconnect_notifies: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            fanout_dropped_total: Arc::new(AtomicU64::new(0)),
         };
         spawn_read_count_broadcaster(subsystem, status_event_tx);
         store
@@ -599,6 +604,20 @@ impl StatusStore {
     /// Return a clone of the P2P status event sender for HTTP adapter state.
     pub(crate) fn status_event_sender(&self) -> broadcast::Sender<ForwarderStatusEvent> {
         self.status_event_tx.clone()
+    }
+
+    /// Return the shared fanout drop counter handle for wiring into
+    /// [`crate::local_fanout::FanoutServer::set_drop_counter`].
+    #[must_use]
+    pub fn fanout_drop_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.fanout_dropped_total)
+    }
+
+    /// Return the running total of fanout messages dropped due to lagged
+    /// consumers.
+    #[must_use]
+    pub fn fanout_dropped_total(&self) -> u64 {
+        self.fanout_dropped_total.load(Ordering::Relaxed)
     }
 
     /// Return a clone of the internal subsystem status Arc.

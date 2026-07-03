@@ -36,16 +36,17 @@ fn replay_starts_after_ack_cursor() {
     // Ack through seq 3
     j.update_ack_cursor("192.168.2.10", 1, 3).unwrap();
 
-    // Replay should return events 4 and 5
+    // Replay from the durable ack cursor should return events 4 and 5
     let engine = ReplayEngine::new();
-    let result = engine.pending_events(&j, "192.168.2.10").unwrap();
+    let (_epoch, acked_seq) = j.ack_cursor("192.168.2.10").unwrap();
+    let batch = engine
+        .read_after(&j, "192.168.2.10", acked_seq, 100)
+        .unwrap();
 
-    assert_eq!(result.len(), 1, "one epoch replay batch expected");
-    let batch = &result[0];
-    assert_eq!(batch.stream_epoch, 1);
-    assert_eq!(batch.events.len(), 2, "events 4 and 5 should be pending");
-    assert_eq!(batch.events[0].seq, 4);
-    assert_eq!(batch.events[1].seq, 5);
+    assert!(batch.gap.is_none());
+    assert_eq!(batch.records.len(), 2, "events 4 and 5 should be pending");
+    assert_eq!(batch.records[0].seq, 4);
+    assert_eq!(batch.records[1].seq, 5);
 }
 
 /// Test: no replay events when all events are acked.
@@ -64,10 +65,14 @@ fn replay_returns_empty_when_fully_acked() {
     j.update_ack_cursor("192.168.2.20", 1, 3).unwrap();
 
     let engine = ReplayEngine::new();
-    let result = engine.pending_events(&j, "192.168.2.20").unwrap();
-    let total_events: usize = result.iter().map(|b| b.events.len()).sum();
+    let (_epoch, acked_seq) = j.ack_cursor("192.168.2.20").unwrap();
+    let batch = engine
+        .read_after(&j, "192.168.2.20", acked_seq, 100)
+        .unwrap();
+    assert!(batch.gap.is_none());
     assert_eq!(
-        total_events, 0,
+        batch.records.len(),
+        0,
         "no events should be pending when fully acked"
     );
 }
@@ -96,15 +101,23 @@ fn replay_includes_old_epoch_unacked_events() {
     }
 
     let engine = ReplayEngine::new();
-    let result = engine.pending_events(&j, "192.168.2.30").unwrap();
+    let (_epoch, acked_seq) = j.ack_cursor("192.168.2.30").unwrap();
+    let batch = engine
+        .read_after(&j, "192.168.2.30", acked_seq, 100)
+        .unwrap();
 
-    // Should have both epoch 1 and epoch 2 batches
-    assert!(!result.is_empty(), "should have pending events");
-    let total_events: usize = result.iter().map(|b| b.events.len()).sum();
+    // The stream-wide cursor spans the epoch bump: all 4 events come back in
+    // seq order, carrying their original epochs.
+    assert!(batch.gap.is_none());
     assert_eq!(
-        total_events, 4,
+        batch.records.len(),
+        4,
         "all 4 unacked events (2 epoch1 + 2 epoch2) should be pending"
     );
+    let epochs: Vec<i64> = batch.records.iter().map(|e| e.stream_epoch).collect();
+    assert_eq!(epochs, vec![1, 1, 2, 2]);
+    let seqs: Vec<i64> = batch.records.iter().map(|e| e.seq).collect();
+    assert_eq!(seqs, vec![1, 2, 3, 4]);
 }
 
 /// Test: after replay and ack, cursor advances correctly.
@@ -124,17 +137,21 @@ fn replay_cursor_advances_after_ack() {
 
     // Only seq 3 should be pending
     let engine = ReplayEngine::new();
-    let result = engine.pending_events(&j, "192.168.2.40").unwrap();
-    let total: usize = result.iter().map(|b| b.events.len()).sum();
-    assert_eq!(total, 1);
-    assert_eq!(result[0].events[0].seq, 3);
+    let (_epoch, acked_seq) = j.ack_cursor("192.168.2.40").unwrap();
+    let batch = engine
+        .read_after(&j, "192.168.2.40", acked_seq, 100)
+        .unwrap();
+    assert_eq!(batch.records.len(), 1);
+    assert_eq!(batch.records[0].seq, 3);
 
     // Now ack seq 3 too
     j.update_ack_cursor("192.168.2.40", 1, 3).unwrap();
 
-    let result2 = engine.pending_events(&j, "192.168.2.40").unwrap();
-    let total2: usize = result2.iter().map(|b| b.events.len()).sum();
-    assert_eq!(total2, 0, "nothing pending after full ack");
+    let (_epoch, acked_seq) = j.ack_cursor("192.168.2.40").unwrap();
+    let batch = engine
+        .read_after(&j, "192.168.2.40", acked_seq, 100)
+        .unwrap();
+    assert_eq!(batch.records.len(), 0, "nothing pending after full ack");
 }
 
 /// Test: ack cursor ignores stale (lower) seq updates.

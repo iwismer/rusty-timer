@@ -620,23 +620,6 @@ impl Journal {
             .map_err(Into::into)
     }
 
-    /// Return all events for stream key with epoch strictly greater than `after_epoch`.
-    pub fn unacked_events_across_epochs(
-        &self,
-        stream_key: &str,
-        after_epoch: i64,
-    ) -> Result<Vec<JournalEvent>, JournalError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT rowid, stream_id, epoch, seq, reader_timestamp, raw_frame, read_kind,
-                    CAST(received_unix_ms AS TEXT)
-             FROM events
-             WHERE stream_id = ?1 AND epoch > ?2
-             ORDER BY epoch ASC, seq ASC",
-        )?;
-        let rows = stmt.query_map(params![stream_key, after_epoch], map_event)?;
-        collect_events(rows)
-    }
-
     /// Delete up to `limit` acked events for `stream_key`.
     pub fn prune_acked(&mut self, stream_key: &str, limit: i64) -> Result<i64, JournalError> {
         let (_, acked_seq) = self.ack_cursor(stream_key)?;

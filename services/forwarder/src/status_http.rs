@@ -683,6 +683,8 @@ struct StatusJsonResponse {
     restart_needed: bool,
     ups_status: Option<UpsStatusState>,
     server: crate::status_store::ServerDeviceStatus,
+    /// Total local-fanout messages dropped because consumers lagged.
+    fanout_dropped_total: u64,
     readers: Vec<ReaderStatusJson>,
 }
 
@@ -742,6 +744,7 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
         restart_needed: ss.restart_needed(),
         ups_status: ss.ups_status().cloned(),
         server,
+        fanout_dropped_total: state.store.fanout_dropped_total(),
         readers,
     };
 
@@ -1964,6 +1967,36 @@ mod tests {
         assert_eq!(body["ups_status"]["status"]["power_plugged"], false);
         assert_eq!(body["readers"][0]["ip"], "192.168.1.10");
         assert_eq!(body["readers"][0]["state"], "connected");
+    }
+
+    #[tokio::test]
+    async fn status_json_includes_fanout_dropped_total() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server
+            .store()
+            .fanout_drop_counter()
+            .fetch_add(3, Ordering::SeqCst);
+
+        let addr = server.local_addr();
+        let resp = reqwest::get(format!("http://{}/api/v1/status", addr))
+            .await
+            .expect("GET /api/v1/status");
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert_eq!(
+            body["fanout_dropped_total"], 3,
+            "status JSON must surface the fanout drop total"
+        );
     }
 
     #[tokio::test]

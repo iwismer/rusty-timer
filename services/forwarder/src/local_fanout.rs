@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, broadcast};
@@ -78,6 +79,10 @@ pub struct FanoutServer {
     tx: BroadcastSender,
     /// The bound local address, stored so that Drop can clean up the registry.
     local_addr: SocketAddr,
+    /// Running total of messages dropped because consumers lagged behind the
+    /// broadcast channel. Shared with the status store when wired via
+    /// [`FanoutServer::set_drop_counter`].
+    dropped: Arc<AtomicU64>,
 }
 
 impl FanoutServer {
@@ -102,7 +107,14 @@ impl FanoutServer {
             listener,
             tx,
             local_addr,
+            dropped: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    /// Replace the drop counter with a shared handle (e.g. the status store's
+    /// `fanout_dropped_total`) so lag-induced drops are visible in status JSON.
+    pub fn set_drop_counter(&mut self, counter: Arc<AtomicU64>) {
+        self.dropped = counter;
     }
 
     /// Return the bound local address (useful when port 0 was used).
@@ -132,7 +144,7 @@ impl FanoutServer {
     pub async fn run(self) {
         while let Ok((stream, _peer_addr)) = self.listener.accept().await {
             let rx = self.tx.subscribe();
-            tokio::spawn(serve_consumer(stream, rx));
+            tokio::spawn(serve_consumer(stream, rx, Arc::clone(&self.dropped)));
         }
     }
 }
@@ -156,7 +168,16 @@ impl Drop for FanoutServer {
 
 /// Drive one consumer connection: forward every broadcast message to the TCP
 /// writer until the broadcast sender is dropped or the TCP write fails.
-async fn serve_consumer(mut stream: TcpStream, mut rx: broadcast::Receiver<Vec<u8>>) {
+///
+/// Messages missed because the consumer lagged behind the broadcast channel
+/// are counted per consumer and accumulated into the shared `dropped` total.
+async fn serve_consumer(
+    mut stream: TcpStream,
+    mut rx: broadcast::Receiver<Vec<u8>>,
+    dropped: Arc<AtomicU64>,
+) {
+    let peer = stream.peer_addr().ok();
+    let mut consumer_dropped: u64 = 0;
     loop {
         match rx.recv().await {
             Ok(data) => {
@@ -165,15 +186,31 @@ async fn serve_consumer(mut stream: TcpStream, mut rx: broadcast::Receiver<Vec<u
                     break;
                 }
             }
-            Err(broadcast::error::RecvError::Lagged(_)) => {
-                // Consumer is too slow; skip missed messages and continue.
-                continue;
+            Err(broadcast::error::RecvError::Lagged(missed)) => {
+                // Consumer is too slow; count the skipped messages, then
+                // continue from the retained window.
+                if consumer_dropped == 0 {
+                    tracing::warn!(
+                        peer = ?peer,
+                        missed,
+                        "fanout consumer lagged; dropping messages"
+                    );
+                }
+                consumer_dropped += missed;
+                dropped.fetch_add(missed, Ordering::Relaxed);
             }
             Err(broadcast::error::RecvError::Closed) => {
                 // Channel closed (server shutting down).
                 break;
             }
         }
+    }
+    if consumer_dropped > 0 {
+        tracing::warn!(
+            peer = ?peer,
+            dropped = consumer_dropped,
+            "fanout consumer disconnected after dropping messages"
+        );
     }
 }
 
@@ -184,6 +221,51 @@ async fn serve_consumer(mut stream: TcpStream, mut rx: broadcast::Receiver<Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::io::AsyncReadExt;
+
+    /// A consumer that lags behind the broadcast channel must increment the
+    /// shared drop counter by the number of messages it missed.
+    #[tokio::test]
+    async fn slow_consumer_lag_increments_drop_counter() {
+        // Mirror the production channel capacity (256) and overfill it before
+        // the consumer task gets a chance to read: the first recv() then
+        // deterministically observes Lagged(overflow).
+        const CAPACITY: usize = 256;
+        const SENT: u64 = 300;
+
+        let (tx, rx) = broadcast::channel::<Vec<u8>>(CAPACITY);
+        for i in 0..SENT {
+            tx.send(vec![u8::try_from(i % 256).unwrap()]).unwrap();
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (server_stream, _) = listener.accept().await.unwrap();
+
+        let dropped = Arc::new(AtomicU64::new(0));
+        let task = tokio::spawn(serve_consumer(server_stream, rx, Arc::clone(&dropped)));
+
+        // Drain everything the consumer forwards, then close the channel so
+        // the consumer task exits.
+        drop(tx);
+        let mut received = Vec::new();
+        client.read_to_end(&mut received).await.unwrap();
+        task.await.unwrap();
+
+        let expected_dropped = SENT - CAPACITY as u64;
+        assert_eq!(
+            dropped.load(Ordering::Relaxed),
+            expected_dropped,
+            "drop counter must record the messages the lagged consumer missed"
+        );
+        assert_eq!(
+            received.len() as u64,
+            SENT - expected_dropped,
+            "the retained window must still be delivered"
+        );
+    }
 
     /// Verify that dropping a FanoutServer removes its entry from the registry.
     #[tokio::test]

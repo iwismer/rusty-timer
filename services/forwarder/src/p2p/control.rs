@@ -674,7 +674,21 @@ async fn run_control_loop(
             frame = rx.recv() => {
                 match frame {
                     Some(control) => match control.msg {
-                        Some(control_c2f::Msg::Pong(_)) => outstanding = 0,
+                        Some(control_c2f::Msg::Pong(pong)) => {
+                            // Only a pong echoing the last sent ping nonce
+                            // counts as liveness; anything else (stale,
+                            // fabricated) is logged and ignored.
+                            if pong.nonce == nonce {
+                                outstanding = 0;
+                            } else {
+                                tracing::warn!(
+                                    %peer,
+                                    expected = nonce,
+                                    got = pong.nonce,
+                                    "p2p: pong nonce mismatch; not counting as liveness"
+                                );
+                            }
+                        }
                         Some(control_c2f::Msg::Ping(ping)) => {
                             let pong = ControlF2C {
                                 msg: Some(control_f2c::Msg::Pong(Pong { nonce: ping.nonce })),
@@ -2307,6 +2321,116 @@ mod tests {
         forwarder.close().await;
         Ok(())
     }
+    #[tokio::test]
+    async fn bogus_pong_nonce_does_not_reset_heartbeat() -> TestResult {
+        let heartbeat = HeartbeatConfig {
+            interval: Duration::from_millis(50),
+            max_missed: 3,
+        };
+        let (forwarder, forwarder_addr, handle) = spawn_forwarder(
+            [80; 32],
+            StaticCatalog::new(sample_catalog()),
+            LONG_HANDSHAKE,
+            heartbeat,
+        )
+        .await?;
+
+        let receiver = EndpointBuilder::test([81; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        // Answer every ping promptly, but with a WRONG nonce. These must not
+        // count as liveness: the loop must still declare the peer dead after
+        // max_missed unanswered pings.
+        let responder = tokio::spawn(async move {
+            while let Ok(frame) = read_frame::<ControlF2C>(&mut recv).await {
+                if let Some(control_f2c::Msg::Ping(ping)) = frame.msg {
+                    let bogus = ControlC2F {
+                        msg: Some(control_c2f::Msg::Pong(Pong {
+                            nonce: ping.nonce + 999,
+                        })),
+                    };
+                    if write_frame(&mut send, &bogus).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+
+        let result = tokio::time::timeout(Duration::from_secs(5), handle).await??;
+        assert!(
+            result.is_err(),
+            "bogus pong nonces must not reset heartbeat liveness, got {result:?}"
+        );
+
+        responder.abort();
+        connection.close(0u32.into(), b"done");
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn matching_pong_nonce_keeps_heartbeat_alive() -> TestResult {
+        let heartbeat = HeartbeatConfig {
+            interval: Duration::from_millis(50),
+            max_missed: 3,
+        };
+        let (forwarder, forwarder_addr, handle) = spawn_forwarder(
+            [82; 32],
+            StaticCatalog::new(sample_catalog()),
+            LONG_HANDSHAKE,
+            heartbeat,
+        )
+        .await?;
+
+        let receiver = EndpointBuilder::test([83; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        // Echo every ping's nonce back: the loop must stay alive well past
+        // max_missed * interval.
+        let responder = tokio::spawn(async move {
+            while let Ok(frame) = read_frame::<ControlF2C>(&mut recv).await {
+                if let Some(control_f2c::Msg::Ping(ping)) = frame.msg {
+                    let pong = ControlC2F {
+                        msg: Some(control_c2f::Msg::Pong(Pong { nonce: ping.nonce })),
+                    };
+                    if write_frame(&mut send, &pong).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+
+        // 500ms >> max_missed (3) * interval (50ms); correct pongs must keep
+        // the loop alive the whole time.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            !handle.is_finished(),
+            "matching pong nonces must keep the heartbeat alive"
+        );
+
+        responder.abort();
+        handle.abort();
+        connection.close(0u32.into(), b"done");
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn heartbeat_timeout_closes() -> TestResult {
         let heartbeat = HeartbeatConfig {
