@@ -831,14 +831,119 @@ pub fn run_dbf_delivery_pass(
     Ok(())
 }
 
-/// Replace the DBF file with **every subscribed stream's** deliverable rows
-/// (ordered chronologically) and re-mark all rows delivered. Returns each
-/// stream's max processed seq (the new append points).
+/// Result of one cross-stream regenerate scan (the read half of
+/// [`regenerate_dbf_cross_stream`]).
+struct RegenerateScan {
+    /// Deliverable rows as `(received_unix_ms, stream_idx, seq, serialized
+    /// record)`, sorted chronologically — the DBF write order.
+    rows: Vec<(i64, usize, i64, [u8; RECORD_DATA_LEN])>,
+    /// Per `streams` index: the exact seqs the scan processed, both rows
+    /// serialized into `rows` and rows intentionally skipped as
+    /// undeliverable (same "processed" semantics as the append path's
+    /// `collect_records_and_processed`). Only these seqs may be marked
+    /// delivered: a row persisted after the scan was never written.
+    scanned_seqs: Vec<Vec<i64>>,
+    /// Per-stream max scanned seq (the new append points).
+    append_points: std::collections::HashMap<String, i64>,
+}
+
+/// Scan every subscribed stream's durable rows for a cross-stream
+/// regenerate.
 ///
 /// Memory-bounded: rows are loaded in seq-ordered chunks and immediately
 /// serialized to their fixed 40-byte DBF form, so the in-memory working set
 /// is ~64 bytes/row (not raw frames + field strings) even at 1M+ retained
 /// rows on the low-RAM target hardware.
+fn scan_regenerate_rows(db: &Db, streams: &[DbfStreamSpec]) -> Result<RegenerateScan, DbError> {
+    let mut rows: Vec<(i64, usize, i64, [u8; RECORD_DATA_LEN])> = Vec::new();
+    let mut scanned_seqs: Vec<Vec<i64>> = vec![Vec::new(); streams.len()];
+    let mut append_points = std::collections::HashMap::new();
+    for (stream_idx, spec) in streams.iter().enumerate() {
+        let mut after_seq = 0i64;
+        let mut max_seq = 0i64;
+        loop {
+            let events = db.load_received_events_after_limited(
+                &spec.stream_id,
+                after_seq,
+                DBF_APPEND_CHUNK_ROWS,
+            )?;
+            if events.is_empty() {
+                break;
+            }
+            let fetched = events.len();
+            after_seq = events.last().map_or(after_seq, |event| event.seq);
+            for event in &events {
+                match map_to_dbf_fields(&event.raw_frame, spec.event_type, spec.reader_index) {
+                    Ok(record) => {
+                        rows.push((
+                            event.received_unix_ms,
+                            stream_idx,
+                            event.seq,
+                            serialize_record(&record),
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            stream_id = %event.stream_id,
+                            seq = event.seq,
+                            error = %e,
+                            "skipping undeliverable durable frame during DBF regenerate"
+                        );
+                    }
+                }
+                scanned_seqs[stream_idx].push(event.seq);
+                max_seq = max_seq.max(event.seq);
+            }
+            if fetched < DBF_APPEND_CHUNK_ROWS {
+                break;
+            }
+        }
+        append_points.insert(spec.stream_id.clone(), max_seq);
+    }
+    rows.sort_by_key(|&(received_unix_ms, stream_idx, seq, _)| (received_unix_ms, stream_idx, seq));
+    Ok(RegenerateScan {
+        rows,
+        scanned_seqs,
+        append_points,
+    })
+}
+
+/// Write the replacement DBF from a completed scan, then mark **exactly the
+/// scanned seqs** delivered. A row persisted after the scan — including a
+/// gap-fill below the scanned max, since the event writer owns a separate
+/// SQLite connection — stays undelivered so the next pass delivers it
+/// instead of silently losing it.
+fn write_and_mark_regenerated(
+    db: &mut Db,
+    streams: &[DbfStreamSpec],
+    path: &Path,
+    scan: RegenerateScan,
+    delivered_unix_ms: i64,
+) -> Result<std::collections::HashMap<String, i64>, DbError> {
+    tracing::info!(
+        records = scan.rows.len(),
+        streams = streams.len(),
+        path = %path.display(),
+        "regenerating DBF from durable store (cross-stream)"
+    );
+    write_replacement_dbf_bytes(
+        path,
+        scan.rows.len(),
+        scan.rows.iter().map(|(_, _, _, bytes)| bytes),
+    )?;
+    for (spec, seqs) in streams.iter().zip(&scan.scanned_seqs) {
+        // Mark exactly what the scan processed, in bounded chunks. Streams
+        // with zero scanned rows produce no chunks, so nothing is marked.
+        for chunk in seqs.chunks(DBF_APPEND_CHUNK_ROWS) {
+            db.mark_dbf_delivered_batch(&spec.stream_id, chunk, delivered_unix_ms)?;
+        }
+    }
+    Ok(scan.append_points)
+}
+
+/// Replace the DBF file with **every subscribed stream's** deliverable rows
+/// (ordered chronologically) and mark the scanned rows delivered. Returns
+/// each stream's max processed seq (the new append points).
 fn regenerate_dbf_cross_stream(
     db: &mut Db,
     streams: &[DbfStreamSpec],
@@ -846,63 +951,8 @@ fn regenerate_dbf_cross_stream(
     delivered_unix_ms: i64,
 ) -> Result<std::collections::HashMap<String, i64>, DbError> {
     with_durable_dbf_lock(path, || {
-        let mut all: Vec<(i64, usize, i64, [u8; RECORD_DATA_LEN])> = Vec::new();
-        let mut append_points = std::collections::HashMap::new();
-        for (stream_idx, spec) in streams.iter().enumerate() {
-            let mut after_seq = 0i64;
-            let mut max_seq = 0i64;
-            loop {
-                let events = db.load_received_events_after_limited(
-                    &spec.stream_id,
-                    after_seq,
-                    DBF_APPEND_CHUNK_ROWS,
-                )?;
-                if events.is_empty() {
-                    break;
-                }
-                let fetched = events.len();
-                after_seq = events.last().map_or(after_seq, |event| event.seq);
-                for event in &events {
-                    match map_to_dbf_fields(&event.raw_frame, spec.event_type, spec.reader_index) {
-                        Ok(record) => {
-                            all.push((
-                                event.received_unix_ms,
-                                stream_idx,
-                                event.seq,
-                                serialize_record(&record),
-                            ));
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                stream_id = %event.stream_id,
-                                seq = event.seq,
-                                error = %e,
-                                "skipping undeliverable durable frame during DBF regenerate"
-                            );
-                        }
-                    }
-                    max_seq = max_seq.max(event.seq);
-                }
-                if fetched < DBF_APPEND_CHUNK_ROWS {
-                    break;
-                }
-            }
-            append_points.insert(spec.stream_id.clone(), max_seq);
-        }
-        all.sort_by_key(|a| (a.0, a.1, a.2));
-        tracing::info!(
-            records = all.len(),
-            streams = streams.len(),
-            path = %path.display(),
-            "regenerating DBF from durable store (cross-stream)"
-        );
-        write_replacement_dbf_bytes(path, all.len(), all.iter().map(|(_, _, _, bytes)| bytes))?;
-        for spec in streams {
-            // Every stored row was just written (or logged as undeliverable):
-            // mark the whole stream in one statement.
-            db.mark_all_dbf_delivered(&spec.stream_id, delivered_unix_ms)?;
-        }
-        Ok(append_points)
+        let scan = scan_regenerate_rows(db, streams)?;
+        write_and_mark_regenerated(db, streams, path, scan, delivered_unix_ms)
     })
 }
 
@@ -1244,6 +1294,63 @@ mod tests {
             dbf_records(&dbf_path).len(),
             3,
             "regenerate after one stream's reset keeps all streams' rows exactly once"
+        );
+    }
+
+    #[test]
+    fn regenerate_does_not_mark_rows_persisted_after_the_scan() {
+        // P0 regression: the regenerate mark step must be bounded by the
+        // exact seqs the scan processed. The event writer owns a separate
+        // SQLite connection, so a gap-fill row *below* the scanned max can
+        // be persisted between the scan and the mark; an unbounded
+        // per-stream mark would flag it delivered without it ever being
+        // written to the file.
+        let dir = tempfile::tempdir().unwrap();
+        let dbf_path = dir.path().join("out.dbf");
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_id = "s-scan-race";
+        let raw = sample_raw_frame();
+        // A seq gap at 2: rows 1 and 3 are durable when the scan runs.
+        insert_durable_event(&db, stream_id, 1, &raw, 1_700_000_000_000);
+        insert_durable_event(&db, stream_id, 3, &raw, 1_700_000_000_002);
+
+        let specs = vec![spec(stream_id, 0)];
+        let scan = scan_regenerate_rows(&db, &specs).unwrap();
+
+        // The gap-fill row lands after the scan but before the mark.
+        insert_durable_event(&db, stream_id, 2, &raw, 1_700_000_000_001);
+
+        let append_points = with_durable_dbf_lock(&dbf_path, || {
+            write_and_mark_regenerated(&mut db, &specs, &dbf_path, scan, 1_700_000_010_000)
+        })
+        .unwrap();
+        assert_eq!(
+            dbf_records(&dbf_path).len(),
+            2,
+            "only the scanned rows were written"
+        );
+        assert_eq!(
+            db.min_undelivered_dbf_seq(stream_id).unwrap(),
+            Some(2),
+            "the row persisted after the scan must stay undelivered"
+        );
+
+        // The next pass sees the undelivered row below the append point and
+        // falls back to a regenerate: the gap-fill row reaches the file.
+        let mut state = DbfPassState {
+            regenerated: true,
+            last_delivered: append_points,
+        };
+        run_dbf_delivery_pass(&mut db, &specs, &dbf_path, &mut state, 1_700_000_020_000).unwrap();
+        assert_eq!(
+            dbf_records(&dbf_path).len(),
+            3,
+            "the next pass delivers the gap-fill row"
+        );
+        assert!(
+            db.load_undelivered_received_events(stream_id)
+                .unwrap()
+                .is_empty()
         );
     }
 

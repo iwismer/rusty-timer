@@ -1161,21 +1161,6 @@ impl Db {
         Ok(count)
     }
 
-    /// Mark **every** stored row of `stream_id` DBF-delivered (used by the
-    /// cross-stream regenerate, which by construction just wrote them all to
-    /// the file). One statement; replaces reset-then-remark row loops.
-    pub fn mark_all_dbf_delivered(
-        &self,
-        stream_id: &str,
-        delivered_unix_ms: i64,
-    ) -> DbResult<usize> {
-        let count = self.conn.execute(
-            "UPDATE received_events SET dbf_delivered_unix_ms = ?2 WHERE stream_id = ?1",
-            rusqlite::params![stream_id, delivered_unix_ms],
-        )?;
-        Ok(count)
-    }
-
     pub fn reset_dbf_delivered(&self, stream_id: &str) -> DbResult<usize> {
         let count = self.conn.execute(
             "UPDATE received_events SET dbf_delivered_unix_ms = NULL WHERE stream_id = ?1",
@@ -3421,6 +3406,39 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(details, (1, EventType::Finish));
+    }
+
+    #[test]
+    fn mark_dbf_delivered_batch_only_marks_listed_seqs() {
+        // Exact-seq marking: a seq not in the batch — even one below the
+        // batch max — must stay undelivered. The DBF regenerate relies on
+        // this to never mark a row it did not write.
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_id = "s-exact-mark";
+        for seq in [1i64, 2, 3] {
+            db.insert_received_event(&ReceivedEventInsert {
+                stream_id,
+                seq,
+                epoch: 1,
+                raw_frame: b"frame",
+                read_kind: "chip",
+                reader_timestamp: None,
+                received_unix_ms: 1_700_000_000_000 + seq,
+                dbf_delivered_unix_ms: None,
+                chip_id: None,
+            })
+            .unwrap();
+        }
+
+        let marked = db
+            .mark_dbf_delivered_batch(stream_id, &[1, 3], 1_700_000_010_000)
+            .unwrap();
+        assert_eq!(marked, 2);
+        assert_eq!(
+            db.min_undelivered_dbf_seq(stream_id).unwrap(),
+            Some(2),
+            "an unlisted seq below the batch max stays undelivered"
+        );
     }
 
     #[test]
