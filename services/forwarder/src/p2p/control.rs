@@ -252,6 +252,10 @@ pub struct NoopRemoteConfigHandler;
 /// Error returned for any remote-config verb when the feature is disabled.
 pub(crate) const REMOTE_CONFIG_DISABLED: &str = "remote config disabled";
 
+/// Error returned for any remote-config verb when the peer did not negotiate
+/// [`CAP_REMOTE_CONFIG`] on this connection.
+const REMOTE_CONFIG_NOT_NEGOTIATED: &str = "remote config was not negotiated on this connection";
+
 impl RemoteConfigHandler for NoopRemoteConfigHandler {
     fn allow_remote_config(&self) -> bool {
         false
@@ -421,8 +425,9 @@ pub(crate) async fn negotiate_control_stream(
 
 /// Runs the post-negotiation heartbeat/control loop on an already-negotiated
 /// control stream until the peer disconnects cleanly (`Ok`) or is declared dead
-/// (`Err`). Uses the default no-op reader-control handler and forwards status
-/// updates from the optional `outbound_events` channel to the peer.
+/// (`Err`). Dispatches reader-control and remote-config requests to the
+/// supplied handlers and forwards status updates from the optional
+/// `outbound_events` channel to the peer.
 pub(crate) async fn run_control_stream_loop(
     send: SendStream,
     recv: RecvStream,
@@ -662,11 +667,20 @@ async fn run_control_loop(
                         }
                         Some(control_c2f::Msg::ReaderControlRequest(request)) => {
                             if !reader_control_negotiated {
+                                // Denials are written inline: the response channels are
+                                // drained by other arms of this same select loop, so
+                                // sending on them from here could fill the bounded channel
+                                // and deadlock the loop under a request flood.
                                 let response = reader_control_error_response(
-                                    &request,
+                                    request,
                                     "reader control was not negotiated on this connection",
                                 );
-                                let _ = control_response_tx.send(response).await;
+                                let frame = ControlF2C {
+                                    msg: Some(control_f2c::Msg::ReaderControlResponse(response)),
+                                };
+                                if write_frame(&mut send, &frame).await.is_err() {
+                                    break Ok(());
+                                }
                                 continue;
                             }
 
@@ -691,7 +705,9 @@ async fn run_control_loop(
                                 let frame = ControlF2C {
                                     msg: Some(control_f2c::Msg::ConfigGetResponse(response)),
                                 };
-                                let _ = config_response_tx.send(frame).await;
+                                if write_frame(&mut send, &frame).await.is_err() {
+                                    break Ok(());
+                                }
                                 continue;
                             }
 
@@ -715,13 +731,14 @@ async fn run_control_loop(
                                     request_id: request.request_id,
                                     ok: false,
                                     restart_needed: false,
-                                    error: "remote config was not negotiated on this connection"
-                                        .to_owned(),
+                                    error: REMOTE_CONFIG_NOT_NEGOTIATED.to_owned(),
                                 };
                                 let frame = ControlF2C {
                                     msg: Some(control_f2c::Msg::ConfigSetResponse(response)),
                                 };
-                                let _ = config_response_tx.send(frame).await;
+                                if write_frame(&mut send, &frame).await.is_err() {
+                                    break Ok(());
+                                }
                                 continue;
                             }
 
@@ -740,13 +757,14 @@ async fn run_control_loop(
                                 let response = RestartResponse {
                                     request_id: request.request_id,
                                     accepted: false,
-                                    error: "remote config was not negotiated on this connection"
-                                        .to_owned(),
+                                    error: REMOTE_CONFIG_NOT_NEGOTIATED.to_owned(),
                                 };
                                 let frame = ControlF2C {
                                     msg: Some(control_f2c::Msg::RestartResponse(response)),
                                 };
-                                let _ = config_response_tx.send(frame).await;
+                                if write_frame(&mut send, &frame).await.is_err() {
+                                    break Ok(());
+                                }
                                 continue;
                             }
 
@@ -809,12 +827,12 @@ async fn run_control_loop(
 }
 
 fn reader_control_error_response(
-    request: &ReaderControlRequest,
+    request: ReaderControlRequest,
     message: &str,
 ) -> ReaderControlResponse {
     ReaderControlResponse {
-        stream_id: request.stream_id.clone(),
-        request_id: request.request_id.clone(),
+        stream_id: request.stream_id,
+        request_id: request.request_id,
         success: false,
         message: message.to_owned(),
         reader_info_json: None,
@@ -1562,6 +1580,139 @@ mod tests {
         }
         assert_eq!(handler.set_calls.load(Ordering::SeqCst), 0);
         assert!(handler.last_set.lock().unwrap().is_none());
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restart_rejected_when_capability_not_negotiated() -> TestResult {
+        let handler = Arc::new(FakeRemoteConfigHandler::new(true));
+        let (forwarder, forwarder_addr, handle) =
+            spawn_forwarder_with_remote_config([78; 32], Arc::clone(&handler) as _).await?;
+
+        let receiver = EndpointBuilder::test([79; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::RestartRequest(RestartRequest {
+                    request_id: "restart-no-cap".to_owned(),
+                })),
+            },
+        )
+        .await?;
+
+        let frame =
+            tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::RestartResponse(response)) => {
+                assert_eq!(response.request_id, "restart-no-cap");
+                assert!(!response.accepted);
+                assert!(
+                    response.error.contains("not negotiated"),
+                    "error should mention negotiation, got {:?}",
+                    response.error
+                );
+            }
+            other => return Err(format!("expected RestartResponse, got {other:?}").into()),
+        }
+        assert_eq!(handler.restart_calls.load(Ordering::SeqCst), 0);
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    /// A non-conforming peer that floods gated requests without reading the
+    /// denials must not wedge the control loop: denials are written straight to
+    /// the stream by the select arm, so no bounded internal channel (cap 16,
+    /// drained only by another arm of the same loop) can fill up and deadlock.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gate_denial_flood_does_not_deadlock_control_loop() -> TestResult {
+        // Far above the internal response-channel capacity of 16. The old
+        // channel-based denial path only wedged once channel occupancy hit the
+        // cap, which under the select loop's random branch ordering is a random
+        // walk; a large burst makes hitting it overwhelmingly likely.
+        const FLOOD: usize = 2000;
+
+        let handler = Arc::new(FakeRemoteConfigHandler::new(true));
+        let (forwarder, forwarder_addr, handle) =
+            spawn_forwarder_with_remote_config([76; 32], Arc::clone(&handler) as _).await?;
+
+        let receiver = EndpointBuilder::test([77; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        // Send the whole burst before reading anything back, so far more
+        // denials than the old channel capacity are in flight at once.
+        for i in 0..FLOOD {
+            write_frame(
+                &mut send,
+                &ControlC2F {
+                    msg: Some(control_c2f::Msg::ConfigSetRequest(ConfigSetRequest {
+                        request_id: format!("flood-{i}"),
+                        config_json: r#"{"schema_version":1}"#.to_owned(),
+                    })),
+                },
+            )
+            .await?;
+        }
+
+        // Every request must be denied, in order.
+        for i in 0..FLOOD {
+            let frame = tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv))
+                .await
+                .map_err(|_| format!("control loop wedged: no denial for request {i}/{FLOOD}"))??;
+            match frame.msg {
+                Some(control_f2c::Msg::ConfigSetResponse(response)) => {
+                    assert_eq!(response.request_id, format!("flood-{i}"));
+                    assert!(!response.ok);
+                    assert!(
+                        response.error.contains("not negotiated"),
+                        "error should mention negotiation, got {:?}",
+                        response.error
+                    );
+                }
+                other => return Err(format!("expected ConfigSetResponse, got {other:?}").into()),
+            }
+        }
+        assert_eq!(handler.set_calls.load(Ordering::SeqCst), 0);
+
+        // The loop must still be live after the flood: a Ping gets a Pong.
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::Ping(Ping { nonce: 42 })),
+            },
+        )
+        .await?;
+        let frame = tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv))
+            .await
+            .map_err(|_| "control loop wedged: no Pong after gate-denial flood".to_owned())??;
+        match frame.msg {
+            Some(control_f2c::Msg::Pong(pong)) => assert_eq!(pong.nonce, 42),
+            other => return Err(format!("expected Pong, got {other:?}").into()),
+        }
 
         connection.close(0u32.into(), b"done");
         handle.abort();
