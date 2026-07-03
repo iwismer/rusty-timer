@@ -11,9 +11,10 @@
 //! Scope: production startup wires the endpoint, accept loop, allow-listed
 //! control-plane handshake, data-stream subscriber handler, server allow-list
 //! distribution components ([`ServerAllowListClient`] and
-//! [`run_allowlist_distribution`]), and forwarder status events. Reader control
-//! actions are still handled by the no-op adapter until a production adapter is
-//! installed.
+//! [`run_allowlist_distribution`]), and forwarder status events. Reader
+//! control actions are served by [`ForwarderReaderControlHandler`], gated by
+//! the negotiated `CAP_READER_CONTROL` capability and
+//! `control.allow_reader_control`.
 
 mod allowlist;
 mod control;
