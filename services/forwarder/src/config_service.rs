@@ -12,9 +12,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::status_http::{
-    SubsystemStatus, apply_control_action_from_config, bad_request_error,
-    mark_restart_needed_and_emit, require_object_payload,
+    apply_control_action_from_config, bad_request_error, require_object_payload,
 };
+use crate::status_store::{SubsystemStatus, mark_restart_needed_and_emit};
 
 /// Holds the config file path and a write lock for read-modify-write operations.
 pub struct ConfigState {

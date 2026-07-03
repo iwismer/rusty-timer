@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::P2pConfig;
-use crate::status_http::ForwarderStatusFeed;
+use crate::status_store::ForwarderStatusFeed;
 use crate::storage::journal::Journal;
 use rt_iroh::{EndpointAddr, EndpointBuilder, EndpointId, RelayMode, SecretKey};
 use rt_p2p_protocol::{StreamCatalog, StreamEntry};
@@ -590,7 +590,8 @@ mod tests {
     use super::*;
 
     use crate::config::P2pConfig;
-    use crate::status_http::{StatusConfig, StatusServer, SubsystemStatus};
+    use crate::status_http::{StatusConfig, StatusServer};
+    use crate::status_store::SubsystemStatus;
     use crate::storage::journal::Journal;
     use rt_iroh::EndpointBuilder;
     use rt_p2p_protocol::{

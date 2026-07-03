@@ -1,7 +1,7 @@
 // reader_task: IPICO reader TCP connect/read loop, journal append, local fanout.
 
 use crate::local_fanout::FanoutServer;
-use crate::status_http::{ReaderConnectionState, StatusServer};
+use crate::status_store::{ReaderConnectionState, StatusStore};
 use crate::storage::journal::Journal;
 use crate::ui_events::ForwarderUiEvent;
 use ipico_core::read::ChipRead;
@@ -19,13 +19,13 @@ use tracing::{debug, info, warn};
 // Helpers
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn mark_reader_disconnected(status: &StatusServer, reader_ip: &str) {
+pub(crate) async fn mark_reader_disconnected(status: &StatusStore, reader_ip: &str) {
     status
         .update_reader_state(reader_ip, ReaderConnectionState::Disconnected)
         .await;
 }
 
-async fn disconnect_and_notify(status: &StatusServer, stream_key: &str) {
+async fn disconnect_and_notify(status: &StatusStore, stream_key: &str) {
     mark_reader_disconnected(status, stream_key).await;
 }
 
@@ -190,7 +190,7 @@ pub async fn run_reader(
     fanout_addr: SocketAddr,
     journal: Arc<Mutex<Journal>>,
     mut shutdown_rx: watch::Receiver<bool>,
-    status: StatusServer,
+    status: StatusStore,
     logger: Arc<rt_ui_log::UiLogger<ForwarderUiEvent>>,
 ) {
     let target_addr = format!("{}:{}", reader_ip, reader_port);

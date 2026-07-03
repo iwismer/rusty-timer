@@ -31,7 +31,7 @@ use rt_p2p_protocol::{
 use tokio::sync::{Mutex, Notify, broadcast};
 
 use crate::config_service::{ConfigState, config_json_string, write_config_json_restricted};
-use crate::status_http::SubsystemStatus;
+use crate::status_store::SubsystemStatus;
 use crate::ui_events::ForwarderUiEvent;
 
 use super::control::{

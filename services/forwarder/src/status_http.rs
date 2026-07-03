@@ -47,6 +47,12 @@
 //! No authentication in v1.
 
 use crate::config_service::ConfigState;
+use crate::status_store::{
+    ForwarderStatusEvent, ForwarderStatusFeed, ReaderConnectionState, StatusStore, SubsystemStatus,
+    UpsStatusState,
+};
+#[cfg(test)]
+use crate::status_store::{ReaderStatus, broadcast_dirty_read_counts};
 use crate::storage::journal::Journal;
 use axum::Router;
 use axum::body::Bytes;
@@ -57,15 +63,16 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use rt_updater::UpdateStatus;
 use rt_updater::workflow::{RealChecker, WorkflowState, run_check, run_download};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, broadcast};
 
@@ -80,260 +87,6 @@ pub struct StatusConfig {
     pub bind: String,
     /// Forwarder software version (shown in status page).
     pub forwarder_version: String,
-}
-
-// ---------------------------------------------------------------------------
-// Subsystem readiness
-// ---------------------------------------------------------------------------
-
-/// Connection state of a reader TCP socket.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ReaderConnectionState {
-    Connecting,
-    Connected,
-    Disconnected,
-}
-
-impl From<&ReaderConnectionState> for crate::ui_events::ReaderConnectionState {
-    fn from(state: &ReaderConnectionState) -> Self {
-        match state {
-            ReaderConnectionState::Connected => crate::ui_events::ReaderConnectionState::Connected,
-            ReaderConnectionState::Connecting => {
-                crate::ui_events::ReaderConnectionState::Connecting
-            }
-            ReaderConnectionState::Disconnected => {
-                crate::ui_events::ReaderConnectionState::Disconnected
-            }
-        }
-    }
-}
-
-/// Per-reader status tracked in memory.
-#[derive(Debug, Clone)]
-pub struct ReaderStatus {
-    pub state: ReaderConnectionState,
-    pub last_seen: Option<Instant>,
-    pub reads_since_restart: u64,
-    pub reads_total: i64,
-    /// The local port the forwarder listens on to re-expose reads from this reader.
-    pub local_port: u16,
-    /// The name of the current epoch, if any.
-    pub current_epoch_name: Option<String>,
-    /// Control protocol info (firmware, clock, etc.) — populated on connect.
-    pub reader_info: Option<crate::reader_control::ReaderInfo>,
-}
-
-/// UPS daemon availability + latest readings snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct UpsStatusState {
-    pub available: bool,
-    pub status: Option<rt_domain::UpsStatus>,
-}
-
-/// Forwarder-local status updates consumed by P2P control sessions.
-#[derive(Debug, Clone)]
-pub enum ForwarderStatusEvent {
-    ReaderStatus {
-        stream_id: String,
-        status: ReaderStatus,
-    },
-    ReaderInfo {
-        stream_id: String,
-        info: crate::reader_control::ReaderInfo,
-    },
-    DownloadProgress {
-        stream_id: String,
-        event: crate::reader_control::DownloadEvent,
-    },
-    UpsStatus(UpsStatusState),
-}
-
-/// Current forwarder status snapshot consumed by a newly connected P2P peer.
-#[derive(Debug, Clone, Default)]
-pub struct ForwarderStatusSnapshot {
-    pub readers: Vec<(String, ReaderStatus)>,
-    pub ups_status: Option<UpsStatusState>,
-}
-
-/// Read-only status feed for P2P control sessions.
-#[derive(Clone)]
-pub struct ForwarderStatusFeed {
-    subsystem: Arc<Mutex<SubsystemStatus>>,
-    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
-}
-
-impl ForwarderStatusFeed {
-    /// Atomically subscribe to the status broadcast and capture the current
-    /// snapshot under the same `SubsystemStatus` lock.
-    ///
-    /// Holding the lock across both operations guarantees the returned snapshot
-    /// and the delta stream do not overlap: every status update either landed in
-    /// the snapshot (and was broadcast before this subscription existed) or is
-    /// delivered as a post-snapshot delta on the returned receiver. This relies
-    /// on all `ForwarderStatusEvent` broadcasts being emitted while holding the
-    /// same lock. No `.await` is held across the lock.
-    pub async fn subscribe_and_snapshot(
-        &self,
-    ) -> (
-        broadcast::Receiver<ForwarderStatusEvent>,
-        ForwarderStatusSnapshot,
-    ) {
-        let ss = self.subsystem.lock().await;
-        let receiver = self.status_event_tx.subscribe();
-        let snapshot = ForwarderStatusSnapshot {
-            readers: ss
-                .readers()
-                .iter()
-                .map(|(stream_id, status)| (stream_id.clone(), status.clone()))
-                .collect(),
-            ups_status: ss.ups_status().cloned(),
-        };
-        (receiver, snapshot)
-    }
-}
-
-/// Tracks local subsystem readiness for the `/readyz` endpoint.
-///
-/// Ready = config loaded + journal open + worker tasks started.
-/// P2P session connectivity is explicitly excluded from readiness.
-#[derive(Debug, Clone)]
-pub struct SubsystemStatus {
-    ready: bool,
-    reason: Option<String>,
-    /// P2P session state is tracked for the status page but does NOT affect readiness.
-    p2p_connected: bool,
-    p2p_endpoint_id: Option<String>,
-    forwarder_id: String,
-    local_ip: Option<String>,
-    pub(crate) readers: HashMap<String, ReaderStatus>,
-    update_status: UpdateStatus,
-    staged_update_path: Option<std::path::PathBuf>,
-    pub update_mode: rt_updater::UpdateMode,
-    /// Set to `true` when config is saved and the forwarder needs a restart to apply changes.
-    restart_needed: bool,
-    /// UPS status snapshot (None if UPS monitoring is not configured).
-    ups_status: Option<UpsStatusState>,
-    /// Readers whose read counters changed since the last coalesced P2P
-    /// status broadcast (see [`spawn_read_count_broadcaster`]).
-    read_counts_dirty: HashSet<String>,
-}
-
-impl SubsystemStatus {
-    /// Create a fully-ready subsystem status.
-    pub fn ready() -> Self {
-        SubsystemStatus {
-            ready: true,
-            reason: None,
-            p2p_connected: false,
-            p2p_endpoint_id: None,
-            forwarder_id: String::new(),
-            local_ip: None,
-            readers: HashMap::new(),
-            update_status: UpdateStatus::UpToDate,
-            staged_update_path: None,
-            update_mode: rt_updater::UpdateMode::default(),
-            restart_needed: false,
-            ups_status: None,
-            read_counts_dirty: HashSet::new(),
-        }
-    }
-
-    /// Create a not-ready subsystem status with a reason.
-    pub fn not_ready(reason: String) -> Self {
-        SubsystemStatus {
-            ready: false,
-            reason: Some(reason),
-            p2p_connected: false,
-            p2p_endpoint_id: None,
-            forwarder_id: String::new(),
-            local_ip: None,
-            readers: HashMap::new(),
-            update_status: UpdateStatus::UpToDate,
-            staged_update_path: None,
-            update_mode: rt_updater::UpdateMode::default(),
-            restart_needed: false,
-            ups_status: None,
-            read_counts_dirty: HashSet::new(),
-        }
-    }
-
-    /// Set the P2P session state (does NOT affect `/readyz` result).
-    pub fn set_p2p_connected(&mut self, connected: bool) {
-        self.p2p_connected = connected;
-    }
-
-    /// Return true if all local subsystems are ready.
-    pub fn is_ready(&self) -> bool {
-        self.ready
-    }
-
-    /// Return the P2P session state.
-    pub fn p2p_connected(&self) -> bool {
-        self.p2p_connected
-    }
-
-    pub fn set_p2p_endpoint_id(&mut self, endpoint_id: String) {
-        self.p2p_endpoint_id = Some(endpoint_id);
-    }
-
-    /// Return whether a restart is needed to apply saved config changes.
-    pub fn restart_needed(&self) -> bool {
-        self.restart_needed
-    }
-
-    /// Mark that a restart is needed to apply saved config changes.
-    pub fn set_restart_needed(&mut self) {
-        self.restart_needed = true;
-    }
-
-    /// Return the connection state for a given reader IP, if tracked.
-    pub fn reader_connection_state(&self, reader_ip: &str) -> Option<ReaderConnectionState> {
-        self.readers.get(reader_ip).map(|r| r.state.clone())
-    }
-
-    /// Return a reference to the readers map.
-    pub fn readers(&self) -> &HashMap<String, ReaderStatus> {
-        &self.readers
-    }
-
-    pub(crate) fn cached_reader_info(
-        &self,
-        reader_ip: &str,
-    ) -> Option<crate::reader_control::ReaderInfo> {
-        self.readers
-            .get(reader_ip)
-            .and_then(|r| r.reader_info.clone())
-    }
-
-    pub(crate) fn update_cached_reader_info_unless_disconnected(
-        &mut self,
-        reader_ip: &str,
-        info: crate::reader_control::ReaderInfo,
-    ) -> bool {
-        let Some(reader) = self.readers.get_mut(reader_ip) else {
-            tracing::warn!(reader_ip = %reader_ip, "update_cached_reader_info: reader not found in status map, skipping broadcast");
-            return false;
-        };
-        if reader.state == ReaderConnectionState::Disconnected {
-            tracing::debug!(
-                reader_ip,
-                "dropping cached reader info update for disconnected reader"
-            );
-            return false;
-        }
-        reader.reader_info = Some(info);
-        true
-    }
-
-    /// Set the UPS status snapshot.
-    pub fn set_ups_status(&mut self, state: UpsStatusState) {
-        self.ups_status = Some(state);
-    }
-
-    /// Return the current UPS status snapshot, if any.
-    pub fn ups_status(&self) -> Option<&UpsStatusState> {
-        self.ups_status.as_ref()
-    }
 }
 
 #[cfg(any(feature = "eink", feature = "lcd"))]
@@ -400,18 +153,7 @@ fn subsystem_to_display_state(
 #[derive(Clone)]
 pub struct StatusServer {
     local_addr: SocketAddr,
-    subsystem: Arc<Mutex<SubsystemStatus>>,
-    ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
-    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
-    logger: Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-    control_clients:
-        Arc<std::sync::RwLock<HashMap<String, Arc<crate::reader_control::ControlClient>>>>,
-    download_trackers: Arc<
-        std::sync::RwLock<
-            HashMap<String, Arc<tokio::sync::Mutex<crate::reader_control::DownloadTracker>>>,
-        >,
-    >,
-    reconnect_notifies: Arc<std::sync::RwLock<HashMap<String, Arc<Notify>>>>,
+    store: StatusStore,
     #[cfg(any(feature = "eink", feature = "lcd"))]
     display_tx: Option<tokio::sync::watch::Sender<rt_screen::state::DisplayState>>,
     #[cfg(any(feature = "eink", feature = "lcd"))]
@@ -479,236 +221,100 @@ impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
     }
 }
 
-fn bridge_download_progress_events(
-    stream_id: String,
-    tracker: Arc<tokio::sync::Mutex<crate::reader_control::DownloadTracker>>,
-    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
-) {
-    if let Ok(tracker) = tracker.try_lock() {
-        spawn_download_progress_bridge(stream_id, tracker.subscribe(), status_event_tx);
-        return;
-    }
-
-    tokio::spawn(async move {
-        let rx = {
-            let tracker = tracker.lock().await;
-            tracker.subscribe()
-        };
-        spawn_download_progress_bridge(stream_id, rx, status_event_tx);
-    });
-}
-
-fn spawn_download_progress_bridge(
-    stream_id: String,
-    mut rx: broadcast::Receiver<crate::reader_control::DownloadEvent>,
-    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
-) {
-    tokio::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    let _ = status_event_tx.send(ForwarderStatusEvent::DownloadProgress {
-                        stream_id: stream_id.clone(),
-                        event,
-                    });
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::debug!(skipped = n, "download status bridge lagged");
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    });
-}
-
-/// Interval at which accumulated read-count changes are broadcast to P2P
-/// control sessions as `ReaderStatus` deltas.
-const READ_COUNT_BROADCAST_INTERVAL: Duration = Duration::from_secs(2);
-
-/// Broadcast a `ReaderStatus` delta for every reader whose read counters
-/// changed since the last tick (see `record_read`).
-///
-/// Sends while holding the `SubsystemStatus` lock so deltas stay ordered
-/// against `subscribe_and_snapshot`, like every other status broadcast.
-/// Broadcasting current state (not increments) makes a dropped or duplicated
-/// delta harmless: the next tick carries the up-to-date counters.
-async fn broadcast_dirty_read_counts(
-    subsystem: &Mutex<SubsystemStatus>,
-    status_event_tx: &broadcast::Sender<ForwarderStatusEvent>,
-) {
-    let mut ss = subsystem.lock().await;
-    if ss.read_counts_dirty.is_empty() {
-        return;
-    }
-    let dirty = std::mem::take(&mut ss.read_counts_dirty);
-    for reader_ip in dirty {
-        if let Some(status) = ss.readers.get(&reader_ip) {
-            let _ = status_event_tx.send(ForwarderStatusEvent::ReaderStatus {
-                stream_id: reader_ip,
-                status: status.clone(),
-            });
-        }
-    }
-}
-
-/// Spawn the coalescing task that pushes read-count updates to P2P peers at a
-/// bounded rate. Quiet when no reads arrive; at most one delta per reader per
-/// interval during bursts.
-fn spawn_read_count_broadcaster(
-    subsystem: Arc<Mutex<SubsystemStatus>>,
-    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
-) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(READ_COUNT_BROADCAST_INTERVAL);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            ticker.tick().await;
-            broadcast_dirty_read_counts(&subsystem, &status_event_tx).await;
-        }
-    });
-}
-
 impl StatusServer {
     /// Return the bound listen address.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
+    /// Return a clone of the pure status store.
+    pub fn store(&self) -> StatusStore {
+        self.store.clone()
+    }
+
     /// Return a clone of the internal subsystem status Arc.
     pub fn subsystem_arc(&self) -> Arc<Mutex<SubsystemStatus>> {
-        self.subsystem.clone()
+        self.store.subsystem_arc()
     }
 
     /// Return a clone of the UI event broadcast sender.
     pub fn ui_sender(&self) -> tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent> {
-        self.ui_tx.clone()
+        self.store.ui_sender()
     }
 
     /// Return a read-only status feed for P2P control sessions.
     pub fn status_feed(&self) -> ForwarderStatusFeed {
-        ForwarderStatusFeed {
-            subsystem: self.subsystem.clone(),
-            status_event_tx: self.status_event_tx.clone(),
-        }
+        self.store.status_feed()
     }
 
     /// Return the shared reader-control service used by HTTP and P2P control paths.
     pub fn reader_control_service(&self) -> crate::reader_control_service::ReaderControlService {
-        crate::reader_control_service::ReaderControlService::new(
-            self.subsystem.clone(),
-            self.control_clients.clone(),
-            self.download_trackers.clone(),
-            self.reconnect_notifies.clone(),
-            self.ui_tx.clone(),
-            self.status_event_tx.clone(),
-            self.logger.clone(),
-        )
+        self.store.reader_control_service()
     }
 
     /// Return a clone of the shared UI logger Arc.
     pub fn logger(&self) -> Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>> {
-        self.logger.clone()
+        self.store.logger()
     }
 
     /// Mark all local subsystems as ready.
     pub async fn set_ready(&self) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            ss.ready = true;
-            ss.reason = None;
-            let _ = self
-                .ui_tx
-                .send(crate::ui_events::ForwarderUiEvent::StatusChanged {
-                    ready: ss.is_ready(),
-                    p2p_connected: ss.p2p_connected(),
-                    restart_needed: ss.restart_needed(),
-                });
-        }
+        self.store.set_ready().await;
         #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
     /// Mark that a restart is needed to apply saved config changes.
     pub async fn set_restart_needed(&self) {
-        mark_restart_needed_and_emit(&self.subsystem, &self.ui_tx).await;
+        self.store.set_restart_needed().await;
     }
 
     /// Return whether a restart is needed to apply saved config changes.
     pub async fn restart_needed(&self) -> bool {
-        self.subsystem.lock().await.restart_needed()
+        self.store.restart_needed().await
     }
 
     pub async fn set_p2p_endpoint_id(&self, endpoint_id: String) {
-        let mut ss = self.subsystem.lock().await;
-        ss.set_p2p_endpoint_id(endpoint_id);
+        self.store.set_p2p_endpoint_id(endpoint_id).await;
     }
 
     /// Update the P2P session state (does not affect readiness).
     pub async fn set_p2p_connected(&self, connected: bool) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            ss.set_p2p_connected(connected);
-            let _ = self
-                .ui_tx
-                .send(crate::ui_events::ForwarderUiEvent::StatusChanged {
-                    ready: ss.is_ready(),
-                    p2p_connected: connected,
-                    restart_needed: ss.restart_needed(),
-                });
-        }
+        self.store.set_p2p_connected(connected).await;
         #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
     /// Set the forwarder ID (call once at startup).
     pub async fn set_forwarder_id(&self, id: &str) {
-        self.subsystem.lock().await.forwarder_id = id.to_owned();
+        self.store.set_forwarder_id(id).await;
     }
 
     /// Set the detected local IP (at startup and on reader connect/disconnect).
     pub async fn set_local_ip(&self, ip: Option<String>) {
-        self.subsystem.lock().await.local_ip = ip;
+        self.store.set_local_ip(ip).await;
         #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
     /// Set the update mode (controls check-only vs check-and-download behavior).
     pub async fn set_update_mode(&self, mode: rt_updater::UpdateMode) {
-        self.subsystem.lock().await.update_mode = mode;
+        self.store.set_update_mode(mode).await;
     }
 
     /// Update the current rt-updater status (shown on `/update/status`).
     pub async fn set_update_status(&self, status: UpdateStatus) {
-        self.subsystem.lock().await.update_status = status.clone();
-        let _ = self
-            .ui_tx
-            .send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged { status });
+        self.store.set_update_status(status).await;
     }
 
     /// Record the filesystem path of a downloaded update artifact ready to apply.
     pub async fn set_staged_update_path(&self, path: std::path::PathBuf) {
-        self.subsystem.lock().await.staged_update_path = Some(path);
+        self.store.set_staged_update_path(path).await;
     }
 
     /// Update the UPS status snapshot in the subsystem state.
-    ///
-    /// The local HTTP/UI snapshot is always updated, but the P2P control-event
-    /// broadcast only fires when the UPS status actually changed from the stored
-    /// previous value. The UPS poller calls this every interval, so gating the
-    /// broadcast on a real change avoids spamming connected receivers with
-    /// identical `UpsStatus` frames. The send happens under the subsystem lock so
-    /// it is ordered against `subscribe_and_snapshot`.
     pub async fn set_ups_status(&self, state: UpsStatusState) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            let changed = ss.ups_status() != Some(&state);
-            ss.set_ups_status(state.clone());
-            if changed {
-                let _ = self
-                    .status_event_tx
-                    .send(ForwarderStatusEvent::UpsStatus(state));
-            }
-        }
+        self.store.set_ups_status(state).await;
         #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
@@ -716,7 +322,7 @@ impl StatusServer {
     pub fn control_clients(
         &self,
     ) -> &Arc<std::sync::RwLock<HashMap<String, Arc<crate::reader_control::ControlClient>>>> {
-        &self.control_clients
+        self.store.control_clients()
     }
 
     #[allow(clippy::type_complexity)]
@@ -727,7 +333,7 @@ impl StatusServer {
             HashMap<String, Arc<tokio::sync::Mutex<crate::reader_control::DownloadTracker>>>,
         >,
     > {
-        &self.download_trackers
+        self.store.download_trackers()
     }
 
     pub fn register_download_tracker(
@@ -735,46 +341,30 @@ impl StatusServer {
         reader_ip: &str,
         tracker: Arc<tokio::sync::Mutex<crate::reader_control::DownloadTracker>>,
     ) {
-        self.download_trackers
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(reader_ip.to_owned(), tracker.clone());
-        bridge_download_progress_events(
-            reader_ip.to_owned(),
-            tracker,
-            self.status_event_tx.clone(),
-        );
+        self.store.register_download_tracker(reader_ip, tracker);
     }
 
     pub fn deregister_download_tracker(&self, reader_ip: &str) {
-        self.download_trackers
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(reader_ip);
+        self.store.deregister_download_tracker(reader_ip);
     }
 
     pub fn register_reconnect_notify(&self, reader_ip: &str, notify: Arc<Notify>) {
-        self.reconnect_notifies
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(reader_ip.to_owned(), notify);
+        self.store.register_reconnect_notify(reader_ip, notify);
     }
 
     pub fn deregister_reconnect_notify(&self, reader_ip: &str) {
-        self.reconnect_notifies
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(reader_ip);
+        self.store.deregister_reconnect_notify(reader_ip);
     }
 
     pub fn reconnect_notifies(&self) -> &Arc<std::sync::RwLock<HashMap<String, Arc<Notify>>>> {
-        &self.reconnect_notifies
+        self.store.reconnect_notifies()
     }
 
     #[cfg(any(feature = "eink", feature = "lcd"))]
     async fn publish_display_state(&self) {
         if let Some(ref tx) = self.display_tx {
-            let ss = self.subsystem.lock().await;
+            let subsystem = self.store.subsystem_arc();
+            let ss = subsystem.lock().await;
             let forwarder_name = self.display_name.lock().await.clone();
             let cpu_temp = *self.cpu_temp.lock().await;
             let state = subsystem_to_display_state(&ss, forwarder_name, cpu_temp);
@@ -788,6 +378,24 @@ impl StatusServer {
         tx: tokio::sync::watch::Sender<rt_screen::state::DisplayState>,
     ) {
         self.display_tx = Some(tx);
+        self.spawn_display_change_bridge();
+    }
+
+    #[cfg(any(feature = "eink", feature = "lcd"))]
+    fn spawn_display_change_bridge(&self) {
+        let mut display_changes = self.store.subscribe_display_changes();
+        let server = self.clone();
+        tokio::spawn(async move {
+            loop {
+                match display_changes.recv().await {
+                    Ok(()) => server.publish_display_state().await,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        server.publish_display_state().await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
     }
 
     #[cfg(any(feature = "eink", feature = "lcd"))]
@@ -812,10 +420,7 @@ impl StatusServer {
         &self,
         reader_ip: &str,
     ) -> Option<crate::reader_control::ReaderInfo> {
-        let ss = self.subsystem.lock().await;
-        ss.readers
-            .get(reader_ip)
-            .and_then(|r| r.reader_info.clone())
+        self.store.get_reader_info(reader_ip).await
     }
 
     pub async fn update_reader_info(
@@ -823,68 +428,20 @@ impl StatusServer {
         reader_ip: &str,
         info: crate::reader_control::ReaderInfo,
     ) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            if let Some(r) = ss.readers.get_mut(reader_ip) {
-                r.reader_info = Some(info.clone());
-            }
-            let _ = self
-                .ui_tx
-                .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
-                    ip: reader_ip.to_owned(),
-                    info: info.clone(),
-                });
-            // Broadcast under the lock so it is ordered against
-            // `subscribe_and_snapshot`.
-            let _ = self.status_event_tx.send(ForwarderStatusEvent::ReaderInfo {
-                stream_id: reader_ip.to_owned(),
-                info,
-            });
-        }
+        self.store.update_reader_info(reader_ip, info).await;
         #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
     /// Update reader info only if the reader has not transitioned to Disconnected.
-    ///
-    /// This is used by the background poller so a late poll result cannot restore
-    /// stale info after the read loop has already marked the reader disconnected.
     pub async fn update_reader_info_unless_disconnected(
         &self,
         reader_ip: &str,
         info: crate::reader_control::ReaderInfo,
     ) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            if let Some(r) = ss.readers.get_mut(reader_ip) {
-                if r.state == ReaderConnectionState::Disconnected {
-                    tracing::debug!(
-                        reader_ip,
-                        "dropping reader info update for disconnected reader"
-                    );
-                    return;
-                }
-                r.reader_info = Some(info.clone());
-            } else {
-                tracing::debug!(
-                    reader_ip,
-                    "reader IP not found in map, skipping info update"
-                );
-                return;
-            }
-            let _ = self
-                .ui_tx
-                .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
-                    ip: reader_ip.to_owned(),
-                    info: info.clone(),
-                });
-            // Broadcast under the lock so it is ordered against
-            // `subscribe_and_snapshot`.
-            let _ = self.status_event_tx.send(ForwarderStatusEvent::ReaderInfo {
-                stream_id: reader_ip.to_owned(),
-                info,
-            });
-        }
+        self.store
+            .update_reader_info_unless_disconnected(reader_ip, info)
+            .await;
         #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
@@ -894,141 +451,44 @@ impl StatusServer {
         reader_ip: &str,
         client: Arc<crate::reader_control::ControlClient>,
     ) {
-        self.control_clients
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(reader_ip.to_owned(), client);
+        self.store.register_control_client(reader_ip, client);
     }
 
     pub fn deregister_control_client(&self, reader_ip: &str) {
-        self.control_clients
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(reader_ip);
+        self.store.deregister_control_client(reader_ip);
     }
 
     /// Pre-populate all configured reader IPs as Disconnected.
-    ///
-    /// Each entry is `(reader_addr, local_port)` where `reader_addr` is `"ip:port"`
-    /// and `local_port` is the port the forwarder listens on to re-expose reads.
     pub async fn init_readers(&self, readers: &[(String, u16)]) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            for (addr, local_port) in readers {
-                ss.readers.entry(addr.clone()).or_insert(ReaderStatus {
-                    state: ReaderConnectionState::Disconnected,
-                    last_seen: None,
-                    reads_since_restart: 0,
-                    reads_total: 0,
-                    local_port: *local_port,
-                    current_epoch_name: None,
-                    reader_info: None,
-                });
-            }
-        }
+        self.store.init_readers(readers).await;
         #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
     /// Seed a reader's total historical count from durable journal state.
     pub async fn set_reader_total(&self, reader_ip: &str, total: i64) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            if let Some(r) = ss.readers.get_mut(reader_ip) {
-                r.reads_total = total;
-            }
-        }
+        self.store.set_reader_total(reader_ip, total).await;
         #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
     /// Set the current epoch name for a reader and broadcast a ReaderUpdated SSE event.
     pub async fn set_reader_epoch_name(&self, reader_ip: &str, name: Option<String>) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            if let Some(r) = ss.readers.get_mut(reader_ip) {
-                r.current_epoch_name = name;
-                let _ = self
-                    .ui_tx
-                    .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
-                        ip: reader_ip.to_owned(),
-                        state: (&r.state).into(),
-                        reads_session: r.reads_since_restart,
-                        reads_total: r.reads_total,
-                        last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
-                        local_port: r.local_port,
-                        current_epoch_name: r.current_epoch_name.clone(),
-                    });
-            }
-        }
+        self.store.set_reader_epoch_name(reader_ip, name).await;
         #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
     /// Update a reader's connection state.
     pub async fn update_reader_state(&self, reader_ip: &str, state: ReaderConnectionState) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            if let Some(r) = ss.readers.get_mut(reader_ip) {
-                let changed = r.state != state;
-                if state == ReaderConnectionState::Disconnected {
-                    r.reader_info = None;
-                }
-                r.state = state;
-                let _ = self
-                    .ui_tx
-                    .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
-                        ip: reader_ip.to_owned(),
-                        state: (&r.state).into(),
-                        reads_session: r.reads_since_restart,
-                        reads_total: r.reads_total,
-                        last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
-                        local_port: r.local_port,
-                        current_epoch_name: r.current_epoch_name.clone(),
-                    });
-                // Only broadcast a P2P control delta on an actual state
-                // transition, and do so under the lock so it is ordered against
-                // `subscribe_and_snapshot`. The local UI event above is always
-                // emitted.
-                if changed {
-                    let _ = self
-                        .status_event_tx
-                        .send(ForwarderStatusEvent::ReaderStatus {
-                            stream_id: reader_ip.to_owned(),
-                            status: r.clone(),
-                        });
-                }
-            }
-        }
+        self.store.update_reader_state(reader_ip, state).await;
         #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
 
     /// Record a successful chip read for a reader.
     pub async fn record_read(&self, reader_ip: &str) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            if let Some(r) = ss.readers.get_mut(reader_ip) {
-                r.reads_since_restart += 1;
-                r.reads_total += 1;
-                r.last_seen = Some(Instant::now());
-                let _ = self
-                    .ui_tx
-                    .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
-                        ip: reader_ip.to_owned(),
-                        state: (&r.state).into(),
-                        reads_session: r.reads_since_restart,
-                        reads_total: r.reads_total,
-                        last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
-                        local_port: r.local_port,
-                        current_epoch_name: r.current_epoch_name.clone(),
-                    });
-                // Per-read P2P broadcasts would flood the control stream during
-                // bursts, so reads only mark the reader dirty; the coalescing
-                // task broadcasts the latest counters at a bounded rate.
-                ss.read_counts_dirty.insert(reader_ip.to_owned());
-            }
-        }
+        self.store.record_read(reader_ip).await;
         #[cfg(any(feature = "eink", feature = "lcd"))]
         self.publish_display_state().await;
     }
@@ -1050,33 +510,23 @@ impl StatusServer {
         let listener = TcpListener::bind(&cfg.bind).await?;
         let local_addr = listener.local_addr()?;
 
-        let (ui_tx, _) = tokio::sync::broadcast::channel(256);
-        let (status_event_tx, _) = broadcast::channel(256);
-        let logger = Arc::new(rt_ui_log::UiLogger::with_buffer(
-            ui_tx.clone(),
-            |entry| crate::ui_events::ForwarderUiEvent::LogEntry { entry },
-            500,
-        ));
-        let subsystem = Arc::new(Mutex::new(subsystem));
-        let control_clients = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let download_trackers = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let reconnect_notifies = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let store = StatusStore::new(subsystem);
         #[cfg(any(feature = "eink", feature = "lcd"))]
         let display_name = Arc::new(Mutex::new(None));
         #[cfg(any(feature = "eink", feature = "lcd"))]
         let cpu_temp = Arc::new(Mutex::new(None));
         let state = AppState {
-            subsystem: subsystem.clone(),
+            subsystem: store.subsystem_arc(),
             journal,
             version: Arc::new(cfg.forwarder_version),
             config_state: None,
             restart_signal: None,
-            ui_tx: ui_tx.clone(),
-            status_event_tx: status_event_tx.clone(),
-            logger: logger.clone(),
-            control_clients: control_clients.clone(),
-            download_trackers: download_trackers.clone(),
-            reconnect_notifies: reconnect_notifies.clone(),
+            ui_tx: store.ui_sender(),
+            status_event_tx: store.status_event_sender(),
+            logger: store.logger(),
+            control_clients: store.control_clients().clone(),
+            download_trackers: store.download_trackers().clone(),
+            reconnect_notifies: store.reconnect_notifies().clone(),
             #[cfg(any(feature = "eink", feature = "lcd"))]
             display_name: display_name.clone(),
             #[cfg(any(feature = "eink", feature = "lcd"))]
@@ -1089,17 +539,10 @@ impl StatusServer {
                 tracing::error!(error = %err, "status HTTP server fatal error");
             }
         });
-        spawn_read_count_broadcaster(subsystem.clone(), status_event_tx.clone());
 
         Ok(StatusServer {
             local_addr,
-            subsystem,
-            ui_tx,
-            status_event_tx,
-            logger,
-            control_clients,
-            download_trackers,
-            reconnect_notifies,
+            store,
             #[cfg(any(feature = "eink", feature = "lcd"))]
             display_tx: None,
             #[cfg(any(feature = "eink", feature = "lcd"))]
@@ -1120,33 +563,23 @@ impl StatusServer {
         let listener = TcpListener::bind(&cfg.bind).await?;
         let local_addr = listener.local_addr()?;
 
-        let (ui_tx, _) = tokio::sync::broadcast::channel(256);
-        let (status_event_tx, _) = broadcast::channel(256);
-        let logger = Arc::new(rt_ui_log::UiLogger::with_buffer(
-            ui_tx.clone(),
-            |entry| crate::ui_events::ForwarderUiEvent::LogEntry { entry },
-            500,
-        ));
-        let subsystem = Arc::new(Mutex::new(subsystem));
-        let control_clients = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let download_trackers = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let reconnect_notifies = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let store = StatusStore::new(subsystem);
         #[cfg(any(feature = "eink", feature = "lcd"))]
         let display_name = Arc::new(Mutex::new(None));
         #[cfg(any(feature = "eink", feature = "lcd"))]
         let cpu_temp = Arc::new(Mutex::new(None));
         let state = AppState {
-            subsystem: subsystem.clone(),
+            subsystem: store.subsystem_arc(),
             journal,
             version: Arc::new(cfg.forwarder_version),
             config_state: Some(config_state),
             restart_signal: Some(restart_signal),
-            ui_tx: ui_tx.clone(),
-            status_event_tx: status_event_tx.clone(),
-            logger: logger.clone(),
-            control_clients: control_clients.clone(),
-            download_trackers: download_trackers.clone(),
-            reconnect_notifies: reconnect_notifies.clone(),
+            ui_tx: store.ui_sender(),
+            status_event_tx: store.status_event_sender(),
+            logger: store.logger(),
+            control_clients: store.control_clients().clone(),
+            download_trackers: store.download_trackers().clone(),
+            reconnect_notifies: store.reconnect_notifies().clone(),
             #[cfg(any(feature = "eink", feature = "lcd"))]
             display_name: display_name.clone(),
             #[cfg(any(feature = "eink", feature = "lcd"))]
@@ -1159,17 +592,10 @@ impl StatusServer {
                 tracing::error!(error = %err, "status HTTP server fatal error");
             }
         });
-        spawn_read_count_broadcaster(subsystem.clone(), status_event_tx.clone());
 
         Ok(StatusServer {
             local_addr,
-            subsystem,
-            ui_tx,
-            status_event_tx,
-            logger,
-            control_clients,
-            download_trackers,
-            reconnect_notifies,
+            store,
             #[cfg(any(feature = "eink", feature = "lcd"))]
             display_tx: None,
             #[cfg(any(feature = "eink", feature = "lcd"))]
@@ -1240,19 +666,6 @@ impl JournalAccess for NoJournal {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-pub(crate) async fn mark_restart_needed_and_emit(
-    subsystem: &Arc<Mutex<SubsystemStatus>>,
-    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
-) {
-    let mut ss = subsystem.lock().await;
-    ss.set_restart_needed();
-    let _ = ui_tx.send(crate::ui_events::ForwarderUiEvent::StatusChanged {
-        ready: ss.is_ready(),
-        p2p_connected: ss.p2p_connected(),
-        restart_needed: true,
-    });
-}
 
 fn text_response(status: StatusCode, body: impl Into<String>) -> Response {
     (status, [(header::CONTENT_TYPE, "text/plain")], body.into()).into_response()
@@ -3386,7 +2799,7 @@ mod tests {
             .update_reader_state(reader_ip, ReaderConnectionState::Connected)
             .await;
 
-        let mut ui_rx = server.ui_tx.subscribe();
+        let mut ui_rx = server.ui_sender().subscribe();
 
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
         let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
@@ -3553,17 +2966,17 @@ mod tests {
             .await;
 
         let state = AppState {
-            subsystem: server.subsystem.clone(),
+            subsystem: server.subsystem_arc(),
             journal: Arc::new(Mutex::new(NoJournal)),
             version: Arc::new("0.2.0".to_owned()),
             config_state: None,
             restart_signal: None,
-            logger: server.logger.clone(),
-            ui_tx: server.ui_tx.clone(),
-            status_event_tx: server.status_event_tx.clone(),
-            control_clients: server.control_clients.clone(),
-            download_trackers: server.download_trackers.clone(),
-            reconnect_notifies: server.reconnect_notifies.clone(),
+            logger: server.logger(),
+            ui_tx: server.ui_sender(),
+            status_event_tx: server.store.status_event_sender(),
+            control_clients: server.control_clients().clone(),
+            download_trackers: server.download_trackers().clone(),
+            reconnect_notifies: server.reconnect_notifies().clone(),
             #[cfg(any(feature = "eink", feature = "lcd"))]
             display_name: server.display_name.clone(),
             #[cfg(any(feature = "eink", feature = "lcd"))]
@@ -4516,7 +3929,7 @@ mod tests {
             .update_reader_info(reader_ip, crate::reader_control::ReaderInfo::default())
             .await;
 
-        let mut rx = server.ui_tx.subscribe();
+        let mut rx = server.ui_sender().subscribe();
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
         let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
         server.register_control_client(reader_ip, Arc::new(control_client));
@@ -4578,7 +3991,7 @@ mod tests {
         .await
         .expect("start status server");
 
-        let mut rx = server.ui_tx.subscribe();
+        let mut rx = server.ui_sender().subscribe();
         server.set_ready().await;
 
         let evt = tokio::time::timeout(Duration::from_millis(250), rx.recv())
@@ -4605,7 +4018,7 @@ mod tests {
         .await
         .expect("start status server");
 
-        let mut rx = server.ui_tx.subscribe();
+        let mut rx = server.ui_sender().subscribe();
         server
             .set_update_status(UpdateStatus::Downloaded {
                 version: "1.2.3".to_owned(),
@@ -4662,7 +4075,7 @@ target = "192.168.1.100:10000"
         .await
         .expect("start status server");
 
-        let mut rx = server.ui_tx.subscribe();
+        let mut rx = server.ui_sender().subscribe();
         let client = reqwest::Client::new();
         let resp = client
             .post(format!(
@@ -4723,7 +4136,7 @@ target = "192.168.1.100:10000"
         .expect("start status server");
 
         assert_eq!(
-            server.subsystem.lock().await.update_mode,
+            server.subsystem_arc().lock().await.update_mode,
             rt_updater::UpdateMode::CheckAndDownload
         );
 
@@ -4740,7 +4153,7 @@ target = "192.168.1.100:10000"
             .expect("post config update");
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
-            server.subsystem.lock().await.update_mode,
+            server.subsystem_arc().lock().await.update_mode,
             rt_updater::UpdateMode::CheckOnly
         );
         assert!(
@@ -4796,7 +4209,7 @@ target = "192.168.1.100:10000"
             .expect("post config update");
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
-            server.subsystem.lock().await.update_mode,
+            server.subsystem_arc().lock().await.update_mode,
             rt_updater::UpdateMode::CheckAndDownload
         );
     }
@@ -5001,7 +4414,7 @@ target = "192.168.1.100:10000"
         };
 
         let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+            ForwarderWorkflowAdapter::new(server.subsystem_arc(), server.ui_sender());
         let status = run_check(&workflow_state, &checker, rt_updater::UpdateMode::CheckOnly).await;
 
         assert_eq!(
@@ -5034,7 +4447,7 @@ target = "192.168.1.100:10000"
         };
 
         let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+            ForwarderWorkflowAdapter::new(server.subsystem_arc(), server.ui_sender());
         let status = run_check(&workflow_state, &checker, rt_updater::UpdateMode::Disabled).await;
 
         assert_eq!(
@@ -5067,7 +4480,7 @@ target = "192.168.1.100:10000"
         };
 
         let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+            ForwarderWorkflowAdapter::new(server.subsystem_arc(), server.ui_sender());
         let status = run_check(
             &workflow_state,
             &checker,
@@ -5083,7 +4496,7 @@ target = "192.168.1.100:10000"
         );
         assert_eq!(download_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
-            server.subsystem.lock().await.staged_update_path,
+            server.subsystem_arc().lock().await.staged_update_path,
             Some(std::path::PathBuf::from("/tmp/staged-forwarder"))
         );
     }
@@ -5307,7 +4720,7 @@ target = "192.168.1.100:10000"
         };
 
         let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+            ForwarderWorkflowAdapter::new(server.subsystem_arc(), server.ui_sender());
         let status = run_download(&workflow_state, &checker).await;
 
         assert_eq!(
@@ -5318,7 +4731,7 @@ target = "192.168.1.100:10000"
         );
         assert_eq!(download_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
-            server.subsystem.lock().await.staged_update_path,
+            server.subsystem_arc().lock().await.staged_update_path,
             Some(std::path::PathBuf::from("/tmp/staged-forwarder"))
         );
     }
@@ -5340,7 +4753,7 @@ target = "192.168.1.100:10000"
                 version: "2.0.0".to_owned(),
             })
             .await;
-        let mut rx = server.ui_tx.subscribe();
+        let mut rx = server.ui_sender().subscribe();
 
         let checker = FakeChecker {
             check_result: Ok(UpdateStatus::UpToDate),
@@ -5349,7 +4762,7 @@ target = "192.168.1.100:10000"
         };
 
         let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+            ForwarderWorkflowAdapter::new(server.subsystem_arc(), server.ui_sender());
         let status = run_download(&workflow_state, &checker).await;
         assert_eq!(
             status,
@@ -5390,7 +4803,7 @@ target = "192.168.1.100:10000"
         };
 
         let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+            ForwarderWorkflowAdapter::new(server.subsystem_arc(), server.ui_sender());
         let status = run_download(&workflow_state, &checker).await;
         assert!(status.is_err());
     }
@@ -5420,7 +4833,7 @@ target = "192.168.1.100:10000"
         };
 
         let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+            ForwarderWorkflowAdapter::new(server.subsystem_arc(), server.ui_sender());
         let status = run_download(&workflow_state, &checker).await;
         assert_eq!(
             status,
@@ -5449,7 +4862,7 @@ target = "192.168.1.100:10000"
             .update_reader_state("192.168.1.10", ReaderConnectionState::Connected)
             .await;
 
-        let mut rx = server.ui_tx.subscribe();
+        let mut rx = server.ui_sender().subscribe();
 
         // Set epoch name
         server
@@ -5492,7 +4905,7 @@ target = "192.168.1.100:10000"
             .set_reader_epoch_name("192.168.1.10", Some("Race Day".to_owned()))
             .await;
 
-        let mut rx = server.ui_tx.subscribe();
+        let mut rx = server.ui_sender().subscribe();
 
         // Clear epoch name
         server.set_reader_epoch_name("192.168.1.10", None).await;
@@ -5890,7 +5303,8 @@ target = "192.168.1.100:10000"
         // have been consumed if the background broadcaster ticked, in which
         // case the delta must be on the feed instead.)
         let dirty = {
-            let ss = server.subsystem.lock().await;
+            let subsystem = server.subsystem_arc();
+            let ss = subsystem.lock().await;
             ss.read_counts_dirty.contains("10.0.0.9:10000")
         };
         if !dirty {

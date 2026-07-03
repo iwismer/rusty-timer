@@ -15,7 +15,7 @@ use rt_iroh::{Connection, Endpoint, EndpointAddr, EndpointBuilder, EndpointId};
 use rt_p2p_protocol::{CAP_CONTROL_EVENTS, has_capability};
 use tokio::sync::{Mutex, broadcast, mpsc};
 
-use crate::status_http::{
+use crate::status_store::{
     ForwarderStatusEvent, ForwarderStatusFeed, ForwarderStatusSnapshot, ReaderConnectionState,
     ReaderStatus, UpsStatusState,
 };
@@ -487,7 +487,8 @@ mod tests {
     use crate::p2p::control::{
         PROTOCOL_MINOR, StaticCatalog, forwarder_hello, read_frame, write_frame,
     };
-    use crate::status_http::{ReaderConnectionState, StatusConfig, StatusServer, SubsystemStatus};
+    use crate::status_http::{StatusConfig, StatusServer};
+    use crate::status_store::{ReaderConnectionState, SubsystemStatus};
     use rt_p2p_protocol::{
         CAP_CONTROL_EVENTS, ControlC2F, ControlF2C, DataC2F, DataF2C, DataSubscribe, HelloOk,
         StreamCatalog, SubscribeMode, control_c2f, control_f2c, data_c2f, data_f2c, has_capability,

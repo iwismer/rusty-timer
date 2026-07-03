@@ -6,9 +6,8 @@
 use forwarder::config_service::ConfigState;
 use forwarder::discovery::expand_target;
 use forwarder::local_fanout::FanoutServer;
-use forwarder::status_http::{
-    ForwarderStatusEvent, ReaderConnectionState, StatusConfig, StatusServer, SubsystemStatus,
-};
+use forwarder::status_http::{StatusConfig, StatusServer};
+use forwarder::status_store::{ForwarderStatusEvent, ReaderConnectionState, SubsystemStatus};
 use forwarder::storage::journal::Journal;
 use rt_ui_log::UiLogLevel;
 use sha2::{Digest, Sha256};
@@ -700,11 +699,13 @@ async fn main() {
         }
     }
 
+    let status_store = status_server.store();
+
     // Spawn reader tasks
     for (reader_ip, reader_port, fanout_addr) in fanout_addrs {
         let j = journal.clone();
         let rx = shutdown_rx.clone();
-        let ss = status_server.clone();
+        let ss = status_store.clone();
         let lg = logger.clone();
         tokio::spawn(async move {
             run_reader(reader_ip, reader_port, fanout_addr, j, rx, ss, lg).await;
@@ -713,7 +714,7 @@ async fn main() {
 
     // Spawn UPS monitoring task (if enabled)
     let ups_handle = if cfg.ups.enabled {
-        let ss = status_server.clone();
+        let ss = status_store.clone();
         let rx = shutdown_rx.clone();
         let fwd_id = forwarder_id.clone();
         Some(forwarder::ups_task::spawn_ups_task(

@@ -258,7 +258,7 @@ mod tests {
     fn handler_with_reader_control_flag(
         allow_reader_control: bool,
     ) -> (ForwarderReaderControlHandler, tempfile::TempDir) {
-        let subsystem = Arc::new(Mutex::new(crate::status_http::SubsystemStatus::ready()));
+        let subsystem = Arc::new(Mutex::new(crate::status_store::SubsystemStatus::ready()));
         let control_clients = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let download_trackers = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let reconnect_notifies = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));

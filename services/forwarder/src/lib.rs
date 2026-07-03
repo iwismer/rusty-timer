@@ -14,6 +14,7 @@ pub mod reader_control_service;
 pub mod reader_task;
 pub mod replay;
 pub mod status_http;
+pub mod status_store;
 pub mod storage;
 pub mod ui_events;
 pub mod ui_server;

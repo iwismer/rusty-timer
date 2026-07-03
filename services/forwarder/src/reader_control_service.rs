@@ -1,7 +1,7 @@
 //! Shared reader-control operations used by HTTP and P2P control paths.
 
 use crate::reader_control::{ControlClient, DownloadTracker};
-use crate::status_http::{ForwarderStatusEvent, SubsystemStatus};
+use crate::status_store::{ForwarderStatusEvent, SubsystemStatus};
 use ipico_core::control;
 use std::collections::HashMap;
 use std::sync::Arc;

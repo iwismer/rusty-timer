@@ -9,7 +9,8 @@
 //! 6. status page returns HTML with expected content
 //! 7. graceful shutdown handler registered
 
-use forwarder::status_http::{StatusConfig, StatusServer, SubsystemStatus};
+use forwarder::status_http::{StatusConfig, StatusServer};
+use forwarder::status_store::SubsystemStatus;
 use serde_json::Value;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -675,7 +676,7 @@ async fn status_json_shows_forwarder_id() {
 
 #[tokio::test]
 async fn status_json_shows_reader_status() {
-    use forwarder::status_http::ReaderConnectionState;
+    use forwarder::status_store::ReaderConnectionState;
 
     let cfg = StatusConfig {
         bind: "127.0.0.1:0".to_owned(),

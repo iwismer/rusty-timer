@@ -1,7 +1,8 @@
 //! Integration tests for forwarder config editing endpoints.
 
 use forwarder::status_http::{EpochResetError, JournalAccess};
-use forwarder::status_http::{StatusConfig, StatusServer, SubsystemStatus};
+use forwarder::status_http::{StatusConfig, StatusServer};
+use forwarder::status_store::SubsystemStatus;
 use std::net::SocketAddr;
 use std::time::Duration;
 
