@@ -423,7 +423,7 @@ mod tests {
     use super::{DataConfig, serve_data_streams, split_segments};
     use crate::p2p::control::{read_frame, write_frame};
     use crate::storage::journal::{Journal, JournalEvent, RetentionContext, RetentionPolicy};
-    use rt_iroh::{Endpoint, EndpointBuilder, NodeAddr};
+    use rt_iroh::{Endpoint, EndpointAddr, EndpointBuilder};
     use rt_p2p_protocol::{
         Ack, CaughtUp, DataC2F, DataF2C, DataSubscribe, EventBatch, SubscribeMode, SubscribeOk,
         data_c2f, data_f2c,
@@ -449,7 +449,7 @@ mod tests {
         journal: Arc<Mutex<Journal>>,
         _forwarder: Endpoint,
         receiver: Endpoint,
-        forwarder_addr: NodeAddr,
+        forwarder_addr: EndpointAddr,
         _server: JoinHandle<()>,
     }
 
@@ -467,7 +467,7 @@ mod tests {
         let journal = Arc::new(Mutex::new(Journal::open(&journal_path)?));
         let forwarder = EndpointBuilder::test([91; 32]).bind().await?;
         let receiver = EndpointBuilder::test([92; 32]).bind().await?;
-        let forwarder_addr = forwarder.node_addr().await;
+        let forwarder_addr = forwarder.endpoint_addr().await;
         let accept = forwarder.clone();
         let journal_for_task = Arc::clone(&journal);
         let server = tokio::spawn(async move {
@@ -504,9 +504,6 @@ mod tests {
         stream_id: Vec<u8>,
         after_seq: u64,
     ) -> TestResult<(rt_iroh::SendStream, rt_iroh::RecvStream, SubscribeOk)> {
-        harness
-            .receiver
-            .add_node_addr(harness.forwarder_addr.clone())?;
         let connection = harness
             .receiver
             .connect(harness.forwarder_addr.clone())
@@ -539,9 +536,6 @@ mod tests {
         after_seq: u64,
         mode: i32,
     ) -> TestResult<()> {
-        harness
-            .receiver
-            .add_node_addr(harness.forwarder_addr.clone())?;
         let connection = harness
             .receiver
             .connect(harness.forwarder_addr.clone())
@@ -843,9 +837,6 @@ mod tests {
             journal.append_read(&fast_stream, None, b"fast", "chip")?;
         }
 
-        harness
-            .receiver
-            .add_node_addr(harness.forwarder_addr.clone())?;
         let connection = harness
             .receiver
             .connect(harness.forwarder_addr.clone())

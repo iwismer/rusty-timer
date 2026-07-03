@@ -41,7 +41,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use rt_iroh::{
-    Endpoint, EndpointBuilder, NodeAddr, NodeId, RelayMode, SecretKey, load_or_create_secret_key,
+    Endpoint, EndpointAddr, EndpointBuilder, EndpointId, RelayMode, SecretKey, TransportAddr,
+    load_or_create_secret_key,
 };
 use rt_p2p_protocol::{
     CAP_CONTROL_EVENTS, CAP_READER_CONTROL, CAP_REMOTE_CONFIG, Hello, MAX_FRAME_BYTES,
@@ -81,9 +82,9 @@ pub const MIN_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
 /// Configuration for the forwarder peer this receiver dials.
 #[derive(Clone, Debug)]
 pub struct ForwarderPeerConfig {
-    /// The forwarder's iroh endpoint id (string node id). Also the
+    /// The forwarder's iroh endpoint id (string endpoint id). Also the
     /// `forwarder_endpoint_id` used to filter canonical subscriptions.
-    pub node_id: String,
+    pub endpoint_id: String,
     /// A direct socket address where the forwarder peer can be reached.
     pub direct_addr: SocketAddr,
 }
@@ -278,7 +279,7 @@ impl P2pReceiverRuntime {
 }
 
 /// Start the headless P2P receiver runtime. Returns immediately; the endpoint
-/// is bound and `p2p_node_id=<id>` is printed to stdout once ready.
+/// is bound and `p2p_endpoint_id=<id>` is printed to stdout once ready.
 pub async fn start_receiver_p2p(
     state: Arc<AppState>,
     config: P2pReceiverConfig,
@@ -309,14 +310,14 @@ pub async fn start_receiver_p2p(
         .await
         .map_err(|e| format!("failed to bind p2p endpoint: {e}"))?;
     // Stdout line consumed by T5.4 orchestration to learn this receiver's id.
-    println!("p2p_node_id={}", endpoint.node_id());
+    println!("p2p_endpoint_id={}", endpoint.endpoint_id());
     state
-        .set_p2p_endpoint_id(endpoint.node_id().to_string())
+        .set_p2p_endpoint_id(endpoint.endpoint_id().to_string())
         .await;
-    let local_addr = endpoint.node_addr().await;
+    let local_addr = endpoint.endpoint_addr().await;
     info!(
-        p2p_node_id = %endpoint.node_id(),
-        direct_addresses = ?local_addr.direct_addresses,
+        p2p_endpoint_id = %endpoint.endpoint_id(),
+        direct_addresses = ?local_addr.ip_addrs().collect::<Vec<_>>(),
         "receiver p2p endpoint bound"
     );
 
@@ -327,12 +328,12 @@ pub async fn start_receiver_p2p(
     // An already-present entry (e.g. injected by a test) is left untouched.
     if let Some(forwarder) = &config.forwarder {
         forwarder
-            .node_id
-            .parse::<NodeId>()
-            .map_err(|e| format!("invalid forwarder node id: {e}"))?;
+            .endpoint_id
+            .parse::<EndpointId>()
+            .map_err(|e| format!("invalid forwarder endpoint id: {e}"))?;
         let mut discovered = state.discovered_forwarders.write().await;
         discovered
-            .entry(forwarder.node_id.clone())
+            .entry(forwarder.endpoint_id.clone())
             .or_insert_with(|| DiscoveredForwarder {
                 display_name: None,
                 direct_addrs: vec![forwarder.direct_addr],
@@ -367,7 +368,7 @@ pub async fn start_receiver_p2p(
 /// (loopback/dev) forwarder seed. Called when the server config changes so
 /// forwarders learned from the previous server are not re-dialed; the new
 /// server's discovery loop (if any) then repopulates the map. An invalid seed
-/// node id is dropped because it cannot be dialed.
+/// endpoint id is dropped because it cannot be dialed.
 async fn reseed_discovered_forwarders(
     state: &Arc<AppState>,
     forwarder: Option<&ForwarderPeerConfig>,
@@ -375,10 +376,10 @@ async fn reseed_discovered_forwarders(
     let mut discovered = state.discovered_forwarders.write().await;
     discovered.clear();
     if let Some(forwarder) = forwarder
-        && forwarder.node_id.parse::<NodeId>().is_ok()
+        && forwarder.endpoint_id.parse::<EndpointId>().is_ok()
     {
         discovered.insert(
-            forwarder.node_id.clone(),
+            forwarder.endpoint_id.clone(),
             DiscoveredForwarder {
                 display_name: None,
                 direct_addrs: vec![forwarder.direct_addr],
@@ -443,7 +444,7 @@ async fn run_reconcile_loop(
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let endpoint = Arc::new(endpoint);
-    let endpoint_id = endpoint.node_id().to_string();
+    let endpoint_id = endpoint.endpoint_id().to_string();
     let mut workers: HashMap<String, ForwarderConnection> = HashMap::new();
     let mut stream_workers: HashMap<String, StreamWorker> = HashMap::new();
     let mut connect_attempt_rx = state.connect_attempt_rx();
@@ -991,7 +992,7 @@ async fn run_approval_watch_loop(
 
 /// Build the discovered-forwarders snapshot from a server discovery feed.
 ///
-/// Each entry's endpoint id is validated as a dialable node id exactly once
+/// Each entry's endpoint id is validated as a dialable endpoint id exactly once
 /// here, at discovery cadence, so a malformed id is dropped (with a single
 /// warning) before it can reach the map. That keeps `resolve_forwarder_addr` —
 /// which runs over every subscription on each reconcile pass — free of
@@ -1004,11 +1005,11 @@ fn build_discovered_forwarders(
 ) -> DiscoveredForwarders {
     let mut map = DiscoveredForwarders::new();
     for entry in entries {
-        if let Err(e) = entry.endpoint_id.parse::<NodeId>() {
+        if let Err(e) = entry.endpoint_id.parse::<EndpointId>() {
             warn!(
                 endpoint_id = %entry.endpoint_id,
                 error = %e,
-                "discovered forwarder has invalid node id; skipping"
+                "discovered forwarder has invalid endpoint id; skipping"
             );
             continue;
         }
@@ -1036,7 +1037,7 @@ fn build_discovered_forwarders(
         );
     }
     if let Some(forwarder) = seed {
-        map.entry(forwarder.node_id.clone())
+        map.entry(forwarder.endpoint_id.clone())
             .or_insert_with(|| DiscoveredForwarder {
                 display_name: None,
                 direct_addrs: vec![forwarder.direct_addr],
@@ -1058,20 +1059,28 @@ async fn fetch_forwarders(
     .map_err(|e| format!("forwarder discovery task failed: {e}"))?
 }
 
-/// Resolve a forwarder endpoint id to a dialable [`NodeAddr`] from the
+/// Resolve a forwarder endpoint id to a dialable [`EndpointAddr`] from the
 /// discovered-forwarders snapshot. Returns `None` when the forwarder is not yet
-/// discovered or its endpoint id is not a valid node id.
+/// discovered or its endpoint id is not a valid endpoint id.
 ///
 /// Endpoint ids are validated once when they enter the map (the discovery loop
-/// and the startup seed both reject invalid node ids), so the parse here is a
+/// and the startup seed both reject invalid endpoint ids), so the parse here is a
 /// cheap, non-logging fallback that cannot spam at reconcile cadence.
 fn resolve_forwarder_addr(
     endpoint_id: &str,
     discovered: &DiscoveredForwarders,
-) -> Option<NodeAddr> {
+) -> Option<EndpointAddr> {
     let forwarder = discovered.get(endpoint_id)?;
-    let node_id = endpoint_id.parse::<NodeId>().ok()?;
-    Some(NodeAddr::new(node_id).with_direct_addresses(forwarder.direct_addrs.iter().copied()))
+    let endpoint_id = endpoint_id.parse::<EndpointId>().ok()?;
+    Some(
+        EndpointAddr::new(endpoint_id).with_addrs(
+            forwarder
+                .direct_addrs
+                .iter()
+                .copied()
+                .map(TransportAddr::Ip),
+        ),
+    )
 }
 
 fn desired_forwarder_subscriptions(
@@ -1443,16 +1452,15 @@ async fn run_ui_projection_worker(
                 }
             }
             _ = tick.tick() => {
-                if needs_rebuild {
-                    if let Some(rebuilt) =
+                if needs_rebuild
+                    && let Some(rebuilt) =
                         rebuild_stream_projection(&state, &stream_id, &ui_key).await
-                    {
-                        proj = rebuilt;
-                        // The rebuild replaced the shared counts wholesale;
-                        // drop deltas already covered by the durable store.
-                        pending_counts.clear();
-                        needs_rebuild = false;
-                    }
+                {
+                    proj = rebuilt;
+                    // The rebuild replaced the shared counts wholesale;
+                    // drop deltas already covered by the durable store.
+                    pending_counts.clear();
+                    needs_rebuild = false;
                 }
                 if !dirty {
                     continue;
@@ -1928,9 +1936,9 @@ pub fn parse_secret_key_seed_hex(hex: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
-/// Derive the deterministic loopback node id for a given seed, useful for tests
+/// Derive the deterministic loopback endpoint id for a given seed, useful for tests
 /// and orchestration that need the receiver/forwarder id before binding.
-pub fn node_id_for_seed(seed: [u8; 32]) -> String {
+pub fn endpoint_id_for_seed(seed: [u8; 32]) -> String {
     SecretKey::from_bytes(&seed).public().to_string()
 }
 
@@ -1944,7 +1952,7 @@ pub fn node_id_for_seed(seed: [u8; 32]) -> String {
 // at least one of these keys is present.
 // ---------------------------------------------------------------------------
 
-/// Env var naming the forwarder's iroh endpoint (string node id) to dial.
+/// Env var naming the forwarder's iroh endpoint (string endpoint id) to dial.
 pub const ENV_P2P_FORWARDER_NODE_ID: &str = "RT_P2P_FORWARDER_NODE_ID";
 /// Env var giving a direct `ip:port` socket address for the forwarder peer.
 pub const ENV_P2P_FORWARDER_DIRECT_ADDR: &str = "RT_P2P_FORWARDER_DIRECT_ADDR";
@@ -1981,7 +1989,7 @@ fn parse_env_flag(value: Option<String>, key: &str) -> Result<bool, String> {
 /// Build an optional [`P2pReceiverConfig`] from a key->value lookup (e.g. env).
 ///
 /// Mirrors the `receiver-headless` CLI validation: P2P is enabled only when at
-/// least one key is present; the forwarder node id and direct address must be
+/// least one key is present; the forwarder endpoint id and direct address must be
 /// supplied together (both or neither); the server URL and token must be
 /// supplied together; and the reconcile interval defaults to 1000ms and must be
 /// at least [`MIN_RECONCILE_INTERVAL`]. Empty/whitespace-only values are treated
@@ -2004,7 +2012,7 @@ pub fn p2p_config_from_lookup(
             .filter(|v| !v.is_empty())
     };
 
-    let forwarder_node_id = trimmed(ENV_P2P_FORWARDER_NODE_ID);
+    let forwarder_endpoint_id = trimmed(ENV_P2P_FORWARDER_NODE_ID);
     let forwarder_direct_addr = trimmed(ENV_P2P_FORWARDER_DIRECT_ADDR);
     let secret_key_seed_hex = trimmed(ENV_P2P_SECRET_KEY_SEED_HEX);
     let secret_key_path = trimmed(ENV_P2P_SECRET_KEY_PATH);
@@ -2014,7 +2022,7 @@ pub fn p2p_config_from_lookup(
     let relay_disabled_raw = trimmed(ENV_P2P_RELAY_DISABLED);
     let discovery_disabled_raw = trimmed(ENV_P2P_DISCOVERY_DISABLED);
 
-    let any_present = forwarder_node_id.is_some()
+    let any_present = forwarder_endpoint_id.is_some()
         || forwarder_direct_addr.is_some()
         || secret_key_seed_hex.is_some()
         || secret_key_path.is_some()
@@ -2027,13 +2035,13 @@ pub fn p2p_config_from_lookup(
         return Ok(None);
     }
 
-    let forwarder = match (forwarder_node_id, forwarder_direct_addr) {
-        (Some(node_id), Some(direct_addr_raw)) => {
+    let forwarder = match (forwarder_endpoint_id, forwarder_direct_addr) {
+        (Some(endpoint_id), Some(direct_addr_raw)) => {
             let direct_addr: SocketAddr = direct_addr_raw
                 .parse()
                 .map_err(|e| format!("invalid {ENV_P2P_FORWARDER_DIRECT_ADDR}: {e}"))?;
             Some(ForwarderPeerConfig {
-                node_id,
+                endpoint_id,
                 direct_addr,
             })
         }
@@ -2154,11 +2162,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keypath_identity_persists_node_id_across_starts() {
+    async fn keypath_identity_persists_endpoint_id_across_starts() {
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("p2p_secret.key");
-        let id1 = bind_node_id(ReceiverIdentity::KeyPath(key.clone())).await;
-        let id2 = bind_node_id(ReceiverIdentity::KeyPath(key)).await;
+        let id1 = bind_endpoint_id(ReceiverIdentity::KeyPath(key.clone())).await;
+        let id2 = bind_endpoint_id(ReceiverIdentity::KeyPath(key)).await;
         assert_eq!(id1, id2);
     }
 
@@ -2229,7 +2237,7 @@ mod tests {
         }
         let seed_id = SecretKey::from_bytes(&[7u8; 32]).public().to_string();
         let seed = ForwarderPeerConfig {
-            node_id: seed_id.clone(),
+            endpoint_id: seed_id.clone(),
             direct_addr: "127.0.0.1:9000".parse().unwrap(),
         };
         reseed_discovered_forwarders(&state, Some(&seed)).await;
@@ -2240,9 +2248,9 @@ mod tests {
     }
 
     /// Bind a minimal loopback runtime with the given identity, capture the
-    /// resulting p2p node id, and shut it down.
+    /// resulting p2p endpoint id, and shut it down.
     #[cfg(test)]
-    async fn bind_node_id(identity: ReceiverIdentity) -> String {
+    async fn bind_endpoint_id(identity: ReceiverIdentity) -> String {
         use crate::control_api::AppState;
         use crate::db::Db;
         let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
@@ -2508,7 +2516,7 @@ mod tests {
         .unwrap()
         .expect("config present");
         let fwd = cfg.forwarder.as_ref().expect("forwarder present");
-        assert_eq!(fwd.node_id, "endpoint-x");
+        assert_eq!(fwd.endpoint_id, "endpoint-x");
         assert_eq!(fwd.direct_addr, "127.0.0.1:5000".parse().unwrap());
         assert!(matches!(cfg.identity, ReceiverIdentity::Seed(s) if s == [0xab; 32]));
         assert!(cfg.server.is_none());
@@ -2921,7 +2929,7 @@ mod tests {
             discovery_disabled: true,
             bind_addr_v4: None,
             forwarder: Some(ForwarderPeerConfig {
-                node_id: "node".to_owned(),
+                endpoint_id: "node".to_owned(),
                 direct_addr: "127.0.0.1:1".parse().unwrap(),
             }),
             server: Some(cfg),
@@ -3124,9 +3132,9 @@ mod tests {
 
     #[test]
     fn desired_forwarders_include_discovered_and_subscribed_unless_disconnected() {
-        let discovered_only = node_id_for_seed([21u8; 32]);
-        let subscribed = node_id_for_seed([22u8; 32]);
-        let disconnected = node_id_for_seed([23u8; 32]);
+        let discovered_only = endpoint_id_for_seed([21u8; 32]);
+        let subscribed = endpoint_id_for_seed([22u8; 32]);
+        let disconnected = endpoint_id_for_seed([23u8; 32]);
         let mut discovered = DiscoveredForwarders::new();
         discovered.insert(
             discovered_only.clone(),
@@ -3172,10 +3180,10 @@ mod tests {
     }
 
     #[test]
-    fn build_discovered_forwarders_skips_invalid_node_ids() {
+    fn build_discovered_forwarders_skips_invalid_endpoint_ids() {
         use crate::announcer_push::{ForwarderDiscoveryEntry, ForwarderDiscoveryStream};
 
-        let valid = node_id_for_seed([7u8; 32]);
+        let valid = endpoint_id_for_seed([7u8; 32]);
         let entries = vec![
             ForwarderDiscoveryEntry {
                 endpoint_id: valid.clone(),
@@ -3188,7 +3196,7 @@ mod tests {
                 }],
             },
             ForwarderDiscoveryEntry {
-                endpoint_id: "not-a-node-id".to_owned(),
+                endpoint_id: "not-a-endpoint-id".to_owned(),
                 display_name: None,
                 direct_addrs: vec!["127.0.0.1:6000".to_owned()],
                 streams: vec![],
@@ -3210,7 +3218,7 @@ mod tests {
 
         // The dropped id never reaches the map, so resolve_forwarder_addr is
         // never asked to parse (and warn about) it at reconcile cadence.
-        assert!(resolve_forwarder_addr("not-a-node-id", &map).is_none());
+        assert!(resolve_forwarder_addr("not-a-endpoint-id", &map).is_none());
         assert!(resolve_forwarder_addr(&valid, &map).is_some());
     }
 
@@ -3218,9 +3226,9 @@ mod tests {
     fn build_discovered_forwarders_seed_added_only_when_absent() {
         use crate::announcer_push::ForwarderDiscoveryEntry;
 
-        let seed_id = node_id_for_seed([3u8; 32]);
+        let seed_id = endpoint_id_for_seed([3u8; 32]);
         let seed = ForwarderPeerConfig {
-            node_id: seed_id.clone(),
+            endpoint_id: seed_id.clone(),
             direct_addr: "127.0.0.1:7000".parse().unwrap(),
         };
 

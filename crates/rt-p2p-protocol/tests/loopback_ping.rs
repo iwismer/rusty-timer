@@ -20,9 +20,7 @@ async fn loopback_endpoint_pair_exchanges_framed_hello() -> TestResult {
 async fn exchange_hello() -> TestResult {
     let server = EndpointBuilder::test([10; 32]).bind().await?;
     let client = EndpointBuilder::test([20; 32]).bind().await?;
-    let server_addr = server.node_addr().await;
-
-    client.add_node_addr(server_addr.clone())?;
+    let server_addr = server.endpoint_addr().await;
 
     let server_for_task = server.clone();
     let server_task = tokio::spawn(async move {

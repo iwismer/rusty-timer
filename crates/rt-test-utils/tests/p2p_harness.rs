@@ -96,7 +96,7 @@ async fn run_harness_self_test() {
     };
 
     let session = receiver
-        .hello(forwarder.node_addr(), client_hello)
+        .hello(forwarder.endpoint_addr(), client_hello)
         .await
         .expect("hello negotiation");
 
@@ -221,7 +221,7 @@ async fn p2p_harness_data_fault_drop_outbound_suppresses_subscribe_response() {
 
     let session = receiver
         .hello(
-            forwarder.node_addr(),
+            forwarder.endpoint_addr(),
             Hello {
                 min_minor: 1,
                 max_minor: 1,
@@ -304,10 +304,7 @@ async fn run_partition_ack_test() {
         .bind()
         .await
         .expect("start client endpoint");
-    let forwarder_addr = forwarder.node_addr();
-    client
-        .add_node_addr(forwarder_addr.clone())
-        .expect("register forwarder addr");
+    let forwarder_addr = forwarder.endpoint_addr();
     let connection = client
         .connect(forwarder_addr)
         .await

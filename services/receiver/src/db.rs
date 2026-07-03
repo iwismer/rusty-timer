@@ -984,7 +984,7 @@ impl Db {
     /// The retention watermark for `stream_id`: seqs at or below it have been
     /// pruned from `received_events`. 0 when nothing was pruned.
     pub fn load_pruned_through_seq(&self, stream_id: &str) -> DbResult<i64> {
-        Ok(load_pruned_through_seq_conn(&self.conn, stream_id)?)
+        load_pruned_through_seq_conn(&self.conn, stream_id)
     }
 
     /// Highest stored seq for `stream_id`, or `None` when the stream has no

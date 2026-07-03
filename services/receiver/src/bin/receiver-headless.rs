@@ -1,7 +1,7 @@
 use receiver::headless::{HeadlessConfig, HeadlessHost};
 use receiver::p2p_runtime::{
     ForwarderPeerConfig, MIN_RECONCILE_INTERVAL, P2pReceiverConfig, ReceiverIdentity,
-    ServerClientConfig, node_id_for_seed, parse_secret_key_seed_hex,
+    ServerClientConfig, endpoint_id_for_seed, parse_secret_key_seed_hex,
 };
 use std::ffi::OsString;
 use std::net::SocketAddr;
@@ -19,14 +19,14 @@ async fn main() {
 async fn run() -> Result<(), String> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
 
-    // `print-node-id` is a non-binding helper subcommand: it derives the
-    // deterministic loopback node id for a seed and exits without binding any
+    // `print-endpoint-id` is a non-binding helper subcommand: it derives the
+    // deterministic loopback endpoint id for a seed and exits without binding any
     // endpoint or initializing logging (so stdout carries only the id). The
     // forwarder and receiver share the same seed->id derivation, so the E2E
     // stack orchestrator uses this to learn both peers' ids before startup.
-    if let Some(seed_hex) = node_id_subcommand(&args)? {
+    if let Some(seed_hex) = endpoint_id_subcommand(&args)? {
         let seed = parse_secret_key_seed_hex(&seed_hex)?;
-        println!("{}", node_id_for_seed(seed));
+        println!("{}", endpoint_id_for_seed(seed));
         return Ok(());
     }
 
@@ -50,14 +50,14 @@ async fn run() -> Result<(), String> {
     host.shutdown().await
 }
 
-/// If the first CLI argument is the `print-node-id` subcommand, returns the
+/// If the first CLI argument is the `print-endpoint-id` subcommand, returns the
 /// secret-key seed hex that followed `--p2p-secret-key-seed-hex`. Returns `None`
 /// for the normal (server) invocation so the caller falls through to
 /// [`parse_args`].
-fn node_id_subcommand(args: &[OsString]) -> Result<Option<String>, String> {
+fn endpoint_id_subcommand(args: &[OsString]) -> Result<Option<String>, String> {
     let mut iter = args.iter();
     match iter.next() {
-        Some(first) if first == "print-node-id" => {}
+        Some(first) if first == "print-endpoint-id" => {}
         _ => return Ok(None),
     }
     let mut seed_hex: Option<String> = None;
@@ -69,12 +69,12 @@ fn node_id_subcommand(args: &[OsString]) -> Result<Option<String>, String> {
                     .ok_or_else(|| "--p2p-secret-key-seed-hex requires a value".to_owned())?;
                 seed_hex = Some(value.to_string_lossy().into_owned());
             }
-            other => return Err(format!("unknown argument for print-node-id: {other}")),
+            other => return Err(format!("unknown argument for print-endpoint-id: {other}")),
         }
     }
     seed_hex
         .map(Some)
-        .ok_or_else(|| "print-node-id requires --p2p-secret-key-seed-hex <64-hex>".to_owned())
+        .ok_or_else(|| "print-endpoint-id requires --p2p-secret-key-seed-hex <64-hex>".to_owned())
 }
 
 fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<HeadlessConfig, String> {
@@ -83,7 +83,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<HeadlessConfig
         .parse()
         .expect("default bind address must parse");
     let mut receiver_id: Option<String> = None;
-    let mut forwarder_node_id: Option<String> = None;
+    let mut forwarder_endpoint_id: Option<String> = None;
     let mut forwarder_direct_addr: Option<SocketAddr> = None;
     let mut secret_key_seed: Option<[u8; 32]> = None;
     let mut secret_key_path: Option<PathBuf> = None;
@@ -120,11 +120,11 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<HeadlessConfig
                     .ok_or_else(|| "--receiver-id requires a value".to_owned())?;
                 receiver_id = Some(value.to_string_lossy().into_owned());
             }
-            "--p2p-forwarder-node-id" => {
+            "--p2p-forwarder-endpoint-id" => {
                 let value = args
                     .next()
-                    .ok_or_else(|| "--p2p-forwarder-node-id requires a value".to_owned())?;
-                forwarder_node_id = Some(value.to_string_lossy().into_owned());
+                    .ok_or_else(|| "--p2p-forwarder-endpoint-id requires a value".to_owned())?;
+                forwarder_endpoint_id = Some(value.to_string_lossy().into_owned());
             }
             "--p2p-forwarder-direct-addr" => {
                 let value = args
@@ -186,7 +186,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<HeadlessConfig
     let data_dir = data_dir.ok_or_else(|| format!("--data-dir is required\n{}", usage()))?;
     let default_key_path = data_dir.join("p2p_secret.key");
     let p2p = build_p2p_config(
-        forwarder_node_id,
+        forwarder_endpoint_id,
         forwarder_direct_addr,
         secret_key_seed,
         secret_key_path,
@@ -207,7 +207,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<HeadlessConfig
 }
 
 /// Assemble the optional P2P config from parsed flags. P2P is enabled only when
-/// at least one P2P flag is present; the forwarder node id and direct address
+/// at least one P2P flag is present; the forwarder endpoint id and direct address
 /// must be supplied together (both or neither); and the server URL and token
 /// must be supplied together. A config with only identity/transport/reconcile
 /// flags (no forwarder, no server) is valid: the stored profile then supplies
@@ -220,7 +220,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<HeadlessConfig
 /// a key path uses production transport unless the disable flags are set.
 #[allow(clippy::too_many_arguments)]
 fn build_p2p_config(
-    forwarder_node_id: Option<String>,
+    forwarder_endpoint_id: Option<String>,
     forwarder_direct_addr: Option<SocketAddr>,
     secret_key_seed: Option<[u8; 32]>,
     secret_key_path: Option<PathBuf>,
@@ -231,7 +231,7 @@ fn build_p2p_config(
     reconcile_ms: Option<u64>,
     default_key_path: PathBuf,
 ) -> Result<Option<P2pReceiverConfig>, String> {
-    let any_p2p = forwarder_node_id.is_some()
+    let any_p2p = forwarder_endpoint_id.is_some()
         || forwarder_direct_addr.is_some()
         || secret_key_seed.is_some()
         || secret_key_path.is_some()
@@ -244,21 +244,21 @@ fn build_p2p_config(
         return Ok(None);
     }
 
-    let forwarder = match (forwarder_node_id, forwarder_direct_addr) {
-        (Some(node_id), Some(direct_addr)) => Some(ForwarderPeerConfig {
-            node_id,
+    let forwarder = match (forwarder_endpoint_id, forwarder_direct_addr) {
+        (Some(endpoint_id), Some(direct_addr)) => Some(ForwarderPeerConfig {
+            endpoint_id,
             direct_addr,
         }),
         (None, None) => None,
         (Some(_), None) => {
             return Err(format!(
-                "--p2p-forwarder-direct-addr is required when --p2p-forwarder-node-id is set\n{}",
+                "--p2p-forwarder-direct-addr is required when --p2p-forwarder-endpoint-id is set\n{}",
                 usage()
             ));
         }
         (None, Some(_)) => {
             return Err(format!(
-                "--p2p-forwarder-node-id is required when --p2p-forwarder-direct-addr is set\n{}",
+                "--p2p-forwarder-endpoint-id is required when --p2p-forwarder-direct-addr is set\n{}",
                 usage()
             ));
         }
@@ -328,7 +328,7 @@ fn usage() -> String {
         "  [--p2p-secret-key-seed-hex <64-hex>]  (dev/loopback identity; default: persistent key in data dir)\n",
         "  [--p2p-secret-key-path <path>]  (persistent identity; mutually exclusive with seed)\n",
         "  [--p2p-relay-disabled] [--p2p-discovery-disabled]  (transport; forced on for a seed)\n",
-        "  [--p2p-forwarder-node-id <node-id> --p2p-forwarder-direct-addr <ip:port>]\n",
+        "  [--p2p-forwarder-endpoint-id <endpoint-id> --p2p-forwarder-direct-addr <ip:port>]\n",
         "  [--p2p-server-url <url> --p2p-server-token <token>]\n",
         "  [--p2p-reconcile-ms <ms>]  (must be >= 50)",
     )
@@ -344,15 +344,15 @@ mod tests {
     }
 
     const SEED_HEX: &str = "abababababababababababababababababababababababababababababababab";
-    // A valid deterministic loopback node id (public key for seed [0xcd; 32]).
-    fn forwarder_node_id() -> String {
-        receiver::p2p_runtime::node_id_for_seed([0xcd; 32])
+    // A valid deterministic loopback endpoint id (public key for seed [0xcd; 32]).
+    fn forwarder_endpoint_id() -> String {
+        receiver::p2p_runtime::endpoint_id_for_seed([0xcd; 32])
     }
 
     #[test]
-    fn print_node_id_subcommand_returns_seed_hex() {
-        let got = node_id_subcommand(&args(&[
-            "print-node-id",
+    fn print_endpoint_id_subcommand_returns_seed_hex() {
+        let got = endpoint_id_subcommand(&args(&[
+            "print-endpoint-id",
             "--p2p-secret-key-seed-hex",
             SEED_HEX,
         ]))
@@ -362,13 +362,13 @@ mod tests {
 
     #[test]
     fn no_subcommand_returns_none() {
-        let got = node_id_subcommand(&args(&["--data-dir", "/tmp/x"])).unwrap();
+        let got = endpoint_id_subcommand(&args(&["--data-dir", "/tmp/x"])).unwrap();
         assert!(got.is_none());
     }
 
     #[test]
-    fn print_node_id_subcommand_requires_seed() {
-        let err = node_id_subcommand(&args(&["print-node-id"])).unwrap_err();
+    fn print_endpoint_id_subcommand_requires_seed() {
+        let err = endpoint_id_subcommand(&args(&["print-endpoint-id"])).unwrap_err();
         assert!(err.contains("requires --p2p-secret-key-seed-hex"));
     }
 
@@ -381,12 +381,12 @@ mod tests {
 
     #[test]
     fn full_p2p_flags_parse() {
-        let node_id = forwarder_node_id();
+        let endpoint_id = forwarder_endpoint_id();
         let config = parse_args(args(&[
             "--data-dir",
             "/tmp/x",
-            "--p2p-forwarder-node-id",
-            &node_id,
+            "--p2p-forwarder-endpoint-id",
+            &endpoint_id,
             "--p2p-forwarder-direct-addr",
             "127.0.0.1:5000",
             "--p2p-secret-key-seed-hex",
@@ -397,7 +397,7 @@ mod tests {
         .unwrap();
         let p2p = config.p2p.expect("p2p config present");
         let fwd = p2p.forwarder.as_ref().expect("forwarder present");
-        assert_eq!(fwd.node_id, node_id);
+        assert_eq!(fwd.endpoint_id, endpoint_id);
         assert_eq!(fwd.direct_addr, "127.0.0.1:5000".parse().unwrap());
         assert!(matches!(p2p.identity, ReceiverIdentity::Seed(s) if s == [0xab; 32]));
         assert_eq!(p2p.reconcile_interval, Duration::from_millis(50));
@@ -446,12 +446,12 @@ mod tests {
 
     #[test]
     fn full_p2p_flags_with_server_parse() {
-        let node_id = forwarder_node_id();
+        let endpoint_id = forwarder_endpoint_id();
         let config = parse_args(args(&[
             "--data-dir",
             "/tmp/x",
-            "--p2p-forwarder-node-id",
-            &node_id,
+            "--p2p-forwarder-endpoint-id",
+            &endpoint_id,
             "--p2p-forwarder-direct-addr",
             "127.0.0.1:5000",
             "--p2p-secret-key-seed-hex",
@@ -472,7 +472,7 @@ mod tests {
         let err = parse_args(args(&[
             "--data-dir",
             "/tmp/x",
-            "--p2p-forwarder-node-id",
+            "--p2p-forwarder-endpoint-id",
             "some-id",
         ]))
         .unwrap_err();
@@ -484,12 +484,12 @@ mod tests {
 
     #[test]
     fn partial_server_rejected() {
-        let node_id = forwarder_node_id();
+        let endpoint_id = forwarder_endpoint_id();
         let err = parse_args(args(&[
             "--data-dir",
             "/tmp/x",
-            "--p2p-forwarder-node-id",
-            &node_id,
+            "--p2p-forwarder-endpoint-id",
+            &endpoint_id,
             "--p2p-forwarder-direct-addr",
             "127.0.0.1:5000",
             "--p2p-secret-key-seed-hex",
@@ -503,12 +503,12 @@ mod tests {
 
     #[test]
     fn zero_reconcile_ms_rejected() {
-        let node_id = forwarder_node_id();
+        let endpoint_id = forwarder_endpoint_id();
         let err = parse_args(args(&[
             "--data-dir",
             "/tmp/x",
-            "--p2p-forwarder-node-id",
-            &node_id,
+            "--p2p-forwarder-endpoint-id",
+            &endpoint_id,
             "--p2p-forwarder-direct-addr",
             "127.0.0.1:5000",
             "--p2p-secret-key-seed-hex",
@@ -522,12 +522,12 @@ mod tests {
 
     #[test]
     fn tiny_reconcile_ms_rejected() {
-        let node_id = forwarder_node_id();
+        let endpoint_id = forwarder_endpoint_id();
         let err = parse_args(args(&[
             "--data-dir",
             "/tmp/x",
-            "--p2p-forwarder-node-id",
-            &node_id,
+            "--p2p-forwarder-endpoint-id",
+            &endpoint_id,
             "--p2p-forwarder-direct-addr",
             "127.0.0.1:5000",
             "--p2p-secret-key-seed-hex",
@@ -541,12 +541,12 @@ mod tests {
 
     #[test]
     fn minimum_reconcile_ms_accepted() {
-        let node_id = forwarder_node_id();
+        let endpoint_id = forwarder_endpoint_id();
         let config = parse_args(args(&[
             "--data-dir",
             "/tmp/x",
-            "--p2p-forwarder-node-id",
-            &node_id,
+            "--p2p-forwarder-endpoint-id",
+            &endpoint_id,
             "--p2p-forwarder-direct-addr",
             "127.0.0.1:5000",
             "--p2p-secret-key-seed-hex",
@@ -563,12 +563,12 @@ mod tests {
 
     #[test]
     fn bad_seed_hex_rejected() {
-        let node_id = forwarder_node_id();
+        let endpoint_id = forwarder_endpoint_id();
         let err = parse_args(args(&[
             "--data-dir",
             "/tmp/x",
-            "--p2p-forwarder-node-id",
-            &node_id,
+            "--p2p-forwarder-endpoint-id",
+            &endpoint_id,
             "--p2p-forwarder-direct-addr",
             "127.0.0.1:5000",
             "--p2p-secret-key-seed-hex",

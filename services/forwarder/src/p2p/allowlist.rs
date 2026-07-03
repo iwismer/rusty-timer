@@ -1,6 +1,6 @@
 //! Persistent receiver allow-list with revocation for the forwarder P2P endpoint.
 //!
-//! [`AllowList`] gates inbound receiver connections by their iroh node id (the
+//! [`AllowList`] gates inbound receiver connections by their iroh endpoint id (the
 //! transport-layer `EndpointId`). It keeps three concerns together so the
 //! accept loop can enforce them at the connection boundary:
 //!
@@ -13,7 +13,7 @@
 //!    persist *before* the in-memory swap, so a write failure leaves the
 //!    last-known set in force ([`AllowList::apply_update`]).
 //! 3. **Revocation / force-close.** Admitted connections are tracked by remote
-//!    node id ([`AllowList::try_register_connection`]); when an update removes a
+//!    endpoint id ([`AllowList::try_register_connection`]); when an update removes a
 //!    peer, its open connections are force-closed immediately.
 //!
 //! Updates are sourced from the server: [`ServerAllowListClient`] fetches
@@ -30,7 +30,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use rt_iroh::{Connection, NodeId};
+use rt_iroh::{Connection, EndpointId};
 pub use rt_server_api::allowlist::ReceiverAllowListResponse as ReceiverAllowListUpdate;
 pub use rt_server_api::catalog::{
     ForwarderCatalogRequest as ForwarderCatalog, ForwarderCatalogStream,
@@ -65,17 +65,17 @@ pub const DEFAULT_ALLOWLIST_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Shared, mutable allow-list state guarded by a single mutex.
 #[derive(Debug, Default)]
 struct State {
-    /// Node ids currently permitted to connect.
-    allowed: HashSet<NodeId>,
-    /// Open admitted connections, keyed by remote node id then a per-connection
+    /// Endpoint ids currently permitted to connect.
+    allowed: HashSet<EndpointId>,
+    /// Open admitted connections, keyed by remote endpoint id then a per-connection
     /// registration id so multiple connections from one peer are tracked
     /// independently.
-    connections: HashMap<NodeId, HashMap<u64, Connection>>,
+    connections: HashMap<EndpointId, HashMap<u64, Connection>>,
     /// Monotonic id allocator for connection registrations.
     next_conn_id: u64,
 }
 
-/// Persistent, revocable allow-list of receiver node ids.
+/// Persistent, revocable allow-list of receiver endpoint ids.
 #[derive(Clone, Debug, Default)]
 pub struct AllowList {
     state: Arc<Mutex<State>>,
@@ -84,9 +84,9 @@ pub struct AllowList {
 }
 
 impl AllowList {
-    /// Builds an in-memory allow-list (no persistence) from the given node ids.
+    /// Builds an in-memory allow-list (no persistence) from the given endpoint ids.
     #[must_use]
-    pub fn new(allowed: impl IntoIterator<Item = NodeId>) -> Self {
+    pub fn new(allowed: impl IntoIterator<Item = EndpointId>) -> Self {
         Self {
             state: Arc::new(Mutex::new(State {
                 allowed: allowed.into_iter().collect(),
@@ -107,11 +107,11 @@ impl AllowList {
     /// # Errors
     ///
     /// Returns an error if the cache file exists but cannot be read or contains
-    /// a line that is not a valid node id.
+    /// a line that is not a valid endpoint id.
     pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let allowed = match fs::read_to_string(&path) {
-            Ok(contents) => parse_node_ids(&contents)?,
+            Ok(contents) => parse_endpoint_ids(&contents)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => HashSet::new(),
             Err(error) => return Err(error),
         };
@@ -124,27 +124,27 @@ impl AllowList {
         })
     }
 
-    /// Returns whether `node_id` is currently permitted to connect.
+    /// Returns whether `endpoint_id` is currently permitted to connect.
     #[must_use]
-    pub fn contains(&self, node_id: &NodeId) -> bool {
-        self.lock().allowed.contains(node_id)
+    pub fn contains(&self, endpoint_id: &EndpointId) -> bool {
+        self.lock().allowed.contains(endpoint_id)
     }
 
-    /// Unions `additional` node ids into the allowed set in memory only.
+    /// Unions `additional` endpoint ids into the allowed set in memory only.
     ///
     /// Unlike [`AllowList::apply_update`], this neither persists to the cache
     /// nor revokes anything: it is additive. It exists so statically configured
     /// receivers can be allowed *on top of* the cached/last-known (or
     /// server-fetched) set at startup, rather than replacing it.
-    pub fn add_allowed(&self, additional: impl IntoIterator<Item = NodeId>) {
+    pub fn add_allowed(&self, additional: impl IntoIterator<Item = EndpointId>) {
         let mut state = self.lock();
         state.allowed.extend(additional);
     }
 
     /// Atomically replaces the allowed set with `allowed`, persisting it and
-    /// force-closing every open connection whose node id was removed.
+    /// force-closing every open connection whose endpoint id was removed.
     ///
-    /// Returns the revoked node ids. Persistence happens before the in-memory
+    /// Returns the revoked endpoint ids. Persistence happens before the in-memory
     /// swap: if the cache cannot be written the in-memory state is left at its
     /// last-known value and the error is returned.
     ///
@@ -154,9 +154,9 @@ impl AllowList {
     /// written.
     pub fn apply_update(
         &self,
-        allowed: impl IntoIterator<Item = NodeId>,
-    ) -> io::Result<Vec<NodeId>> {
-        let new_allowed: HashSet<NodeId> = allowed.into_iter().collect();
+        allowed: impl IntoIterator<Item = EndpointId>,
+    ) -> io::Result<Vec<EndpointId>> {
+        let new_allowed: HashSet<EndpointId> = allowed.into_iter().collect();
         let (revoked, connections_to_close) = {
             let mut state = self.lock();
             // Persist before swapping in memory while holding the state lock so
@@ -166,11 +166,12 @@ impl AllowList {
                 persist(path, &new_allowed)?;
             }
 
-            let revoked: Vec<NodeId> = state.allowed.difference(&new_allowed).copied().collect();
+            let revoked: Vec<EndpointId> =
+                state.allowed.difference(&new_allowed).copied().collect();
             state.allowed = new_allowed;
             let mut connections_to_close = Vec::new();
-            for node_id in &revoked {
-                if let Some(connections) = state.connections.remove(node_id) {
+            for endpoint_id in &revoked {
+                if let Some(connections) = state.connections.remove(endpoint_id) {
                     connections_to_close.extend(connections.into_values());
                 }
             }
@@ -183,38 +184,38 @@ impl AllowList {
         Ok(revoked)
     }
 
-    /// Registers `connection` only if `node_id` is still allowed, returning a
+    /// Registers `connection` only if `endpoint_id` is still allowed, returning a
     /// guard that deregisters the connection when dropped.
     #[must_use]
     pub(crate) fn try_register_connection(
         &self,
-        node_id: NodeId,
+        endpoint_id: EndpointId,
         connection: Connection,
     ) -> Option<ConnectionGuard> {
         let mut state = self.lock();
-        if !state.allowed.contains(&node_id) {
+        if !state.allowed.contains(&endpoint_id) {
             return None;
         }
         let id = state.next_conn_id;
         state.next_conn_id += 1;
         state
             .connections
-            .entry(node_id)
+            .entry(endpoint_id)
             .or_default()
             .insert(id, connection);
         Some(ConnectionGuard {
             allow_list: self.clone(),
-            node_id,
+            endpoint_id,
             id,
         })
     }
 
-    fn deregister(&self, node_id: NodeId, id: u64) {
+    fn deregister(&self, endpoint_id: EndpointId, id: u64) {
         let mut state = self.lock();
-        if let Some(connections) = state.connections.get_mut(&node_id) {
+        if let Some(connections) = state.connections.get_mut(&endpoint_id) {
             connections.remove(&id);
             if connections.is_empty() {
-                state.connections.remove(&node_id);
+                state.connections.remove(&endpoint_id);
             }
         }
     }
@@ -443,7 +444,7 @@ pub enum AllowListRefreshError {
 pub async fn fetch_and_apply_once(
     client: &ServerAllowListClient,
     allow_list: &AllowList,
-) -> Result<Vec<NodeId>, AllowListRefreshError> {
+) -> Result<Vec<EndpointId>, AllowListRefreshError> {
     let update = client.fetch().await?;
     apply_receiver_update(allow_list, update)
 }
@@ -452,7 +453,7 @@ pub async fn fetch_and_apply_once(
 pub fn apply_receiver_update(
     allow_list: &AllowList,
     update: ReceiverAllowListUpdate,
-) -> Result<Vec<NodeId>, AllowListRefreshError> {
+) -> Result<Vec<EndpointId>, AllowListRefreshError> {
     let allowed = parse_update(update);
     Ok(allow_list.apply_update(allowed)?)
 }
@@ -610,12 +611,12 @@ pub async fn run_allowlist_push_subscription(
     }
 }
 
-fn parse_update(update: ReceiverAllowListUpdate) -> Vec<NodeId> {
+fn parse_update(update: ReceiverAllowListUpdate) -> Vec<EndpointId> {
     update
         .receiver_endpoint_ids
         .into_iter()
-        .filter_map(|endpoint_id| match NodeId::from_str(&endpoint_id) {
-            Ok(node_id) => Some(node_id),
+        .filter_map(|endpoint_id| match EndpointId::from_str(&endpoint_id) {
+            Ok(endpoint_id) => Some(endpoint_id),
             Err(error) => {
                 tracing::warn!(
                     endpoint_id = %endpoint_id,
@@ -633,24 +634,24 @@ fn parse_update(update: ReceiverAllowListUpdate) -> Vec<NodeId> {
 #[must_use = "dropping the guard immediately deregisters the tracked connection"]
 pub(crate) struct ConnectionGuard {
     allow_list: AllowList,
-    node_id: NodeId,
+    endpoint_id: EndpointId,
     id: u64,
 }
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
-        self.allow_list.deregister(self.node_id, self.id);
+        self.allow_list.deregister(self.endpoint_id, self.id);
     }
 }
 
-/// Parses a newline-delimited list of node ids, ignoring blank lines.
-fn parse_node_ids(contents: &str) -> io::Result<HashSet<NodeId>> {
+/// Parses a newline-delimited list of endpoint ids, ignoring blank lines.
+fn parse_endpoint_ids(contents: &str) -> io::Result<HashSet<EndpointId>> {
     contents
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(|line| {
-            NodeId::from_str(line)
+            EndpointId::from_str(line)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
         })
         .collect()
@@ -658,7 +659,7 @@ fn parse_node_ids(contents: &str) -> io::Result<HashSet<NodeId>> {
 
 /// Writes `allowed` to `path` via a write-then-rename so a crash never leaves a
 /// partially written cache. Ids are sorted for a deterministic on-disk form.
-fn persist(path: &Path, allowed: &HashSet<NodeId>) -> io::Result<()> {
+fn persist(path: &Path, allowed: &HashSet<EndpointId>) -> io::Result<()> {
     let mut ids: Vec<String> = allowed.iter().map(ToString::to_string).collect();
     ids.sort();
     let mut contents = ids.join("\n");
@@ -699,7 +700,7 @@ mod tests {
         response::{IntoResponse, Response},
         routing::{get, post},
     };
-    use rt_iroh::{Endpoint, EndpointBuilder, NodeAddr};
+    use rt_iroh::{Endpoint, EndpointAddr, EndpointBuilder};
     use tokio::sync::{Mutex as TokioMutex, mpsc, watch};
 
     type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -721,10 +722,8 @@ mod tests {
             };
             let allow = allow.clone();
             tokio::spawn(async move {
-                let Ok(node_id) = connection.remote_node_id() else {
-                    return;
-                };
-                let Some(_guard) = allow.try_register_connection(node_id, connection.clone())
+                let endpoint_id = connection.remote_id();
+                let Some(_guard) = allow.try_register_connection(endpoint_id, connection.clone())
                 else {
                     connection.close(1u32.into(), b"denied");
                     return;
@@ -747,9 +746,8 @@ mod tests {
     /// returns the connection plus the server's reply bytes.
     async fn subscribe(
         receiver: &Endpoint,
-        forwarder_addr: NodeAddr,
+        forwarder_addr: EndpointAddr,
     ) -> Result<(Connection, [u8; 4]), BoxError> {
-        receiver.add_node_addr(forwarder_addr.clone())?;
         let connection = receiver.connect(forwarder_addr).await?;
         let (mut send, mut recv) = connection.open_bi().await?;
         send.write_all(SUBSCRIBE).await?;
@@ -813,7 +811,7 @@ mod tests {
     async fn denied_peer_cannot_subscribe() -> TestResult {
         let receiver = EndpointBuilder::test([40; 32]).bind().await?;
         let forwarder = EndpointBuilder::test([41; 32]).bind().await?;
-        let forwarder_addr = forwarder.node_addr().await;
+        let forwarder_addr = forwarder.endpoint_addr().await;
 
         // Empty allow-list: the receiver is not authorized.
         let server = tokio::spawn(admission_server(forwarder.clone(), AllowList::default()));
@@ -836,10 +834,9 @@ mod tests {
     async fn try_register_connection_rejects_revoked_peer() -> TestResult {
         let receiver = EndpointBuilder::test([46; 32]).bind().await?;
         let forwarder = EndpointBuilder::test([47; 32]).bind().await?;
-        let forwarder_addr = forwarder.node_addr().await;
+        let forwarder_addr = forwarder.endpoint_addr().await;
 
-        let allow = AllowList::new([receiver.node_id()]);
-        receiver.add_node_addr(forwarder_addr.clone())?;
+        let allow = AllowList::new([receiver.endpoint_id()]);
 
         let accept = {
             let forwarder = forwarder.clone();
@@ -849,12 +846,12 @@ mod tests {
         let server_connection = tokio::time::timeout(Duration::from_secs(5), accept)
             .await???
             .ok_or("forwarder endpoint closed before accepting connection")?;
-        let node_id = server_connection.remote_node_id()?;
+        let endpoint_id = server_connection.remote_id();
 
         allow.apply_update([])?;
         assert!(
             allow
-                .try_register_connection(node_id, server_connection.clone())
+                .try_register_connection(endpoint_id, server_connection.clone())
                 .is_none(),
             "revoked peer must not be registered after allow-list removal"
         );
@@ -868,9 +865,9 @@ mod tests {
     async fn revoke_force_closes_open_conn() -> TestResult {
         let receiver = EndpointBuilder::test([42; 32]).bind().await?;
         let forwarder = EndpointBuilder::test([43; 32]).bind().await?;
-        let forwarder_addr = forwarder.node_addr().await;
+        let forwarder_addr = forwarder.endpoint_addr().await;
 
-        let allow = AllowList::new([receiver.node_id()]);
+        let allow = AllowList::new([receiver.endpoint_id()]);
         let server = tokio::spawn(admission_server(forwarder.clone(), allow.clone()));
 
         // Establish and confirm an admitted, registered subscription.
@@ -881,7 +878,7 @@ mod tests {
 
         // Revoke the peer; its open connection must be force-closed.
         let revoked = allow.apply_update([])?;
-        assert_eq!(revoked, vec![receiver.node_id()]);
+        assert_eq!(revoked, vec![receiver.endpoint_id()]);
 
         let closed = tokio::time::timeout(Duration::from_secs(5), connection.closed()).await;
         assert!(
@@ -904,19 +901,19 @@ mod tests {
 
         // First run with the server online: persist the allowed set.
         let online = AllowList::load(&cache_path)?;
-        online.apply_update([receiver.node_id()])?;
+        online.apply_update([receiver.endpoint_id()])?;
 
         // Restart with the server offline: load only uses the cache, no
         // refresh. The cached peer must still be authorized.
         let cached = AllowList::load(&cache_path)?;
         assert!(
-            cached.contains(&receiver.node_id()),
+            cached.contains(&receiver.endpoint_id()),
             "cached allow-list must authorize the previously persisted peer"
         );
 
         // The cached list authenticates the peer end-to-end.
         let forwarder = EndpointBuilder::test([45; 32]).bind().await?;
-        let forwarder_addr = forwarder.node_addr().await;
+        let forwarder_addr = forwarder.endpoint_addr().await;
         let server = tokio::spawn(admission_server(forwarder.clone(), cached));
 
         let (_connection, reply) =
@@ -1048,7 +1045,8 @@ mod tests {
     #[tokio::test]
     async fn approved_receiver_appears_in_forwarder_list() -> TestResult {
         let receiver = EndpointBuilder::test([50; 32]).bind().await?;
-        let receiver_endpoint_ids = Arc::new(TokioMutex::new(vec![receiver.node_id().to_string()]));
+        let receiver_endpoint_ids =
+            Arc::new(TokioMutex::new(vec![receiver.endpoint_id().to_string()]));
         let (base_url, _fetches, server) =
             spawn_test_allowlist_server(receiver_endpoint_ids).await?;
         let client = ServerAllowListClient::new(base_url, "thin-secret");
@@ -1056,7 +1054,7 @@ mod tests {
 
         fetch_and_apply_once(&client, &allow).await?;
 
-        assert!(allow.contains(&receiver.node_id()));
+        assert!(allow.contains(&receiver.endpoint_id()));
         server.abort();
         receiver.close().await;
         Ok(())
@@ -1065,8 +1063,9 @@ mod tests {
     #[tokio::test]
     async fn revoke_propagates() -> TestResult {
         let receiver = EndpointBuilder::test([51; 32]).bind().await?;
-        let allow = AllowList::new([receiver.node_id()]);
-        let receiver_endpoint_ids = Arc::new(TokioMutex::new(vec![receiver.node_id().to_string()]));
+        let allow = AllowList::new([receiver.endpoint_id()]);
+        let receiver_endpoint_ids =
+            Arc::new(TokioMutex::new(vec![receiver.endpoint_id().to_string()]));
         let (base_url, _fetches, server) =
             spawn_test_allowlist_server(receiver_endpoint_ids).await?;
         let client = ServerAllowListClient::new(base_url, "thin-secret");
@@ -1081,13 +1080,13 @@ mod tests {
         tx.send(ReceiverAllowListUpdate::replace(Vec::new()))
             .await?;
         tokio::time::timeout(Duration::from_secs(5), async {
-            while allow.contains(&receiver.node_id()) {
+            while allow.contains(&receiver.endpoint_id()) {
                 tokio::task::yield_now().await;
             }
         })
         .await?;
 
-        assert!(!allow.contains(&receiver.node_id()));
+        assert!(!allow.contains(&receiver.endpoint_id()));
         sync.abort();
         server.abort();
         receiver.close().await;
@@ -1119,19 +1118,19 @@ mod tests {
             fetches.wait_for(|&count| count >= 1),
         )
         .await??;
-        assert!(!allow.contains(&receiver.node_id()));
+        assert!(!allow.contains(&receiver.endpoint_id()));
 
         // Publish the receiver; only the polling backstop can pick this up.
-        *receiver_endpoint_ids.lock().await = vec![receiver.node_id().to_string()];
+        *receiver_endpoint_ids.lock().await = vec![receiver.endpoint_id().to_string()];
 
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !allow.contains(&receiver.node_id()) {
+            while !allow.contains(&receiver.endpoint_id()) {
                 tokio::task::yield_now().await;
             }
         })
         .await?;
 
-        assert!(allow.contains(&receiver.node_id()));
+        assert!(allow.contains(&receiver.endpoint_id()));
         sync.abort();
         server.abort();
         receiver.close().await;
@@ -1176,7 +1175,7 @@ mod tests {
         let app = Router::new()
             .route("/allowlist/receivers", get(stall_handler))
             .with_state(StallState {
-                old_list: vec![receiver.node_id().to_string()],
+                old_list: vec![receiver.endpoint_id().to_string()],
                 requests: Arc::new(AtomicU64::new(0)),
                 observed: observed_tx,
                 release: release.clone(),
@@ -1200,7 +1199,7 @@ mod tests {
 
         // Initial fetch (request 1) admits the receiver from the old list.
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !allow.contains(&receiver.node_id()) {
+            while !allow.contains(&receiver.endpoint_id()) {
                 tokio::task::yield_now().await;
             }
         })
@@ -1217,7 +1216,7 @@ mod tests {
         tx.send(ReceiverAllowListUpdate::replace(Vec::new()))
             .await?;
         tokio::time::timeout(Duration::from_secs(5), async {
-            while allow.contains(&receiver.node_id()) {
+            while allow.contains(&receiver.endpoint_id()) {
                 tokio::task::yield_now().await;
             }
         })
@@ -1238,7 +1237,7 @@ mod tests {
         .await??;
 
         assert!(
-            !allow.contains(&receiver.node_id()),
+            !allow.contains(&receiver.endpoint_id()),
             "a stale in-flight poll must not re-authorize a receiver revoked while it was outstanding"
         );
 
@@ -1393,13 +1392,13 @@ mod tests {
     async fn malformed_active_id_does_not_block_valid_revocation() -> TestResult {
         let retained = EndpointBuilder::test([53; 32]).bind().await?;
         let revoked = EndpointBuilder::test([54; 32]).bind().await?;
-        let allow = AllowList::new([retained.node_id(), revoked.node_id()]);
+        let allow = AllowList::new([retained.endpoint_id(), revoked.endpoint_id()]);
 
         // The server can contain arbitrary endpoint_id text from receiver
         // registration. An invalid active id must be ignored, while the valid
         // omission of `revoked` still removes its authorization.
         let receiver_endpoint_ids = Arc::new(TokioMutex::new(vec![
-            retained.node_id().to_string(),
+            retained.endpoint_id().to_string(),
             "not-a-valid-endpoint-id".to_owned(),
         ]));
         let (base_url, _fetches, server) =
@@ -1407,13 +1406,13 @@ mod tests {
         let client = ServerAllowListClient::new(base_url, "thin-secret");
 
         let result = fetch_and_apply_once(&client, &allow).await?;
-        assert_eq!(result, vec![revoked.node_id()]);
+        assert_eq!(result, vec![revoked.endpoint_id()]);
         assert!(
-            allow.contains(&retained.node_id()),
+            allow.contains(&retained.endpoint_id()),
             "valid active receiver must remain authorized"
         );
         assert!(
-            !allow.contains(&revoked.node_id()),
+            !allow.contains(&revoked.endpoint_id()),
             "valid revocation must apply even when the response also contains a malformed id"
         );
 

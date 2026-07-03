@@ -784,7 +784,7 @@ where
 mod tests {
     use super::*;
 
-    use rt_iroh::{Endpoint, EndpointBuilder, NodeAddr};
+    use rt_iroh::{Endpoint, EndpointAddr, EndpointBuilder};
     use rt_p2p_protocol::{ReaderControlRequest, StreamEntry, control_f2c};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -827,7 +827,7 @@ mod tests {
         catalog: StaticCatalog,
         handshake_timeout: Duration,
         heartbeat: HeartbeatConfig,
-    ) -> Result<(Endpoint, NodeAddr, JoinHandle<Result<(), String>>), BoxError> {
+    ) -> Result<(Endpoint, EndpointAddr, JoinHandle<Result<(), String>>), BoxError> {
         spawn_forwarder_with_control(
             seed,
             catalog,
@@ -849,9 +849,9 @@ mod tests {
         handler: Arc<dyn ReaderControlHandler>,
         outbound_events: Option<ControlEventReceiver>,
         remote_config: Arc<dyn RemoteConfigHandler>,
-    ) -> Result<(Endpoint, NodeAddr, JoinHandle<Result<(), String>>), BoxError> {
+    ) -> Result<(Endpoint, EndpointAddr, JoinHandle<Result<(), String>>), BoxError> {
         let endpoint = EndpointBuilder::test(seed).bind().await?;
-        let node_addr = endpoint.node_addr().await;
+        let endpoint_addr = endpoint.endpoint_addr().await;
 
         let accept_endpoint = endpoint.clone();
         let handle = tokio::spawn(async move {
@@ -877,16 +877,15 @@ mod tests {
             Ok(())
         });
 
-        Ok((endpoint, node_addr, handle))
+        Ok((endpoint, endpoint_addr, handle))
     }
 
     /// Dials `forwarder_addr` and opens the control stream, sending `hello`.
     async fn open_control(
         receiver: &Endpoint,
-        forwarder_addr: NodeAddr,
+        forwarder_addr: EndpointAddr,
         hello: Hello,
     ) -> Result<(Connection, SendStream, RecvStream), BoxError> {
-        receiver.add_node_addr(forwarder_addr.clone())?;
         let connection = receiver.connect(forwarder_addr).await?;
         let (mut send, recv) = connection.open_bi().await?;
         write_frame(
@@ -1073,7 +1072,7 @@ mod tests {
     async fn spawn_forwarder_with_remote_config(
         seed: [u8; 32],
         remote_config: Arc<dyn RemoteConfigHandler>,
-    ) -> Result<(Endpoint, NodeAddr, JoinHandle<Result<(), String>>), BoxError> {
+    ) -> Result<(Endpoint, EndpointAddr, JoinHandle<Result<(), String>>), BoxError> {
         spawn_forwarder_with_control(
             seed,
             StaticCatalog::new(sample_catalog()),
