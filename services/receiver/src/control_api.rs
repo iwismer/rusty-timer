@@ -14,7 +14,7 @@ use rt_p2p_protocol::{
     ReaderStatus, RestartResponse, UpsStatus,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -371,6 +371,15 @@ pub struct AppState {
     pub discovered_forwarders: Arc<tokio::sync::RwLock<DiscoveredForwarders>>,
     pub p2p_endpoint_id: Arc<RwLock<Option<String>>>,
     forwarder_runtime: Arc<StdMutex<HashMap<String, ForwarderRuntimeStatus>>>,
+    /// Endpoint ids whose persisted intent is explicit disconnect (a
+    /// `forwarder_intent` row with `connect = 0`). This mirrors the table so
+    /// [`Self::recompute_aggregate_connection_state_sync_default_trying`],
+    /// which cannot await the DB mutex, can still exclude intentionally
+    /// disconnected forwarders from the trying-aggregation. Seeded from the DB
+    /// during construction (before any worker can trigger the sync fallback)
+    /// and updated via [`Self::cache_forwarder_intent`] only after the
+    /// corresponding DB write succeeds. Never held across an await.
+    disconnected_intents: Arc<StdMutex<HashSet<String>>>,
     forwarder_live_status: Arc<StdMutex<HashMap<String, ForwarderLiveStatus>>>,
     /// Per-forwarder remote-config request channels, keyed by endpoint id. An
     /// entry exists only while that forwarder has a live control session whose
@@ -485,6 +494,16 @@ impl AppState {
             .timeout(std::time::Duration::from_secs(3))
             .build()
             .expect("failed to build HTTP client");
+        let disconnected_intents: HashSet<String> = match db.load_forwarder_intents() {
+            Ok(intents) => intents
+                .into_iter()
+                .filter_map(|(endpoint_id, connect)| (!connect).then_some(endpoint_id))
+                .collect(),
+            Err(error) => {
+                warn!(error = %error, "failed to seed forwarder intent cache from DB");
+                HashSet::new()
+            }
+        };
         let db = Arc::new(Mutex::new(db));
         let read_source = match read_pool {
             Some(pool) => crate::read_pool::ReadSource::Pool(pool),
@@ -514,6 +533,7 @@ impl AppState {
             discovered_forwarders: Arc::new(tokio::sync::RwLock::new(DiscoveredForwarders::new())),
             p2p_endpoint_id: Arc::new(RwLock::new(None)),
             forwarder_runtime: Arc::new(StdMutex::new(HashMap::new())),
+            disconnected_intents: Arc::new(StdMutex::new(disconnected_intents)),
             forwarder_live_status: Arc::new(StdMutex::new(HashMap::new())),
             forwarder_config_tx: StdMutex::new(HashMap::new()),
             forwarder_reader_control_tx: StdMutex::new(HashMap::new()),
@@ -670,6 +690,24 @@ impl AppState {
         let mut statuses = self.forwarder_runtime.lock().unwrap();
         let status = statuses.entry(endpoint_id.to_owned()).or_default();
         update(status);
+    }
+
+    /// Mirror a forwarder intent into the sync-fallback cache. Call only
+    /// after the corresponding `forwarder_intent` DB write succeeded, so the
+    /// cache never runs ahead of the persisted truth.
+    pub(crate) fn cache_forwarder_intent(&self, endpoint_id: &str, connect: bool) {
+        let mut disconnected = self.disconnected_intents.lock().unwrap();
+        if connect {
+            disconnected.remove(endpoint_id);
+        } else {
+            disconnected.insert(endpoint_id.to_owned());
+        }
+    }
+
+    /// Drop all cached disconnect intents. Call only after a DB operation
+    /// that deleted every `forwarder_intent` row (factory reset).
+    fn clear_forwarder_intent_cache(&self) {
+        self.disconnected_intents.lock().unwrap().clear();
     }
 
     pub(crate) async fn mark_forwarder_runtime(
@@ -1087,9 +1125,14 @@ impl AppState {
         let any_connected = statuses
             .values()
             .any(|status| status.control_up || status.data_sessions > 0);
-        let any_trying = statuses
-            .values()
-            .any(|status| !status.control_up && status.data_sessions == 0);
+        let any_trying = {
+            let disconnected = self.disconnected_intents.lock().unwrap();
+            statuses.iter().any(|(endpoint_id, status)| {
+                !status.control_up
+                    && status.data_sessions == 0
+                    && !disconnected.contains(endpoint_id)
+            })
+        };
         let next = if any_connected {
             ConnectionState::Connected
         } else if any_trying {
@@ -2541,6 +2584,7 @@ pub async fn connect_forwarder(state: &AppState, endpoint_id: String) -> Result<
         db.set_forwarder_intent(&endpoint_id, true)
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     }
+    state.cache_forwarder_intent(&endpoint_id, true);
     state.recompute_aggregate_connection_state().await;
     state.wake_reconcile();
     state.emit_resync();
@@ -2556,6 +2600,7 @@ pub async fn disconnect_forwarder(
         db.set_forwarder_intent(&endpoint_id, false)
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     }
+    state.cache_forwarder_intent(&endpoint_id, false);
     state.recompute_aggregate_connection_state().await;
     state.wake_reconcile();
     state.emit_resync();
@@ -2571,6 +2616,7 @@ pub async fn reconnect_forwarder(
         db.set_forwarder_intent(&endpoint_id, true)
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     }
+    state.cache_forwarder_intent(&endpoint_id, true);
     state.recompute_aggregate_connection_state().await;
     state.request_forwarder_reconnect(endpoint_id).await;
     state.emit_resync();
@@ -3215,6 +3261,7 @@ pub async fn admin_factory_reset(state: &AppState) -> Result<(), ReceiverError> 
     match db.factory_reset() {
         Ok(()) => {
             drop(db);
+            state.clear_forwarder_intent_cache();
             *state.receiver_id.write().await = String::new();
             // Drop the now-empty participant/chip lookup from memory so a
             // factory reset does not leave prior identities resolvable.
@@ -4766,6 +4813,64 @@ mod tests {
             Some("endpoint-1")
         );
         assert!(connect_rx.borrow().restart);
+    }
+
+    #[tokio::test]
+    async fn sync_fallback_seeds_disconnect_intents_from_db_at_startup() {
+        // Restart-shaped: the intent cache must be seeded from persisted
+        // intents during AppState construction, so a forwarder disconnected
+        // before a restart never shows Connecting through the sync fallback.
+        let db = Db::open_in_memory().unwrap();
+        db.set_forwarder_intent("endpoint-1", false).unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+
+        // Runtime status entry with no live sessions, as the reconcile loop
+        // would leave behind for a known forwarder.
+        state.update_forwarder_runtime_sync("endpoint-1", |_status| {});
+        state.recompute_aggregate_connection_state_sync_default_trying();
+
+        assert_eq!(
+            *state.connection_state.borrow(),
+            ConnectionState::Disconnected
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_intent_write_restores_sync_fallback_trying() {
+        // A successful connect-intent write must update the sync-fallback
+        // cache so the forwarder counts as trying again.
+        let db = Db::open_in_memory().unwrap();
+        db.set_forwarder_intent("endpoint-1", false).unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        state.update_forwarder_runtime_sync("endpoint-1", |_status| {});
+
+        connect_forwarder(&state, "endpoint-1".to_owned())
+            .await
+            .unwrap();
+        state.recompute_aggregate_connection_state_sync_default_trying();
+
+        assert_eq!(
+            *state.connection_state.borrow(),
+            ConnectionState::Connecting
+        );
+    }
+
+    #[tokio::test]
+    async fn factory_reset_clears_intent_cache_for_sync_fallback() {
+        // Factory reset deletes all forwarder_intent rows, restoring the
+        // default-connect contract; the sync-fallback cache must follow.
+        let db = Db::open_in_memory().unwrap();
+        db.set_forwarder_intent("endpoint-1", false).unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        state.update_forwarder_runtime_sync("endpoint-1", |_status| {});
+
+        admin_factory_reset(&state).await.unwrap();
+        state.recompute_aggregate_connection_state_sync_default_trying();
+
+        assert_eq!(
+            *state.connection_state.borrow(),
+            ConnectionState::Connecting
+        );
     }
 
     #[tokio::test]

@@ -846,6 +846,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn guard_drop_fallback_respects_disconnect_intent() {
+        // Dropping the last control guard for a forwarder whose persisted
+        // intent is disconnect must fall the aggregate to Disconnected, not
+        // Connecting: the sync fallback runs before the spawned async
+        // recompute, and must not transiently report a deliberately
+        // disconnected forwarder as trying.
+        let (state, reporter) = reporter_state();
+        let guard = reporter.on_control_connected("fwd-1").await;
+        assert_eq!(
+            state.connection_state.borrow().clone(),
+            ConnectionState::Connected
+        );
+
+        crate::control_api::disconnect_forwarder(&state, "fwd-1".to_owned())
+            .await
+            .unwrap();
+
+        drop(guard);
+
+        // No await between the drop and this assert: on the test's
+        // single-threaded runtime the spawned async recompute has not run
+        // yet, so this observes the sync fallback's result.
+        assert_eq!(
+            state.connection_state.borrow().clone(),
+            ConnectionState::Disconnected
+        );
+    }
+
+    #[tokio::test]
     async fn connected_session_guard_releases_on_cancellation() {
         // A connected session whose control guard is dropped without a clean
         // return (e.g. the connection task is cancelled mid-session) must still
