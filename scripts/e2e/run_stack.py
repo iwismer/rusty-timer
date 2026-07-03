@@ -1017,18 +1017,42 @@ allowlist_request_timeout_secs = 2
     results.expect_eq("remote config: updated document is readable",
                       updated_doc.get("display_name"), "E2E Remote Config Updated")
 
-    updated_doc.setdefault("control", {})["allow_remote_config"] = False
+    # [control] is a protected section: a remote attempt to flip
+    # allow_remote_config must be rejected and must not persist.
+    protected_doc = json.loads(json.dumps(updated_doc))
+    protected_doc.setdefault("control", {})["allow_remote_config"] = False
     disable_response = bridge_invoke(
         bridge_url,
         "set_forwarder_config",
-        {"endpoint_id": forwarder_endpoint_id, "config_json": json.dumps(updated_doc)},
+        {"endpoint_id": forwarder_endpoint_id, "config_json": json.dumps(protected_doc)},
     )
-    results.expect_eq("remote config gating: disabling remote config succeeds",
-                      disable_response.get("ok"), True)
-    results.expect_eq("remote config gating: disable reports restart_needed",
-                      disable_response.get("restart_needed"), True)
+    results.expect_eq("remote config protection: remote [control] flip is rejected",
+                      disable_response.get("ok"), False)
+    results.check("remote config protection: error names the protected section",
+                  "control" in (disable_response.get("error") or ""),
+                  disable_response.get("error") or "")
+    recheck_response = bridge_invoke(
+        bridge_url,
+        "get_forwarder_config",
+        {"endpoint_id": forwarder_endpoint_id},
+    )
+    recheck_doc = json.loads(recheck_response.get("config_json", "{}"))
+    results.expect_eq("remote config protection: allow_remote_config unchanged after rejection",
+                      (recheck_doc.get("control") or {}).get("allow_remote_config"), True)
 
     forwarder.stop()
+
+    # Gate remote config the supported way: a local (trusted) config edit.
+    # Remote writes to [control] are rejected above, so the gating scenario
+    # flips the flag directly in the forwarder's TOML before the restart.
+    config_text = forwarder_config.read_text()
+    if "allow_remote_config = true" not in config_text:
+        raise AssertionError(
+            f"expected 'allow_remote_config = true' in forwarder config, got:\n{config_text}"
+        )
+    forwarder_config.write_text(
+        config_text.replace("allow_remote_config = true", "allow_remote_config = false")
+    )
     forwarder2 = stack.add(make_forwarder("2"))
     forwarder2.start()
     wait_for_log(forwarder2.log_path, "p2p iroh server started", timeout=30,
