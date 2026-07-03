@@ -132,6 +132,49 @@ describe("ForwarderConfigModal", () => {
     expect(submitted.update?.mode).toBeUndefined();
   });
 
+  it("renders protected sections read-only and round-trips their values verbatim", async () => {
+    render(ForwarderConfigModal, {
+      open: true,
+      endpointId: "endpoint-1",
+      displayName: "Timing Forwarder",
+      onClose: vi.fn(),
+    });
+
+    await screen.findByLabelText("Display name");
+
+    // Protected [p2p] and [control] inputs must be disabled.
+    expect(screen.getByLabelText("Enable P2P")).toBeDisabled();
+    expect(screen.getByLabelText("Server URL")).toBeDisabled();
+    expect(screen.getByLabelText("Server token file")).toBeDisabled();
+    expect(screen.getByLabelText("Allow power actions")).toBeDisabled();
+    expect(screen.getByLabelText("Allow remote config")).toBeDisabled();
+
+    // Each protected card explains why the fields are read-only.
+    expect(
+      screen.getAllByText(
+        "Managed locally on the forwarder — not editable remotely.",
+      ),
+    ).toHaveLength(2);
+
+    // Operational fields stay editable.
+    expect(screen.getByLabelText("Display name")).toBeEnabled();
+    expect(screen.getByLabelText("SQLite path")).toBeEnabled();
+
+    await fireEvent.click(screen.getByTestId("forwarder-config-save"));
+
+    await waitFor(() => {
+      expect(mockApi.setForwarderConfig).toHaveBeenCalled();
+    });
+
+    // Protected sections must round-trip unchanged — the forwarder rejects
+    // any write whose [auth]/[p2p]/[control] differ from the on-disk config.
+    const submitted = JSON.parse(mockApi.setForwarderConfig.mock.calls[0][1]);
+    const fetched = sampleConfig();
+    expect(submitted.p2p).toEqual(fetched.p2p);
+    expect(submitted.control).toEqual(fetched.control);
+    expect(submitted.auth).toEqual(fetched.auth);
+  });
+
   it("shows a restart banner after a save that requires restart and restarts on demand", async () => {
     mockApi.setForwarderConfig.mockResolvedValue({
       ok: true,

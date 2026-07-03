@@ -257,11 +257,15 @@
 
             <Card title="P2P / Server">
               <div class="space-y-3">
+                <p class="text-xs text-text-muted">
+                  Managed locally on the forwarder — not editable remotely.
+                </p>
                 <label class="block text-sm font-medium text-text-secondary">
                   <span class="inline-flex items-center gap-2">
                     <input
                       class="accent-accent"
                       type="checkbox"
+                      disabled
                       bind:checked={config.p2p.enabled}
                     />
                     Enable P2P
@@ -270,16 +274,18 @@
                 <label class="block text-sm font-medium text-text-secondary">
                   Server URL
                   <input
-                    class="mt-1 {inputClass}"
+                    class="mt-1 {inputClass} opacity-50"
                     type="text"
+                    disabled
                     bind:value={config.p2p.server_url}
                   />
                 </label>
                 <label class="block text-sm font-medium text-text-secondary">
                   Server token file
                   <input
-                    class="mt-1 {inputClass}"
+                    class="mt-1 {inputClass} opacity-50"
                     type="text"
+                    disabled
                     bind:value={config.p2p.server_token_file}
                   />
                 </label>
@@ -322,11 +328,15 @@
 
             <Card title="Control">
               <div class="space-y-3">
+                <p class="text-xs text-text-muted">
+                  Managed locally on the forwarder — not editable remotely.
+                </p>
                 <label class="block text-sm font-medium text-text-secondary">
                   <span class="inline-flex items-center gap-2">
                     <input
                       class="accent-accent"
                       type="checkbox"
+                      disabled
                       bind:checked={config.control.allow_power_actions}
                     />
                     Allow power actions
@@ -337,6 +347,7 @@
                     <input
                       class="accent-accent"
                       type="checkbox"
+                      disabled
                       bind:checked={config.control.allow_remote_config}
                     />
                     Allow remote config
