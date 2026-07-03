@@ -7,7 +7,10 @@ mod reader_task;
 
 use forwarder::discovery::expand_target;
 use forwarder::local_fanout::FanoutServer;
-use forwarder::status_http::{ConfigState, StatusConfig, StatusServer, SubsystemStatus};
+use forwarder::status_http::{
+    ConfigState, ForwarderStatusEvent, ReaderConnectionState, StatusConfig, StatusServer,
+    SubsystemStatus,
+};
 use forwarder::storage::journal::Journal;
 use rt_ui_log::UiLogLevel;
 use sha2::{Digest, Sha256};
@@ -240,14 +243,60 @@ async fn main() {
     status_server.set_forwarder_id(&forwarder_id).await;
 
     // Detect local IP from first reader
-    let local_ip = all_readers.first().and_then(|(addr, _)| {
-        let ip = addr.rsplit_once(':').map(|(ip, _)| ip).unwrap_or(addr);
-        detect_local_ip(ip)
+    let detect_target = all_readers.first().map(|(addr, _)| {
+        addr.rsplit_once(':')
+            .map(|(ip, _)| ip)
+            .unwrap_or(addr)
+            .to_owned()
     });
+    let local_ip = detect_target.as_deref().and_then(detect_local_ip);
     if let Some(ref ip) = local_ip {
         info!(local_ip = %ip, "detected local IP");
     }
-    status_server.set_local_ip(local_ip).await;
+    status_server.set_local_ip(local_ip.clone()).await;
+
+    // Re-detect the local IP whenever a reader connects or disconnects. The
+    // startup detection above is a one-shot snapshot: if the interface facing
+    // the reader (e.g. a direct Ethernet cable) has no carrier yet, the kernel
+    // routes via the default interface (often WiFi) and the wrong IP would
+    // otherwise stay on the status screen forever. Reader state transitions are
+    // the natural signal that routing may have changed: a direct link coming up
+    // is immediately followed by a successful connect.
+    if let Some(target) = detect_target {
+        let status = status_server.clone();
+        let mut shutdown = shutdown_rx.clone();
+        let mut last_ip = local_ip;
+        tokio::spawn(async move {
+            let (mut status_rx, _snapshot) = status.status_feed().subscribe_and_snapshot().await;
+            loop {
+                tokio::select! {
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            return;
+                        }
+                    }
+                    event = status_rx.recv() => match event {
+                        Ok(ForwarderStatusEvent::ReaderStatus { status: reader, .. })
+                            if reader.state != ReaderConnectionState::Connecting =>
+                        {
+                            let detected = detect_local_ip(&target);
+                            if detected != last_ip {
+                                info!(
+                                    local_ip = detected.as_deref().unwrap_or("none"),
+                                    "local IP changed, updating status"
+                                );
+                                last_ip = detected.clone();
+                                status.set_local_ip(detected).await;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    }
+                }
+            }
+        });
+    }
 
     let remote_config_handler = Arc::new(forwarder::p2p::ForwarderRemoteConfigHandler::new(
         cfg.control.allow_remote_config,

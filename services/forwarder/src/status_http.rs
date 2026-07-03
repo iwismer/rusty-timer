@@ -680,7 +680,7 @@ impl StatusServer {
         self.subsystem.lock().await.forwarder_id = id.to_owned();
     }
 
-    /// Set the detected local IP (call once at startup).
+    /// Set the detected local IP (at startup and on reader connect/disconnect).
     pub async fn set_local_ip(&self, ip: Option<String>) {
         self.subsystem.lock().await.local_ip = ip;
         #[cfg(any(feature = "eink", feature = "lcd"))]
