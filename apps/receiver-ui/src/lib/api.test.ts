@@ -345,10 +345,12 @@ describe("api client", () => {
     });
 
     const result = await getReplayTargetEpochs({
+      forwarder_endpoint_id: "endpoint-1",
       stream_id: "10.0.0.1:10000",
     });
 
     expect(mockInvoke).toHaveBeenCalledWith("get_replay_target_epochs", {
+      forwarderEndpointId: "endpoint-1",
       streamId: "10.0.0.1:10000",
     });
     expect(result.epochs).toEqual([
@@ -366,11 +368,13 @@ describe("api client", () => {
     mockInvoke.mockResolvedValue(undefined);
 
     await resetStreamCursor({
+      forwarder_endpoint_id: "endpoint-1",
       stream_id: "11111111-1111-1111-1111-111111111111",
     });
 
     expect(mockInvoke).toHaveBeenCalledWith("admin_reset_cursor", {
       body: {
+        forwarder_endpoint_id: "endpoint-1",
         stream_id: "11111111-1111-1111-1111-111111111111",
       },
     });

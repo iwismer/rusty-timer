@@ -39,6 +39,7 @@ use rt_p2p_protocol::{
 use tokio::sync::broadcast;
 
 use crate::control_api::AppState;
+use crate::stream_key::LocalStreamKey;
 use crate::writer::{PreparedGap, PreparedRecord, WriteError, WriterHandle};
 
 /// Aggregates live control/data connectivity per forwarder and reflects it
@@ -528,10 +529,19 @@ async fn send_ack(
 pub async fn run_data_subscription(
     connection: &Connection,
     writer: &WriterHandle,
-    stream_id: &str,
+    wire_stream_id: &str,
+    local_stream_key: &LocalStreamKey,
     mode: SubscribeMode,
 ) -> Result<SessionOutcome, P2pSessionError> {
-    run_data_subscription_with_hint(connection, writer, stream_id, mode, None).await
+    run_data_subscription_with_hint(
+        connection,
+        writer,
+        wire_stream_id,
+        local_stream_key,
+        mode,
+        None,
+    )
+    .await
 }
 
 /// Like [`run_data_subscription`], but broadcasts the durable contiguous cursor
@@ -542,12 +552,13 @@ pub async fn run_data_subscription(
 pub async fn run_data_subscription_with_hint(
     connection: &Connection,
     writer: &WriterHandle,
-    stream_id: &str,
+    wire_stream_id: &str,
+    local_stream_key: &LocalStreamKey,
     mode: SubscribeMode,
     durable_hint_tx: Option<&broadcast::Sender<DurableBatch>>,
 ) -> Result<SessionOutcome, P2pSessionError> {
     let after_seq = writer
-        .load_cursor(stream_id.to_owned())
+        .load_cursor(local_stream_key.as_str().to_owned())
         .await
         .map_err(map_write_error)?;
 
@@ -560,7 +571,7 @@ pub async fn run_data_subscription_with_hint(
         &mut send,
         &DataC2F {
             msg: Some(data_c2f::Msg::DataSubscribe(DataSubscribe {
-                stream_id: stream_id_bytes(stream_id),
+                stream_id: stream_id_bytes(wire_stream_id),
                 after_seq: i64_to_u64(after_seq),
                 mode: mode as i32,
             })),
@@ -570,7 +581,7 @@ pub async fn run_data_subscription_with_hint(
 
     match read_frame::<DataF2C>(&mut recv).await {
         Ok(frame) => match frame.msg {
-            Some(data_f2c::Msg::SubscribeOk(ok)) => check_stream_id(stream_id, &ok.stream_id)?,
+            Some(data_f2c::Msg::SubscribeOk(ok)) => check_stream_id(wire_stream_id, &ok.stream_id)?,
             _ => return Err(P2pSessionError::UnexpectedMessage { plane: "data" }),
         },
         // A read error before SubscribeOk is a disconnect, not a contract
@@ -593,9 +604,9 @@ pub async fn run_data_subscription_with_hint(
                 // Durable-first: validate, persist through the writer (the
                 // reply resolves only after a successful group commit), then
                 // ack through the durable cursor.
-                let records = prepare_batch(stream_id, &batch)?;
+                let records = prepare_batch(wire_stream_id, &batch)?;
                 let durable = writer
-                    .persist_batch(stream_id.to_owned(), records)
+                    .persist_batch(local_stream_key.as_str().to_owned(), records)
                     .await
                     .map_err(map_write_error)?;
                 let through_seq = durable.through_seq;
@@ -603,15 +614,15 @@ pub async fn run_data_subscription_with_hint(
                 if let Some(tx) = durable_hint_tx {
                     let _ = tx.send(durable);
                 }
-                send_ack(&mut send, stream_id, through_seq).await?;
+                send_ack(&mut send, wire_stream_id, through_seq).await?;
             }
             Some(data_f2c::Msg::GapNotice(gap)) => {
                 // Record the gap, jump the cursor past the unavailable history,
                 // then ack the jumped cursor so the forwarder will not resend
                 // the now-skipped seqs.
-                let gap = prepare_gap(stream_id, &gap)?;
+                let gap = prepare_gap(wire_stream_id, &gap)?;
                 let through_seq = writer
-                    .persist_gap(stream_id.to_owned(), gap)
+                    .persist_gap(local_stream_key.as_str().to_owned(), gap)
                     .await
                     .map_err(map_write_error)?;
                 if let Some(tx) = durable_hint_tx {
@@ -620,16 +631,16 @@ pub async fn run_data_subscription_with_hint(
                         inserted: Arc::new(Vec::new()),
                     });
                 }
-                send_ack(&mut send, stream_id, through_seq).await?;
+                send_ack(&mut send, wire_stream_id, through_seq).await?;
             }
             // CaughtUp / StreamEpochStarted carry no durable state to persist
             // here, but they are stream-scoped: validate the stream_id and keep
             // listening for further live frames.
             Some(data_f2c::Msg::CaughtUp(caught_up)) => {
-                check_stream_id(stream_id, &caught_up.stream_id)?;
+                check_stream_id(wire_stream_id, &caught_up.stream_id)?;
             }
             Some(data_f2c::Msg::StreamEpochStarted(epoch_started)) => {
-                check_stream_id(stream_id, &epoch_started.stream_id)?;
+                check_stream_id(wire_stream_id, &epoch_started.stream_id)?;
             }
             // A second SubscribeOk after open is out of sequence.
             Some(data_f2c::Msg::SubscribeOk(_)) => {
@@ -660,6 +671,10 @@ mod tests {
 
     fn stream_id() -> &'static str {
         STREAM_ID
+    }
+
+    fn local_stream_key() -> LocalStreamKey {
+        LocalStreamKey::new("test-forwarder", STREAM_ID)
     }
 
     fn sid_bytes() -> Vec<u8> {
@@ -877,6 +892,7 @@ mod tests {
                 &session.connection,
                 &store.writer,
                 stream_id,
+                &local_stream_key(),
                 SubscribeMode::Replay,
             )
             .await
@@ -885,14 +901,19 @@ mod tests {
             // Every received record is durable.
             let guard = store.db.lock().await;
             let seqs: Vec<i64> = guard
-                .load_received_events(stream_id)
+                .load_received_events(local_stream_key().as_str())
                 .unwrap()
                 .iter()
                 .map(|e| e.seq)
                 .collect();
             assert_eq!(seqs, vec![1, 2, 4]);
             // Cursor tracks the durable *contiguous* prefix, not the latest seq.
-            assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 2);
+            assert_eq!(
+                guard
+                    .load_stream_cursor(local_stream_key().as_str())
+                    .unwrap(),
+                2
+            );
             drop(guard);
 
             poll_until(
@@ -937,19 +958,25 @@ mod tests {
                 &session.connection,
                 &store.writer,
                 stream_id,
+                &local_stream_key(),
                 SubscribeMode::Replay,
             )
             .await
             .unwrap();
 
             let guard = store.db.lock().await;
-            let markers = guard.load_gap_markers(stream_id).unwrap();
+            let markers = guard.load_gap_markers(local_stream_key().as_str()).unwrap();
             assert_eq!(markers.len(), 1);
             assert_eq!(markers[0].requested_after_seq, 0);
             assert_eq!(markers[0].earliest_available_seq, 15);
             assert_eq!(markers[0].latest_available_seq, 20);
             // Cursor jumps to earliest_available_seq - 1.
-            assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 14);
+            assert_eq!(
+                guard
+                    .load_stream_cursor(local_stream_key().as_str())
+                    .unwrap(),
+                14
+            );
             drop(guard);
 
             forwarder.shutdown().await;
@@ -978,12 +1005,18 @@ mod tests {
                 &session.connection,
                 &store.writer,
                 stream_id,
+                &local_stream_key(),
                 SubscribeMode::Replay,
             )
             .await
             .unwrap();
             assert_eq!(
-                store.db.lock().await.load_stream_cursor(stream_id).unwrap(),
+                store
+                    .db
+                    .lock()
+                    .await
+                    .load_stream_cursor(local_stream_key().as_str())
+                    .unwrap(),
                 2
             );
             drop(session);
@@ -996,6 +1029,7 @@ mod tests {
                 &session.connection,
                 &store.writer,
                 stream_id,
+                &local_stream_key(),
                 SubscribeMode::Replay,
             )
             .await
@@ -1003,8 +1037,19 @@ mod tests {
 
             // The forwarder re-sent [1, 2]; dedup keeps a single row per seq.
             let guard = store.db.lock().await;
-            assert_eq!(guard.load_received_events(stream_id).unwrap().len(), 2);
-            assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 2);
+            assert_eq!(
+                guard
+                    .load_received_events(local_stream_key().as_str())
+                    .unwrap()
+                    .len(),
+                2
+            );
+            assert_eq!(
+                guard
+                    .load_stream_cursor(local_stream_key().as_str())
+                    .unwrap(),
+                2
+            );
             drop(guard);
 
             poll_until(
@@ -1046,6 +1091,7 @@ mod tests {
                 &session.connection,
                 &store.writer,
                 stream_id,
+                &local_stream_key(),
                 SubscribeMode::Replay,
             )
             .await
@@ -1053,7 +1099,7 @@ mod tests {
 
             let guard = store.db.lock().await;
             let seqs: Vec<i64> = guard
-                .load_received_events(stream_id)
+                .load_received_events(local_stream_key().as_str())
                 .unwrap()
                 .iter()
                 .map(|e| e.seq)
@@ -1063,7 +1109,12 @@ mod tests {
                 vec![1, 2, 3],
                 "duplicate seqs collapse to one row each"
             );
-            assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 3);
+            assert_eq!(
+                guard
+                    .load_stream_cursor(local_stream_key().as_str())
+                    .unwrap(),
+                3
+            );
             drop(guard);
 
             poll_until(
@@ -1103,6 +1154,7 @@ mod tests {
                 &session.connection,
                 &store.writer,
                 stream_id,
+                &local_stream_key(),
                 SubscribeMode::Replay,
                 Some(&hint_tx),
             )
@@ -1174,6 +1226,7 @@ mod tests {
                 &session.connection,
                 &store.writer,
                 stream_id,
+                &local_stream_key(),
                 SubscribeMode::Replay,
             )
             .await;
@@ -1184,8 +1237,18 @@ mod tests {
             );
             // Nothing was persisted and nothing was acked.
             let guard = store.db.lock().await;
-            assert!(guard.load_received_events(stream_id).unwrap().is_empty());
-            assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 0);
+            assert!(
+                guard
+                    .load_received_events(local_stream_key().as_str())
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                guard
+                    .load_stream_cursor(local_stream_key().as_str())
+                    .unwrap(),
+                0
+            );
             drop(guard);
             assert!(forwarder.acks().is_empty());
 
@@ -1219,6 +1282,7 @@ mod tests {
                 &session.connection,
                 &store.writer,
                 stream_id,
+                &local_stream_key(),
                 SubscribeMode::Replay,
             )
             .await;
@@ -1228,8 +1292,18 @@ mod tests {
                 "mismatched gap stream_id must be rejected, got {result:?}"
             );
             let guard = store.db.lock().await;
-            assert!(guard.load_gap_markers(stream_id).unwrap().is_empty());
-            assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 0);
+            assert!(
+                guard
+                    .load_gap_markers(local_stream_key().as_str())
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                guard
+                    .load_stream_cursor(local_stream_key().as_str())
+                    .unwrap(),
+                0
+            );
             drop(guard);
             assert!(forwarder.acks().is_empty());
 
@@ -1260,6 +1334,7 @@ mod tests {
                 &session.connection,
                 &store.writer,
                 stream_id,
+                &local_stream_key(),
                 SubscribeMode::Replay,
             )
             .await;
@@ -1298,6 +1373,7 @@ mod tests {
                 &session.connection,
                 &store.writer,
                 stream_id,
+                &local_stream_key(),
                 SubscribeMode::Replay,
             )
             .await;
@@ -1350,6 +1426,7 @@ mod tests {
                 &session.connection,
                 &store.writer,
                 stream_id,
+                &local_stream_key(),
                 SubscribeMode::Replay,
             )
             .await;
@@ -1363,10 +1440,18 @@ mod tests {
             );
             let guard = store.db.lock().await;
             assert!(
-                guard.load_received_events(stream_id).unwrap().is_empty(),
+                guard
+                    .load_received_events(local_stream_key().as_str())
+                    .unwrap()
+                    .is_empty(),
                 "a batch with a conflicting duplicate must persist nothing"
             );
-            assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 0);
+            assert_eq!(
+                guard
+                    .load_stream_cursor(local_stream_key().as_str())
+                    .unwrap(),
+                0
+            );
             drop(guard);
             assert!(forwarder.acks().is_empty());
 
@@ -1400,14 +1485,26 @@ mod tests {
                 &session.connection,
                 &store.writer,
                 stream_id,
+                &local_stream_key(),
                 SubscribeMode::Replay,
             )
             .await
             .unwrap();
 
             let guard = store.db.lock().await;
-            assert_eq!(guard.load_received_events(stream_id).unwrap().len(), 1);
-            assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 1);
+            assert_eq!(
+                guard
+                    .load_received_events(local_stream_key().as_str())
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                guard
+                    .load_stream_cursor(local_stream_key().as_str())
+                    .unwrap(),
+                1
+            );
             drop(guard);
 
             forwarder.shutdown().await;
@@ -1440,6 +1537,7 @@ mod tests {
                 &session.connection,
                 &store.writer,
                 stream_id,
+                &local_stream_key(),
                 SubscribeMode::Replay,
             )
             .await;
@@ -1483,6 +1581,7 @@ mod tests {
                 &session.connection,
                 &store.writer,
                 stream_id,
+                &local_stream_key(),
                 SubscribeMode::Replay,
             )
             .await;
@@ -1498,8 +1597,18 @@ mod tests {
                 "over-i64 seq must be rejected, got {result:?}"
             );
             let guard = store.db.lock().await;
-            assert!(guard.load_received_events(stream_id).unwrap().is_empty());
-            assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 0);
+            assert!(
+                guard
+                    .load_received_events(local_stream_key().as_str())
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                guard
+                    .load_stream_cursor(local_stream_key().as_str())
+                    .unwrap(),
+                0
+            );
             drop(guard);
             assert!(forwarder.acks().is_empty());
 
@@ -1533,6 +1642,7 @@ mod tests {
                 &session.connection,
                 &store.writer,
                 stream_id,
+                &local_stream_key(),
                 SubscribeMode::Replay,
             )
             .await;
@@ -1548,8 +1658,18 @@ mod tests {
                 "over-i64 gap must be rejected, got {result:?}"
             );
             let guard = store.db.lock().await;
-            assert!(guard.load_gap_markers(stream_id).unwrap().is_empty());
-            assert_eq!(guard.load_stream_cursor(stream_id).unwrap(), 0);
+            assert!(
+                guard
+                    .load_gap_markers(local_stream_key().as_str())
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                guard
+                    .load_stream_cursor(local_stream_key().as_str())
+                    .unwrap(),
+                0
+            );
             drop(guard);
             assert!(forwarder.acks().is_empty());
 
@@ -1578,6 +1698,7 @@ mod tests {
                 &session.connection,
                 &store.writer,
                 stream_id,
+                &local_stream_key(),
                 SubscribeMode::Replay,
             )
             .await

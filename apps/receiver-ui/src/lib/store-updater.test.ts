@@ -1362,6 +1362,7 @@ describe("canonical-only stream identity", () => {
     await prefetchEarliestEpochOptions([stream]);
 
     expect(apiMocks.getReplayTargetEpochs).toHaveBeenCalledWith({
+      forwarder_endpoint_id: "endpoint-1",
       stream_id: "11111111-1111-1111-1111-111111111111",
     });
     expect(store.earliestEpochOptions[streamIdentity(stream)]).toEqual([

@@ -19,6 +19,7 @@ use receiver::p2p_runtime::{
     ForwarderPeerConfig, P2pReceiverConfig, ReceiverIdentity, ServerClientConfig,
     start_receiver_p2p,
 };
+use receiver::stream_key::LocalStreamKey;
 use receiver::ui_events::ReceiverUiEvent;
 use rt_p2p_protocol::{
     EventBatch, Hello, MAX_FRAME_BYTES, ReadRecord, StreamCatalog, StreamEntry, SubscribeOk,
@@ -110,6 +111,10 @@ async fn init_state(data_dir: &std::path::Path) -> Arc<receiver::control_api::Ap
     state
 }
 
+fn local_stream_key(sub: &StreamSubscription) -> LocalStreamKey {
+    LocalStreamKey::new(&sub.forwarder_endpoint_id, &sub.stream_id)
+}
+
 fn stream_subscription(
     forwarder_endpoint_id: &str,
     local_port_override: Option<u16>,
@@ -155,6 +160,128 @@ fn base_config(
         reconcile_interval: Duration::from_millis(50),
     };
     (config, sub)
+}
+
+#[tokio::test]
+async fn colliding_wire_stream_ids_are_isolated_by_forwarder_endpoint() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let forwarder_a = MockForwarderPeer::start([81; 32], script_two(b"aaa"))
+            .await
+            .unwrap();
+        let forwarder_b = MockForwarderPeer::start([82; 32], script_two(b"bbb"))
+            .await
+            .unwrap();
+        let (node_a, direct_a) = forwarder_config(&forwarder_a);
+        let (node_b, direct_b) = forwarder_config(&forwarder_b);
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_state(dir.path()).await;
+        state
+            .db
+            .lock()
+            .await
+            .replace_stream_subscriptions(&[
+                stream_subscription(&node_a, None),
+                stream_subscription(&node_b, None),
+            ])
+            .unwrap();
+        {
+            let mut discovered = state.discovered_forwarders.write().await;
+            discovered.insert(
+                node_a.clone(),
+                DiscoveredForwarder {
+                    display_name: Some("Forwarder A".to_owned()),
+                    direct_addrs: vec![direct_a],
+                    streams: vec![DiscoveredStream {
+                        stream_id: STREAM_ID.to_owned(),
+                        epoch: 1,
+                        next_seq: 3,
+                    }],
+                },
+            );
+            discovered.insert(
+                node_b.clone(),
+                DiscoveredForwarder {
+                    display_name: Some("Forwarder B".to_owned()),
+                    direct_addrs: vec![direct_b],
+                    streams: vec![DiscoveredStream {
+                        stream_id: STREAM_ID.to_owned(),
+                        epoch: 1,
+                        next_seq: 3,
+                    }],
+                },
+            );
+        }
+
+        let config = P2pReceiverConfig {
+            identity: ReceiverIdentity::Seed([83; 32]),
+            relay_disabled: true,
+            discovery_disabled: true,
+            bind_addr_v4: Some(std::net::SocketAddrV4::new(
+                std::net::Ipv4Addr::LOCALHOST,
+                0,
+            )),
+            forwarder: None,
+            server: None,
+            server_override: (None, None),
+            reconcile_interval: Duration::from_millis(50),
+        };
+        let runtime = start_receiver_p2p(Arc::clone(&state), config)
+            .await
+            .unwrap();
+
+        let key_a = LocalStreamKey::new(&node_a, STREAM_ID);
+        let key_b = LocalStreamKey::new(&node_b, STREAM_ID);
+        poll_until(
+            || {
+                let state = Arc::clone(&state);
+                let key_a = key_a.clone();
+                let key_b = key_b.clone();
+                async move {
+                    let db = state.db.lock().await;
+                    db.load_received_events(key_a.as_str())
+                        .map(|events| {
+                            events.len() == 2 && events.iter().all(|e| e.raw_frame == b"aaa")
+                        })
+                        .unwrap_or(false)
+                        && db
+                            .load_received_events(key_b.as_str())
+                            .map(|events| {
+                                events.len() == 2 && events.iter().all(|e| e.raw_frame == b"bbb")
+                            })
+                            .unwrap_or(false)
+                        && db.load_stream_cursor(key_a.as_str()).unwrap_or_default() == 2
+                        && db.load_stream_cursor(key_b.as_str()).unwrap_or_default() == 2
+                }
+            },
+            Duration::from_secs(10),
+        )
+        .await;
+
+        let db = state.db.lock().await;
+        assert!(db.load_received_events(STREAM_ID).unwrap().is_empty());
+        assert_eq!(db.load_received_events(key_a.as_str()).unwrap().len(), 2);
+        assert_eq!(db.load_received_events(key_b.as_str()).unwrap().len(), 2);
+        let cursors = db.load_stream_cursors().unwrap();
+        assert!(cursors.iter().any(|c| c.stream_id == key_a.as_str()));
+        assert!(cursors.iter().any(|c| c.stream_id == key_b.as_str()));
+        drop(db);
+
+        poll_until(
+            || async {
+                forwarder_a.acks().iter().any(|a| a.through_seq == 2)
+                    && forwarder_b.acks().iter().any(|a| a.through_seq == 2)
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+
+        runtime.shutdown().await;
+        forwarder_a.shutdown().await;
+        forwarder_b.shutdown().await;
+    })
+    .await
+    .expect("colliding_wire_stream_ids_are_isolated_by_forwarder_endpoint timed out");
 }
 
 #[tokio::test]
@@ -232,6 +359,7 @@ async fn runtime_persists_events_and_advances_cursor() {
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
         let (config, sub) = base_config(endpoint_id, direct, 71, None);
+        let local_key = local_stream_key(&sub);
         state
             .db
             .lock()
@@ -246,9 +374,10 @@ async fn runtime_persists_events_and_advances_cursor() {
         poll_until(
             || {
                 let state = Arc::clone(&state);
+                let local_key = local_key.clone();
                 async move {
                     let db = state.db.lock().await;
-                    db.load_received_events(STREAM_ID)
+                    db.load_received_events(local_key.as_str())
                         .map(|e| e.len() >= 2)
                         .unwrap_or(false)
                 }
@@ -259,14 +388,14 @@ async fn runtime_persists_events_and_advances_cursor() {
 
         let db = state.db.lock().await;
         let seqs: Vec<i64> = db
-            .load_received_events(STREAM_ID)
+            .load_received_events(local_key.as_str())
             .unwrap()
             .iter()
             .map(|e| e.seq)
             .collect();
         assert_eq!(seqs, vec![1, 2], "exact durable rows");
         assert_eq!(
-            db.load_stream_cursor(STREAM_ID).unwrap(),
+            db.load_stream_cursor(local_key.as_str()).unwrap(),
             2,
             "cursor advanced over the durable contiguous prefix"
         );
@@ -307,6 +436,7 @@ async fn durable_local_proxy_replays_exact_frames() {
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
         let (config, sub) = base_config(endpoint_id, direct, 73, Some(port));
+        let local_key = local_stream_key(&sub);
         state
             .db
             .lock()
@@ -322,9 +452,10 @@ async fn durable_local_proxy_replays_exact_frames() {
         poll_until(
             || {
                 let state = Arc::clone(&state);
+                let local_key = local_key.clone();
                 async move {
                     let db = state.db.lock().await;
-                    db.load_received_events(STREAM_ID)
+                    db.load_received_events(local_key.as_str())
                         .map(|e| e.len() >= 2)
                         .unwrap_or(false)
                 }
@@ -404,6 +535,7 @@ async fn dbf_feed_delivers_from_received_events_without_duplicates() {
             db.replace_stream_subscriptions(&[stream_subscription(&endpoint_id, None)])
                 .unwrap();
         }
+        let local_key = LocalStreamKey::new(&endpoint_id, STREAM_ID);
 
         let (config, _sub) = base_config(endpoint_id, direct, 75, None);
         let runtime = start_receiver_p2p(Arc::clone(&state), config)
@@ -414,10 +546,11 @@ async fn dbf_feed_delivers_from_received_events_without_duplicates() {
         poll_until(
             || {
                 let state = Arc::clone(&state);
+                let local_key = local_key.clone();
                 async move {
                     let db = state.db.lock().await;
-                    let e1 = db.load_received_event(STREAM_ID, 1).ok().flatten();
-                    let e2 = db.load_received_event(STREAM_ID, 2).ok().flatten();
+                    let e1 = db.load_received_event(local_key.as_str(), 1).ok().flatten();
+                    let e2 = db.load_received_event(local_key.as_str(), 2).ok().flatten();
                     matches!((e1, e2), (Some(a), Some(b))
                         if a.dbf_delivered_unix_ms.is_some()
                         && b.dbf_delivered_unix_ms.is_some())
@@ -434,11 +567,11 @@ async fn dbf_feed_delivers_from_received_events_without_duplicates() {
         let markers_before: Vec<Option<i64>> = {
             let db = state.db.lock().await;
             vec![
-                db.load_received_event(STREAM_ID, 1)
+                db.load_received_event(local_key.as_str(), 1)
                     .unwrap()
                     .unwrap()
                     .dbf_delivered_unix_ms,
-                db.load_received_event(STREAM_ID, 2)
+                db.load_received_event(local_key.as_str(), 2)
                     .unwrap()
                     .unwrap()
                     .dbf_delivered_unix_ms,
@@ -448,11 +581,11 @@ async fn dbf_feed_delivers_from_received_events_without_duplicates() {
         let markers_after: Vec<Option<i64>> = {
             let db = state.db.lock().await;
             vec![
-                db.load_received_event(STREAM_ID, 1)
+                db.load_received_event(local_key.as_str(), 1)
                     .unwrap()
                     .unwrap()
                     .dbf_delivered_unix_ms,
-                db.load_received_event(STREAM_ID, 2)
+                db.load_received_event(local_key.as_str(), 2)
                     .unwrap()
                     .unwrap()
                     .dbf_delivered_unix_ms,
@@ -549,13 +682,15 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
+        let sub = stream_subscription(&endpoint_id, None);
+        let local_key = local_stream_key(&sub);
         {
             let mut db = state.db.lock().await;
-            db.replace_stream_subscriptions(&[stream_subscription(&endpoint_id, None)])
-                .unwrap();
+            db.replace_stream_subscriptions(&[sub]).unwrap();
             // Opt this stream in to announcer publishing (global + per-stream).
             db.set_announcer_enabled(true).unwrap();
-            db.set_stream_announcer_publish(STREAM_ID, true).unwrap();
+            db.set_stream_announcer_publish(local_key.as_str(), true)
+                .unwrap();
         }
 
         let (mut config, _sub) = base_config(endpoint_id, direct, 77, None);
@@ -589,7 +724,10 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
         keys.sort();
         assert_eq!(
             keys,
-            vec![(STREAM_ID.to_owned(), 1), (STREAM_ID.to_owned(), 2)],
+            vec![
+                (local_key.as_str().to_owned(), 1),
+                (local_key.as_str().to_owned(), 2)
+            ],
             "each (stream_id, seq) pushed exactly once with no duplicate repush"
         );
         for (_, _, row_gen) in &rows {
@@ -617,10 +755,11 @@ async fn announcer_does_not_push_when_stream_not_opted_in() {
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
+        let sub = stream_subscription(&endpoint_id, None);
+        let local_key = local_stream_key(&sub);
         {
             let mut db = state.db.lock().await;
-            db.replace_stream_subscriptions(&[stream_subscription(&endpoint_id, None)])
-                .unwrap();
+            db.replace_stream_subscriptions(&[sub]).unwrap();
             // Global toggle on, but the stream is NOT opted in.
             db.set_announcer_enabled(true).unwrap();
         }
@@ -640,10 +779,11 @@ async fn announcer_does_not_push_when_stream_not_opted_in() {
             || {
                 let state = Arc::clone(&state);
                 let thin_state = thin_state.clone();
+                let local_key = local_key.clone();
                 async move {
                     let durable = {
                         let db = state.db.lock().await;
-                        db.load_received_events(STREAM_ID)
+                        db.load_received_events(local_key.as_str())
                             .map(|e| e.len() >= 2)
                             .unwrap_or(false)
                     };
@@ -874,12 +1014,14 @@ async fn announcer_push_recovers_when_server_starts_late() {
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
+        let sub = stream_subscription(&endpoint_id, None);
+        let local_key = local_stream_key(&sub);
         {
             let mut db = state.db.lock().await;
-            db.replace_stream_subscriptions(&[stream_subscription(&endpoint_id, None)])
-                .unwrap();
+            db.replace_stream_subscriptions(&[sub]).unwrap();
             db.set_announcer_enabled(true).unwrap();
-            db.set_stream_announcer_publish(STREAM_ID, true).unwrap();
+            db.set_stream_announcer_publish(local_key.as_str(), true)
+                .unwrap();
         }
 
         let (mut config, _sub) = base_config(endpoint_id, direct, 85, None);
@@ -896,9 +1038,10 @@ async fn announcer_push_recovers_when_server_starts_late() {
         poll_until(
             || {
                 let state = Arc::clone(&state);
+                let local_key = local_key.clone();
                 async move {
                     let db = state.db.lock().await;
-                    db.load_received_events(STREAM_ID)
+                    db.load_received_events(local_key.as_str())
                         .map(|e| e.len() >= 2)
                         .unwrap_or(false)
                 }
@@ -937,7 +1080,10 @@ async fn announcer_push_recovers_when_server_starts_late() {
         keys.dedup();
         assert_eq!(
             keys,
-            vec![(STREAM_ID.to_owned(), 1), (STREAM_ID.to_owned(), 2)],
+            vec![
+                (local_key.as_str().to_owned(), 1),
+                (local_key.as_str().to_owned(), 2)
+            ],
             "both pending rows pushed after server recovery"
         );
 
@@ -1125,11 +1271,13 @@ async fn discovered_forwarder_is_dialed_and_persists_events() {
             },
         );
 
+        let sub = stream_subscription(&endpoint_id, None);
+        let local_key = local_stream_key(&sub);
         state
             .db
             .lock()
             .await
-            .replace_stream_subscriptions(&[stream_subscription(&endpoint_id, None)])
+            .replace_stream_subscriptions(&[sub])
             .unwrap();
 
         let config = P2pReceiverConfig {
@@ -1152,9 +1300,10 @@ async fn discovered_forwarder_is_dialed_and_persists_events() {
         poll_until(
             || {
                 let state = Arc::clone(&state);
+                let local_key = local_key.clone();
                 async move {
                     let db = state.db.lock().await;
-                    db.load_received_events(STREAM_ID)
+                    db.load_received_events(local_key.as_str())
                         .map(|e| e.len() >= 2)
                         .unwrap_or(false)
                 }
@@ -1165,7 +1314,7 @@ async fn discovered_forwarder_is_dialed_and_persists_events() {
 
         let db = state.db.lock().await;
         let seqs: Vec<i64> = db
-            .load_received_events(STREAM_ID)
+            .load_received_events(local_key.as_str())
             .unwrap()
             .iter()
             .map(|e| e.seq)
@@ -1190,11 +1339,13 @@ async fn shutdown_cancels_runtime_promptly() {
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
+        let sub = stream_subscription(&endpoint_id, None);
+        let local_key = local_stream_key(&sub);
         state
             .db
             .lock()
             .await
-            .replace_stream_subscriptions(&[stream_subscription(&endpoint_id, None)])
+            .replace_stream_subscriptions(&[sub])
             .unwrap();
 
         let (config, _sub) = base_config(endpoint_id, direct, 79, None);
@@ -1206,9 +1357,10 @@ async fn shutdown_cancels_runtime_promptly() {
         poll_until(
             || {
                 let state = Arc::clone(&state);
+                let local_key = local_key.clone();
                 async move {
                     let db = state.db.lock().await;
-                    db.load_received_events(STREAM_ID)
+                    db.load_received_events(local_key.as_str())
                         .map(|e| !e.is_empty())
                         .unwrap_or(false)
                 }
@@ -1269,14 +1421,15 @@ async fn one_connection_multiplexes_multiple_data_streams() {
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
         let (config, _sub) = base_config(endpoint_id.clone(), direct, 93, None);
+        let sub_a = stream_subscription_for(&endpoint_id, STREAM_ID);
+        let sub_b = stream_subscription_for(&endpoint_id, STREAM_ID_2);
+        let local_key_a = local_stream_key(&sub_a);
+        let local_key_b = local_stream_key(&sub_b);
         state
             .db
             .lock()
             .await
-            .replace_stream_subscriptions(&[
-                stream_subscription_for(&endpoint_id, STREAM_ID),
-                stream_subscription_for(&endpoint_id, STREAM_ID_2),
-            ])
+            .replace_stream_subscriptions(&[sub_a, sub_b])
             .unwrap();
 
         let runtime = start_receiver_p2p(Arc::clone(&state), config)
@@ -1287,14 +1440,16 @@ async fn one_connection_multiplexes_multiple_data_streams() {
         poll_until(
             || {
                 let state = Arc::clone(&state);
+                let local_key_a = local_key_a.clone();
+                let local_key_b = local_key_b.clone();
                 async move {
                     let db = state.db.lock().await;
                     let a = db
-                        .load_received_events(STREAM_ID)
+                        .load_received_events(local_key_a.as_str())
                         .map(|e| e.len())
                         .unwrap_or(0);
                     let b = db
-                        .load_received_events(STREAM_ID_2)
+                        .load_received_events(local_key_b.as_str())
                         .map(|e| e.len())
                         .unwrap_or(0);
                     a >= 2 && b >= 2
@@ -1330,9 +1485,10 @@ async fn one_connection_multiplexes_multiple_data_streams() {
         poll_until(
             || {
                 let state = Arc::clone(&state);
+                let local_key_a = local_key_a.clone();
                 async move {
                     let db = state.db.lock().await;
-                    db.load_received_events(STREAM_ID)
+                    db.load_received_events(local_key_a.as_str())
                         .map(|e| e.len())
                         .unwrap_or(0)
                         >= 2

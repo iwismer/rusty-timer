@@ -6,6 +6,7 @@
 
 use crate::db::{DEFAULT_UPDATE_MODE, Db, StreamSubscription};
 use crate::error::ReceiverError;
+use crate::stream_key::LocalStreamKey;
 use crate::ui_events::ReceiverUiEvent;
 use rt_domain::ReceiverMode;
 use rt_p2p_protocol::{
@@ -1281,7 +1282,8 @@ impl AppState {
                     let sk = crate::cache::StreamKey::new(forwarder_id, reader_ip);
                     counts_snapshot.get(&sk)
                 });
-            let cursor = cursor_map.get(sub.stream_id.as_str());
+            let local_stream_key = LocalStreamKey::new(&sub.forwarder_endpoint_id, &sub.stream_id);
+            let cursor = cursor_map.get(local_stream_key.as_str());
             let discovered_stream = discovered_streams
                 .get(&(sub.forwarder_endpoint_id.as_str(), sub.stream_id.as_str()));
             let runtime = runtime_statuses
@@ -1306,7 +1308,7 @@ impl AppState {
                 reader_ip: display_reader_ip,
                 subscribed: true,
                 local_port: port,
-                announcer_publish: announcer_publish_streams.contains(&sub.stream_id),
+                announcer_publish: announcer_publish_streams.contains(local_stream_key.as_str()),
                 event_type: Some(sub.event_type),
                 online,
                 reader_connected,
@@ -1510,7 +1512,8 @@ pub struct SubscriptionsBody {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct CursorResetRequest {
+pub struct StreamRef {
+    pub forwarder_endpoint_id: String,
     pub stream_id: String,
 }
 
@@ -1908,12 +1911,14 @@ pub async fn set_announcer_max_list_size(
 /// Opt a single stream in/out of announcer publishing (opt-in default off).
 pub async fn set_stream_announcer_publish(
     state: &AppState,
+    forwarder_endpoint_id: &str,
     stream_id: &str,
     publish: bool,
 ) -> Result<(), ReceiverError> {
+    let local_stream_key = LocalStreamKey::new(forwarder_endpoint_id, stream_id);
     {
         let db = state.db.lock().await;
-        db.set_stream_announcer_publish(stream_id, publish)
+        db.set_stream_announcer_publish(local_stream_key.as_str(), publish)
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     }
     // The per-stream publish flag rides on the streams snapshot, so broadcast
@@ -2139,11 +2144,13 @@ pub async fn get_stream_metrics(state: &AppState) -> Vec<crate::ui_events::Strea
 
 pub async fn get_replay_target_epochs(
     state: &AppState,
+    forwarder_endpoint_id: String,
     stream_id: String,
 ) -> Result<ReplayTargetEpochsResponse, ReceiverError> {
+    let local_stream_key = LocalStreamKey::new(&forwarder_endpoint_id, &stream_id);
     let db = state.db.lock().await;
     let rows = db
-        .load_replay_target_epochs(&stream_id)
+        .load_replay_target_epochs(local_stream_key.as_str())
         .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     Ok(ReplayTargetEpochsResponse {
         epochs: rows
@@ -2970,12 +2977,10 @@ pub async fn update_subscription_event_type(
     }
 }
 
-pub async fn admin_reset_cursor(
-    state: &AppState,
-    body: CursorResetRequest,
-) -> Result<(), ReceiverError> {
+pub async fn admin_reset_cursor(state: &AppState, body: StreamRef) -> Result<(), ReceiverError> {
+    let local_stream_key = LocalStreamKey::new(&body.forwarder_endpoint_id, &body.stream_id);
     let db = state.db.lock().await;
-    match db.delete_stream_cursor(&body.stream_id) {
+    match db.delete_stream_cursor(local_stream_key.as_str()) {
         Ok(()) => Ok(()),
         Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
@@ -3001,10 +3006,11 @@ pub async fn admin_reset_all_earliest_epochs(
 
 pub async fn admin_reset_earliest_epoch(
     state: &AppState,
-    body: CursorResetRequest,
+    body: StreamRef,
 ) -> Result<(), ReceiverError> {
+    let local_stream_key = LocalStreamKey::new(&body.forwarder_endpoint_id, &body.stream_id);
     let db = state.db.lock().await;
-    match db.delete_stream_earliest_epoch(&body.stream_id) {
+    match db.delete_stream_earliest_epoch(local_stream_key.as_str()) {
         Ok(()) => Ok(()),
         Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
@@ -3200,6 +3206,7 @@ macro_rules! receiver_command_list {
             get_stream_metrics() -> "Vec<StreamMetricsPayload>",
             put_earliest_epoch(body: "EarliestEpochRequest") -> "()",
             get_replay_target_epochs(
+                forwarder_endpoint_id: "String",
                 stream_id: "String"
             ) -> "ReplayTargetEpochsResponse",
             get_subscriptions() -> "SubscriptionsBody",
@@ -3247,9 +3254,9 @@ macro_rules! receiver_command_list {
             reader_reconnect(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
             get_version() -> "String",
             get_logs() -> "LogsResponse",
-            admin_reset_cursor(body: "CursorResetRequest") -> "()",
+            admin_reset_cursor(body: "StreamRef") -> "()",
             admin_reset_all_cursors() -> "serde_json::Value",
-            admin_reset_earliest_epoch(body: "CursorResetRequest") -> "()",
+            admin_reset_earliest_epoch(body: "StreamRef") -> "()",
             admin_reset_all_earliest_epochs() -> "serde_json::Value",
             admin_purge_subscriptions() -> "serde_json::Value",
             admin_update_port(body: "UpdatePortRequest") -> "()",
@@ -3275,6 +3282,7 @@ macro_rules! receiver_command_list {
             set_announcer_enabled(enabled: "bool") -> "()",
             set_announcer_max_list_size(max_list_size: "u32") -> "()",
             set_stream_announcer_publish(
+                forwarder_endpoint_id: "String",
                 stream_id: "String",
                 publish: "bool"
             ) -> "()",
@@ -4682,13 +4690,16 @@ mod tests {
     #[tokio::test]
     async fn admin_reset_cursor_uses_stream_id() {
         let stream_id = "127.0.0.1:10000";
+        let local_stream_key = LocalStreamKey::new("forwarder-a", stream_id);
         let db = Db::open_in_memory().unwrap();
-        db.jump_stream_cursor(stream_id, 42).unwrap();
+        db.jump_stream_cursor(local_stream_key.as_str(), 42)
+            .unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
 
         admin_reset_cursor(
             &state,
-            CursorResetRequest {
+            StreamRef {
+                forwarder_endpoint_id: "forwarder-a".to_owned(),
                 stream_id: stream_id.to_owned(),
             },
         )
@@ -4696,7 +4707,7 @@ mod tests {
         .unwrap();
 
         let db = state.db.lock().await;
-        assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 0);
+        assert_eq!(db.load_stream_cursor(local_stream_key.as_str()).unwrap(), 0);
     }
 
     #[tokio::test]
@@ -4721,7 +4732,12 @@ mod tests {
             assert_eq!(
                 db.load_stream_earliest_epochs().unwrap(),
                 vec![crate::db::StreamEarliestEpoch {
-                    stream_id: "22222222-2222-2222-2222-222222222222".to_owned(),
+                    stream_id: LocalStreamKey::new(
+                        "endpoint-1",
+                        "22222222-2222-2222-2222-222222222222",
+                    )
+                    .as_str()
+                    .to_owned(),
                     forwarder_endpoint_id: "endpoint-1".to_owned(),
                     earliest_epoch: 7,
                 }]
@@ -4734,7 +4750,8 @@ mod tests {
 
         admin_reset_earliest_epoch(
             &state,
-            CursorResetRequest {
+            StreamRef {
+                forwarder_endpoint_id: "endpoint-1".to_owned(),
                 stream_id: "22222222-2222-2222-2222-222222222222".to_owned(),
             },
         )

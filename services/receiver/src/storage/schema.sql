@@ -7,11 +7,18 @@
 --   PRAGMA foreign_keys=ON;
 -- At startup, run PRAGMA integrity_check; exit if result != 'ok'.
 --
--- P2P stream IDs are stored as arbitrary UTF-8 TEXT (e.g. the forwarder journal
--- key `ip:port`). They are never required to be parseable UUIDs.
--- Legacy receiver APIs populate compatibility columns where present so the
--- incremental migration can keep existing callers green while new P2P APIs use
--- stream_id directly.
+-- Stream identity: except for `subscriptions` (which keeps separate
+-- forwarder_endpoint_id + wire stream_id columns), every `stream_id` column in
+-- this schema stores the receiver-local canonical stream key
+-- `{forwarder_endpoint_id}\u{1F}{wire_stream_id}` (Unit Separator, U+001F; see
+-- services/receiver/src/stream_key.rs). Two forwarders can expose the same
+-- wire stream id (forwarder journal keys like `ip:port`), so the bare wire id
+-- is ambiguous. Wire stream ids are arbitrary UTF-8 and never required to be
+-- parseable UUIDs.
+--
+-- Versioning: `PRAGMA user_version = 1` is stamped when the schema is applied.
+-- A database that has tables but user_version == 0 predates the canonical
+-- stream key and is rejected at startup (no migration; delete and recreate).
 
 CREATE TABLE IF NOT EXISTS profile (
     server_url  TEXT NOT NULL,
@@ -22,6 +29,8 @@ CREATE TABLE IF NOT EXISTS profile (
     dbf_enabled INTEGER NOT NULL DEFAULT 0,
     -- Global announcer publish on/off (opt-in; default off).
     announcer_enabled INTEGER NOT NULL DEFAULT 0,
+    announcer_max_list_size INTEGER NOT NULL DEFAULT 25,
+    device_token TEXT,
     -- Race Director DBF participant/chip import (background poll). Opt-in;
     -- default off. The manual import action ignores `rd_import_enabled`.
     rd_import_enabled INTEGER NOT NULL DEFAULT 0,

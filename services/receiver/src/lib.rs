@@ -19,6 +19,7 @@ pub mod rd_poll;
 pub mod read_pool;
 pub mod retention;
 pub mod runtime;
+pub mod stream_key;
 pub mod ui_events;
 pub mod writer;
 pub use cache::{EventBus, StreamCounts, StreamKey};

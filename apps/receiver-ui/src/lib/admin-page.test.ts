@@ -61,6 +61,7 @@ describe("receiver admin page", () => {
 
     await waitFor(() => {
       expect(apiMocks.resetStreamCursor).toHaveBeenCalledWith({
+        forwarder_endpoint_id: "endpoint-1",
         stream_id: "stream-1",
       });
     });
@@ -156,6 +157,7 @@ describe("receiver admin page", () => {
     await fireEvent.click(startButton);
     await waitFor(() => {
       expect(apiMocks.resetStreamCursor).toHaveBeenNthCalledWith(2, {
+        forwarder_endpoint_id: "endpoint-2",
         stream_id: "stream-2",
       });
     });

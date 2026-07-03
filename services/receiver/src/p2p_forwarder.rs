@@ -21,11 +21,13 @@ use crate::p2p_session::{
     BackoffConfig, DurableBatch, P2pSessionError, SessionStatusReporter, connect_and_hello,
     read_frame, run_data_subscription_with_hint, write_frame,
 };
+use crate::stream_key::LocalStreamKey;
 use crate::writer::WriterHandle;
 
 #[derive(Clone, Debug)]
 pub struct ForwarderDataStream {
     pub stream_id: String,
+    pub local_stream_key: LocalStreamKey,
     pub mode: SubscribeMode,
     pub durable_hint_tx: Option<broadcast::Sender<DurableBatch>>,
 }
@@ -73,7 +75,7 @@ impl ForwarderConnection {
     pub fn set_desired_streams(&self, streams: Vec<ForwarderDataStream>) {
         let desired = streams
             .into_iter()
-            .map(|stream| (stream.stream_id.clone(), stream))
+            .map(|stream| (stream.local_stream_key.as_str().to_owned(), stream))
             .collect();
         let _ = self.desired_tx.send(desired);
     }
@@ -714,6 +716,7 @@ async fn sync_data_tasks(
                     &connection,
                     &writer,
                     &stream.stream_id,
+                    &stream.local_stream_key,
                     stream.mode,
                     stream.durable_hint_tx.as_ref(),
                 )
@@ -759,6 +762,7 @@ mod tests {
         get_forwarder_config, restart_forwarder, set_forwarder_config,
     };
     use crate::p2p_session::{BackoffConfig, SessionStatusReporter};
+    use crate::stream_key::LocalStreamKey;
 
     use super::{
         FORWARDER_CONFIG_TIMEOUT, ForwarderConnection, ForwarderDataStream, PendingConfigRequest,
@@ -766,6 +770,10 @@ mod tests {
     };
 
     const STREAM_ID: &str = "127.0.0.1:10000";
+
+    fn local_stream_key(endpoint_id: &str) -> LocalStreamKey {
+        LocalStreamKey::new(endpoint_id, STREAM_ID)
+    }
 
     fn test_hello() -> Hello {
         Hello {
@@ -874,6 +882,7 @@ mod tests {
             let (hint_tx, _hint_rx) = broadcast::channel(16);
             connection.set_desired_streams(vec![ForwarderDataStream {
                 stream_id: STREAM_ID.to_owned(),
+                local_stream_key: local_stream_key(&endpoint_id),
                 mode: SubscribeMode::Replay,
                 durable_hint_tx: Some(hint_tx),
             }]);
@@ -1002,6 +1011,7 @@ mod tests {
             let (hint_tx, _hint_rx) = broadcast::channel(16);
             connection.set_desired_streams(vec![ForwarderDataStream {
                 stream_id: STREAM_ID.to_owned(),
+                local_stream_key: local_stream_key(&endpoint_id),
                 mode: SubscribeMode::Replay,
                 durable_hint_tx: Some(hint_tx),
             }]);
@@ -1030,7 +1040,7 @@ mod tests {
             // per seq, with no duplicate seqs in the final durable set.
             let guard = store.db.lock().await;
             let seqs: Vec<i64> = guard
-                .load_received_events(STREAM_ID)
+                .load_received_events(local_stream_key(&endpoint_id).as_str())
                 .unwrap()
                 .iter()
                 .map(|e| e.seq)
@@ -1040,7 +1050,12 @@ mod tests {
                 vec![1, 2],
                 "resume must not produce duplicate durable rows"
             );
-            assert_eq!(guard.load_stream_cursor(STREAM_ID).unwrap(), 2);
+            assert_eq!(
+                guard
+                    .load_stream_cursor(local_stream_key(&endpoint_id).as_str())
+                    .unwrap(),
+                2
+            );
             drop(guard);
 
             connection.stop().await;
@@ -1737,6 +1752,7 @@ mod tests {
             let (hint_tx, _hint_rx) = broadcast::channel(16);
             connection.set_desired_streams(vec![ForwarderDataStream {
                 stream_id: STREAM_ID.to_owned(),
+                local_stream_key: local_stream_key(&endpoint_id),
                 mode: SubscribeMode::Replay,
                 durable_hint_tx: Some(hint_tx),
             }]);

@@ -686,6 +686,7 @@ export async function prefetchEarliestEpochOptions(
       // store has no events yet, fall back to the advertised current epoch so
       // the controls do not show "No epochs available".
       const response = await api.getReplayTargetEpochs({
+        forwarder_endpoint_id: stream.forwarder_endpoint_id,
         stream_id: stream.stream_id,
       });
       const epochs =
@@ -1231,7 +1232,11 @@ export async function setStreamAnnouncerPublish(
   store.streamAnnouncerBusy = { ...store.streamAnnouncerBusy, [key]: true };
   try {
     store.error = null;
-    await api.setStreamAnnouncerPublish(stream.stream_id, publish);
+    await api.setStreamAnnouncerPublish(
+      stream.forwarder_endpoint_id,
+      stream.stream_id,
+      publish,
+    );
     // Refresh streams so the toggle reflects persisted state.
     const latest = await api.getStreams();
     store.streams = latest;

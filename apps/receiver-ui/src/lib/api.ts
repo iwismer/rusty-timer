@@ -377,10 +377,12 @@ export async function setAnnouncerMaxListSize(
 }
 
 export async function setStreamAnnouncerPublish(
+  forwarderEndpointId: string,
   streamId: string,
   publish: boolean,
 ): Promise<void> {
   await invoke("set_stream_announcer_publish", {
+    forwarderEndpointId,
     streamId,
     publish,
   });
@@ -619,17 +621,25 @@ export async function putEarliestEpoch(
 }
 
 export async function getReplayTargetEpochs(stream: {
+  forwarder_endpoint_id: string;
   stream_id: string;
 }): Promise<ReplayTargetEpochsResponse> {
   return invoke<ReplayTargetEpochsResponse>("get_replay_target_epochs", {
+    forwarderEndpointId: stream.forwarder_endpoint_id,
     streamId: stream.stream_id,
   });
 }
 
 export async function resetStreamCursor(stream: {
+  forwarder_endpoint_id: string;
   stream_id: string;
 }): Promise<void> {
-  await invoke("admin_reset_cursor", { body: { stream_id: stream.stream_id } });
+  await invoke("admin_reset_cursor", {
+    body: {
+      forwarder_endpoint_id: stream.forwarder_endpoint_id,
+      stream_id: stream.stream_id,
+    },
+  });
 }
 
 export async function resetAllCursors(): Promise<{ deleted: number }> {
@@ -637,10 +647,14 @@ export async function resetAllCursors(): Promise<{ deleted: number }> {
 }
 
 export async function resetEarliestEpoch(stream: {
+  forwarder_endpoint_id: string;
   stream_id: string;
 }): Promise<void> {
   await invoke("admin_reset_earliest_epoch", {
-    body: { stream_id: stream.stream_id },
+    body: {
+      forwarder_endpoint_id: stream.forwarder_endpoint_id,
+      stream_id: stream.stream_id,
+    },
   });
 }
 

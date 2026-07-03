@@ -68,6 +68,7 @@ use crate::p2p_forwarder::{ForwarderConnection, ForwarderDataStream};
 use crate::p2p_session::{BackoffConfig, DurableBatch, SessionStatusReporter};
 use crate::ports::{default_port, reader_addr_if_port_mappable};
 use crate::projection::StreamProjection;
+use crate::stream_key::LocalStreamKey;
 use crate::ui_events::ReceiverUiEvent;
 
 /// Capacity of each per-stream durable-hint broadcast channel.
@@ -1180,14 +1181,17 @@ async fn reconcile_once(
         workers.insert(endpoint_id.clone(), worker);
     }
 
-    let mut desired_streams: HashMap<String, StreamSubscription> = HashMap::new();
+    let mut desired_streams: HashMap<LocalStreamKey, StreamSubscription> = HashMap::new();
     for sub in subs {
-        desired_streams.insert(sub.stream_id.clone(), sub);
+        desired_streams.insert(
+            LocalStreamKey::new(&sub.forwarder_endpoint_id, &sub.stream_id),
+            sub,
+        );
     }
 
     let stale_streams = stream_workers
         .keys()
-        .filter(|stream_id| !desired_streams.contains_key(*stream_id))
+        .filter(|stream_id| !desired_streams.contains_key(stream_id.as_str()))
         .cloned()
         .collect::<Vec<_>>();
     for stream_id in stale_streams {
@@ -1204,7 +1208,8 @@ async fn reconcile_once(
         config.server.is_some() && announcer_generation.is_some() && announcer_enabled;
     let should_announce =
         |stream_id: &str| announcer_available && announcer_publish_streams.contains(stream_id);
-    for (stream_id, sub) in desired_streams {
+    for (local_stream_key, sub) in desired_streams {
+        let stream_id = local_stream_key.as_str().to_owned();
         let want_announce = should_announce(&stream_id);
         if let Some(existing) = stream_workers.get(&stream_id) {
             let config_changed = existing.sub != sub;
@@ -1237,6 +1242,7 @@ async fn reconcile_once(
             announcer_stale,
             want_announce,
             &sub,
+            &local_stream_key,
         )
         .await;
         stream_workers.insert(stream_id, worker);
@@ -1249,9 +1255,13 @@ async fn reconcile_once(
             .flatten()
             .filter_map(|sub| {
                 stream_workers
-                    .get(&sub.stream_id)
+                    .get(LocalStreamKey::new(&sub.forwarder_endpoint_id, &sub.stream_id).as_str())
                     .map(|stream_worker| ForwarderDataStream {
                         stream_id: sub.stream_id.clone(),
+                        local_stream_key: LocalStreamKey::new(
+                            &sub.forwarder_endpoint_id,
+                            &sub.stream_id,
+                        ),
                         mode: SubscribeMode::Replay,
                         durable_hint_tx: Some(stream_worker.hint_tx.clone()),
                     })
@@ -1269,9 +1279,11 @@ async fn start_stream_worker(
     announcer_stale: &Arc<AtomicBool>,
     announce: bool,
     sub: &StreamSubscription,
+    local_stream_key: &LocalStreamKey,
 ) -> StreamWorker {
-    let stream_id = sub.stream_id.clone();
-    info!(%stream_id, "starting p2p stream worker");
+    let wire_stream_id = sub.stream_id.clone();
+    let stream_id = local_stream_key.as_str().to_owned();
+    info!(%stream_id, wire_stream_id = %wire_stream_id, "starting p2p stream worker");
 
     let (hint_tx, _hint_rx) = broadcast::channel::<DurableBatch>(HINT_CHANNEL_CAPACITY);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -1716,7 +1728,12 @@ async fn run_shared_dbf_pass(
                             Ok(Some((idx, event_type))) => match u8::try_from(idx) {
                                 Ok(reader_index) if reader_index <= 9 => {
                                     specs.push(crate::dbf_writer::DbfStreamSpec {
-                                        stream_id: sub.stream_id,
+                                        stream_id: LocalStreamKey::new(
+                                            &sub.forwarder_endpoint_id,
+                                            &sub.stream_id,
+                                        )
+                                        .as_str()
+                                        .to_owned(),
                                         event_type,
                                         reader_index,
                                     });
@@ -2954,6 +2971,7 @@ mod tests {
     async fn shared_dbf_worker_delivers_and_retries_on_interval() {
         let stream_id = "127.0.0.1:11000";
         let fwd = "fwd-dbf-retry";
+        let local_stream_key = LocalStreamKey::new(fwd, stream_id);
 
         let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
         let tmp = tempfile::tempdir().unwrap();
@@ -2982,8 +3000,8 @@ mod tests {
                 reader_ip: Some(stream_id.to_owned()),
             }])
             .unwrap();
-            insert_chip_event(&db, stream_id, 1, 1_700_000_000_100);
-            insert_chip_event(&db, stream_id, 2, 1_700_000_000_200);
+            insert_chip_event(&db, local_stream_key.as_str(), 1, 1_700_000_000_100);
+            insert_chip_event(&db, local_stream_key.as_str(), 2, 1_700_000_000_200);
         }
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -2996,7 +3014,7 @@ mod tests {
             let guard = state.db.lock().await;
             assert_eq!(
                 guard
-                    .load_undelivered_received_events(stream_id)
+                    .load_undelivered_received_events(local_stream_key.as_str())
                     .unwrap()
                     .len(),
                 2,
@@ -3008,12 +3026,13 @@ mod tests {
         std::fs::create_dir_all(&missing_dir).unwrap();
         let delivered = poll_async(Duration::from_secs(10), || {
             let state = Arc::clone(&state);
+            let local_stream_key = local_stream_key.clone();
             async move {
                 state
                     .db
                     .lock()
                     .await
-                    .load_undelivered_received_events(stream_id)
+                    .load_undelivered_received_events(local_stream_key.as_str())
                     .unwrap()
                     .is_empty()
             }
@@ -3025,16 +3044,17 @@ mod tests {
         // New rows are appended incrementally on later ticks.
         {
             let guard = state.db.lock().await;
-            insert_chip_event(&guard, stream_id, 3, 1_700_000_000_300);
+            insert_chip_event(&guard, local_stream_key.as_str(), 3, 1_700_000_000_300);
         }
         let appended = poll_async(Duration::from_secs(10), || {
             let state = Arc::clone(&state);
+            let local_stream_key = local_stream_key.clone();
             async move {
                 state
                     .db
                     .lock()
                     .await
-                    .load_undelivered_received_events(stream_id)
+                    .load_undelivered_received_events(local_stream_key.as_str())
                     .unwrap()
                     .is_empty()
             }

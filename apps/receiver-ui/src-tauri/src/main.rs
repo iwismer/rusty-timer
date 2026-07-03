@@ -332,10 +332,11 @@ async fn set_announcer_max_list_size(
 #[tauri::command]
 async fn set_stream_announcer_publish(
     state: State<'_, Arc<AppState>>,
+    forwarder_endpoint_id: String,
     stream_id: String,
     publish: bool,
 ) -> CmdResult<()> {
-    control_api::set_stream_announcer_publish(&state, &stream_id, publish)
+    control_api::set_stream_announcer_publish(&state, &forwarder_endpoint_id, &stream_id, publish)
         .await
         .map_err(|e| e.to_string())
 }
@@ -379,9 +380,10 @@ async fn put_earliest_epoch(
 #[tauri::command]
 async fn get_replay_target_epochs(
     state: State<'_, Arc<AppState>>,
+    forwarder_endpoint_id: String,
     stream_id: String,
 ) -> CmdResult<control_api::ReplayTargetEpochsResponse> {
-    control_api::get_replay_target_epochs(&state, stream_id)
+    control_api::get_replay_target_epochs(&state, forwarder_endpoint_id, stream_id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -632,7 +634,7 @@ async fn get_logs(state: State<'_, Arc<AppState>>) -> CmdResult<control_api::Log
 #[tauri::command]
 async fn admin_reset_cursor(
     state: State<'_, Arc<AppState>>,
-    body: control_api::CursorResetRequest,
+    body: control_api::StreamRef,
 ) -> CmdResult<()> {
     control_api::admin_reset_cursor(&state, body)
         .await
@@ -649,7 +651,7 @@ async fn admin_reset_all_cursors(state: State<'_, Arc<AppState>>) -> CmdResult<s
 #[tauri::command]
 async fn admin_reset_earliest_epoch(
     state: State<'_, Arc<AppState>>,
-    body: control_api::CursorResetRequest,
+    body: control_api::StreamRef,
 ) -> CmdResult<()> {
     control_api::admin_reset_earliest_epoch(&state, body)
         .await

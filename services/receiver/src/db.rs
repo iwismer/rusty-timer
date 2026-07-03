@@ -1,3 +1,4 @@
+use crate::stream_key::LocalStreamKey;
 use rt_domain::{ReceiverMode, ResumeCursor};
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
@@ -68,6 +69,10 @@ pub enum DbError {
     Io(#[from] std::io::Error),
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error(
+        "Existing receiver database at {path} has schema user_version=0; delete receiver.sqlite3 and restart"
+    )]
+    LegacyDatabase { path: String },
     #[error("Profile missing")]
     ProfileMissing,
 }
@@ -255,14 +260,14 @@ impl Db {
         let c = Connection::open(path)?;
         let d = Self { conn: c };
         d.apply_pragmas()?;
-        d.apply_schema()?;
+        d.apply_schema(Some(path))?;
         Ok(d)
     }
     pub fn open_in_memory() -> DbResult<Self> {
         let c = Connection::open_in_memory()?;
         let d = Self { conn: c };
         d.apply_pragmas()?;
-        d.apply_schema()?;
+        d.apply_schema(None)?;
         Ok(d)
     }
 
@@ -384,11 +389,12 @@ impl Db {
         stream_id: &str,
         epoch: i64,
     ) -> DbResult<()> {
+        let local_stream_key = LocalStreamKey::new(forwarder_endpoint_id, stream_id);
         self.conn.execute(
             "INSERT OR REPLACE INTO earliest_epochs
              (stream_id, forwarder_endpoint_id, earliest_epoch, forwarder_id, reader_ip)
              VALUES (?1, ?2, ?3, NULL, NULL)",
-            rusqlite::params![stream_id, forwarder_endpoint_id, epoch],
+            rusqlite::params![local_stream_key.as_str(), forwarder_endpoint_id, epoch],
         )?;
         Ok(())
     }
@@ -427,7 +433,7 @@ impl Db {
     /// display-metadata rows, and records the real metadata in the compatibility
     /// columns.
     pub fn save_earliest_epoch(&self, fwd: &str, ip: &str, epoch: i64) -> DbResult<()> {
-        let stream_id = legacy_cursor_stream_id(fwd, ip);
+        let stream_id = LocalStreamKey::new(fwd, ip).as_str().to_owned();
         self.conn.execute(
             "INSERT OR REPLACE INTO earliest_epochs
              (stream_id, forwarder_endpoint_id, earliest_epoch, forwarder_id, reader_ip)
@@ -749,7 +755,7 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
     pub fn save_cursor(&self, fwd: &str, ip: &str, epoch: i64, seq: i64) -> DbResult<()> {
-        let stream_id = legacy_cursor_stream_id(fwd, ip);
+        let stream_id = LocalStreamKey::new(fwd, ip).as_str().to_owned();
         let existing: Option<(i64, i64)> = self
             .conn
             .query_row(
@@ -785,7 +791,7 @@ impl Db {
         Ok(())
     }
     pub fn delete_cursor(&self, fwd: &str, ip: &str) -> DbResult<()> {
-        let stream_id = legacy_cursor_stream_id(fwd, ip);
+        let stream_id = LocalStreamKey::new(fwd, ip).as_str().to_owned();
         self.conn.execute(
             "DELETE FROM cursors WHERE stream_id = ?1 OR (forwarder_id = ?2 AND reader_ip = ?3)",
             rusqlite::params![stream_id, fwd, ip],
@@ -1397,168 +1403,29 @@ impl Db {
         )?;
         Ok(())
     }
-    fn apply_schema(&self) -> DbResult<()> {
+    fn apply_schema(&self, path: Option<&Path>) -> DbResult<()> {
+        let user_version: i64 = self
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let existing_tables: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            [],
+            |row| row.get(0),
+        )?;
+        if existing_tables > 0 && user_version == 0 {
+            return Err(DbError::LegacyDatabase {
+                path: path
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| ":memory:".to_owned()),
+            });
+        }
+
         self.conn.execute_batch(SCHEMA_SQL)?;
-        // Migration: rename the legacy profile.thin_node_url column to server_url.
-        migrate_profile_server_url_column(&self.conn)?;
-        // Migration: add update_mode column to existing profile tables.
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE profile ADD COLUMN update_mode TEXT NOT NULL DEFAULT 'check-and-download';",
-            "update_mode",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE profile ADD COLUMN receiver_mode_json TEXT;",
-            "receiver_mode_json",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE profile ADD COLUMN receiver_id TEXT;",
-            "receiver_id",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE profile ADD COLUMN dbf_enabled INTEGER NOT NULL DEFAULT 0;",
-            "dbf_enabled",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE profile ADD COLUMN announcer_enabled INTEGER NOT NULL DEFAULT 0;",
-            "announcer_enabled",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE profile ADD COLUMN announcer_max_list_size INTEGER NOT NULL DEFAULT 25;",
-            "announcer_max_list_size",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE profile ADD COLUMN device_token TEXT;",
-            "device_token",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE subscriptions ADD COLUMN event_type TEXT NOT NULL DEFAULT 'finish';",
-            "event_type",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE subscriptions ADD COLUMN forwarder_endpoint_id TEXT NOT NULL DEFAULT '';",
-            "forwarder_endpoint_id",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE subscriptions ADD COLUMN stream_id TEXT NOT NULL DEFAULT '';",
-            "stream_id",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE subscriptions ADD COLUMN local_port_override INTEGER;",
-            "local_port_override",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE subscriptions ADD COLUMN forwarder_id TEXT;",
-            "forwarder_id",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE subscriptions ADD COLUMN reader_ip TEXT;",
-            "reader_ip",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE cursors ADD COLUMN stream_id TEXT;",
-            "stream_id",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE cursors ADD COLUMN last_seq BIGINT NOT NULL DEFAULT 0;",
-            "last_seq",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE cursors ADD COLUMN forwarder_id TEXT;",
-            "forwarder_id",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE cursors ADD COLUMN reader_ip TEXT;",
-            "reader_ip",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE cursors ADD COLUMN stream_epoch BIGINT;",
-            "stream_epoch",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE received_events ADD COLUMN announcer_pushed_unix_ms BIGINT;",
-            "announcer_pushed_unix_ms",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE received_events ADD COLUMN chip_id TEXT;",
-            "chip_id",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE profile ADD COLUMN dbf_flush_interval_ms INTEGER NOT NULL DEFAULT 1000;",
-            "dbf_flush_interval_ms",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE earliest_epochs ADD COLUMN stream_id TEXT;",
-            "stream_id",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE earliest_epochs ADD COLUMN forwarder_endpoint_id TEXT;",
-            "forwarder_endpoint_id",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE earliest_epochs ADD COLUMN forwarder_id TEXT;",
-            "forwarder_id",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE earliest_epochs ADD COLUMN reader_ip TEXT;",
-            "reader_ip",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE participants ADD COLUMN division INTEGER;",
-            "division",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE profile ADD COLUMN rd_import_enabled INTEGER NOT NULL DEFAULT 0;",
-            "rd_import_enabled",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE profile ADD COLUMN rd_import_dir TEXT NOT NULL DEFAULT 'C:\\Winrace\\Files';",
-            "rd_import_dir",
-        )?;
-        apply_add_column_migration(
-            &self.conn,
-            "ALTER TABLE profile ADD COLUMN rd_import_interval_secs INTEGER NOT NULL DEFAULT 15;",
-            "rd_import_interval_secs",
-        )?;
-        migrate_subscriptions_to_endpoint_stream_shape(&self.conn)?;
-        migrate_cursors_to_stream_id_shape(&self.conn)?;
-        migrate_earliest_epochs_to_stream_id_shape(&self.conn)?;
-        migrate_forwarder_intent(&self.conn)?;
-        // Created after the column migrations (a legacy DB gains
-        // announcer_pushed_unix_ms above): the unpushed scan becomes
-        // O(unpushed) instead of O(stream rows), and the set stays small at
-        // steady state because pushes mark rows in batches.
         self.conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_received_announcer_unpushed
                  ON received_events(stream_id, received_unix_ms, seq)
-                 WHERE announcer_pushed_unix_ms IS NULL;",
+                 WHERE announcer_pushed_unix_ms IS NULL;
+             PRAGMA user_version = 1;",
         )?;
         Ok(())
     }
@@ -1999,13 +1866,6 @@ fn parse_event_type_column(raw: String, column: usize) -> rusqlite::Result<Event
     }
 }
 
-/// Deterministic stream_id used for legacy cursor rows keyed only by
-/// `(forwarder_id, reader_ip)`. Unit Separator avoids ambiguity between the
-/// two user-provided strings while keeping the value human-readable in SQLite.
-fn legacy_cursor_stream_id(fwd: &str, ip: &str) -> String {
-    format!("legacy:{fwd}\u{1f}{ip}")
-}
-
 /// Row-level operations usable both on a plain connection and inside a
 /// [`rusqlite::Transaction`] (which derefs to [`Connection`]). The P2P persist
 /// path runs these inside one `IMMEDIATE` transaction per `EventBatch`.
@@ -2149,197 +2009,6 @@ fn received_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Received
     })
 }
 
-fn apply_add_column_migration(conn: &Connection, sql: &str, column_name: &str) -> DbResult<()> {
-    match conn.execute_batch(sql) {
-        Ok(()) => Ok(()),
-        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
-            if is_duplicate_column_error(&message, column_name) =>
-        {
-            Ok(())
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
-fn migrate_subscriptions_to_endpoint_stream_shape(conn: &Connection) -> DbResult<()> {
-    let columns = load_table_columns(conn, "subscriptions")?;
-    if has_column_pk_notnull(&columns, "forwarder_endpoint_id", 1, true)
-        && has_column_pk_notnull(&columns, "stream_id", 2, true)
-        && !legacy_column_has_pk_or_notnull(&columns, "forwarder_id")
-        && !legacy_column_has_pk_or_notnull(&columns, "reader_ip")
-    {
-        return Ok(());
-    }
-
-    conn.execute_batch(
-        "SAVEPOINT migrate_subscriptions_to_v2;
-         CREATE TABLE subscriptions_v2 (
-             forwarder_endpoint_id TEXT NOT NULL,
-             stream_id             TEXT NOT NULL,
-             local_port_override   INTEGER,
-             event_type            TEXT NOT NULL DEFAULT 'finish',
-             forwarder_id          TEXT,
-             reader_ip             TEXT,
-             PRIMARY KEY (forwarder_endpoint_id, stream_id)
-         );
-         INSERT OR REPLACE INTO subscriptions_v2
-             (forwarder_endpoint_id, stream_id, local_port_override, event_type, forwarder_id, reader_ip)
-         SELECT
-             COALESCE(NULLIF(forwarder_endpoint_id, ''), forwarder_id),
-             COALESCE(NULLIF(stream_id, ''), reader_ip),
-             local_port_override,
-             COALESCE(event_type, 'finish'),
-             forwarder_id,
-             reader_ip
-         FROM subscriptions;
-         DROP TABLE subscriptions;
-         ALTER TABLE subscriptions_v2 RENAME TO subscriptions;
-         RELEASE migrate_subscriptions_to_v2;",
-    )?;
-    Ok(())
-}
-
-fn migrate_earliest_epochs_to_stream_id_shape(conn: &Connection) -> DbResult<()> {
-    let columns = load_table_columns(conn, "earliest_epochs")?;
-    if has_column_pk_notnull(&columns, "stream_id", 1, false)
-        && has_column_notnull(&columns, "forwarder_endpoint_id", true)
-        && !legacy_column_has_pk_or_notnull(&columns, "forwarder_id")
-        && !legacy_column_has_pk_or_notnull(&columns, "reader_ip")
-    {
-        return Ok(());
-    }
-
-    conn.execute_batch(
-        "SAVEPOINT migrate_earliest_epochs_to_v2;
-         CREATE TABLE earliest_epochs_v2 (
-             stream_id             TEXT PRIMARY KEY,
-             forwarder_endpoint_id TEXT NOT NULL,
-             earliest_epoch        BIGINT NOT NULL,
-             forwarder_id          TEXT,
-             reader_ip             TEXT
-         );
-         INSERT OR REPLACE INTO earliest_epochs_v2
-             (stream_id, forwarder_endpoint_id, earliest_epoch, forwarder_id, reader_ip)
-         SELECT
-             COALESCE(NULLIF(stream_id, ''), 'legacy:' || forwarder_id || char(31) || reader_ip),
-             COALESCE(NULLIF(forwarder_endpoint_id, ''), forwarder_id),
-             earliest_epoch,
-             forwarder_id,
-             reader_ip
-         FROM earliest_epochs;
-         DROP TABLE earliest_epochs;
-         ALTER TABLE earliest_epochs_v2 RENAME TO earliest_epochs;
-         RELEASE migrate_earliest_epochs_to_v2;",
-    )?;
-    Ok(())
-}
-
-fn migrate_cursors_to_stream_id_shape(conn: &Connection) -> DbResult<()> {
-    let columns = load_table_columns(conn, "cursors")?;
-    if has_column_pk_notnull(&columns, "stream_id", 1, false)
-        && has_column_notnull(&columns, "last_seq", true)
-        && !legacy_column_has_pk_or_notnull(&columns, "forwarder_id")
-        && !legacy_column_has_pk_or_notnull(&columns, "reader_ip")
-    {
-        return Ok(());
-    }
-
-    conn.execute_batch(
-        "SAVEPOINT migrate_cursors_to_v2;
-         CREATE TABLE cursors_v2 (
-             stream_id    TEXT PRIMARY KEY,
-             last_seq     BIGINT NOT NULL,
-             forwarder_id TEXT,
-             reader_ip    TEXT,
-             stream_epoch BIGINT
-         );
-         INSERT OR REPLACE INTO cursors_v2
-             (stream_id, last_seq, forwarder_id, reader_ip, stream_epoch)
-         SELECT
-             COALESCE(NULLIF(stream_id, ''), 'legacy:' || forwarder_id || char(31) || reader_ip),
-             acked_through_seq,
-             forwarder_id,
-             reader_ip,
-             stream_epoch
-         FROM cursors;
-         DROP TABLE cursors;
-         ALTER TABLE cursors_v2 RENAME TO cursors;
-         RELEASE migrate_cursors_to_v2;",
-    )?;
-    Ok(())
-}
-
-fn migrate_forwarder_intent(conn: &Connection) -> DbResult<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS forwarder_intent (
-             endpoint_id TEXT PRIMARY KEY,
-             connect     INTEGER NOT NULL
-         );",
-    )?;
-    Ok(())
-}
-
-#[derive(Debug)]
-struct TableColumn {
-    name: String,
-    notnull: bool,
-    pk: i64,
-}
-
-/// Rename the legacy `profile.thin_node_url` column to `server_url`.
-///
-/// Idempotent: only renames when the legacy column exists and the new column
-/// does not, so it is a no-op on fresh databases (created with `server_url`)
-/// and on databases already migrated.
-fn migrate_profile_server_url_column(conn: &Connection) -> DbResult<()> {
-    let columns = load_table_columns(conn, "profile")?;
-    let has_legacy = columns.iter().any(|column| column.name == "thin_node_url");
-    let has_new = columns.iter().any(|column| column.name == "server_url");
-    if has_legacy && !has_new {
-        conn.execute_batch("ALTER TABLE profile RENAME COLUMN thin_node_url TO server_url;")?;
-    }
-    Ok(())
-}
-
-fn load_table_columns(conn: &Connection, table: &str) -> DbResult<Vec<TableColumn>> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let rows = stmt.query_map([], |row| {
-        Ok(TableColumn {
-            name: row.get(1)?,
-            notnull: row.get::<_, i64>(3)? != 0,
-            pk: row.get(5)?,
-        })
-    })?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
-}
-
-fn has_column_pk_notnull(
-    columns: &[TableColumn],
-    column_name: &str,
-    expected_pk: i64,
-    expected_notnull: bool,
-) -> bool {
-    columns.iter().any(|column| {
-        column.name == column_name && column.pk == expected_pk && column.notnull == expected_notnull
-    })
-}
-
-fn has_column_notnull(columns: &[TableColumn], column_name: &str, expected_notnull: bool) -> bool {
-    columns
-        .iter()
-        .any(|column| column.name == column_name && column.notnull == expected_notnull)
-}
-
-fn legacy_column_has_pk_or_notnull(columns: &[TableColumn], column_name: &str) -> bool {
-    columns
-        .iter()
-        .any(|column| column.name == column_name && (column.pk != 0 || column.notnull))
-}
-
-fn is_duplicate_column_error(message: &str, column_name: &str) -> bool {
-    message.contains(&format!("duplicate column name: {column_name}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2450,31 +2119,27 @@ mod tests {
     }
 
     #[test]
-    fn migrates_legacy_thin_node_url_column_to_server_url() {
-        let conn = Connection::open_in_memory().unwrap();
-        // Pre-rename profile schema, created with the legacy column name.
-        conn.execute_batch(
-            "CREATE TABLE profile (
-                 thin_node_url TEXT NOT NULL,
-                 token TEXT NOT NULL,
-                 update_mode TEXT NOT NULL DEFAULT 'check-and-download'
-             );
-             INSERT INTO profile (thin_node_url, token)
-             VALUES ('https://legacy.example', 'legacy-token');",
-        )
-        .unwrap();
+    fn existing_user_version_zero_database_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("receiver.sqlite3");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE profile (
+                     server_url TEXT NOT NULL,
+                     token TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+        }
 
-        let db = Db { conn };
-        db.apply_pragmas().unwrap();
-        db.apply_schema().unwrap();
-
-        let columns = load_table_columns(&db.conn, "profile").unwrap();
-        assert!(columns.iter().any(|column| column.name == "server_url"));
-        assert!(!columns.iter().any(|column| column.name == "thin_node_url"));
-
-        let profile = db.load_profile().unwrap().expect("profile row preserved");
-        assert_eq!(profile.server_url, "https://legacy.example");
-        assert_eq!(profile.token, "legacy-token");
+        let message = match Db::open(&path) {
+            Ok(_) => panic!("legacy database should be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert!(message.contains(&path.display().to_string()));
+        assert!(message.contains("user_version=0"));
+        assert!(message.contains("delete receiver.sqlite3"));
     }
 
     #[test]
@@ -2493,18 +2158,6 @@ mod tests {
             .unwrap();
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.update_mode, "check-and-download");
-    }
-
-    #[test]
-    fn duplicate_column_message_detection_matches_expected_error() {
-        assert!(is_duplicate_column_error(
-            "duplicate column name: update_mode",
-            "update_mode"
-        ));
-        assert!(!is_duplicate_column_error(
-            "near \"ALTER\": syntax error",
-            "update_mode"
-        ));
     }
 
     #[test]
@@ -2612,7 +2265,12 @@ mod tests {
         assert_eq!(
             db.load_stream_earliest_epochs().unwrap(),
             vec![StreamEarliestEpoch {
-                stream_id: "22222222-2222-2222-2222-222222222222".to_owned(),
+                stream_id: LocalStreamKey::new(
+                    "endpoint-1",
+                    "22222222-2222-2222-2222-222222222222",
+                )
+                .as_str()
+                .to_owned(),
                 forwarder_endpoint_id: "endpoint-1".to_owned(),
                 earliest_epoch: 7,
             }]
@@ -2633,7 +2291,10 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
-        assert_eq!(stream_id, "22222222-2222-2222-2222-222222222222");
+        assert_eq!(
+            stream_id,
+            LocalStreamKey::new("endpoint-1", "22222222-2222-2222-2222-222222222222").as_str()
+        );
         assert_eq!(fwd_endpoint, "endpoint-1");
         assert_eq!(forwarder_id, None);
         assert_eq!(reader_ip, None);
@@ -2650,13 +2311,20 @@ mod tests {
         db.save_stream_earliest_epoch("endpoint-2", "33333333-3333-3333-3333-333333333333", 9)
             .unwrap();
 
-        db.delete_stream_earliest_epoch("22222222-2222-2222-2222-222222222222")
-            .unwrap();
+        db.delete_stream_earliest_epoch(
+            LocalStreamKey::new("endpoint-1", "22222222-2222-2222-2222-222222222222").as_str(),
+        )
+        .unwrap();
 
         assert_eq!(
             db.load_stream_earliest_epochs().unwrap(),
             vec![StreamEarliestEpoch {
-                stream_id: "33333333-3333-3333-3333-333333333333".to_owned(),
+                stream_id: LocalStreamKey::new(
+                    "endpoint-2",
+                    "33333333-3333-3333-3333-333333333333",
+                )
+                .as_str()
+                .to_owned(),
                 forwarder_endpoint_id: "endpoint-2".to_owned(),
                 earliest_epoch: 9,
             }]
@@ -3194,203 +2862,6 @@ mod tests {
         .unwrap();
         let subs = db.load_subscriptions().unwrap();
         assert_eq!(subs[0].event_type, EventType::Start);
-    }
-
-    #[test]
-    fn migrates_legacy_cursors_to_stream_id_shape() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("legacy.db");
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE cursors (
-                    forwarder_id TEXT NOT NULL,
-                    reader_ip TEXT NOT NULL,
-                    stream_epoch BIGINT NOT NULL,
-                    acked_through_seq BIGINT NOT NULL,
-                    PRIMARY KEY (forwarder_id, reader_ip)
-                );",
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq)
-                 VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params!["fwd-1", "10.0.0.1:10000", 7i64, 42i64],
-            )
-            .unwrap();
-        }
-
-        let db = Db::open(&path).unwrap();
-
-        let columns = table_info(&db.conn, "cursors");
-        assert_eq!(columns.get("stream_id"), Some(&(1, 0)));
-        assert_eq!(columns.get("last_seq"), Some(&(0, 1)));
-        assert_eq!(columns.get("forwarder_id"), Some(&(0, 0)));
-        assert_eq!(columns.get("reader_ip"), Some(&(0, 0)));
-
-        let rows = db.load_cursors().unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].forwarder_id, "fwd-1");
-        assert_eq!(rows[0].reader_ip, "10.0.0.1:10000");
-        assert_eq!(rows[0].stream_epoch, 7);
-        assert_eq!(rows[0].last_seq, 42);
-
-        let stream_id = "44444444-4444-4444-4444-444444444444";
-        assert_eq!(db.advance_cursor_contiguous_prefix(stream_id).unwrap(), 0);
-    }
-
-    #[test]
-    fn migrates_legacy_subscriptions_to_endpoint_stream_shape() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("legacy.db");
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE subscriptions (
-                    forwarder_id TEXT NOT NULL,
-                    reader_ip TEXT NOT NULL,
-                    local_port_override INTEGER,
-                    event_type TEXT NOT NULL DEFAULT 'finish',
-                    PRIMARY KEY (forwarder_id, reader_ip)
-                );",
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO subscriptions (forwarder_id, reader_ip, local_port_override, event_type)
-                 VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params!["fwd-1", "10.0.0.1:10000", 10001i64, "start"],
-            )
-            .unwrap();
-        }
-
-        let db = Db::open(&path).unwrap();
-
-        let columns = table_info(&db.conn, "subscriptions");
-        assert_eq!(columns.get("forwarder_endpoint_id"), Some(&(1, 1)));
-        assert_eq!(columns.get("stream_id"), Some(&(2, 1)));
-        assert_eq!(columns.get("forwarder_id"), Some(&(0, 0)));
-        assert_eq!(columns.get("reader_ip"), Some(&(0, 0)));
-
-        let subs = db.load_subscriptions().unwrap();
-        assert_eq!(
-            subs,
-            vec![Subscription {
-                forwarder_id: "fwd-1".to_owned(),
-                reader_ip: "10.0.0.1:10000".to_owned(),
-                local_port_override: Some(10001),
-                event_type: EventType::Start,
-            }]
-        );
-
-        // A canonical-only row (no legacy forwarder_id/reader_ip metadata) must
-        // NOT surface in the legacy (forwarder_id, reader_ip) view: the legacy
-        // loader filters it out rather than fabricating legacy keys from
-        // forwarder_endpoint_id/stream_id.
-        db.conn
-            .execute(
-                "INSERT INTO subscriptions (forwarder_endpoint_id, stream_id, event_type)
-                 VALUES (?1, ?2, ?3)",
-                rusqlite::params![
-                    "endpoint-2",
-                    "22222222-2222-2222-2222-222222222222",
-                    "finish"
-                ],
-            )
-            .unwrap();
-        assert_eq!(db.load_subscriptions().unwrap().len(), 1);
-        // It is, however, visible through the canonical loader.
-        assert_eq!(db.load_stream_subscriptions().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn migrates_legacy_earliest_epochs_to_stream_id_shape() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("legacy.db");
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE earliest_epochs (
-                    forwarder_id TEXT NOT NULL,
-                    reader_ip TEXT NOT NULL,
-                    earliest_epoch BIGINT NOT NULL,
-                    PRIMARY KEY (forwarder_id, reader_ip)
-                );",
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO earliest_epochs (forwarder_id, reader_ip, earliest_epoch)
-                 VALUES (?1, ?2, ?3)",
-                rusqlite::params!["fwd-1", "10.0.0.1:10000", 7i64],
-            )
-            .unwrap();
-        }
-
-        let db = Db::open(&path).unwrap();
-
-        // Canonical shape is in place after migration.
-        let columns = table_info(&db.conn, "earliest_epochs");
-        assert_eq!(columns.get("stream_id"), Some(&(1, 0)));
-        assert_eq!(columns.get("forwarder_endpoint_id"), Some(&(0, 1)));
-        assert_eq!(columns.get("forwarder_id"), Some(&(0, 0)));
-        assert_eq!(columns.get("reader_ip"), Some(&(0, 0)));
-
-        // Legacy view still returns the real legacy metadata row.
-        assert_eq!(
-            db.load_earliest_epochs().unwrap(),
-            vec![("fwd-1".to_owned(), "10.0.0.1:10000".to_owned(), 7)]
-        );
-
-        // Canonical view returns a synthetic stream_id + forwarder_endpoint_id
-        // without storing stream_id in reader_ip.
-        assert_eq!(
-            db.load_stream_earliest_epochs().unwrap(),
-            vec![StreamEarliestEpoch {
-                stream_id: "legacy:fwd-1\u{1f}10.0.0.1:10000".to_owned(),
-                forwarder_endpoint_id: "fwd-1".to_owned(),
-                earliest_epoch: 7,
-            }]
-        );
-
-        // Canonical saves work afterwards and stay canonical-only.
-        db.save_stream_earliest_epoch("endpoint-2", "22222222-2222-2222-2222-222222222222", 11)
-            .unwrap();
-        let mut stream_rows = db.load_stream_earliest_epochs().unwrap();
-        stream_rows.sort_by(|a, b| a.stream_id.cmp(&b.stream_id));
-        assert_eq!(
-            stream_rows,
-            vec![
-                StreamEarliestEpoch {
-                    stream_id: "22222222-2222-2222-2222-222222222222".to_owned(),
-                    forwarder_endpoint_id: "endpoint-2".to_owned(),
-                    earliest_epoch: 11,
-                },
-                StreamEarliestEpoch {
-                    stream_id: "legacy:fwd-1\u{1f}10.0.0.1:10000".to_owned(),
-                    forwarder_endpoint_id: "fwd-1".to_owned(),
-                    earliest_epoch: 7,
-                },
-            ]
-        );
-        // The canonical row must not surface in the legacy view.
-        assert_eq!(
-            db.load_earliest_epochs().unwrap(),
-            vec![("fwd-1".to_owned(), "10.0.0.1:10000".to_owned(), 7)]
-        );
-    }
-
-    fn table_info(conn: &Connection, table: &str) -> std::collections::HashMap<String, (i64, i64)> {
-        let mut stmt = conn
-            .prepare(&format!("PRAGMA table_info({table})"))
-            .unwrap();
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(1)?,
-                    (row.get::<_, i64>(5)?, row.get::<_, i64>(3)?),
-                ))
-            })
-            .unwrap();
-        rows.collect::<Result<_, _>>().unwrap()
     }
 
     #[test]

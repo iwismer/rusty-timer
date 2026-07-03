@@ -302,7 +302,12 @@ def derive_endpoint_id(seed_hex: str) -> str:
 # ---------------------------------------------------------------------------
 # Receiver DB preseed (canonical stream subscription + DBF profile)
 # ---------------------------------------------------------------------------
+# Must stay in column-sync with services/receiver/src/storage/schema.sql: the
+# receiver refuses to open a DB with tables but user_version == 0, and it no
+# longer runs add-column migrations, so the preseeded tables must already
+# carry every column the receiver reads.
 PRESEED_SQL = """
+PRAGMA user_version = 1;
 CREATE TABLE IF NOT EXISTS profile (
     server_url  TEXT NOT NULL,
     token       TEXT NOT NULL,
@@ -310,11 +315,13 @@ CREATE TABLE IF NOT EXISTS profile (
     receiver_mode_json TEXT,
     receiver_id TEXT,
     dbf_enabled INTEGER NOT NULL DEFAULT 0,
-    dbf_path    TEXT NOT NULL DEFAULT 'C:\\winrace\\Files\\IPICO.DBF',
     announcer_enabled INTEGER NOT NULL DEFAULT 0,
+    announcer_max_list_size INTEGER NOT NULL DEFAULT 25,
+    device_token TEXT,
     rd_import_enabled INTEGER NOT NULL DEFAULT 0,
     rd_import_dir TEXT NOT NULL DEFAULT 'C:\\Winrace\\Files',
-    rd_import_interval_secs INTEGER NOT NULL DEFAULT 15
+    rd_import_interval_secs INTEGER NOT NULL DEFAULT 15,
+    dbf_flush_interval_ms INTEGER NOT NULL DEFAULT 1000
 );
 CREATE TABLE IF NOT EXISTS subscriptions (
     forwarder_endpoint_id TEXT NOT NULL,
@@ -333,13 +340,24 @@ CREATE TABLE IF NOT EXISTS participants (
     last        TEXT NOT NULL,
     first       TEXT NOT NULL,
     affiliation TEXT NOT NULL,
-    gender      TEXT NOT NULL
+    gender      TEXT NOT NULL,
+    division    INTEGER
 );
 CREATE TABLE IF NOT EXISTS bib_chips (
     chip_id TEXT PRIMARY KEY,
     bib     INTEGER NOT NULL
 );
 """
+
+
+def local_stream_key(forwarder_endpoint_id: str, stream_id: str) -> str:
+    """Receiver-local canonical stream key: `{endpoint_id}\\x1f{wire_stream_id}`.
+
+    Mirrors `services/receiver/src/stream_key.rs`. Durable receiver state
+    (received_events, cursors, announcer opt-in, ...) is keyed by this encoded
+    form; the wire stream id alone is ambiguous across forwarders.
+    """
+    return f"{forwarder_endpoint_id}\x1f{stream_id}"
 
 
 def preseed_receiver_db(db_path: Path, forwarder_endpoint_id: str, stream_id: str,
@@ -350,15 +368,14 @@ def preseed_receiver_db(db_path: Path, forwarder_endpoint_id: str, stream_id: st
     try:
         conn.executescript(PRESEED_SQL)
         # The receiver writes IPICO.DBF into the Race Director working
-        # directory (profile.rd_import_dir); the legacy dbf_path column is
-        # kept for schema compatibility but no longer read.
+        # directory (profile.rd_import_dir).
         conn.execute(
             "INSERT INTO profile "
             "(server_url, token, update_mode, receiver_mode_json, receiver_id, "
-            " dbf_enabled, dbf_path, announcer_enabled, rd_import_dir) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            " dbf_enabled, announcer_enabled, rd_import_dir) "
+            "VALUES (?,?,?,?,?,?,?,?)",
             (server_url, server_token, "check-and-download", None,
-             "rx-e2e", 1, str(dbf_path), 1, str(dbf_path.parent)),
+             "rx-e2e", 1, 1, str(dbf_path.parent)),
         )
         conn.execute(
             "INSERT INTO subscriptions "
@@ -367,9 +384,10 @@ def preseed_receiver_db(db_path: Path, forwarder_endpoint_id: str, stream_id: st
             (forwarder_endpoint_id, stream_id, proxy_port, "finish", None, stream_id),
         )
         # Opt the seeded stream in to announcer publishing (opt-in default).
+        # Keyed by the canonical local stream key, not the bare wire id.
         conn.execute(
             "INSERT INTO announcer_publish_streams (stream_id) VALUES (?)",
-            (stream_id,),
+            (local_stream_key(forwarder_endpoint_id, stream_id),),
         )
         # Seed participant + chip data so announcer rows carry bib/name. Each
         # emulated chip tag (EXPECTED_TAGS, bibs 1..NUM_READS) maps to a named
@@ -639,7 +657,8 @@ class Results:
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
-def assert_received_events(results: Results, db_path: Path, label: str, expected_stream_id: str):
+def assert_received_events(results: Results, db_path: Path, label: str,
+                           expected_stream_key: str):
     events = load_received_events(db_path)
     results.expect_eq(f"{label}: received_events count == {NUM_READS}",
                       len(events), NUM_READS)
@@ -655,7 +674,7 @@ def assert_received_events(results: Results, db_path: Path, label: str, expected
     kinds = {e["read_kind"] for e in events}
     results.expect_eq(f"{label}: read_kind is 'raw'", kinds, {"raw"})
     stream_ids = {e["stream_id"] for e in events}
-    results.expect_eq(f"{label}: canonical stream_id", stream_ids, {expected_stream_id})
+    results.expect_eq(f"{label}: canonical stream key", stream_ids, {expected_stream_key})
 
 
 def partial_received_count(db_path: Path):
@@ -918,7 +937,8 @@ allowlist_request_timeout_secs = 2
     status = wait_until(lambda: server_announcer_ready(server_url), timeout=20,
                         what="server announcer to receive all rows")
     assert_received_events(results, receiver_db_path,
-                           "received_events (approval auto-connect)", stream_id)
+                           "received_events (approval auto-connect)",
+                           local_stream_key(forwarder_endpoint_id, stream_id))
     results.expect_eq(f"connections: server finisher_count == {NUM_READS}",
                       status.get("finisher_count"), NUM_READS)
 
@@ -1328,7 +1348,7 @@ static_allowed_receivers = ["{receiver_endpoint_id}"]
     # 1 + 5. Receiver received_events exact + lossless / no-dup after resume.
     assert_received_events(results, receiver_db_path,
                            f"received_events (post-resume, {power_loss_target} kill)",
-                           stream_id)
+                           local_stream_key(forwarder_endpoint_id, stream_id))
     results.check(f"power-loss: {power_loss_target} was killed mid-stream",
                   0 < count_at_kill < NUM_READS,
                   f"killed at {count_at_kill}/{NUM_READS}")

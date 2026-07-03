@@ -60,6 +60,7 @@
     feedback = null;
     try {
       await api.resetStreamCursor({
+        forwarder_endpoint_id: stream.forwarder_endpoint_id,
         stream_id: stream.stream_id,
       });
       setFeedback(`Cursor reset for ${streamLabel(stream)}.`, true);
@@ -103,6 +104,7 @@
     feedback = null;
     try {
       await api.resetEarliestEpoch({
+        forwarder_endpoint_id: stream.forwarder_endpoint_id,
         stream_id: stream.stream_id,
       });
       setFeedback(

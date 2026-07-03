@@ -1,9 +1,10 @@
 use receiver::Db;
 use receiver::control_api::{
-    self, AppState, ConnectionState, CursorResetRequest, EarliestEpochRequest, ProfileRequest,
+    self, AppState, ConnectionState, EarliestEpochRequest, ProfileRequest, StreamRef,
     UpdatePortRequest,
 };
 use receiver::db::{EventType, StreamEarliestEpoch, StreamSubscription};
+use receiver::stream_key::LocalStreamKey;
 use std::sync::Arc;
 
 const TEST_RACE_ID: &str = "11111111-1111-1111-1111-111111111111";
@@ -164,11 +165,14 @@ async fn put_earliest_epoch_persists_to_db() {
     .unwrap();
 
     let db = state.db.lock().await;
-    // Canonical view is keyed by stream_id with the forwarder endpoint id.
+    // Canonical view is keyed by the encoded local stream key with the
+    // forwarder endpoint id.
     assert_eq!(
         db.load_stream_earliest_epochs().unwrap(),
         vec![StreamEarliestEpoch {
-            stream_id: "11111111-1111-1111-1111-111111111111".to_owned(),
+            stream_id: LocalStreamKey::new("endpoint-1", "11111111-1111-1111-1111-111111111111")
+                .as_str()
+                .to_owned(),
             forwarder_endpoint_id: "endpoint-1".to_owned(),
             earliest_epoch: 7,
         }]
@@ -353,7 +357,8 @@ async fn admin_reset_earliest_epoch_per_stream() {
     }
     control_api::admin_reset_earliest_epoch(
         &state,
-        CursorResetRequest {
+        StreamRef {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
             stream_id: "11111111-1111-1111-1111-111111111111".to_owned(),
         },
     )
@@ -364,7 +369,7 @@ async fn admin_reset_earliest_epoch_per_stream() {
     assert_eq!(remaining.len(), 1);
     assert_eq!(
         remaining[0].stream_id,
-        "22222222-2222-2222-2222-222222222222"
+        LocalStreamKey::new("endpoint-2", "22222222-2222-2222-2222-222222222222").as_str()
     );
     assert_eq!(remaining[0].forwarder_endpoint_id, "endpoint-2");
 }
@@ -550,7 +555,8 @@ async fn streams_response_includes_cursor_data() {
             },
         ])
         .unwrap();
-        db.jump_stream_cursor(stream_1, 42).unwrap();
+        db.jump_stream_cursor(LocalStreamKey::new("endpoint-1", stream_1).as_str(), 42)
+            .unwrap();
     }
     let response = control_api::get_streams(&state).await;
     assert_eq!(response.streams.len(), 2);

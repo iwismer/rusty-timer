@@ -18,6 +18,7 @@
 
 use crate::control_api::{self, AppState};
 use crate::error::ReceiverError;
+use crate::stream_key::LocalStreamKey;
 use crate::ui_events::ReceiverUiEvent;
 use axum::Json;
 use axum::Router;
@@ -178,7 +179,8 @@ async fn local_streams_snapshot(state: &AppState) -> control_api::StreamsRespons
     let streams = subs
         .iter()
         .map(|sub| {
-            let cursor = cursor_map.get(sub.stream_id.as_str());
+            let local_stream_key = LocalStreamKey::new(&sub.forwarder_endpoint_id, &sub.stream_id);
+            let cursor = cursor_map.get(local_stream_key.as_str());
             let counts = sub
                 .forwarder_id
                 .as_deref()
@@ -198,7 +200,7 @@ async fn local_streams_snapshot(state: &AppState) -> control_api::StreamsRespons
                         .as_deref()
                         .and_then(crate::ports::default_port)
                 }),
-                announcer_publish: announcer_publish_streams.contains(&sub.stream_id),
+                announcer_publish: announcer_publish_streams.contains(local_stream_key.as_str()),
                 event_type: Some(sub.event_type),
                 online: None,
                 reader_connected: None,
@@ -272,9 +274,12 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
         "put_earliest_epoch" => {
             ok(control_api::put_earliest_epoch(state, arg(args, "body")?).await?)
         }
-        "get_replay_target_epochs" => {
-            ok(control_api::get_replay_target_epochs(state, arg(args, "stream_id")?).await?)
-        }
+        "get_replay_target_epochs" => ok(control_api::get_replay_target_epochs(
+            state,
+            arg(args, "forwarder_endpoint_id")?,
+            arg(args, "stream_id")?,
+        )
+        .await?),
         "get_subscriptions" => ok(control_api::get_subscriptions(state).await?),
         "put_subscriptions" => ok(control_api::put_subscriptions(state, arg(args, "body")?).await?),
         "get_status" => ok(control_api::get_status(state).await),
@@ -434,11 +439,15 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
         )
         .await?),
         "set_stream_announcer_publish" => {
+            let forwarder_endpoint_id: String = arg(args, "forwarder_endpoint_id")?;
             let stream_id: String = arg(args, "stream_id")?;
-            ok(
-                control_api::set_stream_announcer_publish(state, &stream_id, arg(args, "publish")?)
-                    .await?,
+            ok(control_api::set_stream_announcer_publish(
+                state,
+                &forwarder_endpoint_id,
+                &stream_id,
+                arg(args, "publish")?,
             )
+            .await?)
         }
         other => Err(BridgeError::Unknown(other.to_owned())),
     }
