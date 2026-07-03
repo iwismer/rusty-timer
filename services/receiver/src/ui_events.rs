@@ -152,6 +152,8 @@ pub enum ReceiverUiEvent {
 /// One stream's coalesced UI state for [`ReceiverUiEvent::StreamDeltas`].
 #[derive(Clone, Debug, Serialize)]
 pub struct StreamDelta {
+    pub forwarder_endpoint_id: String,
+    pub stream_id: String,
     pub forwarder_id: String,
     pub reader_ip: String,
     pub reads_total: u64,
@@ -366,6 +368,43 @@ mod tests {
         assert!(json["lag_ms"].is_null());
         assert!(json["epoch_last_received_at"].is_null());
         assert!(json["epoch_lag_ms"].is_null());
+    }
+
+    #[test]
+    fn stream_deltas_serialize_wire_composite_identity() {
+        let metrics = StreamMetricsPayload {
+            forwarder_id: "display-fwd".to_owned(),
+            reader_ip: "10.0.0.1:10000".to_owned(),
+            raw_count: 3,
+            dedup_count: 3,
+            retransmit_count: 0,
+            lag_ms: None,
+            epoch_raw_count: 3,
+            epoch_dedup_count: 3,
+            epoch_retransmit_count: 0,
+            unique_chips: 1,
+            epoch_last_received_at: None,
+            epoch_lag_ms: None,
+        };
+        let event = ReceiverUiEvent::StreamDeltas {
+            updates: vec![StreamDelta {
+                forwarder_endpoint_id: "endpoint-1".to_owned(),
+                stream_id: "wire-stream".to_owned(),
+                forwarder_id: "display-fwd".to_owned(),
+                reader_ip: "10.0.0.1:10000".to_owned(),
+                reads_total: 3,
+                reads_epoch: 2,
+                metrics,
+                last_read: None,
+            }],
+        };
+
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "stream_deltas");
+        assert_eq!(json["updates"][0]["forwarder_endpoint_id"], "endpoint-1");
+        assert_eq!(json["updates"][0]["stream_id"], "wire-stream");
+        assert_eq!(json["updates"][0]["forwarder_id"], "display-fwd");
+        assert_eq!(json["updates"][0]["reader_ip"], "10.0.0.1:10000");
     }
 
     #[test]

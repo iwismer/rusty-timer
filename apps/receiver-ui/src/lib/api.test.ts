@@ -488,6 +488,80 @@ describe("sse client", () => {
     destroySSE();
   });
 
+  it("forwards stream_deltas event payload with composite identity", async () => {
+    mockListen.mockImplementation(
+      async (eventName: string, callback: (event: any) => void) => {
+        if (eventName === "stream_deltas") {
+          setTimeout(() => {
+            callback({
+              payload: {
+                updates: [
+                  {
+                    forwarder_endpoint_id: "endpoint-1",
+                    stream_id: "wire-stream",
+                    forwarder_id: "f1",
+                    reader_ip: "10.0.0.1",
+                    reads_total: 15,
+                    reads_epoch: 3,
+                    metrics: {
+                      forwarder_id: "f1",
+                      reader_ip: "10.0.0.1",
+                      raw_count: 15,
+                      dedup_count: 15,
+                      retransmit_count: 0,
+                      lag_ms: null,
+                      epoch_raw_count: 3,
+                      epoch_dedup_count: 3,
+                      epoch_retransmit_count: 0,
+                      unique_chips: 1,
+                      epoch_last_received_at: null,
+                      epoch_lag_ms: null,
+                    },
+                    last_read: null,
+                  },
+                ],
+              },
+            });
+          }, 0);
+        }
+        return () => {};
+      },
+    );
+
+    const { initSSE, destroySSE } = await import("./sse");
+    const callbacks = {
+      onStatusChanged: vi.fn(),
+      onStreamsSnapshot: vi.fn(),
+      onLogEntry: vi.fn(),
+      onResync: vi.fn(),
+      onConnectionsChanged: vi.fn(),
+      onConnectionChange: vi.fn(),
+      onStreamCountsUpdated: vi.fn(),
+      onForwarderMetricsUpdated: vi.fn(),
+      onForwarderReaderCountsUpdated: vi.fn(),
+      onModeChanged: vi.fn(),
+      onLastRead: vi.fn(),
+      onStreamMetricsUpdated: vi.fn(),
+      onStreamDeltas: vi.fn(),
+    };
+
+    await initSSE(callbacks);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(callbacks.onStreamDeltas).toHaveBeenCalledWith([
+      expect.objectContaining({
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "wire-stream",
+        forwarder_id: "f1",
+        reader_ip: "10.0.0.1",
+        reads_total: 15,
+        reads_epoch: 3,
+      }),
+    ]);
+
+    destroySSE();
+  });
+
   it("forwards forwarder_metrics_updated event payload", async () => {
     mockListen.mockImplementation(
       async (eventName: string, callback: (event: any) => void) => {

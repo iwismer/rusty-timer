@@ -47,6 +47,8 @@ export type ForwarderUpsUpdatedPayload = {
 
 // One stream's coalesced update from the backend's 4-10 Hz delta emitter.
 export type StreamDeltaPayload = {
+  forwarder_endpoint_id: string;
+  stream_id: string;
   forwarder_id: string;
   reader_ip: string;
   reads_total: number;

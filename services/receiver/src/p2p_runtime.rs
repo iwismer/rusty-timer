@@ -1323,7 +1323,7 @@ async fn start_stream_worker(
     if let Some(ui_key) = ui_stream_key(sub) {
         tasks.push(tokio::spawn(run_ui_projection_worker(
             Arc::clone(state),
-            stream_id.clone(),
+            local_stream_key.clone(),
             ui_key,
             hint_tx.subscribe(),
             shutdown_rx.clone(),
@@ -1414,14 +1414,14 @@ const UI_PROJECTION_EMIT_INTERVAL: Duration = Duration::from_millis(250);
 
 async fn run_ui_projection_worker(
     state: Arc<AppState>,
-    stream_id: String,
+    local_stream_key: LocalStreamKey,
     ui_key: StreamKey,
     mut hint_rx: broadcast::Receiver<DurableBatch>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     // One-time O(N) seed from the durable store; the hot path below never
     // touches the DB.
-    let mut proj = rebuild_stream_projection(&state, &stream_id, &ui_key)
+    let mut proj = rebuild_stream_projection(&state, local_stream_key.as_str(), &ui_key)
         .await
         .unwrap_or_default();
     let mut dirty = proj.total > 0;
@@ -1466,7 +1466,7 @@ async fn run_ui_projection_worker(
             _ = tick.tick() => {
                 if needs_rebuild
                     && let Some(rebuilt) =
-                        rebuild_stream_projection(&state, &stream_id, &ui_key).await
+                        rebuild_stream_projection(&state, local_stream_key.as_str(), &ui_key).await
                 {
                     proj = rebuilt;
                     // The rebuild replaced the shared counts wholesale;
@@ -1480,7 +1480,7 @@ async fn run_ui_projection_worker(
                 for (epoch, seqs) in pending_counts.drain() {
                     state.stream_counts.record_batch(&ui_key, epoch, seqs);
                 }
-                emit_stream_projection(&state, &ui_key, &proj).await;
+                emit_stream_projection(&state, &local_stream_key, &ui_key, &proj).await;
                 dirty = false;
             }
         }
@@ -1555,6 +1555,7 @@ async fn rebuild_stream_projection(
 /// never per batch tick.
 async fn emit_stream_projection(
     state: &Arc<AppState>,
+    local_stream_key: &LocalStreamKey,
     ui_key: &StreamKey,
     proj: &StreamProjection,
 ) {
@@ -1602,8 +1603,13 @@ async fn emit_stream_projection(
         .lock()
         .expect("stream delta buffer poisoned");
     let _ = buffer.insert(
-        (ui_key.forwarder_id.clone(), ui_key.reader_ip.clone()),
+        (
+            local_stream_key.endpoint_id().to_owned(),
+            local_stream_key.wire_stream_id().to_owned(),
+        ),
         crate::ui_events::StreamDelta {
+            forwarder_endpoint_id: local_stream_key.endpoint_id().to_owned(),
+            stream_id: local_stream_key.wire_stream_id().to_owned(),
             forwarder_id: ui_key.forwarder_id.clone(),
             reader_ip: ui_key.reader_ip.clone(),
             reads_total,
@@ -2723,9 +2729,10 @@ mod tests {
         let through_seq = facts.iter().map(|fact| fact.seq).max().unwrap_or(0);
         let (hint_tx, hint_rx) = broadcast::channel::<DurableBatch>(16);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let local_stream_key = LocalStreamKey::new("endpoint-1", stream_id);
         let worker = tokio::spawn(run_ui_projection_worker(
             Arc::clone(state),
-            stream_id.to_owned(),
+            local_stream_key.clone(),
             StreamKey::new("fwd-1", "10.0.0.1:10000"),
             hint_rx,
             shutdown_rx,
@@ -2739,7 +2746,10 @@ mod tests {
 
         // The projection flushes into the shared delta buffer on its tick;
         // the global emitter (not running here) would fan it out to the UI.
-        let key = ("fwd-1".to_owned(), "10.0.0.1:10000".to_owned());
+        let key = (
+            local_stream_key.endpoint_id().to_owned(),
+            local_stream_key.wire_stream_id().to_owned(),
+        );
         let mut last_read = None;
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline {

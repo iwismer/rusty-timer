@@ -312,8 +312,9 @@ pub struct AppState {
     /// read-only pool in production, or the cold mutex where no file-backed
     /// pool exists (in-memory test states).
     pub read_source: crate::read_pool::ReadSource,
-    /// Dirty per-stream UI deltas, drained by the global coalescing emitter
-    /// (see `p2p_runtime::run_stream_delta_emitter`) into single
+    /// Dirty per-stream UI deltas keyed by `(forwarder_endpoint_id, wire_stream_id)`,
+    /// drained by the global coalescing emitter (see
+    /// `p2p_runtime::run_stream_delta_emitter`) into single
     /// [`ReceiverUiEvent::StreamDeltas`] events.
     pub stream_delta_buffer:
         Arc<StdMutex<HashMap<(String, String), crate::ui_events::StreamDelta>>>,

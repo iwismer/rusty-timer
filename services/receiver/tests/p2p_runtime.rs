@@ -263,6 +263,11 @@ async fn colliding_wire_stream_ids_are_isolated_by_forwarder_endpoint() {
         assert_eq!(db.load_received_events(key_a.as_str()).unwrap().len(), 2);
         assert_eq!(db.load_received_events(key_b.as_str()).unwrap().len(), 2);
         let cursors = db.load_stream_cursors().unwrap();
+        assert_eq!(
+            cursors.len(),
+            2,
+            "only the two canonical cursor rows should exist; no bare wire-id cursor"
+        );
         assert!(cursors.iter().any(|c| c.stream_id == key_a.as_str()));
         assert!(cursors.iter().any(|c| c.stream_id == key_b.as_str()));
         drop(db);

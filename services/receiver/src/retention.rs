@@ -28,6 +28,7 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::control_api::AppState;
+use crate::stream_key::LocalStreamKey;
 
 /// Retention tuning. Defaults keep 24 h *and* 100k rows per stream below the
 /// low-water mark; environment knobs override for constrained deployments.
@@ -191,7 +192,12 @@ async fn run_retention_pass(
                         ),
                         Ok(Some((idx, _))) if idx <= 9
                     );
-                (sub.stream_id, dbf_active)
+                (
+                    LocalStreamKey::new(&sub.forwarder_endpoint_id, &sub.stream_id)
+                        .as_str()
+                        .to_owned(),
+                    dbf_active,
+                )
             })
             .collect::<Vec<_>>();
         (streams, announcer_enabled, announcer_streams)
@@ -381,27 +387,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retention_pass_prunes_end_to_end() {
+    async fn retention_pass_prunes_canonical_keyed_rows_end_to_end() {
         // Full pipeline: floor gathering via the read pool + prune through
-        // the writer, against a real temp-file DB.
+        // the writer, against a real temp-file DB. Rows are stored under the
+        // receiver-local canonical key; the subscription boundary still carries
+        // the wire stream id.
         let (state, _shutdown_rx, _dir) = crate::control_api::AppState::new_for_test();
-        let stream_id = "127.0.0.1:10900";
+        let endpoint_id = "fwd-ret";
+        let wire_stream_id = "127.0.0.1:10900";
+        let local_stream_key = crate::stream_key::LocalStreamKey::new(endpoint_id, wire_stream_id);
         {
             let mut db = state.db.lock().await;
             db.save_profile("http://server", "tok", "check-and-download", None)
                 .unwrap();
             db.replace_stream_subscriptions(&[crate::db::StreamSubscription {
-                forwarder_endpoint_id: "fwd-ret".to_owned(),
-                stream_id: stream_id.to_owned(),
+                forwarder_endpoint_id: endpoint_id.to_owned(),
+                stream_id: wire_stream_id.to_owned(),
                 local_port_override: None,
                 event_type: crate::db::EventType::Finish,
                 forwarder_id: None,
-                reader_ip: Some(stream_id.to_owned()),
+                reader_ip: Some(wire_stream_id.to_owned()),
             }])
             .unwrap();
+            db.save_dbf_config(&crate::db::DbfConfig {
+                enabled: true,
+                flush_interval_ms: crate::db::DEFAULT_DBF_FLUSH_INTERVAL_MS,
+            })
+            .unwrap();
+            db.set_announcer_enabled(true).unwrap();
+            db.set_stream_announcer_publish(local_stream_key.as_str(), true)
+                .unwrap();
             for seq in 1..=10 {
                 db.insert_received_event(&crate::db::ReceivedEventInsert {
-                    stream_id,
+                    stream_id: local_stream_key.as_str(),
                     seq,
                     epoch: 1,
                     raw_frame: b"frame",
@@ -413,12 +431,31 @@ mod tests {
                 })
                 .unwrap();
             }
-            db.jump_stream_cursor(stream_id, 10).unwrap();
+            db.jump_stream_cursor(local_stream_key.as_str(), 10)
+                .unwrap();
+            db.mark_dbf_delivered_batch(
+                local_stream_key.as_str(),
+                &(1..=10).collect::<Vec<_>>(),
+                1_700_000_010_000,
+            )
+            .unwrap();
+            db.mark_announcer_pushed_batch(
+                local_stream_key.as_str(),
+                &(1..=9).collect::<Vec<_>>(),
+                1_700_000_010_000,
+            )
+            .unwrap();
+        }
+        {
+            let mut cursors = state.proxy_consumer_cursors.lock().unwrap();
+            let _ = cursors
+                .entry(local_stream_key.as_str().to_owned())
+                .or_default()
+                .insert(1, 10);
         }
 
-        // DBF + announcer disabled (profile defaults), no proxy consumers:
-        // the ack cursor and the safety window govern. Keep 3 rows, no age
-        // requirement (all rows are older than a zero-age cutoff).
+        // All floors (ack, DBF, announcer, proxy) are past the target; the
+        // safety window keeps 3 rows, and no age window applies.
         let config = RetentionConfig {
             retain_min_rows: 3,
             retain_min_age_ms: 0,
@@ -429,17 +466,25 @@ mod tests {
 
         let db = state.db.lock().await;
         let remaining: Vec<i64> = db
-            .load_received_events(stream_id)
+            .load_received_events(local_stream_key.as_str())
             .unwrap()
             .iter()
             .map(|event| event.seq)
             .collect();
         assert_eq!(remaining, vec![8, 9, 10], "safety window keeps 3 rows");
-        assert_eq!(db.load_pruned_through_seq(stream_id).unwrap(), 7);
         assert_eq!(
-            db.load_stream_cursor(stream_id).unwrap(),
+            db.load_pruned_through_seq(local_stream_key.as_str())
+                .unwrap(),
+            7
+        );
+        assert_eq!(
+            db.load_stream_cursor(local_stream_key.as_str()).unwrap(),
             10,
             "pruning never touches the ack cursor"
+        );
+        assert!(
+            db.load_received_events(wire_stream_id).unwrap().is_empty(),
+            "retention must not create or prune a bare wire-id stream"
         );
     }
 
