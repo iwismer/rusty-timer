@@ -1356,6 +1356,14 @@ async fn update_config_file(
         )
     })?;
 
+    crate::config::load_config_from_str(&new_toml, &config_state.path).map_err(|e| {
+        (
+            400u16,
+            serde_json::json!({"ok": false, "error": format!("config validation failed: {e}")})
+                .to_string(),
+        )
+    })?;
+
     write_atomic(&config_state.path, &new_toml).map_err(|e| {
         (
             500u16,
@@ -5497,6 +5505,67 @@ target = "192.168.1.100:10000"
             server.subsystem.lock().await.update_mode,
             rt_updater::UpdateMode::CheckAndDownload
         );
+    }
+
+    #[tokio::test]
+    async fn config_p2p_section_rejects_cross_field_loader_validation_failure() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let token_file = NamedTempFile::new().expect("create temp token");
+        let token_path = token_file.path().display().to_string().replace('\\', "/");
+        std::fs::write(token_file.path(), "test-token\n").expect("write temp token");
+
+        let mut config_file = NamedTempFile::new().expect("create temp config");
+        write!(
+            config_file,
+            r#"schema_version = 1
+[p2p]
+enabled = false
+max_concurrent_bidi_streams = 1
+server_url = "https://timing.example.com"
+[auth]
+token_file = "{token_path}"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+        )
+        .expect("write config");
+
+        let restart_signal = Arc::new(Notify::new());
+        let server = StatusServer::start_with_config(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            Arc::new(Mutex::new(NoJournal)),
+            Arc::new(ConfigState::new(config_file.path().to_path_buf())),
+            restart_signal,
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{}/api/v1/config/p2p", server.local_addr()))
+            .header("content-type", "application/json")
+            .body(r#"{"enabled":true}"#)
+            .send()
+            .await
+            .expect("post p2p config update");
+
+        let status = resp.status();
+        let body = resp.text().await.expect("read response body");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "response body: {body}");
+        assert!(
+            body.contains("config validation failed")
+                && body.contains("max_concurrent_bidi_streams"),
+            "unexpected response body: {body}"
+        );
+
+        let loaded = crate::config::load_config_from_path(config_file.path()).expect("load config");
+        assert!(!loaded.p2p.enabled);
     }
 
     #[cfg(any(feature = "eink", feature = "lcd"))]

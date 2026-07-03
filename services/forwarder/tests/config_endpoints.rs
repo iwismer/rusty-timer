@@ -5,6 +5,14 @@ use forwarder::status_http::{StatusConfig, StatusServer, SubsystemStatus};
 use std::net::SocketAddr;
 use std::time::Duration;
 
+fn write_token_fixture(path: &str) {
+    std::fs::write(path, "test-token\n").unwrap_or_else(|e| panic!("write token {path}: {e}"));
+}
+
+fn write_legacy_fake_token_fixture() {
+    write_token_fixture("/tmp/fake-token");
+}
+
 async fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -39,6 +47,8 @@ async fn http_post(addr: SocketAddr, path: &str, body: &str) -> (u16, String) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
+    write_legacy_fake_token_fixture();
+
     let mut stream = TcpStream::connect(addr).await.expect("connect failed");
     let request = format!(
         "POST {} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -70,6 +80,8 @@ async fn http_post(addr: SocketAddr, path: &str, body: &str) -> (u16, String) {
 async fn http_post_split(addr: SocketAddr, path: &str, body: &str) -> (u16, String) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
+
+    write_legacy_fake_token_fixture();
 
     let mut stream = TcpStream::connect(addr).await.expect("connect failed");
     let headers = format!(
@@ -544,6 +556,7 @@ target = "192.168.1.100:10000"
     .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
+    write_token_fixture("/tmp/new-token");
 
     let (status, response) = http_post(
         addr,
