@@ -209,6 +209,31 @@ pub fn list_approved_forwarders_with_streams(
     Ok(result)
 }
 
+/// List one forwarder's stored stream catalog rows, ordered by stream id.
+///
+/// Backs the self-scoped `GET /forwarder/catalog` endpoint: the caller's
+/// per-stream `epoch`/`next_seq` high-water, used to restore stream identity
+/// after the forwarder loses its local journal.
+pub fn list_forwarder_streams_for_endpoint(
+    conn: &Connection,
+    endpoint_id: &str,
+) -> rusqlite::Result<Vec<ForwarderCatalogStreamRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT stream_id, epoch, next_seq
+         FROM forwarder_streams
+         WHERE endpoint_id = ?1
+         ORDER BY stream_id",
+    )?;
+    let rows = stmt.query_map([endpoint_id], |row| {
+        Ok(ForwarderCatalogStreamRecord {
+            stream_id: row.get(0)?,
+            epoch: sql_i64_to_u64(row.get(1)?, 1)?,
+            next_seq: sql_i64_to_u64(row.get(2)?, 2)?,
+        })
+    })?;
+    rows.collect()
+}
+
 /// List the backup forwarder stream catalog rows, ordered by stream id.
 pub fn list_forwarder_streams(conn: &Connection) -> rusqlite::Result<Vec<ForwarderStreamRecord>> {
     let mut stmt = conn.prepare(

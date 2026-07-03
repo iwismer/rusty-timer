@@ -8,12 +8,13 @@ use axum::{
 };
 use rt_server_api::catalog::{
     ForwarderCatalogRequest, ForwarderCatalogResponse, ForwarderCatalogStream,
+    ForwarderOwnCatalogResponse,
 };
 
 use crate::http::validate::{
     MAX_ADDR_LEN, MAX_CATALOG_STREAMS, MAX_DIRECT_ADDRS, MAX_ID_LEN, MAX_NAME_LEN, check_len,
 };
-use crate::http::{AppState, authorize_forwarder_catalog};
+use crate::http::{AppState, authorize_forwarder_catalog, authorize_forwarder_self};
 use crate::registry::{self, ForwarderCatalogStreamRecord};
 
 /// `POST /forwarder/catalog` — M2M forwarder identity and stream catalog push.
@@ -79,6 +80,46 @@ pub async fn push_catalog(
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+/// `GET /forwarder/catalog` — self-scoped read of the caller's stored stream
+/// catalog (per-stream `epoch`/`next_seq` high-water).
+///
+/// Authorized by the forwarder's own minted device token (any approval state,
+/// the same auth boundary as the push above); the caller's endpoint id comes
+/// from the token, so a forwarder can only ever see its own streams. Used to
+/// restore stream identity after the forwarder loses its local journal.
+pub async fn get_own_catalog(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let endpoint_id = match authorize_forwarder_self(&state, &headers) {
+        Ok(endpoint_id) => endpoint_id,
+        Err(status) => return status.into_response(),
+    };
+
+    let streams = {
+        let conn = state.conn.lock().expect("registry mutex poisoned");
+        match registry::list_forwarder_streams_for_endpoint(&conn, &endpoint_id) {
+            Ok(streams) => streams,
+            Err(err) => {
+                tracing::error!(error = %err, "failed to list forwarder catalog streams");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        }
+    };
+
+    let streams = streams
+        .into_iter()
+        .map(|stream| ForwarderCatalogStream {
+            stream_id: stream.stream_id,
+            epoch: stream.epoch,
+            next_seq: stream.next_seq,
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(ForwarderOwnCatalogResponse { streams }),
+    )
+        .into_response()
 }
 
 fn validate_catalog(req: &ForwarderCatalogRequest) -> Result<(), String> {
@@ -252,6 +293,134 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    fn get_catalog_request(token: &str) -> Request<Body> {
+        Request::builder()
+            .method("GET")
+            .uri("/forwarder/catalog")
+            .header("Authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    async fn response_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn get_catalog_returns_only_the_calling_forwarders_streams() {
+        let state = test_state();
+        let token_a = forwarder_token(&state, "ep-fwd-a");
+        let token_b = forwarder_token(&state, "ep-fwd-b");
+
+        // Push distinct catalogs for two forwarders.
+        let resp = router(state.clone())
+            .oneshot(catalog_request_with_body(
+                &token_a,
+                &serde_json::json!({
+                    "endpoint_id": "ep-fwd-a",
+                    "display_name": "A",
+                    "direct_addrs": [],
+                    "streams": [
+                        {"stream_id": "10.0.0.5:10000", "epoch": 3, "next_seq": 4200},
+                        {"stream_id": "10.0.0.6:10000", "epoch": 1, "next_seq": 7}
+                    ]
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = router(state.clone())
+            .oneshot(catalog_request_with_body(
+                &token_b,
+                &serde_json::json!({
+                    "endpoint_id": "ep-fwd-b",
+                    "display_name": "B",
+                    "direct_addrs": [],
+                    "streams": [
+                        {"stream_id": "10.0.1.9:10000", "epoch": 2, "next_seq": 99}
+                    ]
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Forwarder A sees exactly its own pushed streams.
+        let resp = router(state.clone())
+            .oneshot(get_catalog_request(&token_a))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await;
+        let streams = body["streams"].as_array().unwrap();
+        assert_eq!(streams.len(), 2);
+        assert_eq!(streams[0]["stream_id"], "10.0.0.5:10000");
+        assert_eq!(streams[0]["epoch"], 3);
+        assert_eq!(streams[0]["next_seq"], 4200);
+        assert_eq!(streams[1]["stream_id"], "10.0.0.6:10000");
+
+        // Forwarder B sees only its own stream, not A's.
+        let resp = router(state)
+            .oneshot(get_catalog_request(&token_b))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await;
+        let streams = body["streams"].as_array().unwrap();
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0]["stream_id"], "10.0.1.9:10000");
+        assert_eq!(streams[0]["epoch"], 2);
+        assert_eq!(streams[0]["next_seq"], 99);
+    }
+
+    #[tokio::test]
+    async fn get_catalog_before_any_push_returns_empty_streams() {
+        let state = test_state();
+        let token = forwarder_token(&state, "ep-fwd");
+        let resp = router(state)
+            .oneshot(get_catalog_request(&token))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await;
+        assert_eq!(body["streams"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn get_catalog_rejects_receiver_token_and_missing_auth() {
+        let state = test_state();
+        let rx_token = {
+            let conn = state.conn.lock().unwrap();
+            crate::registry::register_device_minted(
+                &conn,
+                "ep-receiver",
+                crate::registry::DeviceKind::Receiver,
+            )
+            .unwrap()
+            .device_token
+        };
+        let resp = router(state.clone())
+            .oneshot(get_catalog_request(&rx_token))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/forwarder/catalog")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

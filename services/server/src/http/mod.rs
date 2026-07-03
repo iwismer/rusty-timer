@@ -140,6 +140,27 @@ pub(crate) fn authorize_forwarder_catalog(
     }
 }
 
+/// Authorize a self-scoped forwarder request, resolving the caller's endpoint
+/// id from its own minted device token (any approval state, matching the
+/// catalog-push posture). Receiver tokens and unknown bearers are rejected.
+pub(crate) fn authorize_forwarder_self(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<String, StatusCode> {
+    let Some(raw) = register::bearer_token(headers) else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let conn = state.conn.lock().expect("registry mutex poisoned");
+    match registry::authenticate_device(&conn, raw) {
+        Ok(Some(record)) if record.device_kind == DeviceKind::Forwarder => Ok(record.endpoint_id),
+        Ok(_) => Err(StatusCode::UNAUTHORIZED),
+        Err(err) => {
+            tracing::error!(error = %err, "device authentication failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
 /// Build the server HTTP router.
 ///
 /// Routes are grouped by the auth posture documented in [`status`]:
@@ -170,7 +191,10 @@ pub fn router(state: AppState) -> Router {
         )
         // M2M/device endpoints — per-device minted-token auth.
         .route("/register", post(register::register))
-        .route("/forwarder/catalog", post(catalog::push_catalog))
+        .route(
+            "/forwarder/catalog",
+            post(catalog::push_catalog).get(catalog::get_own_catalog),
+        )
         .route("/announcer/rows", post(announcer::push_row))
         .route("/announcer/takeover", post(announcer::takeover))
         .route("/allowlist/receivers", get(allowlist::receiver_allowlist))

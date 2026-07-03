@@ -30,7 +30,8 @@ pub use enrollment::{
 pub use forwarders::{
     ApprovedForwarderWithStreams, DiscoveredForwarderStream, ForwarderCatalogStreamRecord,
     ForwarderRecord, ForwarderStreamRecord, list_approved_forwarders_with_streams,
-    list_forwarder_streams, list_forwarders, upsert_forwarder_catalog,
+    list_forwarder_streams, list_forwarder_streams_for_endpoint, list_forwarders,
+    upsert_forwarder_catalog,
 };
 pub use schema::migrate;
 pub use tokens::{authenticate_device, hash_token, verify_token};
