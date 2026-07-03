@@ -1581,7 +1581,13 @@ pub struct StreamEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reader_ip: Option<String>,
     pub subscribed: bool,
+    /// Resolved local proxy port: the stored override when present, otherwise
+    /// the default reader port.
     pub local_port: Option<u16>,
+    /// Stored explicit proxy-port override only; `None` means the stream uses
+    /// the default port.
+    /// This field must always serialize, including as `null`, for UI default
+    /// handling.
     pub local_port_override: Option<u16>,
     /// Whether this stream is opted in to announcer publishing.
     pub announcer_publish: bool,

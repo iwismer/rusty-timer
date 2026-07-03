@@ -602,6 +602,17 @@ async fn streams_response_includes_stored_port_override_separate_from_resolved_p
         .unwrap();
     assert_eq!(defaulted.local_port, Some(10005));
     assert_eq!(defaulted.local_port_override, None);
+    let serialized_defaulted = serde_json::to_value(defaulted).unwrap();
+    assert!(
+        serialized_defaulted
+            .as_object()
+            .unwrap()
+            .contains_key("local_port_override")
+    );
+    assert_eq!(
+        serialized_defaulted["local_port_override"],
+        serde_json::Value::Null
+    );
 
     let explicit = response
         .streams

@@ -14,6 +14,7 @@ import type {
 import {
   buildAllSubscriptions,
   buildUpdatedSubscriptions,
+  type SubscriptionBuildStream,
 } from "./subscriptions";
 import { initSSE, destroySSE } from "./sse";
 import { cycleTheme } from "@rusty-timer/shared-ui/lib/dark-mode";
@@ -33,6 +34,15 @@ export type TabId =
   | "announcer"
   | "logs"
   | "admin";
+
+function subscriptionBuildStreams(
+  streams: api.StreamEntry[],
+): SubscriptionBuildStream[] {
+  return streams.map((stream) => ({
+    ...stream,
+    local_port_override: stream.local_port_override ?? null,
+  }));
+}
 
 export type UpdateState = {
   status: "available" | "downloaded";
@@ -999,7 +1009,7 @@ export async function toggleSubscription(
   try {
     store.error = null;
     const result = buildUpdatedSubscriptions({
-      allStreams: store.streams.streams,
+      allStreams: subscriptionBuildStreams(store.streams.streams),
       target: {
         forwarder_endpoint_id: stream.forwarder_endpoint_id,
         stream_id: stream.stream_id,
@@ -1044,7 +1054,9 @@ export async function subscribeAllAvailable(): Promise<void> {
   try {
     store.error = null;
     markSubscriptionPending(pendingStreams);
-    await api.putSubscriptions(buildAllSubscriptions(store.streams.streams));
+    await api.putSubscriptions(
+      buildAllSubscriptions(subscriptionBuildStreams(store.streams.streams)),
+    );
     const latestStreams = await api.getStreams();
     if (refreshVersion === streamRefreshVersion) {
       store.streams = latestStreams;

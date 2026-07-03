@@ -117,6 +117,7 @@ describe("buildUpdatedSubscriptions", () => {
           stream_id: "10.0.0.3:10000",
           subscribed: false,
           local_port: null,
+          local_port_override: null,
         },
       ],
       target: {
@@ -157,18 +158,21 @@ describe("buildUpdatedSubscriptions", () => {
           stream_id: "stream-1",
           subscribed: true,
           local_port: 10001,
+          local_port_override: null,
         },
         {
           forwarder_endpoint_id: "endpoint-2",
           stream_id: "stream-2",
           subscribed: true,
           local_port: null,
+          local_port_override: null,
         },
         {
           forwarder_endpoint_id: "endpoint-3",
           stream_id: "stream-3",
           subscribed: false,
           local_port: null,
+          local_port_override: null,
         },
       ],
       target: {
@@ -209,12 +213,14 @@ describe("buildUpdatedSubscriptions", () => {
           reader_ip: "10.0.0.2:10000",
           subscribed: false,
           local_port: null,
+          local_port_override: null,
         },
         {
           forwarder_endpoint_id: "endpoint-3",
           stream_id: "stream-3",
           subscribed: false,
           local_port: null,
+          local_port_override: null,
         },
       ],
       target: {
@@ -254,12 +260,14 @@ describe("buildUpdatedSubscriptions", () => {
           stream_id: "stream-1",
           subscribed: true,
           local_port: null,
+          local_port_override: null,
         },
         {
           forwarder_endpoint_id: "endpoint-2",
           stream_id: "stream-2",
           subscribed: false,
           local_port: null,
+          local_port_override: null,
         },
       ],
       target: {
@@ -302,6 +310,7 @@ describe("buildUpdatedSubscriptions", () => {
           stream_id: "stream-2",
           subscribed: true,
           local_port: null,
+          local_port_override: null,
           event_type: "finish",
         },
       ],
@@ -331,6 +340,7 @@ describe("buildUpdatedSubscriptions", () => {
           stream_id: "stream-1",
           subscribed: false,
           local_port: null,
+          local_port_override: null,
         },
       ],
       target: {

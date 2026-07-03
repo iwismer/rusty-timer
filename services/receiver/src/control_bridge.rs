@@ -18,7 +18,6 @@
 
 use crate::control_api::{self, AppState};
 use crate::error::ReceiverError;
-use crate::stream_key::LocalStreamKey;
 use crate::ui_events::ReceiverUiEvent;
 use axum::Json;
 use axum::Router;
@@ -31,7 +30,6 @@ use axum::routing::{get, post};
 use futures_util::Stream;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
@@ -154,73 +152,7 @@ async fn state_snapshot(State(state): State<Arc<AppState>>) -> Json<Value> {
 }
 
 async fn local_streams_snapshot(state: &AppState) -> control_api::StreamsResponse {
-    let counts_snapshot = state.stream_counts.snapshot();
-    let db = state.db.lock().await;
-    let subs = match db.load_stream_subscriptions() {
-        Ok(subs) => subs,
-        Err(e) => {
-            return control_api::StreamsResponse {
-                streams: vec![],
-                degraded: true,
-                upstream_error: Some(format!("failed to load subscriptions: {e}")),
-            };
-        }
-    };
-    let (cursors, cursors_error) = match db.load_stream_cursors() {
-        Ok(cursors) => (cursors, None),
-        Err(e) => (vec![], Some(format!("failed to load cursors: {e}"))),
-    };
-    let announcer_publish_streams = db.load_announcer_publish_streams().unwrap_or_default();
-    drop(db);
-
-    let cursor_map: HashMap<&str, &crate::db::StreamCursorRecord> =
-        cursors.iter().map(|c| (c.stream_id.as_str(), c)).collect();
-
-    let streams = subs
-        .iter()
-        .map(|sub| {
-            let local_stream_key = LocalStreamKey::new(&sub.forwarder_endpoint_id, &sub.stream_id);
-            let cursor = cursor_map.get(local_stream_key.as_str());
-            let counts = sub
-                .forwarder_id
-                .as_deref()
-                .zip(sub.reader_ip.as_deref())
-                .and_then(|(forwarder_id, reader_ip)| {
-                    let sk = crate::cache::StreamKey::new(forwarder_id, reader_ip);
-                    counts_snapshot.get(&sk)
-                });
-            control_api::StreamEntry {
-                forwarder_endpoint_id: sub.forwarder_endpoint_id.clone(),
-                stream_id: sub.stream_id.clone(),
-                forwarder_id: sub.forwarder_id.clone(),
-                reader_ip: sub.reader_ip.clone(),
-                subscribed: true,
-                local_port: sub.local_port_override.or_else(|| {
-                    sub.reader_ip
-                        .as_deref()
-                        .and_then(crate::ports::default_port)
-                }),
-                local_port_override: sub.local_port_override,
-                announcer_publish: announcer_publish_streams.contains(local_stream_key.as_str()),
-                event_type: Some(sub.event_type),
-                online: None,
-                reader_connected: None,
-                display_alias: None,
-                stream_epoch: None,
-                current_epoch_name: None,
-                reads_total: counts.as_ref().map(|c| c.total),
-                reads_epoch: counts.as_ref().map(|c| c.epoch),
-                cursor_epoch: cursor.and_then(|c| c.stream_epoch),
-                cursor_seq: cursor.map(|c| c.last_seq),
-            }
-        })
-        .collect();
-
-    control_api::StreamsResponse {
-        streams,
-        degraded: cursors_error.is_some(),
-        upstream_error: cursors_error,
-    }
+    state.build_streams_response().await
 }
 
 async fn events(
@@ -566,6 +498,52 @@ mod tests {
             .await
             .expect("POST unknown command");
         assert_eq!(resp.status().as_u16(), 404);
+    }
+
+    #[tokio::test]
+    async fn state_snapshot_uses_canonical_stream_port_resolution() {
+        let (addr, state) = spawn_bridge().await;
+        {
+            let mut db = state.db.lock().await;
+            db.replace_stream_subscriptions(&[crate::db::StreamSubscription {
+                forwarder_endpoint_id: "endpoint-default".to_owned(),
+                stream_id: "10.0.0.5:10000".to_owned(),
+                local_port_override: None,
+                event_type: crate::db::EventType::Finish,
+                forwarder_id: None,
+                reader_ip: None,
+            }])
+            .unwrap();
+        }
+
+        let canonical = control_api::get_streams(state.as_ref()).await;
+        let canonical_stream = canonical
+            .streams
+            .iter()
+            .find(|s| s.forwarder_endpoint_id == "endpoint-default")
+            .unwrap();
+        assert_eq!(canonical_stream.local_port, Some(10005));
+        assert_eq!(canonical_stream.local_port_override, None);
+
+        let resp = reqwest::get(format!("http://{addr}/bridge/state"))
+            .await
+            .expect("GET /bridge/state");
+        assert!(resp.status().is_success());
+        let body: serde_json::Value = resp.json().await.expect("state json");
+        let bridge_streams = body["streams"]["streams"].as_array().unwrap();
+        let bridge_stream = bridge_streams
+            .iter()
+            .find(|s| s["forwarder_endpoint_id"] == "endpoint-default")
+            .unwrap();
+        assert_eq!(
+            bridge_stream["local_port"],
+            serde_json::json!(canonical_stream.local_port)
+        );
+        assert!(bridge_stream.get("local_port_override").is_some());
+        assert_eq!(
+            bridge_stream["local_port_override"],
+            serde_json::Value::Null
+        );
     }
 
     #[tokio::test]

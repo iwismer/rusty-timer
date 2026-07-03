@@ -10,7 +10,7 @@ export interface SubscriptionBuildStream {
   reader_ip?: string | null;
   subscribed: boolean;
   local_port: number | null;
-  local_port_override?: number | null;
+  local_port_override: number | null;
   event_type?: "start" | "finish";
 }
 
