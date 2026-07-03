@@ -44,7 +44,7 @@ export interface StatusResponse {
   forwarder_streams: ForwarderStreamRecord[];
 }
 
-export type EnrollmentTokenStatus = "active" | "used" | "revoked";
+export type EnrollmentTokenStatus = "active" | "used" | "revoked" | "expired";
 
 export interface EnrollmentTokenRecord {
   token_id: string;
@@ -55,6 +55,7 @@ export interface EnrollmentTokenRecord {
   used_unix_ms: number | null;
   used_endpoint_id: string | null;
   revoked_unix_ms: number | null;
+  expires_unix_ms?: number | null;
 }
 
 export interface EnrollmentTokensResponse {

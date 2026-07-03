@@ -87,6 +87,7 @@ pub enum EnrollmentTokenStatus {
     Active,
     Used,
     Revoked,
+    Expired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -99,6 +100,9 @@ pub struct EnrollmentTokenRecord {
     pub used_unix_ms: Option<i64>,
     pub used_endpoint_id: Option<String>,
     pub revoked_unix_ms: Option<i64>,
+    /// When the voucher stops being usable. `None` for legacy rows created
+    /// before the TTL was introduced (no expiry).
+    pub expires_unix_ms: Option<i64>,
 }
 
 /// A registered forwarder's latest pushed identity.
@@ -366,7 +370,8 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
              created_unix_ms INTEGER NOT NULL,
              used_unix_ms INTEGER,
              used_endpoint_id TEXT,
-             revoked_unix_ms INTEGER
+             revoked_unix_ms INTEGER,
+             expires_unix_ms INTEGER
          );",
     )?;
 
@@ -389,6 +394,12 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_token_id ON devices(token_id);",
     )?;
+
+    // Enrollment voucher expiry. NULL = no expiry (legacy rows created before
+    // the TTL was introduced).
+    if !column_exists(conn, "enrollment_tokens", "expires_unix_ms")? {
+        conn.execute_batch("ALTER TABLE enrollment_tokens ADD COLUMN expires_unix_ms INTEGER;")?;
+    }
 
     Ok(())
 }
@@ -449,23 +460,37 @@ fn reshape_forwarder_streams_pk(conn: &Connection) -> rusqlite::Result<()> {
     }
 }
 
+/// Enrollment vouchers are valid for 24 hours from creation. NULL (legacy
+/// rows) means no expiry.
+const ENROLLMENT_TOKEN_TTL_MS: i64 = 24 * 60 * 60 * 1000;
+
 fn enrollment_token_status(
     used_unix_ms: Option<i64>,
     revoked_unix_ms: Option<i64>,
+    expires_unix_ms: Option<i64>,
+    now_unix_ms: i64,
 ) -> EnrollmentTokenStatus {
     if revoked_unix_ms.is_some() {
         EnrollmentTokenStatus::Revoked
     } else if used_unix_ms.is_some() {
+        // A used voucher past its expiry still displays as `Used`; expiry only
+        // matters for reuse, which the registration query blocks directly.
         EnrollmentTokenStatus::Used
+    } else if expires_unix_ms.is_some_and(|expires| expires <= now_unix_ms) {
+        EnrollmentTokenStatus::Expired
     } else {
         EnrollmentTokenStatus::Active
     }
 }
 
-fn enrollment_token_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EnrollmentTokenRecord> {
+fn enrollment_token_from_row(
+    row: &rusqlite::Row<'_>,
+    now_unix_ms: i64,
+) -> rusqlite::Result<EnrollmentTokenRecord> {
     let device_kind_raw: String = row.get(1)?;
     let used_unix_ms = row.get(5)?;
     let revoked_unix_ms = row.get(7)?;
+    let expires_unix_ms = row.get(8)?;
     let Some(device_kind) = DeviceKind::parse(&device_kind_raw) else {
         return Err(rusqlite::Error::InvalidQuery);
     };
@@ -473,11 +498,17 @@ fn enrollment_token_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Enroll
         token_id: row.get(0)?,
         device_kind,
         display_name: row.get(2)?,
-        status: enrollment_token_status(used_unix_ms, revoked_unix_ms),
+        status: enrollment_token_status(
+            used_unix_ms,
+            revoked_unix_ms,
+            expires_unix_ms,
+            now_unix_ms,
+        ),
         created_unix_ms: row.get(4)?,
         used_unix_ms,
         used_endpoint_id: row.get(6)?,
         revoked_unix_ms,
+        expires_unix_ms,
     })
 }
 
@@ -492,15 +523,17 @@ pub fn create_enrollment_token(
     let token_hash = hash_token(raw_token);
     conn.execute(
         "INSERT INTO enrollment_tokens (
-             token_id, device_kind, display_name, token_hash, created_unix_ms
+             token_id, device_kind, display_name, token_hash, created_unix_ms,
+             expires_unix_ms
          )
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             token_id,
             device_kind.as_str(),
             display_name,
             token_hash,
-            now
+            now,
+            now + ENROLLMENT_TOKEN_TTL_MS
         ],
     )?;
     get_enrollment_token(conn, token_id)?.ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
@@ -510,25 +543,28 @@ fn get_enrollment_token(
     conn: &Connection,
     token_id: &str,
 ) -> rusqlite::Result<Option<EnrollmentTokenRecord>> {
+    let now = Utc::now().timestamp_millis();
     conn.query_row(
         "SELECT token_id, device_kind, display_name, token_hash, created_unix_ms,
-                used_unix_ms, used_endpoint_id, revoked_unix_ms
+                used_unix_ms, used_endpoint_id, revoked_unix_ms, expires_unix_ms
          FROM enrollment_tokens
          WHERE token_id = ?1",
         [token_id],
-        enrollment_token_from_row,
+        |row| enrollment_token_from_row(row, now),
     )
     .optional()
 }
 
 pub fn list_enrollment_tokens(conn: &Connection) -> rusqlite::Result<Vec<EnrollmentTokenRecord>> {
+    let now = Utc::now().timestamp_millis();
     let mut stmt = conn.prepare(
         "SELECT token_id, device_kind, display_name, token_hash, created_unix_ms,
-                used_unix_ms, used_endpoint_id, revoked_unix_ms
+                used_unix_ms, used_endpoint_id, revoked_unix_ms, expires_unix_ms
          FROM enrollment_tokens
          ORDER BY created_unix_ms DESC, token_id",
     )?;
-    stmt.query_map([], enrollment_token_from_row)?.collect()
+    stmt.query_map([], |row| enrollment_token_from_row(row, now))?
+        .collect()
 }
 
 pub fn revoke_enrollment_token(
@@ -669,8 +705,9 @@ pub(crate) fn register_device_minted(
 /// Recovery semantics (single atomic transaction so a voucher can't be
 /// double-spent across endpoints):
 /// - Same-`endpoint_id` re-presentation of its own already-used voucher rotates
-///   the token and **keeps** the existing approval state (covers a crash before
-///   the client persisted its first token).
+///   the token and **resets** approval to `pending` (covers a crash before the
+///   client persisted its first token; a voucher secret leaked after use must
+///   not silently yield an active token — the admin re-approves).
 /// - A different, unused voucher rebinding an *existing* endpoint resets
 ///   `approval_state` to `pending` and requires the existing `device_kind` to
 ///   match, so a stolen voucher cannot silently take over an active device.
@@ -693,16 +730,22 @@ pub fn register_device_with_voucher(
         .and_then(|raw| DeviceKind::parse(&raw));
     let device_exists = existing_kind.is_some();
 
-    // Find a non-revoked voucher of this kind whose secret verifies.
+    let now = Utc::now().timestamp_millis();
+
+    // Find a non-revoked, non-expired voucher of this kind whose secret
+    // verifies. The expiry filter applies to fresh use and same-endpoint reuse
+    // alike (both flow through this query); NULL expiry (legacy rows) never
+    // expires.
     let mut matched: Option<(String, Option<String>, bool)> = None;
     {
         let mut stmt = tx.prepare(
             "SELECT token_id, token_hash, used_unix_ms, used_endpoint_id
              FROM enrollment_tokens
              WHERE device_kind = ?1 AND revoked_unix_ms IS NULL
+               AND (expires_unix_ms IS NULL OR expires_unix_ms > ?2)
              ORDER BY created_unix_ms, token_id",
         )?;
-        let rows = stmt.query_map([device_kind.as_str()], |row| {
+        let rows = stmt.query_map(params![device_kind.as_str(), now], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Vec<u8>>(1)?,
@@ -735,8 +778,6 @@ pub fn register_device_with_voucher(
         return Ok(None);
     }
 
-    let now = Utc::now().timestamp_millis();
-
     // Consume a fresh voucher (idempotent no-op for same-endpoint reuse).
     if !used {
         tx.execute(
@@ -748,21 +789,16 @@ pub fn register_device_with_voucher(
     }
 
     if device_exists {
-        if same_endpoint_reuse {
-            // Rotate only: keep approval state.
-            tx.execute(
-                "UPDATE devices SET device_kind = ?2, updated_unix_ms = ?3 WHERE endpoint_id = ?1",
-                params![endpoint_id, device_kind.as_str(), now],
-            )?;
-        } else {
-            // Fresh-voucher rebind of an existing endpoint: reset to pending.
-            tx.execute(
-                "UPDATE devices
-                 SET device_kind = ?2, approval_state = 'pending', updated_unix_ms = ?3
-                 WHERE endpoint_id = ?1",
-                params![endpoint_id, device_kind.as_str(), now],
-            )?;
-        }
+        // Any voucher-based (re)registration of an existing endpoint resets to
+        // pending: fresh-voucher rebind for the usual takeover reasons, and
+        // same-endpoint reuse because a voucher secret leaked after use must
+        // not silently yield an active token.
+        tx.execute(
+            "UPDATE devices
+             SET device_kind = ?2, approval_state = 'pending', updated_unix_ms = ?3
+             WHERE endpoint_id = ?1",
+            params![endpoint_id, device_kind.as_str(), now],
+        )?;
     } else {
         tx.execute(
             "INSERT INTO devices (
@@ -1325,6 +1361,53 @@ mod tests {
         );
     }
 
+    /// Force a voucher's expiry into the past directly in SQL.
+    fn force_expire_token(conn: &Connection, token_id: &str) {
+        conn.execute(
+            "UPDATE enrollment_tokens SET expires_unix_ms = 1 WHERE token_id = ?1",
+            [token_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn expired_voucher_cannot_register() {
+        let conn = test_conn();
+        create_enrollment_token(&conn, "tok-1", DeviceKind::Forwarder, None, "voucher").unwrap();
+        force_expire_token(&conn, "tok-1");
+        assert!(
+            register_device_with_voucher(&conn, "ep-1", DeviceKind::Forwarder, "voucher")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn expired_voucher_cannot_be_reused_by_same_endpoint() {
+        let conn = test_conn();
+        create_enrollment_token(&conn, "tok-1", DeviceKind::Forwarder, None, "voucher").unwrap();
+        register_device_with_voucher(&conn, "ep-1", DeviceKind::Forwarder, "voucher")
+            .unwrap()
+            .unwrap();
+        force_expire_token(&conn, "tok-1");
+        assert!(
+            register_device_with_voucher(&conn, "ep-1", DeviceKind::Forwarder, "voucher")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn enrollment_token_listing_reports_expired_status() {
+        let conn = test_conn();
+        create_enrollment_token(&conn, "tok-1", DeviceKind::Forwarder, None, "voucher").unwrap();
+        force_expire_token(&conn, "tok-1");
+        assert_eq!(
+            list_enrollment_tokens(&conn).unwrap()[0].status,
+            EnrollmentTokenStatus::Expired
+        );
+    }
+
     #[test]
     fn voucher_double_spend_by_second_endpoint_rejected() {
         let conn = test_conn();
@@ -1340,7 +1423,7 @@ mod tests {
     }
 
     #[test]
-    fn same_endpoint_voucher_reuse_rotates_and_keeps_approval() {
+    fn same_endpoint_voucher_reuse_rotates_and_resets_to_pending() {
         let conn = test_conn();
         create_enrollment_token(&conn, "tok-1", DeviceKind::Forwarder, None, "voucher").unwrap();
         let first = register_device_with_voucher(&conn, "ep-1", DeviceKind::Forwarder, "voucher")
@@ -1350,7 +1433,7 @@ mod tests {
         let second = register_device_with_voucher(&conn, "ep-1", DeviceKind::Forwarder, "voucher")
             .unwrap()
             .unwrap();
-        assert_eq!(second.record.approval_state, ApprovalState::Active);
+        assert_eq!(second.record.approval_state, ApprovalState::Pending);
         assert!(
             authenticate_device(&conn, &first.device_token)
                 .unwrap()

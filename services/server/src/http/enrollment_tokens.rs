@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 use crate::http::{AppState, status};
 use crate::registry::{self, DeviceKind};
 
+/// Manually chosen voucher secrets must not be guessable; enforce a floor.
+/// (Generated vouchers are 32+ hex chars and unaffected.)
+const MIN_MANUAL_VOUCHER_LEN: usize = 16;
+
 #[derive(Debug, Deserialize)]
 pub struct CreateEnrollmentTokenRequest {
     pub device_kind: String,
@@ -68,6 +72,9 @@ pub async fn create_token(
             let trimmed = raw.trim();
             if trimmed.is_empty() {
                 return StatusCode::BAD_REQUEST.into_response();
+            }
+            if trimmed.len() < MIN_MANUAL_VOUCHER_LEN {
+                return (StatusCode::BAD_REQUEST, "token too short (min 16 chars)").into_response();
             }
             trimmed.to_owned()
         }
@@ -251,7 +258,7 @@ mod tests {
                 &serde_json::json!({
                     "device_kind": "forwarder",
                     "display_name": "Manual Start",
-                    "token": "manual-secret"
+                    "token": "manual-secret-0001"
                 }),
             ))
             .await
@@ -259,7 +266,7 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
         let body = response_json(resp).await;
-        assert_eq!(body["token"], "manual-secret");
+        assert_eq!(body["token"], "manual-secret-0001");
 
         let list_resp = router(state)
             .oneshot(list_request(Some("alice")))
@@ -268,6 +275,35 @@ mod tests {
         let listed = response_json(list_resp).await;
         assert_eq!(listed["tokens"][0]["display_name"], "Manual Start");
         assert_eq!(listed["tokens"][0]["status"], "active");
+    }
+
+    #[tokio::test]
+    async fn create_token_rejects_short_manual_secret() {
+        // 15 chars: one below the 16-char floor.
+        let resp = router(test_state())
+            .oneshot(create_request(
+                Some("alice"),
+                &serde_json::json!({
+                    "device_kind": "receiver",
+                    "token": "fifteen-chars-x"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Exactly 16 chars passes.
+        let resp = router(test_state())
+            .oneshot(create_request(
+                Some("alice"),
+                &serde_json::json!({
+                    "device_kind": "receiver",
+                    "token": "sixteen-chars-ok"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

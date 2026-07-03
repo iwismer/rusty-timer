@@ -89,6 +89,7 @@
   function tokenState(tokenStatus: EnrollmentTokenRecord["status"]) {
     if (tokenStatus === "active") return "ok";
     if (tokenStatus === "used") return "warn";
+    if (tokenStatus === "expired") return "err";
     return "err";
   }
 

@@ -355,20 +355,33 @@ mod tests {
             .unwrap();
         }
 
-        for _ in 0..2 {
-            let resp = router(state.clone())
-                .oneshot(register_request(
-                    "enroll-secret",
-                    &serde_json::json!({
-                        "endpoint_id": "ep-forwarder-enrolled",
-                        "device_kind": "forwarder",
-                        "device_token": "enroll-secret"
-                    }),
-                ))
-                .await
+        let body = serde_json::json!({
+            "endpoint_id": "ep-forwarder-enrolled",
+            "device_kind": "forwarder",
+            "device_token": "enroll-secret"
+        });
+        let first = router(state.clone())
+            .oneshot(register_request("enroll-secret", &body))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        // Approve, then recover via the used voucher: registration succeeds
+        // but approval is demoted back to pending (admin must re-approve).
+        {
+            let conn = state.conn.lock().unwrap();
+            crate::registry::approve_device(&conn, "ep-forwarder-enrolled")
+                .unwrap()
                 .unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
         }
+
+        let second = router(state)
+            .oneshot(register_request("enroll-secret", &body))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let json = response_json(second).await;
+        assert_eq!(json["approval_state"], "pending");
     }
 
     #[tokio::test]
