@@ -8,20 +8,22 @@
 //! present in this worktree, and so tests can prove behavior with mocks.
 //!
 //! Contract:
-//! * **Idempotency key `(stream_id, seq)`.** Each row carries its durable
-//!   `(stream_id, seq)`. Once an event is pushed it is marked in the durable
+//! * **Idempotency key `(forwarder_endpoint_id, stream_id, seq)`.** Rows are
+//!   pushed in batches that carry the composite stream identity (decoded from
+//!   the receiver-local [`LocalStreamKey`] at this boundary — the encoded key
+//!   never crosses HTTP). Once an event is pushed it is marked in the durable
 //!   store, so a repush never re-sends an already-delivered row.
 //! * **Ordering key `received_unix_ms`.** Rows are emitted in receipt order.
 //! * **Fenced `announcer_source_generation`.** Every push carries the current
 //!   source generation. A push whose generation is older than the highest
 //!   generation already accepted for the stream is rejected without sending, so
 //!   stale generations never reach the announcer. Pushes are also serialized per
-//!   `stream_id` in-process, so overlapping calls cannot let an older generation
+//!   stream in-process, so overlapping calls cannot let an older generation
 //!   proceed after a newer one has been accepted by another local push.
 //! * **Resolved participant name when available.** Names/bibs are resolved
 //!   locally from race/participant data via the injected resolver.
 
-use rt_server_api::announcer::{PushRowRequest, TakeoverResponse};
+use rt_server_api::announcer::{MAX_PUSH_ROWS, PushRow, PushRowsRequest, TakeoverResponse};
 use rt_server_api::register::{RegisterRequest, RegisterResponse};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -34,6 +36,7 @@ use thiserror::Error;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(3);
 
 use crate::db::{AnnouncerGenerationAcceptance, Db, DbError};
+use crate::stream_key::LocalStreamKey;
 use crate::ui_events::chip_id_from_raw_frame;
 
 /// A participant identity resolved from local race/participant data.
@@ -63,17 +66,15 @@ where
     }
 }
 
-/// A single announcer row pushed downstream.
+/// A single announcer row pushed downstream as part of an [`AnnouncerBatch`].
 ///
-/// `stream_id`/`seq` form the idempotency key, `received_unix_ms` is the
-/// ordering key, and `generation` fences the announcer source. `bib`/`name` are
-/// populated when the chip resolves to a known participant.
+/// `seq` (with the batch's composite stream identity) forms the idempotency
+/// key and `received_unix_ms` is the ordering key. `bib`/`name` are populated
+/// when the chip resolves to a known participant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AnnouncerRow {
-    pub stream_id: String,
     pub seq: i64,
     pub received_unix_ms: i64,
-    pub announcer_source_generation: i64,
     pub chip_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bib: Option<String>,
@@ -83,24 +84,56 @@ pub struct AnnouncerRow {
     pub division: Option<String>,
 }
 
-/// Transport abstraction for delivering announcer rows downstream.
+/// A batch of announcer rows sharing one composite stream identity and one
+/// source generation — by construction, since the identity and generation are
+/// batch-level fields.
 ///
-/// `max_list_size` is the receiver-configured cap on the number of rows the
-/// server keeps visible in the public announcer feed; it rides every push so
-/// the server can re-trim its runtime when the operator changes it.
-pub trait AnnouncerPushClient {
-    fn push(&self, rows: &[AnnouncerRow], max_list_size: u32) -> Result<(), AnnouncerPushError>;
+/// `forwarder_endpoint_id`/`stream_id` are the DECODED halves of the
+/// receiver-local [`LocalStreamKey`]; the encoded form (with its U+001F
+/// separator) never crosses HTTP. `max_list_size` is the receiver-configured
+/// cap on the number of rows the server keeps visible in the public announcer
+/// feed; it rides every push so the server can re-trim its runtime when the
+/// operator changes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnouncerBatch<'a> {
+    pub forwarder_endpoint_id: &'a str,
+    pub stream_id: &'a str,
+    pub announcer_source_generation: i64,
+    pub max_list_size: u32,
+    pub rows: &'a [AnnouncerRow],
 }
+
+/// Transport abstraction for delivering announcer row batches downstream.
+///
+/// One `push` call is one downstream request; callers bound `batch.rows` to
+/// [`MAX_PUSH_ROWS`].
+pub trait AnnouncerPushClient {
+    fn push(&self, batch: &AnnouncerBatch<'_>) -> Result<(), AnnouncerPushError>;
+}
+
+/// Shared blocking HTTP client for announcer row pushes.
+///
+/// One client for the life of the process (≥ the life of every push worker) so
+/// backlog drains reuse a single keep-alive connection pool instead of paying
+/// connection setup per request. It lives in a `static` because
+/// [`push_announcer_rows`] runs on blocking threads while the owning worker
+/// structs live in async tasks: a `reqwest::blocking::Client` must be
+/// constructed and dropped outside async contexts, and a `static` is
+/// initialized on first use (a blocking thread) and never dropped.
+static PUSH_HTTP_CLIENT: LazyLock<Result<reqwest::blocking::Client, String>> =
+    LazyLock::new(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(HTTP_TIMEOUT)
+            .connect_timeout(HTTP_TIMEOUT)
+            .build()
+            .map_err(|e| e.to_string())
+    });
 
 /// Real HTTP transport for the server `/announcer/rows` endpoint.
 ///
-/// Server accepts **one row per POST** with bearer auth, so [`push`] posts
-/// each row individually. A blocking reqwest client is built lazily inside
-/// [`push`] (never held across calls) because [`push_announcer_rows`] is
-/// synchronous and is driven from a blocking task in the headless P2P runtime;
-/// constructing or dropping a blocking client inside an async context panics, so
-/// the client must live entirely on the blocking thread. The bearer token is
-/// held privately and never logged.
+/// [`push`] posts the whole batch as ONE `PushRowsRequest` (bearer auth) over
+/// the shared [`PUSH_HTTP_CLIENT`]. The bearer token is held privately and
+/// never logged.
 ///
 /// [`push`]: AnnouncerPushClient::push
 pub struct ServerAnnouncerClient {
@@ -118,65 +151,70 @@ impl ServerAnnouncerClient {
     }
 }
 
-/// Build the JSON body posted to the server `/announcer/rows` endpoint for one
-/// row. Extracted so the wire shape (including the `division` field) is unit
-/// testable without a live server. Server `bib` is an optional integer; a
-/// non-numeric bib is sent as null rather than failing the whole push.
-fn announcer_row_request_body(
-    row: &AnnouncerRow,
-    max_list_size: u32,
-) -> Result<serde_json::Value, AnnouncerPushError> {
-    let bib = row.bib.as_deref().and_then(|b| b.parse::<i32>().ok());
+/// Build the `PushRowsRequest` body posted to the server `/announcer/rows`
+/// endpoint. Extracted so the wire shape (composite stream identity, division,
+/// bib fallback labels) is unit testable without a live server. Server `bib`
+/// is an optional integer; a non-numeric bib is sent as null rather than
+/// failing the whole push.
+fn push_rows_request_body(
+    batch: &AnnouncerBatch<'_>,
+) -> Result<PushRowsRequest, AnnouncerPushError> {
     let announcer_source_generation =
-        u64::try_from(row.announcer_source_generation).map_err(|_| {
+        u64::try_from(batch.announcer_source_generation).map_err(|_| {
             AnnouncerPushError::Transport(
                 "announcer_source_generation must be non-negative".to_owned(),
             )
         })?;
-    let seq = u64::try_from(row.seq)
-        .map_err(|_| AnnouncerPushError::Transport("seq must be non-negative".to_owned()))?;
-    let body = PushRowRequest {
+    let rows = batch
+        .rows
+        .iter()
+        .map(|row| {
+            let seq = u64::try_from(row.seq).map_err(|_| {
+                AnnouncerPushError::Transport("seq must be non-negative".to_owned())
+            })?;
+            Ok(PushRow {
+                seq,
+                chip_id: row.chip_id.clone(),
+                bib: row.bib.as_deref().and_then(|b| b.parse::<i32>().ok()),
+                display_name: row.name.clone().unwrap_or_else(|| {
+                    row.bib
+                        .as_deref()
+                        .map_or_else(String::new, |bib| format!("Unknown Participant {bib}"))
+                }),
+                reader_timestamp: None,
+                received_unix_ms: row.received_unix_ms,
+                division: row.division.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, AnnouncerPushError>>()?;
+    Ok(PushRowsRequest {
         announcer_source_generation,
-        stream_id: row.stream_id.clone(),
-        seq,
-        chip_id: row.chip_id.clone(),
-        bib,
-        display_name: row.name.clone().unwrap_or_else(|| {
-            row.bib
-                .as_deref()
-                .map_or_else(String::new, |bib| format!("Unknown Participant {bib}"))
-        }),
-        reader_timestamp: None,
-        received_unix_ms: row.received_unix_ms,
-        division: row.division.clone(),
-        max_list_size: Some(max_list_size),
-    };
-    serde_json::to_value(body).map_err(|e| AnnouncerPushError::Transport(e.to_string()))
+        forwarder_endpoint_id: batch.forwarder_endpoint_id.to_owned(),
+        stream_id: batch.stream_id.to_owned(),
+        rows,
+        max_list_size: Some(batch.max_list_size),
+    })
 }
 
 impl AnnouncerPushClient for ServerAnnouncerClient {
-    fn push(&self, rows: &[AnnouncerRow], max_list_size: u32) -> Result<(), AnnouncerPushError> {
-        if rows.is_empty() {
+    fn push(&self, batch: &AnnouncerBatch<'_>) -> Result<(), AnnouncerPushError> {
+        if batch.rows.is_empty() {
             return Ok(());
         }
-        let client = reqwest::blocking::Client::builder()
-            .timeout(HTTP_TIMEOUT)
-            .connect_timeout(HTTP_TIMEOUT)
-            .build()
+        let client = PUSH_HTTP_CLIENT
+            .as_ref()
+            .map_err(|e| AnnouncerPushError::Transport(e.clone()))?;
+        let body = push_rows_request_body(batch)?;
+        let response = client
+            .post(&self.rows_url)
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
             .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
-        for row in rows {
-            let body = announcer_row_request_body(row, max_list_size)?;
-            let response = client
-                .post(&self.rows_url)
-                .bearer_auth(&self.token)
-                .json(&body)
-                .send()
-                .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
-            let status = response.status();
-            if !status.is_success() {
-                let body = response.text().unwrap_or_default();
-                return Err(classify_push_failure(status, body));
-            }
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            return Err(classify_push_failure(status, body));
         }
         Ok(())
     }
@@ -378,22 +416,30 @@ pub enum PushOutcome {
     StaleGeneration { fenced: i64, attempted: i64 },
 }
 
-/// Push not-yet-pushed durable events for `stream_id` to the announcer.
+/// Push not-yet-pushed durable events for `stream_key` to the announcer.
+///
+/// Local durable state (events, fence, push markers) stays keyed by the
+/// ENCODED [`LocalStreamKey`]; the key is decoded into its composite
+/// `(forwarder_endpoint_id, wire stream_id)` halves here, at the push
+/// boundary, so the encoded form never reaches the transport.
 ///
 /// Returns [`PushOutcome::StaleGeneration`] without sending if `generation` is
 /// older than the highest generation already fenced for the stream. Otherwise
 /// the fence is raised, pending events are resolved into rows, pushed via
-/// `client`, and only then marked pushed in the durable store — so a failed
-/// transport leaves rows unmarked for a later retry, and a successful push
-/// followed by a repush sends nothing (idempotent).
+/// `client` in batches of at most [`MAX_PUSH_ROWS`] (one transport request and
+/// one durable mark transaction per batch), and only marked pushed after a
+/// successful push — so a failed transport leaves rows unmarked for a later
+/// retry, and a successful push followed by a repush sends nothing
+/// (idempotent).
 pub fn push_announcer_rows(
     db: &mut Db,
     client: &dyn AnnouncerPushClient,
     resolver: &dyn ParticipantResolver,
-    stream_id: &str,
+    stream_key: &LocalStreamKey,
     generation: i64,
     pushed_unix_ms: i64,
 ) -> Result<PushOutcome, AnnouncerPushError> {
+    let stream_id = stream_key.as_str();
     let stream_lock = announcer_push_lock(stream_id);
     let _stream_guard = lock_unpoisoned(&stream_lock);
 
@@ -407,15 +453,13 @@ pub fn push_announcer_rows(
         }
     }
 
-    // Drain unpushed rows in bounded chunks so enabling the announcer
-    // against a large backlog never materializes every row (with raw
-    // frames) in memory at once.
-    const ANNOUNCER_PUSH_CHUNK_ROWS: usize = 4096;
+    // Drain unpushed rows in server-batch-sized chunks: bounds memory when
+    // enabling the announcer against a large backlog (rows carry raw frames)
+    // and each chunk is exactly one transport request downstream.
     let max_list_size = db.load_announcer_max_list_size()?;
     let mut total_marked = 0usize;
     loop {
-        let pending =
-            db.load_unpushed_announcer_events_limited(stream_id, ANNOUNCER_PUSH_CHUNK_ROWS)?;
+        let pending = db.load_unpushed_announcer_events_limited(stream_id, MAX_PUSH_ROWS)?;
         if pending.is_empty() {
             break;
         }
@@ -427,10 +471,8 @@ pub fn push_announcer_rows(
                 let chip_id = chip_id_from_raw_frame(&event.raw_frame);
                 let resolved = resolver.resolve(&chip_id);
                 AnnouncerRow {
-                    stream_id: event.stream_id.clone(),
                     seq: event.seq,
                     received_unix_ms: event.received_unix_ms,
-                    announcer_source_generation: generation,
                     chip_id,
                     bib: resolved.as_ref().map(|p| p.bib.clone()),
                     name: resolved.as_ref().and_then(|p| p.name.clone()),
@@ -452,7 +494,13 @@ pub fn push_announcer_rows(
             });
         }
 
-        client.push(&rows, max_list_size)?;
+        client.push(&AnnouncerBatch {
+            forwarder_endpoint_id: stream_key.endpoint_id(),
+            stream_id: stream_key.wire_stream_id(),
+            announcer_source_generation: generation,
+            max_list_size,
+            rows: &rows,
+        })?;
 
         // Only mark after a successful push, so a failed transport leaves
         // rows pending for a later retry (at-least-once + idempotency key
@@ -461,7 +509,7 @@ pub fn push_announcer_rows(
         let seqs: Vec<i64> = pending.iter().map(|event| event.seq).collect();
         total_marked += db.mark_announcer_pushed_batch(stream_id, &seqs, pushed_unix_ms)?;
 
-        if fetched < ANNOUNCER_PUSH_CHUNK_ROWS {
+        if fetched < MAX_PUSH_ROWS {
             break;
         }
     }
@@ -508,20 +556,38 @@ mod tests {
         .unwrap();
     }
 
-    /// Records every batch of rows pushed so tests can assert what was sent.
+    fn key(endpoint_id: &str, wire_stream_id: &str) -> LocalStreamKey {
+        LocalStreamKey::new(endpoint_id, wire_stream_id)
+    }
+
+    /// An owned snapshot of one pushed [`AnnouncerBatch`].
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RecordedBatch {
+        forwarder_endpoint_id: String,
+        stream_id: String,
+        announcer_source_generation: i64,
+        max_list_size: u32,
+        rows: Vec<AnnouncerRow>,
+    }
+
+    /// Records every batch pushed so tests can assert what was sent (and how
+    /// many transport requests it took).
     #[derive(Default)]
     struct RecordingClient {
-        batches: Mutex<Vec<Vec<AnnouncerRow>>>,
+        batches: Mutex<Vec<RecordedBatch>>,
     }
 
     impl RecordingClient {
+        fn recorded(&self) -> Vec<RecordedBatch> {
+            self.batches.lock().unwrap().clone()
+        }
+
         fn all_rows(&self) -> Vec<AnnouncerRow> {
             self.batches
                 .lock()
                 .unwrap()
                 .iter()
-                .flatten()
-                .cloned()
+                .flat_map(|batch| batch.rows.iter().cloned())
                 .collect()
         }
 
@@ -531,12 +597,14 @@ mod tests {
     }
 
     impl AnnouncerPushClient for RecordingClient {
-        fn push(
-            &self,
-            rows: &[AnnouncerRow],
-            _max_list_size: u32,
-        ) -> Result<(), AnnouncerPushError> {
-            self.batches.lock().unwrap().push(rows.to_vec());
+        fn push(&self, batch: &AnnouncerBatch<'_>) -> Result<(), AnnouncerPushError> {
+            self.batches.lock().unwrap().push(RecordedBatch {
+                forwarder_endpoint_id: batch.forwarder_endpoint_id.to_owned(),
+                stream_id: batch.stream_id.to_owned(),
+                announcer_source_generation: batch.announcer_source_generation,
+                max_list_size: batch.max_list_size,
+                rows: batch.rows.to_vec(),
+            });
             Ok(())
         }
     }
@@ -559,26 +627,36 @@ mod tests {
     }
 
     #[test]
-    fn batch_marking_marks_all_pushed_rows_in_one_call() {
+    fn backlog_drains_in_max_500_row_batches() {
         let mut db = Db::open_in_memory().unwrap();
-        let stream_id = "127.0.0.1:10400";
+        let stream_key = key("fwd-endpoint", "127.0.0.1:10400");
         let raw = sample_raw_frame();
-        for seq in 1..=600 {
-            insert_event(&db, stream_id, seq, &raw, 1_700_000_000_000 + seq);
+        for seq in 1..=1_100 {
+            insert_event(&db, stream_key.as_str(), seq, &raw, 1_700_000_000_000 + seq);
         }
         let client = RecordingClient::default();
         let resolver = map_resolver(&[]);
 
-        let outcome =
-            push_announcer_rows(&mut db, &client, &resolver, stream_id, 1, 1_700_000_010_000)
-                .unwrap();
-        assert_eq!(outcome, PushOutcome::Pushed { rows: 600 });
+        let outcome = push_announcer_rows(
+            &mut db,
+            &client,
+            &resolver,
+            &stream_key,
+            1,
+            1_700_000_010_000,
+        )
+        .unwrap();
+        assert_eq!(outcome, PushOutcome::Pushed { rows: 1_100 });
         assert!(
-            db.load_unpushed_announcer_events(stream_id)
+            db.load_unpushed_announcer_events(stream_key.as_str())
                 .unwrap()
                 .is_empty(),
-            "one pass marks every pushed row (single transaction, chunked IN lists)"
+            "one pass marks every pushed row (one mark transaction per batch)"
         );
+
+        // ceil(1100 / 500) = 3 transport requests, sized 500/500/100.
+        let sizes: Vec<usize> = client.recorded().iter().map(|b| b.rows.len()).collect();
+        assert_eq!(sizes, vec![500, 500, 100]);
     }
 
     #[test]
@@ -588,54 +666,76 @@ mod tests {
         // received_unix_ms, so a late-received low-seq row must still be
         // picked up by a later pass.
         let mut db = Db::open_in_memory().unwrap();
-        let stream_id = "127.0.0.1:10500";
+        let stream_key = key("fwd-endpoint", "127.0.0.1:10500");
         let raw = sample_raw_frame();
-        insert_event(&db, stream_id, 2, &raw, 1_700_000_000_200);
-        insert_event(&db, stream_id, 3, &raw, 1_700_000_000_300);
+        insert_event(&db, stream_key.as_str(), 2, &raw, 1_700_000_000_200);
+        insert_event(&db, stream_key.as_str(), 3, &raw, 1_700_000_000_300);
         let client = RecordingClient::default();
         let resolver = map_resolver(&[]);
-        let outcome =
-            push_announcer_rows(&mut db, &client, &resolver, stream_id, 1, 1_700_000_010_000)
-                .unwrap();
+        let outcome = push_announcer_rows(
+            &mut db,
+            &client,
+            &resolver,
+            &stream_key,
+            1,
+            1_700_000_010_000,
+        )
+        .unwrap();
         assert_eq!(outcome, PushOutcome::Pushed { rows: 2 });
 
         // Seq 1 arrives late (redelivery after a gap), with a *newer*
         // received time.
-        insert_event(&db, stream_id, 1, &raw, 1_700_000_000_400);
-        let outcome =
-            push_announcer_rows(&mut db, &client, &resolver, stream_id, 1, 1_700_000_020_000)
-                .unwrap();
+        insert_event(&db, stream_key.as_str(), 1, &raw, 1_700_000_000_400);
+        let outcome = push_announcer_rows(
+            &mut db,
+            &client,
+            &resolver,
+            &stream_key,
+            1,
+            1_700_000_020_000,
+        )
+        .unwrap();
         assert_eq!(outcome, PushOutcome::Pushed { rows: 1 });
-        let last_batch = client.batches.lock().unwrap().last().cloned().unwrap();
-        assert_eq!(last_batch.len(), 1);
-        assert_eq!(last_batch[0].seq, 1, "the late low-seq row is pushed");
+        let last_batch = client.recorded().last().cloned().unwrap();
+        assert_eq!(last_batch.rows.len(), 1);
+        assert_eq!(last_batch.rows[0].seq, 1, "the late low-seq row is pushed");
     }
 
     #[test]
     fn pushes_resolved_rows() {
         let mut db = Db::open_in_memory().unwrap();
-        let stream_id = "127.0.0.1:10000";
+        let stream_key = key("fwd-endpoint", "127.0.0.1:10000");
         let raw = sample_raw_frame();
         // Insert out of received order to prove ordering by received_unix_ms.
-        insert_event(&db, stream_id, 2, &raw, 1_700_000_000_200);
-        insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
+        insert_event(&db, stream_key.as_str(), 2, &raw, 1_700_000_000_200);
+        insert_event(&db, stream_key.as_str(), 1, &raw, 1_700_000_000_100);
 
         let client = RecordingClient::default();
         let resolver = map_resolver(&[("000000012345", "42", "Ada Lovelace")]);
 
-        let outcome =
-            push_announcer_rows(&mut db, &client, &resolver, stream_id, 7, 1_700_000_010_000)
-                .unwrap();
+        let outcome = push_announcer_rows(
+            &mut db,
+            &client,
+            &resolver,
+            &stream_key,
+            7,
+            1_700_000_010_000,
+        )
+        .unwrap();
         assert_eq!(outcome, PushOutcome::Pushed { rows: 2 });
 
-        let rows = client.all_rows();
+        let batches = client.recorded();
+        assert_eq!(batches.len(), 1);
+        let batch = &batches[0];
+        assert_eq!(batch.forwarder_endpoint_id, "fwd-endpoint");
+        assert_eq!(batch.stream_id, "127.0.0.1:10000");
+        assert_eq!(batch.announcer_source_generation, 7);
+        let rows = &batch.rows;
         assert_eq!(rows.len(), 2);
         // Ordered by received_unix_ms.
         assert_eq!(rows[0].seq, 1);
         assert_eq!(rows[1].seq, 2);
-        for row in &rows {
-            assert_eq!(row.stream_id, stream_id);
-            assert_eq!(row.announcer_source_generation, 7);
+        for row in rows {
             assert_eq!(row.chip_id, "000000012345");
             assert_eq!(row.bib.as_deref(), Some("42"));
             assert_eq!(row.name.as_deref(), Some("Ada Lovelace"));
@@ -645,64 +745,103 @@ mod tests {
     }
 
     #[test]
-    fn announcer_row_request_body_includes_division() {
-        let row = AnnouncerRow {
-            stream_id: "finish-line".to_owned(),
+    fn push_decodes_local_stream_key_into_composite_fields() {
+        // The encoded LocalStreamKey (with its U+001F separator) must never
+        // cross the push boundary: batches carry the decoded composite
+        // identity instead.
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_key = key("endpointaaaa", "127.0.0.1:10000");
+        let raw = sample_raw_frame();
+        insert_event(&db, stream_key.as_str(), 1, &raw, 1_700_000_000_100);
+
+        let client = RecordingClient::default();
+        let resolver = map_resolver(&[]);
+        push_announcer_rows(
+            &mut db,
+            &client,
+            &resolver,
+            &stream_key,
+            1,
+            1_700_000_010_000,
+        )
+        .unwrap();
+
+        let batches = client.recorded();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].forwarder_endpoint_id, "endpointaaaa");
+        assert_eq!(batches[0].stream_id, "127.0.0.1:10000");
+        assert!(
+            !batches[0].forwarder_endpoint_id.contains('\u{1f}')
+                && !batches[0].stream_id.contains('\u{1f}'),
+            "encoded LocalStreamKey separator must not cross the push boundary"
+        );
+    }
+
+    fn sample_row() -> AnnouncerRow {
+        AnnouncerRow {
             seq: 7,
             received_unix_ms: 1_700_000_000_100,
-            announcer_source_generation: 3,
             chip_id: "000000012345".to_owned(),
             bib: Some("42".to_owned()),
             name: Some("Ada Lovelace".to_owned()),
             division: Some("5k".to_owned()),
-        };
-        let body = announcer_row_request_body(&row, 25).unwrap();
-        assert_eq!(body["division"], "5k");
-        assert_eq!(body["bib"], 42);
-        assert_eq!(body["display_name"], "Ada Lovelace");
-        // A non-numeric/absent division serializes as null rather than being dropped.
-        let mut row_no_div = row;
-        row_no_div.division = None;
-        let body = announcer_row_request_body(&row_no_div, 25).unwrap();
-        assert!(body["division"].is_null());
+        }
+    }
+
+    fn sample_batch(rows: &[AnnouncerRow]) -> AnnouncerBatch<'_> {
+        AnnouncerBatch {
+            forwarder_endpoint_id: "fwd-endpoint",
+            stream_id: "finish-line",
+            announcer_source_generation: 3,
+            max_list_size: 25,
+            rows,
+        }
     }
 
     #[test]
-    fn announcer_row_request_body_labels_bib_without_participant() {
-        let row = AnnouncerRow {
-            stream_id: "finish-line".to_owned(),
-            seq: 7,
-            received_unix_ms: 1_700_000_000_100,
-            announcer_source_generation: 3,
-            chip_id: "000000012345".to_owned(),
+    fn push_rows_request_body_carries_composite_identity_and_division() {
+        let rows = vec![sample_row()];
+        let body =
+            serde_json::to_value(push_rows_request_body(&sample_batch(&rows)).unwrap()).unwrap();
+        assert_eq!(body["forwarder_endpoint_id"], "fwd-endpoint");
+        assert_eq!(body["stream_id"], "finish-line");
+        assert_eq!(body["announcer_source_generation"], 3);
+        assert_eq!(body["max_list_size"], 25);
+        assert_eq!(body["rows"][0]["seq"], 7);
+        assert_eq!(body["rows"][0]["division"], "5k");
+        assert_eq!(body["rows"][0]["bib"], 42);
+        assert_eq!(body["rows"][0]["display_name"], "Ada Lovelace");
+        // An absent division serializes as null rather than being dropped.
+        let rows = vec![AnnouncerRow {
+            division: None,
+            ..sample_row()
+        }];
+        let body =
+            serde_json::to_value(push_rows_request_body(&sample_batch(&rows)).unwrap()).unwrap();
+        assert!(body["rows"][0]["division"].is_null());
+    }
+
+    #[test]
+    fn push_rows_request_body_labels_bib_without_participant() {
+        let rows = vec![AnnouncerRow {
             bib: Some("1488".to_owned()),
             name: None,
             division: None,
-        };
-        let body = announcer_row_request_body(&row, 25).unwrap();
-        assert_eq!(body["bib"], 1488);
-        assert_eq!(body["display_name"], "Unknown Participant 1488");
-    }
-
-    fn push_single_row_to_localhost(row: AnnouncerRow) -> Result<(), AnnouncerPushError> {
-        let client = ServerAnnouncerClient::new("http://127.0.0.1:9", "token").unwrap();
-        client.push(&[row], 25)
+            ..sample_row()
+        }];
+        let body =
+            serde_json::to_value(push_rows_request_body(&sample_batch(&rows)).unwrap()).unwrap();
+        assert_eq!(body["rows"][0]["bib"], 1488);
+        assert_eq!(body["rows"][0]["display_name"], "Unknown Participant 1488");
     }
 
     #[test]
-    fn server_announcer_client_rejects_negative_generation_without_panicking() {
-        let row = AnnouncerRow {
-            stream_id: "finish-line".to_owned(),
-            seq: 7,
-            received_unix_ms: 1_700_000_000_100,
-            announcer_source_generation: -1,
-            chip_id: "000000012345".to_owned(),
-            bib: Some("42".to_owned()),
-            name: Some("Ada Lovelace".to_owned()),
-            division: None,
-        };
+    fn push_rows_request_body_rejects_negative_generation_without_panicking() {
+        let rows = vec![sample_row()];
+        let mut batch = sample_batch(&rows);
+        batch.announcer_source_generation = -1;
 
-        let result = std::panic::catch_unwind(|| push_single_row_to_localhost(row));
+        let result = std::panic::catch_unwind(|| push_rows_request_body(&batch));
         assert!(
             result.is_ok(),
             "negative generation must return an error, not panic"
@@ -715,19 +854,14 @@ mod tests {
     }
 
     #[test]
-    fn server_announcer_client_rejects_negative_seq_without_panicking() {
-        let row = AnnouncerRow {
-            stream_id: "finish-line".to_owned(),
+    fn push_rows_request_body_rejects_negative_seq_without_panicking() {
+        let rows = vec![AnnouncerRow {
             seq: -1,
-            received_unix_ms: 1_700_000_000_100,
-            announcer_source_generation: 3,
-            chip_id: "000000012345".to_owned(),
-            bib: Some("42".to_owned()),
-            name: Some("Ada Lovelace".to_owned()),
-            division: None,
-        };
+            ..sample_row()
+        }];
+        let batch = sample_batch(&rows);
 
-        let result = std::panic::catch_unwind(|| push_single_row_to_localhost(row));
+        let result = std::panic::catch_unwind(|| push_rows_request_body(&batch));
         assert!(
             result.is_ok(),
             "negative seq must return an error, not panic"
@@ -741,9 +875,9 @@ mod tests {
     #[test]
     fn pushes_division_into_announcer_row_payload() {
         let mut db = Db::open_in_memory().unwrap();
-        let stream_id = "127.0.0.1:10000";
+        let stream_key = key("fwd-endpoint", "127.0.0.1:10000");
         let raw = sample_raw_frame();
-        insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
+        insert_event(&db, stream_key.as_str(), 1, &raw, 1_700_000_000_100);
 
         let client = RecordingClient::default();
         // A resolver that carries a division display name through resolve.
@@ -755,7 +889,15 @@ mod tests {
             })
         };
 
-        push_announcer_rows(&mut db, &client, &resolver, stream_id, 7, 1_700_000_010_000).unwrap();
+        push_announcer_rows(
+            &mut db,
+            &client,
+            &resolver,
+            &stream_key,
+            7,
+            1_700_000_010_000,
+        )
+        .unwrap();
         let rows = client.all_rows();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].division.as_deref(), Some("5k"));
@@ -769,9 +911,9 @@ mod tests {
     #[test]
     fn pushes_rows_with_bib_and_without_name_when_participant_is_unknown() {
         let mut db = Db::open_in_memory().unwrap();
-        let stream_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        let stream_key = key("fwd-endpoint", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
         let raw = sample_raw_frame();
-        insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
+        insert_event(&db, stream_key.as_str(), 1, &raw, 1_700_000_000_100);
 
         let client = RecordingClient::default();
         let resolver = |chip_id: &str| {
@@ -782,9 +924,15 @@ mod tests {
             })
         };
 
-        let outcome =
-            push_announcer_rows(&mut db, &client, &resolver, stream_id, 1, 1_700_000_010_000)
-                .unwrap();
+        let outcome = push_announcer_rows(
+            &mut db,
+            &client,
+            &resolver,
+            &stream_key,
+            1,
+            1_700_000_010_000,
+        )
+        .unwrap();
         assert_eq!(outcome, PushOutcome::Pushed { rows: 1 });
 
         let rows = client.all_rows();
@@ -797,17 +945,23 @@ mod tests {
     #[test]
     fn pushes_rows_without_bib_or_name_when_unresolved() {
         let mut db = Db::open_in_memory().unwrap();
-        let stream_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        let stream_key = key("fwd-endpoint", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
         let raw = sample_raw_frame();
-        insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
+        insert_event(&db, stream_key.as_str(), 1, &raw, 1_700_000_000_100);
 
         let client = RecordingClient::default();
         // Resolver knows nothing about this chip.
         let resolver = map_resolver(&[]);
 
-        let outcome =
-            push_announcer_rows(&mut db, &client, &resolver, stream_id, 1, 1_700_000_010_000)
-                .unwrap();
+        let outcome = push_announcer_rows(
+            &mut db,
+            &client,
+            &resolver,
+            &stream_key,
+            1,
+            1_700_000_010_000,
+        )
+        .unwrap();
         assert_eq!(outcome, PushOutcome::Pushed { rows: 1 });
 
         let rows = client.all_rows();
@@ -820,23 +974,35 @@ mod tests {
     #[test]
     fn idempotent_repush() {
         let mut db = Db::open_in_memory().unwrap();
-        let stream_id = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        let stream_key = key("fwd-endpoint", "cccccccc-cccc-cccc-cccc-cccccccccccc");
         let raw = sample_raw_frame();
-        insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
-        insert_event(&db, stream_id, 2, &raw, 1_700_000_000_200);
+        insert_event(&db, stream_key.as_str(), 1, &raw, 1_700_000_000_100);
+        insert_event(&db, stream_key.as_str(), 2, &raw, 1_700_000_000_200);
 
         let client = RecordingClient::default();
         let resolver = map_resolver(&[("000000012345", "42", "Ada Lovelace")]);
 
-        let first =
-            push_announcer_rows(&mut db, &client, &resolver, stream_id, 3, 1_700_000_010_000)
-                .unwrap();
+        let first = push_announcer_rows(
+            &mut db,
+            &client,
+            &resolver,
+            &stream_key,
+            3,
+            1_700_000_010_000,
+        )
+        .unwrap();
         assert_eq!(first, PushOutcome::Pushed { rows: 2 });
 
         // Repush with the same generation must send nothing new.
-        let second =
-            push_announcer_rows(&mut db, &client, &resolver, stream_id, 3, 1_700_000_020_000)
-                .unwrap();
+        let second = push_announcer_rows(
+            &mut db,
+            &client,
+            &resolver,
+            &stream_key,
+            3,
+            1_700_000_020_000,
+        )
+        .unwrap();
         assert_eq!(second, PushOutcome::Pushed { rows: 0 });
 
         assert_eq!(client.all_rows().len(), 2, "repush must not duplicate rows");
@@ -850,24 +1016,36 @@ mod tests {
     #[test]
     fn stale_generation_not_sent() {
         let mut db = Db::open_in_memory().unwrap();
-        let stream_id = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+        let stream_key = key("fwd-endpoint", "dddddddd-dddd-dddd-dddd-dddddddddddd");
         let raw = sample_raw_frame();
-        insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
+        insert_event(&db, stream_key.as_str(), 1, &raw, 1_700_000_000_100);
 
         let client = RecordingClient::default();
         let resolver = map_resolver(&[("000000012345", "42", "Ada Lovelace")]);
 
         // Accept a newer generation first, raising the fence to 5.
-        let fresh =
-            push_announcer_rows(&mut db, &client, &resolver, stream_id, 5, 1_700_000_010_000)
-                .unwrap();
+        let fresh = push_announcer_rows(
+            &mut db,
+            &client,
+            &resolver,
+            &stream_key,
+            5,
+            1_700_000_010_000,
+        )
+        .unwrap();
         assert_eq!(fresh, PushOutcome::Pushed { rows: 1 });
 
         // A later event arrives, but a stale (older) generation tries to push it.
-        insert_event(&db, stream_id, 2, &raw, 1_700_000_000_300);
-        let stale =
-            push_announcer_rows(&mut db, &client, &resolver, stream_id, 3, 1_700_000_020_000)
-                .unwrap();
+        insert_event(&db, stream_key.as_str(), 2, &raw, 1_700_000_000_300);
+        let stale = push_announcer_rows(
+            &mut db,
+            &client,
+            &resolver,
+            &stream_key,
+            3,
+            1_700_000_020_000,
+        )
+        .unwrap();
         assert_eq!(
             stale,
             PushOutcome::StaleGeneration {
@@ -880,7 +1058,9 @@ mod tests {
         assert_eq!(client.all_rows().len(), 1);
         assert_eq!(client.batch_count(), 1);
         // The stale event remains pending for a future in-generation push.
-        let pending = db.load_unpushed_announcer_events(stream_id).unwrap();
+        let pending = db
+            .load_unpushed_announcer_events(stream_key.as_str())
+            .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].seq, 2);
     }
@@ -915,20 +1095,26 @@ mod tests {
         let path = dir.path().join("ann.sqlite3");
         let mut db = Db::open(&path).unwrap();
         let resolver_db = Db::open(&path).unwrap();
-        let stream_id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+        let stream_key = key("fwd-endpoint", "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee");
         let raw = sample_raw_frame();
-        insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
+        insert_event(&db, stream_key.as_str(), 1, &raw, 1_700_000_000_100);
 
         let client = RecordingClient::default();
         let resolver = NewerGenerationWinsDuringResolve {
             db: &resolver_db,
-            stream_id,
+            stream_id: stream_key.as_str(),
             triggered: AtomicBool::new(false),
         };
 
-        let outcome =
-            push_announcer_rows(&mut db, &client, &resolver, stream_id, 3, 1_700_000_010_000)
-                .unwrap();
+        let outcome = push_announcer_rows(
+            &mut db,
+            &client,
+            &resolver,
+            &stream_key,
+            3,
+            1_700_000_010_000,
+        )
+        .unwrap();
         assert_eq!(
             outcome,
             PushOutcome::StaleGeneration {
@@ -940,7 +1126,9 @@ mod tests {
         assert_eq!(client.all_rows(), Vec::<AnnouncerRow>::new());
         assert_eq!(client.batch_count(), 0);
 
-        let pending = db.load_unpushed_announcer_events(stream_id).unwrap();
+        let pending = db
+            .load_unpushed_announcer_events(stream_key.as_str())
+            .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].seq, 1);
     }

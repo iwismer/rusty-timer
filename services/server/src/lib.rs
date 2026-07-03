@@ -14,6 +14,7 @@ mod tests {
 
     fn event(stream_id: &str, seq: u64, received_unix_ms: i64) -> AnnouncerInputEvent {
         AnnouncerInputEvent {
+            forwarder_endpoint_id: "fwd-endpoint".to_owned(),
             stream_id: stream_id.to_owned(),
             seq,
             chip_id: format!("chip-{stream_id}-{seq}"),
@@ -76,7 +77,7 @@ mod tests {
         let user_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 3);
+        assert_eq!(user_version, 4);
 
         let create_sql: String = conn
             .query_row(
@@ -85,10 +86,54 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        assert!(create_sql.contains("forwarder_endpoint_id TEXT NOT NULL"));
         assert!(create_sql.contains("stream_id TEXT NOT NULL"));
         assert!(create_sql.contains("seq INTEGER NOT NULL"));
         assert!(create_sql.contains("source_generation INTEGER NOT NULL"));
         assert!(create_sql.contains("division TEXT"));
-        assert!(create_sql.contains("PRIMARY KEY(stream_id, seq)"));
+        assert!(create_sql.contains("PRIMARY KEY(forwarder_endpoint_id, stream_id, seq)"));
+    }
+
+    #[test]
+    fn db_migrates_legacy_announcer_rows_to_composite_key() {
+        // A pre-v4 database whose announcer_rows table is keyed by
+        // (stream_id, seq) only. Migration must rebuild it with the composite
+        // (forwarder_endpoint_id, stream_id, seq) key (dropping legacy rows;
+        // the system is undeployed).
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("server.sqlite3");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE announcer_rows (
+                     stream_id TEXT NOT NULL,
+                     seq INTEGER NOT NULL,
+                     source_generation INTEGER NOT NULL DEFAULT 0,
+                     chip_id TEXT NOT NULL,
+                     bib INTEGER,
+                     display_name TEXT NOT NULL,
+                     reader_timestamp TEXT,
+                     received_unix_ms INTEGER NOT NULL,
+                     division TEXT,
+                     PRIMARY KEY(stream_id, seq)
+                 );
+                 PRAGMA user_version = 3;",
+            )
+            .unwrap();
+        }
+
+        let conn = crate::db::open(&db_path).unwrap();
+        let create_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'announcer_rows'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(create_sql.contains("PRIMARY KEY(forwarder_endpoint_id, stream_id, seq)"));
+        let user_version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version, 4);
     }
 }

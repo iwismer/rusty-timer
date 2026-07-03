@@ -24,7 +24,9 @@
   }
 
   function rowKey(row: AnnouncerRow): string {
-    return `${row.stream_id}:${row.seq}`;
+    // Composite stream identity: the wire stream_id alone is ambiguous when
+    // two forwarders expose the same stream id.
+    return `${row.forwarder_endpoint_id}:${row.stream_id}:${row.seq}`;
   }
 
   function rowTime(row: AnnouncerRow): string {

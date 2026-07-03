@@ -21,6 +21,10 @@ pub struct StatusResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnnouncerRow {
+    /// Iroh endpoint id of the forwarder the row originated from. Together
+    /// with `stream_id` this forms the composite stream identity; the wire
+    /// `stream_id` alone is ambiguous across forwarders.
+    pub forwarder_endpoint_id: String,
     pub stream_id: String,
     pub seq: u64,
     pub chip_id: String,

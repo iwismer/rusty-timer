@@ -1385,6 +1385,13 @@ static_allowed_receivers = ["{receiver_endpoint_id}"]
     results.check("server announcer rows cover all expected chips",
                   set(EXPECTED_TAGS).issubset(pushed_chips),
                   f"missing={set(EXPECTED_TAGS) - pushed_chips}")
+    # Rows carry the DECODED composite stream identity: the forwarder's
+    # endpoint id and the wire stream id as separate fields, never the
+    # receiver's encoded LocalStreamKey (U+001F separator).
+    row_identities = {(row.get("forwarder_endpoint_id"), row.get("stream_id"))
+                      for row in announcer_rows}
+    results.expect_eq("server announcer rows carry composite stream identity",
+                      row_identities, {(forwarder_node_id, stream_id)})
     # Every announcer row must carry a resolved bib and display name (seeded
     # participant + chip data resolved locally on the receiver).
     rows_missing_identity = [

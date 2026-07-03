@@ -134,46 +134,55 @@ mod tests {
 
     #[test]
     fn announcer_dtos_match_existing_wire_shape_and_defaults() {
-        let request = crate::announcer::PushRowRequest {
+        let request = crate::announcer::PushRowsRequest {
             announcer_source_generation: 3,
+            forwarder_endpoint_id: "fwd-endpoint".to_owned(),
             stream_id: "finish-line".to_owned(),
-            seq: 7,
-            chip_id: "000000012345".to_owned(),
-            bib: Some(42),
-            display_name: "Ada Lovelace".to_owned(),
-            reader_timestamp: None,
-            received_unix_ms: 1_700_000_000_100,
-            division: None,
+            rows: vec![crate::announcer::PushRow {
+                seq: 7,
+                chip_id: "000000012345".to_owned(),
+                bib: Some(42),
+                display_name: "Ada Lovelace".to_owned(),
+                reader_timestamp: None,
+                received_unix_ms: 1_700_000_000_100,
+                division: None,
+            }],
             max_list_size: Some(25),
         };
         assert_eq!(
             serde_json::to_value(&request).unwrap(),
             serde_json::json!({
                 "announcer_source_generation": 3,
+                "forwarder_endpoint_id": "fwd-endpoint",
                 "stream_id": "finish-line",
-                "seq": 7,
-                "chip_id": "000000012345",
-                "bib": 42,
-                "display_name": "Ada Lovelace",
-                "reader_timestamp": null,
-                "received_unix_ms": 1_700_000_000_100_i64,
-                "division": null,
+                "rows": [{
+                    "seq": 7,
+                    "chip_id": "000000012345",
+                    "bib": 42,
+                    "display_name": "Ada Lovelace",
+                    "reader_timestamp": null,
+                    "received_unix_ms": 1_700_000_000_100_i64,
+                    "division": null
+                }],
                 "max_list_size": 25
             })
         );
         let missing_defaults =
-            serde_json::from_value::<crate::announcer::PushRowRequest>(serde_json::json!({
+            serde_json::from_value::<crate::announcer::PushRowsRequest>(serde_json::json!({
                 "announcer_source_generation": 3,
+                "forwarder_endpoint_id": "fwd-endpoint",
                 "stream_id": "finish-line",
-                "seq": 7,
-                "chip_id": "000000012345",
-                "bib": null,
-                "display_name": "Ada Lovelace",
-                "reader_timestamp": null,
-                "received_unix_ms": 1_700_000_000_100_i64
+                "rows": [{
+                    "seq": 7,
+                    "chip_id": "000000012345",
+                    "bib": null,
+                    "display_name": "Ada Lovelace",
+                    "reader_timestamp": null,
+                    "received_unix_ms": 1_700_000_000_100_i64
+                }]
             }))
             .unwrap();
-        assert_eq!(missing_defaults.division, None);
+        assert_eq!(missing_defaults.rows[0].division, None);
         assert_eq!(missing_defaults.max_list_size, None);
 
         assert_eq!(
@@ -215,6 +224,7 @@ mod tests {
             announcer_source_generation: 1,
             finisher_count: 2,
             announcer_rows: vec![crate::status::AnnouncerRow {
+                forwarder_endpoint_id: "fwd-1".to_owned(),
                 stream_id: "finish-line".to_owned(),
                 seq: 7,
                 chip_id: "000000012345".to_owned(),
@@ -254,5 +264,6 @@ mod tests {
             value["announcer_rows"][0]["received_at"],
             "2026-07-02T12:00:00Z"
         );
+        assert_eq!(value["announcer_rows"][0]["forwarder_endpoint_id"], "fwd-1");
     }
 }

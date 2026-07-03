@@ -239,14 +239,17 @@ async fn device_route_auth_matrix() {
             uri: "/announcer/rows",
             body: Some(json!({
                 "announcer_source_generation": 0,
+                "forwarder_endpoint_id": "fwd-auth",
                 "stream_id": "stream-auth",
-                "seq": 1,
-                "chip_id": "chip-auth",
-                "bib": 101,
-                "display_name": "Runner Auth",
-                "reader_timestamp": "10:00:00",
-                "received_unix_ms": 1_000,
-                "division": "5k",
+                "rows": [{
+                    "seq": 1,
+                    "chip_id": "chip-auth",
+                    "bib": 101,
+                    "display_name": "Runner Auth",
+                    "reader_timestamp": "10:00:00",
+                    "received_unix_ms": 1_000,
+                    "division": "5k"
+                }],
                 "max_list_size": 25
             })),
             expected: vec![

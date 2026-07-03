@@ -26,6 +26,7 @@ export interface ForwarderRecord {
 }
 
 export interface AnnouncerRow {
+  forwarder_endpoint_id: string;
   stream_id: string;
   seq: number;
   chip_id: string;

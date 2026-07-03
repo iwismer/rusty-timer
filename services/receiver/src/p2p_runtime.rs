@@ -1348,13 +1348,12 @@ async fn start_stream_worker(
                 let client: Arc<dyn AnnouncerPushClient + Send + Sync> = Arc::new(client);
                 let db = Arc::clone(&state.db);
                 let chip_lookup = Arc::clone(&state.chip_lookup);
-                let stream_id = stream_id.clone();
                 let hint_rx = hint_tx.subscribe();
                 let ann_shutdown = shutdown_rx.clone();
                 tasks.push(tokio::spawn(run_announcer_worker(
                     db,
                     chip_lookup,
-                    stream_id,
+                    local_stream_key.clone(),
                     client,
                     generation,
                     Arc::clone(announcer_stale),
@@ -1826,7 +1825,7 @@ async fn run_shared_dbf_pass(
 async fn run_announcer_worker(
     db: Arc<Mutex<Db>>,
     chip_lookup: Arc<tokio::sync::RwLock<crate::control_api::ChipLookup>>,
-    stream_id: String,
+    stream_key: LocalStreamKey,
     client: Arc<dyn AnnouncerPushClient + Send + Sync>,
     generation: i64,
     announcer_stale: Arc<AtomicBool>,
@@ -1841,7 +1840,7 @@ async fn run_announcer_worker(
     let mut needs_retry = !push_announcer(
         &db,
         &chip_lookup,
-        &stream_id,
+        &stream_key,
         &client,
         generation,
         &announcer_stale,
@@ -1857,14 +1856,14 @@ async fn run_announcer_worker(
                 match recv {
                     Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
                         needs_retry =
-                            !push_announcer(&db, &chip_lookup, &stream_id, &client, generation, &announcer_stale).await;
+                            !push_announcer(&db, &chip_lookup, &stream_key, &client, generation, &announcer_stale).await;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
             () = tokio::time::sleep(retry_interval), if needs_retry => {
                 needs_retry =
-                    !push_announcer(&db, &chip_lookup, &stream_id, &client, generation, &announcer_stale).await;
+                    !push_announcer(&db, &chip_lookup, &stream_key, &client, generation, &announcer_stale).await;
             }
         }
     }
@@ -1877,7 +1876,7 @@ async fn run_announcer_worker(
 async fn push_announcer(
     db: &Arc<Mutex<Db>>,
     chip_lookup: &Arc<tokio::sync::RwLock<crate::control_api::ChipLookup>>,
-    stream_id: &str,
+    stream_key: &LocalStreamKey,
     client: &Arc<dyn AnnouncerPushClient + Send + Sync>,
     generation: i64,
     announcer_stale: &Arc<AtomicBool>,
@@ -1886,7 +1885,7 @@ async fn push_announcer(
     let snapshot = chip_lookup.read().await.clone();
     let db = Arc::clone(db);
     let client = Arc::clone(client);
-    let stream_id_owned = stream_id.to_owned();
+    let stream_key_owned = stream_key.clone();
     let result = tokio::task::spawn_blocking(move || {
         let resolver = SnapshotResolver { snapshot };
         let mut guard = db.blocking_lock();
@@ -1894,7 +1893,7 @@ async fn push_announcer(
             &mut guard,
             client.as_ref(),
             &resolver,
-            &stream_id_owned,
+            &stream_key_owned,
             generation,
             now_unix_ms(),
         )
@@ -1908,16 +1907,16 @@ async fn push_announcer(
             // never succeed. Signal the reconcile loop to re-register and
             // re-takeover; the unpushed rows stay pending and are re-pushed
             // once the worker is rebuilt with the new generation.
-            warn!(%detail, %stream_id, "announcer generation stale on server; requesting re-takeover");
+            warn!(%detail, stream_id = %stream_key, "announcer generation stale on server; requesting re-takeover");
             announcer_stale.store(true, Ordering::SeqCst);
             true
         }
         Ok(Err(e)) => {
-            warn!(error = %e, %stream_id, "announcer push failed; will retry");
+            warn!(error = %e, stream_id = %stream_key, "announcer push failed; will retry");
             false
         }
         Err(e) => {
-            warn!(error = %e, %stream_id, "announcer push task failed");
+            warn!(error = %e, stream_id = %stream_key, "announcer push task failed");
             false
         }
     }
@@ -2174,7 +2173,7 @@ pub fn p2p_config_from_env(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::announcer_push::{AnnouncerPushError, AnnouncerRow};
+    use crate::announcer_push::AnnouncerPushError;
     use crate::control_api::ChipLookup;
     use crate::db::{EventType, ReceivedEventInsert};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -2853,24 +2852,28 @@ mod tests {
     }
 
     /// An announcer push client that fails while `fail` is set, and records the
-    /// `(stream_id, seq)` of every row it successfully pushes otherwise.
+    /// `(forwarder_endpoint_id, stream_id, seq)` of every row it successfully
+    /// pushes otherwise.
     struct FlakyAnnouncerClient {
         fail: AtomicBool,
-        pushed: std::sync::Mutex<Vec<(String, i64)>>,
+        pushed: std::sync::Mutex<Vec<(String, String, i64)>>,
     }
 
     impl AnnouncerPushClient for FlakyAnnouncerClient {
         fn push(
             &self,
-            rows: &[AnnouncerRow],
-            _max_list_size: u32,
+            batch: &crate::announcer_push::AnnouncerBatch<'_>,
         ) -> Result<(), AnnouncerPushError> {
             if self.fail.load(Ordering::SeqCst) {
                 return Err(AnnouncerPushError::Transport("simulated outage".to_owned()));
             }
             let mut pushed = self.pushed.lock().unwrap();
-            for row in rows {
-                pushed.push((row.stream_id.clone(), row.seq));
+            for row in batch.rows {
+                pushed.push((
+                    batch.forwarder_endpoint_id.to_owned(),
+                    batch.stream_id.to_owned(),
+                    row.seq,
+                ));
             }
             Ok(())
         }
@@ -3262,11 +3265,12 @@ mod tests {
     /// durable hint arrives after the failure.
     #[tokio::test]
     async fn announcer_worker_retries_after_push_failure_without_new_hint() {
-        let stream_id = "ann-retry-stream";
+        let stream_key = LocalStreamKey::new("fwd-retry", "ann-retry-stream");
+        let stream_id = stream_key.as_str().to_owned();
 
         let db = Db::open_in_memory().unwrap();
-        insert_chip_event(&db, stream_id, 1, 1_700_000_000_100);
-        insert_chip_event(&db, stream_id, 2, 1_700_000_000_200);
+        insert_chip_event(&db, &stream_id, 1, 1_700_000_000_100);
+        insert_chip_event(&db, &stream_id, 2, 1_700_000_000_200);
         let db = Arc::new(Mutex::new(db));
         let chip_lookup = Arc::new(tokio::sync::RwLock::new(ChipLookup::new()));
 
@@ -3281,7 +3285,7 @@ mod tests {
         let handle = tokio::spawn(run_announcer_worker(
             Arc::clone(&db),
             chip_lookup,
-            stream_id.to_owned(),
+            stream_key.clone(),
             client_dyn,
             1,
             Arc::new(AtomicBool::new(false)),
@@ -3304,7 +3308,7 @@ mod tests {
             let guard = db.lock().await;
             assert_eq!(
                 guard
-                    .load_unpushed_announcer_events(stream_id)
+                    .load_unpushed_announcer_events(&stream_id)
                     .unwrap()
                     .len(),
                 2,
@@ -3329,11 +3333,17 @@ mod tests {
             let guard = db.lock().await;
             assert!(
                 guard
-                    .load_unpushed_announcer_events(stream_id)
+                    .load_unpushed_announcer_events(&stream_id)
                     .unwrap()
                     .is_empty(),
                 "rows must be marked pushed after a successful retry"
             );
+        }
+        // The pushed rows carried the DECODED composite identity, never the
+        // encoded local key.
+        for (endpoint, wire_id, _) in client.pushed.lock().unwrap().iter() {
+            assert_eq!(endpoint, "fwd-retry");
+            assert_eq!(wire_id, "ann-retry-stream");
         }
 
         let _ = shutdown_tx.send(true);

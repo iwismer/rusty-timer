@@ -706,9 +706,14 @@ async fn dbf_feed_delivers_from_received_events_without_duplicates() {
 
 // --- Mock server for announcer push -------------------------------------
 
+/// (forwarder_endpoint_id, stream_id, seq, generation) for one pushed row.
+type PushedRowKey = (String, String, u64, u64);
+
 #[derive(Clone, Default)]
 struct ServerState {
-    rows: Arc<Mutex<Vec<(String, u64, u64)>>>, // (stream_id, seq, generation)
+    rows: Arc<Mutex<Vec<PushedRowKey>>>,
+    /// Number of `POST /announcer/rows` requests received.
+    row_requests: Arc<Mutex<u64>>,
     generation: Arc<Mutex<u64>>,
 }
 
@@ -730,16 +735,25 @@ async fn rows_handler(
     State(state): State<ServerState>,
     Json(body): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
+    *state.row_requests.lock().unwrap() += 1;
+    let forwarder_endpoint_id = body["forwarder_endpoint_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
     let stream_id = body["stream_id"].as_str().unwrap_or_default().to_owned();
-    let seq = body["seq"].as_u64().unwrap_or_default();
     let generation = body["announcer_source_generation"]
         .as_u64()
         .unwrap_or_default();
-    state
-        .rows
-        .lock()
-        .unwrap()
-        .push((stream_id, seq, generation));
+    let mut rows = state.rows.lock().unwrap();
+    for row in body["rows"].as_array().cloned().unwrap_or_default() {
+        let seq = row["seq"].as_u64().unwrap_or_default();
+        rows.push((
+            forwarder_endpoint_id.clone(),
+            stream_id.clone(),
+            seq,
+            generation,
+        ));
+    }
     Json(serde_json::json!({ "announcer_source_generation": generation, "finisher_count": 1 }))
 }
 
@@ -794,7 +808,7 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
                 .unwrap();
         }
 
-        let (mut config, _sub) = base_config(endpoint_id, direct, 77, None);
+        let (mut config, _sub) = base_config(endpoint_id.clone(), direct, 77, None);
         config.server = Some(ServerClientConfig {
             url: thin_url,
             token: "secret-token".to_owned(),
@@ -820,20 +834,34 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
         let generation = *thin_state.generation.lock().unwrap();
         assert_eq!(generation, 1, "takeover should be called exactly once");
 
-        let mut keys: Vec<(String, u64)> =
-            rows.iter().map(|(s, seq, _)| (s.clone(), *seq)).collect();
+        let mut keys: Vec<(String, String, u64)> = rows
+            .iter()
+            .map(|(endpoint, s, seq, _)| (endpoint.clone(), s.clone(), *seq))
+            .collect();
         keys.sort();
         assert_eq!(
             keys,
             vec![
-                (local_key.as_str().to_owned(), 1),
-                (local_key.as_str().to_owned(), 2)
+                (node_id.clone(), STREAM_ID.to_owned(), 1),
+                (node_id.clone(), STREAM_ID.to_owned(), 2)
             ],
-            "each (stream_id, seq) pushed exactly once with no duplicate repush"
+            "each composite (endpoint, stream_id, seq) pushed exactly once, decoded \
+             from the local key (no U+001F separator on the wire)"
         );
-        for (_, _, row_gen) in &rows {
+        for (endpoint, wire_id, _, row_gen) in &rows {
             assert_eq!(*row_gen, 1, "rows fenced to the taken-over generation");
+            assert!(
+                !endpoint.contains('\u{1f}') && !wire_id.contains('\u{1f}'),
+                "encoded LocalStreamKey must not cross HTTP"
+            );
         }
+        // Both rows were durable before the push worker drained them, so the
+        // backlog must arrive as a single batched request.
+        assert_eq!(
+            *thin_state.row_requests.lock().unwrap(),
+            1,
+            "a two-row backlog must drain in one batched request"
+        );
 
         runtime.shutdown().await;
         forwarder.shutdown().await;
@@ -1139,7 +1167,7 @@ async fn announcer_push_recovers_when_server_starts_late() {
                 .unwrap();
         }
 
-        let (mut config, _sub) = base_config(endpoint_id, direct, 85, None);
+        let (mut config, _sub) = base_config(endpoint_id.clone(), direct, 85, None);
         config.server = Some(ServerClientConfig {
             url: thin_url,
             token: "secret-token".to_owned(),
@@ -1184,20 +1212,20 @@ async fn announcer_push_recovers_when_server_starts_late() {
             generation >= 1,
             "a generation must be taken over after the server recovers"
         );
-        let mut keys: Vec<(String, u64)> = thin_state
+        let mut keys: Vec<(String, String, u64)> = thin_state
             .rows
             .lock()
             .unwrap()
             .iter()
-            .map(|(s, seq, _)| (s.clone(), *seq))
+            .map(|(endpoint, s, seq, _)| (endpoint.clone(), s.clone(), *seq))
             .collect();
         keys.sort();
         keys.dedup();
         assert_eq!(
             keys,
             vec![
-                (local_key.as_str().to_owned(), 1),
-                (local_key.as_str().to_owned(), 2)
+                (node_id.clone(), STREAM_ID.to_owned(), 1),
+                (node_id.clone(), STREAM_ID.to_owned(), 2)
             ],
             "both pending rows pushed after server recovery"
         );

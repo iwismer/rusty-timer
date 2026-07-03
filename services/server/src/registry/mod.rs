@@ -15,7 +15,7 @@ mod tokens;
 
 pub use announcer_store::{
     AnnouncerRowRecord, AnnouncerStorageError, current_announcer_source_generation,
-    list_announcer_rows_ordered, takeover_announcer_source, upsert_announcer_row,
+    list_announcer_rows_ordered, takeover_announcer_source, upsert_announcer_rows,
 };
 pub use devices::{
     ApprovalState, DeviceKind, DeviceRecord, MintedRegistration, approve_device, get_device,

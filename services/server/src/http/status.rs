@@ -140,6 +140,7 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> Respon
 
 fn announcer_row_to_wire(row: crate::announcer::AnnouncerRow) -> wire::AnnouncerRow {
     wire::AnnouncerRow {
+        forwarder_endpoint_id: row.forwarder_endpoint_id,
         stream_id: row.stream_id,
         seq: row.seq,
         chip_id: row.chip_id,

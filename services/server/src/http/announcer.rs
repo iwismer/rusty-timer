@@ -7,7 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{TimeZone, Utc};
-use rt_server_api::announcer::{PushRowRequest, PushRowResponse, TakeoverResponse};
+use rt_server_api::announcer::{MAX_PUSH_ROWS, PushRowResponse, PushRowsRequest, TakeoverResponse};
 
 use crate::announcer::{AnnouncerInputEvent, AnnouncerRuntime};
 use crate::http::validate::{MAX_ID_LEN, MAX_NAME_LEN, MAX_TIMESTAMP_LEN, check_len};
@@ -20,23 +20,41 @@ use crate::registry::{self, AnnouncerRowRecord, AnnouncerStorageError, DeviceKin
 /// retains in the live runtime for the public feed.
 pub(crate) const DEFAULT_MAX_ANNOUNCER_ROWS: usize = 25;
 
-pub async fn push_row(
+/// `POST /announcer/rows` — batch announcer row push.
+///
+/// Accepts 1..=[`MAX_PUSH_ROWS`] rows sharing one generation and one composite
+/// stream identity (top-level fields, so mixed batches are structurally
+/// impossible). All-or-nothing: every row is validated before anything is
+/// persisted, and the storage layer inserts the batch in one transaction.
+/// Replayed `(forwarder_endpoint_id, stream_id, seq)` rows are idempotent
+/// no-ops within an otherwise-accepted batch; a stale (or future) generation
+/// rejects the whole batch with `409`.
+pub async fn push_rows(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<PushRowRequest>,
+    Json(req): Json<PushRowsRequest>,
 ) -> Response {
     if let Err(status) = authorize_active_device_kind(&state, &headers, DeviceKind::Receiver) {
         return status.into_response();
     }
-    if let Err(field) = validate_push_row(&req) {
+    if req.rows.is_empty() {
+        return (StatusCode::BAD_REQUEST, "rows must not be empty").into_response();
+    }
+    if req.rows.len() > MAX_PUSH_ROWS {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("rows exceeds max batch size of {MAX_PUSH_ROWS}"),
+        )
+            .into_response();
+    }
+    if let Err(field) = validate_push_rows(&req) {
         return (StatusCode::BAD_REQUEST, format!("{field} too long")).into_response();
     }
-
-    if Utc
-        .timestamp_millis_opt(req.received_unix_ms)
-        .single()
-        .is_none()
-    {
+    if req.rows.iter().any(|row| {
+        Utc.timestamp_millis_opt(row.received_unix_ms)
+            .single()
+            .is_none()
+    }) {
         return (StatusCode::BAD_REQUEST, "invalid received_unix_ms").into_response();
     }
 
@@ -45,21 +63,27 @@ pub async fn push_row(
         .filter(|n| *n > 0)
         .map_or(DEFAULT_MAX_ANNOUNCER_ROWS, |n| n as usize);
 
-    let record = AnnouncerRowRecord {
-        announcer_source_generation: req.announcer_source_generation,
-        stream_id: req.stream_id,
-        seq: req.seq,
-        chip_id: req.chip_id,
-        bib: req.bib,
-        display_name: req.display_name,
-        reader_timestamp: req.reader_timestamp,
-        received_unix_ms: req.received_unix_ms,
-        division: req.division,
-    };
+    let announcer_source_generation = req.announcer_source_generation;
+    let records: Vec<AnnouncerRowRecord> = req
+        .rows
+        .into_iter()
+        .map(|row| AnnouncerRowRecord {
+            announcer_source_generation,
+            forwarder_endpoint_id: req.forwarder_endpoint_id.clone(),
+            stream_id: req.stream_id.clone(),
+            seq: row.seq,
+            chip_id: row.chip_id,
+            bib: row.bib,
+            display_name: row.display_name,
+            reader_timestamp: row.reader_timestamp,
+            received_unix_ms: row.received_unix_ms,
+            division: row.division,
+        })
+        .collect();
 
     let result = {
         let conn = state.conn.lock().expect("registry mutex poisoned");
-        registry::upsert_announcer_row(&conn, &record).and_then(|()| {
+        registry::upsert_announcer_rows(&conn, &records).and_then(|()| {
             let rows = registry::list_announcer_rows_ordered(&conn)?;
             Ok(rebuild_runtime(
                 &state.announcer_runtime,
@@ -73,7 +97,7 @@ pub async fn push_row(
         Ok(finisher_count) => (
             StatusCode::OK,
             Json(PushRowResponse {
-                announcer_source_generation: record.announcer_source_generation,
+                announcer_source_generation,
                 finisher_count,
             }),
         )
@@ -93,15 +117,25 @@ pub async fn push_row(
     }
 }
 
-fn validate_push_row(req: &PushRowRequest) -> Result<(), &'static str> {
+/// Per-row validation identical to the old single-row path, applied to every
+/// row up front so a single bad row rejects the whole batch before anything
+/// is persisted.
+fn validate_push_rows(req: &PushRowsRequest) -> Result<(), &'static str> {
+    check_len(
+        "forwarder_endpoint_id",
+        &req.forwarder_endpoint_id,
+        MAX_ID_LEN,
+    )?;
     check_len("stream_id", &req.stream_id, MAX_ID_LEN)?;
-    check_len("chip_id", &req.chip_id, MAX_ID_LEN)?;
-    check_len("display_name", &req.display_name, MAX_NAME_LEN)?;
-    if let Some(timestamp) = req.reader_timestamp.as_deref() {
-        check_len("reader_timestamp", timestamp, MAX_TIMESTAMP_LEN)?;
-    }
-    if let Some(division) = req.division.as_deref() {
-        check_len("division", division, MAX_NAME_LEN)?;
+    for row in &req.rows {
+        check_len("chip_id", &row.chip_id, MAX_ID_LEN)?;
+        check_len("display_name", &row.display_name, MAX_NAME_LEN)?;
+        if let Some(timestamp) = row.reader_timestamp.as_deref() {
+            check_len("reader_timestamp", timestamp, MAX_TIMESTAMP_LEN)?;
+        }
+        if let Some(division) = row.division.as_deref() {
+            check_len("division", division, MAX_NAME_LEN)?;
+        }
     }
     Ok(())
 }
@@ -147,6 +181,7 @@ pub(crate) fn rebuild_runtime(
             continue;
         };
         let event = AnnouncerInputEvent {
+            forwarder_endpoint_id: row.forwarder_endpoint_id,
             stream_id: row.stream_id,
             seq: row.seq,
             chip_id: row.chip_id,
@@ -196,10 +231,8 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    fn row_body(seq: u64, generation: u64, received_unix_ms: i64) -> serde_json::Value {
+    fn row_json(seq: u64, received_unix_ms: i64) -> serde_json::Value {
         serde_json::json!({
-            "announcer_source_generation": generation,
-            "stream_id": "finish-line",
             "seq": seq,
             "chip_id": format!("chip-{seq}"),
             "bib": 1000 + seq,
@@ -207,6 +240,26 @@ mod tests {
             "reader_timestamp": "10:00:00",
             "received_unix_ms": received_unix_ms
         })
+    }
+
+    fn batch_body(generation: u64, rows: &[serde_json::Value]) -> serde_json::Value {
+        serde_json::json!({
+            "announcer_source_generation": generation,
+            "forwarder_endpoint_id": "fwd-endpoint",
+            "stream_id": "finish-line",
+            "rows": rows
+        })
+    }
+
+    /// One-row batch, the closest equivalent of the old single-row push.
+    fn row_body(seq: u64, generation: u64, received_unix_ms: i64) -> serde_json::Value {
+        batch_body(generation, &[row_json(seq, received_unix_ms)])
+    }
+
+    fn announcer_rows_count(state: &AppState) -> i64 {
+        let conn = state.conn.lock().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM announcer_rows", [], |row| row.get(0))
+            .unwrap()
     }
 
     #[tokio::test]
@@ -231,7 +284,9 @@ mod tests {
         let conn = state.conn.lock().unwrap();
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM announcer_rows WHERE stream_id = 'finish-line' AND seq = 7",
+                "SELECT COUNT(*) FROM announcer_rows
+                 WHERE forwarder_endpoint_id = 'fwd-endpoint'
+                   AND stream_id = 'finish-line' AND seq = 7",
                 [],
                 |row| row.get(0),
             )
@@ -240,11 +295,151 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_insert_persists_all_rows_transactionally() {
+        let state = test_state();
+        let app = router(state.clone());
+        let rows: Vec<serde_json::Value> = (1..=3u64)
+            .map(|seq| row_json(seq, 1_000 * i64::try_from(seq).unwrap()))
+            .collect();
+        let body = batch_body(0, &rows);
+
+        let resp = app
+            .oneshot(json_request("/announcer/rows", &body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp_body = response_json(resp).await;
+        assert_eq!(resp_body["finisher_count"], 3);
+
+        assert_eq!(announcer_rows_count(&state), 3);
+        let runtime = state.announcer_runtime.lock().unwrap();
+        assert_eq!(runtime.finisher_count(), 3);
+        assert_eq!(runtime.rows().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn replayed_batch_is_idempotent() {
+        let state = test_state();
+        let app = router(state.clone());
+        let body = batch_body(0, &[row_json(1, 1_000), row_json(2, 2_000)]);
+
+        for _ in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(json_request("/announcer/rows", &body))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        assert_eq!(
+            announcer_rows_count(&state),
+            2,
+            "replaying a whole batch must not duplicate rows"
+        );
+        let runtime = state.announcer_runtime.lock().unwrap();
+        assert_eq!(runtime.finisher_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn empty_batch_rejected() {
+        let state = test_state();
+        let app = router(state);
+        let resp = app
+            .oneshot(json_request("/announcer/rows", &batch_body(0, &[])))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn oversized_batch_rejected_without_persisting() {
+        let state = test_state();
+        let app = router(state.clone());
+        let rows: Vec<serde_json::Value> = (1..=501u64).map(|seq| row_json(seq, 1_000)).collect();
+        let resp = app
+            .oneshot(json_request("/announcer/rows", &batch_body(0, &rows)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(announcer_rows_count(&state), 0);
+    }
+
+    #[tokio::test]
+    async fn batch_with_one_invalid_row_persists_nothing() {
+        let state = test_state();
+        let app = router(state.clone());
+        let mut bad_row = row_json(2, 2_000);
+        bad_row["display_name"] = serde_json::json!("x".repeat(10_000));
+        let body = batch_body(0, &[row_json(1, 1_000), bad_row, row_json(3, 3_000)]);
+
+        let resp = app
+            .oneshot(json_request("/announcer/rows", &body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            announcer_rows_count(&state),
+            0,
+            "per-row validation is all-or-nothing: valid rows in a bad batch must not persist"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_generation_rejects_whole_batch() {
+        let state = test_state();
+        let app = router(state.clone());
+
+        let takeover = app
+            .clone()
+            .oneshot(json_request("/announcer/takeover", &serde_json::json!({})))
+            .await
+            .unwrap();
+        assert_eq!(takeover.status(), StatusCode::OK);
+
+        // Generation 0 is now stale; the whole multi-row batch must be fenced.
+        let body = batch_body(0, &[row_json(1, 1_000), row_json(2, 2_000)]);
+        let rejected = app
+            .oneshot(json_request("/announcer/rows", &body))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::CONFLICT);
+        assert_eq!(announcer_rows_count(&state), 0);
+    }
+
+    #[tokio::test]
+    async fn same_wire_stream_id_from_two_forwarders_does_not_collide() {
+        let state = test_state();
+        let app = router(state.clone());
+
+        for endpoint in ["fwd-a", "fwd-b"] {
+            let mut body = batch_body(0, &[row_json(1, 1_000)]);
+            body["forwarder_endpoint_id"] = serde_json::json!(endpoint);
+            // Distinct chips so the runtime counts both finishers.
+            body["rows"][0]["chip_id"] = serde_json::json!(format!("chip-{endpoint}"));
+            let resp = app
+                .clone()
+                .oneshot(json_request("/announcer/rows", &body))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        assert_eq!(
+            announcer_rows_count(&state),
+            2,
+            "same (stream_id, seq) from two forwarders must store two rows"
+        );
+        let runtime = state.announcer_runtime.lock().unwrap();
+        assert_eq!(runtime.finisher_count(), 2);
+    }
+
+    #[tokio::test]
     async fn division_round_trips_through_push_into_runtime_row() {
         let state = test_state();
         let app = router(state.clone());
         let mut body = row_body(7, 0, 1_000);
-        body["division"] = serde_json::json!("5k");
+        body["rows"][0]["division"] = serde_json::json!("5k");
 
         let resp = app
             .oneshot(json_request("/announcer/rows", &body))
@@ -257,7 +452,9 @@ mod tests {
             let conn = state.conn.lock().unwrap();
             let division: Option<String> = conn
                 .query_row(
-                    "SELECT division FROM announcer_rows WHERE stream_id = 'finish-line' AND seq = 7",
+                    "SELECT division FROM announcer_rows
+                     WHERE forwarder_endpoint_id = 'fwd-endpoint'
+                       AND stream_id = 'finish-line' AND seq = 7",
                     [],
                     |row| row.get(0),
                 )
@@ -446,10 +643,11 @@ mod tests {
 
         {
             let conn = crate::db::open(&db_path).unwrap();
-            crate::registry::upsert_announcer_row(
+            crate::registry::upsert_announcer_rows(
                 &conn,
-                &crate::registry::AnnouncerRowRecord {
+                &[crate::registry::AnnouncerRowRecord {
                     announcer_source_generation: 0,
+                    forwarder_endpoint_id: "fwd-endpoint".to_string(),
                     stream_id: "finish-line".to_string(),
                     seq: 1,
                     chip_id: "chip-1".to_string(),
@@ -458,7 +656,7 @@ mod tests {
                     reader_timestamp: Some("10:00:00".to_string()),
                     received_unix_ms: 1_000,
                     division: None,
-                },
+                }],
             )
             .unwrap();
         }
@@ -488,7 +686,7 @@ mod tests {
         let state = test_state();
         let app = router(state.clone());
         let mut body = row_body(1, 0, 1_000);
-        body["display_name"] = serde_json::json!("x".repeat(10_000));
+        body["rows"][0]["display_name"] = serde_json::json!("x".repeat(10_000));
 
         let resp = app
             .oneshot(json_request("/announcer/rows", &body))

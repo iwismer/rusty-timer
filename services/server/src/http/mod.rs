@@ -195,7 +195,7 @@ pub fn router(state: AppState) -> Router {
             "/forwarder/catalog",
             post(catalog::push_catalog).get(catalog::get_own_catalog),
         )
-        .route("/announcer/rows", post(announcer::push_row))
+        .route("/announcer/rows", post(announcer::push_rows))
         .route("/announcer/takeover", post(announcer::takeover))
         .route("/allowlist/receivers", get(allowlist::receiver_allowlist))
         .route("/forwarders", get(forwarders::list_forwarders))

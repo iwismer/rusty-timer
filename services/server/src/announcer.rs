@@ -5,6 +5,9 @@ use std::collections::{HashSet, VecDeque};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnouncerInputEvent {
+    /// Iroh endpoint id of the forwarder the row originated from. Together
+    /// with `stream_id` this forms the composite stream identity.
+    pub forwarder_endpoint_id: String,
     pub stream_id: String,
     pub seq: u64,
     pub chip_id: String,
@@ -17,6 +20,7 @@ pub struct AnnouncerInputEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AnnouncerRow {
+    pub forwarder_endpoint_id: String,
     pub stream_id: String,
     pub seq: u64,
     pub chip_id: String,
@@ -30,6 +34,7 @@ pub struct AnnouncerRow {
 impl From<AnnouncerInputEvent> for AnnouncerRow {
     fn from(event: AnnouncerInputEvent) -> Self {
         Self {
+            forwarder_endpoint_id: event.forwarder_endpoint_id,
             stream_id: event.stream_id,
             seq: event.seq,
             chip_id: event.chip_id,
@@ -112,6 +117,7 @@ impl AnnouncerRuntime {
 pub fn compare_input_events(a: &AnnouncerInputEvent, b: &AnnouncerInputEvent) -> Ordering {
     a.received_at
         .cmp(&b.received_at)
+        .then_with(|| a.forwarder_endpoint_id.cmp(&b.forwarder_endpoint_id))
         .then_with(|| a.stream_id.cmp(&b.stream_id))
         .then_with(|| a.seq.cmp(&b.seq))
 }
@@ -123,6 +129,7 @@ mod tests {
 
     fn make_event(chip_id: &str, stream_id: &str, seq: u64, secs: i64) -> AnnouncerInputEvent {
         AnnouncerInputEvent {
+            forwarder_endpoint_id: "fwd-endpoint".to_owned(),
             stream_id: stream_id.to_owned(),
             seq,
             chip_id: chip_id.to_owned(),
