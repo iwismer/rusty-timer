@@ -8,7 +8,7 @@
 
 ## Deployment
 
-- **[Forwarder on Raspberry Pi](../deploy/sbc/)** — SD card flashing, cloud-init, and setup script.
+- **[Forwarder on Raspberry Pi](../deploy/sbc/)** — SD card flashing, cloud-init, setup script, and example field enclosure hardware.
 - **[Systemd services](../deploy/systemd/)** — Unit files for forwarder services.
 - **[Network architecture](network-architecture.md)** — P2P iroh, server HTTP, firewall, and auth layout.
 

@@ -64,7 +64,10 @@ reported as explicit gap markers.
   and Super Elite readers as well.
 - **Timing software:** any software that accepts IPICO TCP streams.
 - **Forwarder hardware:** Raspberry Pi 3/4/5 with a 64-bit OS, or any
-  Linux SBC/server with an ARM64 or x86-64 CPU.
+  Linux SBC/server with an ARM64 or x86-64 CPU. The field setup can be built as
+  a self-contained enclosure with a PiSugar UPS, SPI LCD status display,
+  cooling, 12 V battery input, Ethernet bulkhead connector, and cellular
+  hotspot; see the [SBC deployment guide](deploy/sbc/#example-field-enclosure).
 
 ## Quick Demo
 

@@ -2,11 +2,12 @@
 
 ## Overview
 
-These files help deploy the rt-forwarder to a Raspberry Pi. The deployment
-uses a two-phase approach: **cloud-init** provisions the OS baseline (hostname,
-SSH keys, system user, required packages), and then an **interactive setup
-script** (`rt-setup.sh`) downloads the forwarder binary, collects configuration
-values, and installs the systemd service.
+These files help deploy the rt-forwarder to a Raspberry Pi. The recommended
+path is the server UI's **SBC Setup** wizard: it creates the forwarder enrollment
+token, generates the cloud-init files, and embeds an automatic first-boot setup
+run. Under the hood, cloud-init provisions the OS baseline (hostname, SSH keys,
+system user, required packages), then `rt-setup.sh` downloads the forwarder
+binary, writes configuration, and installs the systemd service.
 
 ## Prerequisites
 
@@ -14,7 +15,81 @@ values, and installs the systemd service.
 - An SD card (16 GB+ recommended)
 - [Raspberry Pi Imager](https://www.raspberrypi.com/software/) 2.0 or later
 - A computer on the same network as the Pi
-- A forwarder enrollment voucher from the server operator
+- Access to the server UI as an operator/admin
+
+## Example Field Enclosure
+
+The forwarder can run on a bare Raspberry Pi, but the field build used for
+race deployments is a self-contained enclosure. The goal is to power the
+forwarder from the same kind of 12 V battery workflow used for IPICO readers,
+protect the Pi and wiring, and support local status visibility without opening
+the box in a future lid-mounted display revision.
+
+![Closed field enclosure with panel-mounted power and Ethernet connectors](../../docs/images/field-enclosure-closed.jpg)
+
+![Open field enclosure showing the Raspberry Pi, PiSugar UPS, display wiring, cooling, and internal mounting panel](../../docs/images/field-enclosure-open.jpg)
+
+The field enclosure uses or plans for these parts:
+
+| Part | Role |
+|---|---|
+| Raspberry Pi | Runs `rt-forwarder` on Raspberry Pi OS Lite. |
+| [PiSugar 3 Plus UPS](https://www.amazon.ca/dp/B0FBK89B8H) | Provides a local UPS HAT so brief power interruptions do not immediately stop the forwarder. The setup script can install and enable PiSugar monitoring when UPS support is selected. |
+| [Waveshare 2-inch SPI LCD, 240×320](https://www.amazon.ca/dp/B081NBBRWS) | Recommended local status display for a future lid-mounted revision. It connects over SPI, and SBC release builds include LCD display support. |
+| 3D-printed PiSugar/Raspberry Pi case | Holds the Pi and UPS inside the enclosure; this build was modified slightly to fit the small Pi fan. |
+| [Easycargo 30 mm Raspberry Pi fan set](https://www.amazon.ca/dp/B0792BW2VH) | Small fan for the Pi/PiSugar case. |
+| [Noctua NF-A6x25 FLX 60 mm fan](https://www.amazon.ca/dp/B009NQMESS) | Larger enclosure fan for airflow, powered from the 5 V DC-DC converter. |
+| [Molex 4-pin to dual XH2.54 fan splitter](https://www.amazon.ca/dp/B0FJ1XNZJ4) | Fan power lead/adaptation inside the enclosure. |
+| [Bud Industries NBF-32018 ABS enclosure](https://www.digikey.ca/en/products/detail/bud-industries/NBF-32018/2328538) | Hinged IP66/NEMA-rated enclosure body. |
+| [Bud Industries NBX-32916-PL ABS inner panel](https://www.digikey.ca/en/products/detail/bud-industries/NBX-32916-PL/2676747) | Plastic internal mounting panel for the electronics, phone, and cable-tie anchors. |
+| [Bud Industries IPV-1115 vent](https://www.digikey.ca/en/products/detail/bud-industries/IPV-1115/4896963) | Vent hardware used with the enclosure. |
+| [ACEIRMC IP67 RJ45 panel-mount couplers](https://www.amazon.ca/dp/B0CFV1WM1Z) | Weather-resistant Ethernet bulkhead feed-throughs. |
+| [12 V to 5 V dual USB DC-DC converter](https://www.amazon.ca/dp/B07GC1NB43) | Converts the external 12 V battery input to 5 V USB power for the Pi/UPS path. |
+| [SAE panel-mount sidewall port](https://www.amazon.ca/dp/B07S91KPQB) | External 12 V battery input connector on the enclosure. |
+| [SAE to battery alligator clip cable](https://www.amazon.ca/dp/B0F1F51QTJ) | Connects the enclosure to a 12 V battery in the field. |
+| Second-hand Pixel phone with low-cost eSIM plan | Provides a dedicated cellular hotspot when wired internet or trusted Wi-Fi is not available. |
+
+Typical field power path:
+
+```text
+12 V battery
+  -> SAE alligator-clip lead
+  -> SAE panel-mount enclosure port
+  -> 12 V to 5 V DC-DC converter
+     -> PiSugar UPS / Raspberry Pi
+     -> enclosure fan
+```
+
+> **Power warning:** Check polarity before connecting the battery, add
+> appropriate fuse protection for your battery setup, and strain-relieve
+> external cables so the enclosure connectors do not carry cable weight. SAE
+> connectors are not always wired with the same polarity convention. Size the
+> DC-DC converter for the Pi model plus any phone charging and fan load. If
+> powering a fan from the converter output, verify that the fan starts reliably
+> at that voltage.
+
+Build notes from this enclosure:
+
+- Velcro cable ties were zip-tied to the plastic inner panel to hold the
+  Raspberry Pi and hotspot phone in place. This keeps the devices from sliding
+  around if the enclosure is shaken, dropped, or transported between timing
+  points.
+- The enclosure is intended to handle field weather such as wind and rain, but
+  temperature remains a practical limit. Battery performance and electronics
+  cooling both constrain the usable operating range; the enclosure fan helps
+  move air, but it does not remove those limits. Operating much below freezing
+  can hurt battery performance, although heat retained inside the enclosure may
+  reduce the impact in some conditions.
+- The recommended Waveshare LCD screen is not mounted in this build. A future
+  lid-mounted version could cut an opening in the lid, mount the display behind
+  it, and cover the opening with acrylic so operators can read status without
+  opening the box. The pictured lid display is from a prototype display setup,
+  not the recommended LCD mounting.
+- The enclosure was chosen because it is rigid, discreet, easy to modify, and
+  light-coloured enough to reduce heat gain in sun compared with a dark box.
+
+The final weather resistance depends on how the ports, vents, display, and
+cable penetrations are installed.
 
 ## Step 1 -- Flash the SD Card
 
@@ -25,50 +100,64 @@ values, and installs the systemd service.
 3. Select your SD card as the target storage device.
 4. Click **Write** and wait for the flash to complete.
 
-## Step 2 -- Configure cloud-init
+## Step 2 -- Generate cloud-init Files
 
-You can configure these files either manually or with the helper wizard.
+Use the server UI's **SBC Setup** page as the normal path. It is easier than
+running the local Python helper because it creates the forwarder enrollment token
+and inserts the one-time secret into the setup form for you.
 
-### Option A -- Generate files with the helper wizard (recommended)
+1. Open the server UI and go to **SBC Setup** (`/sbc-setup`).
+2. In **Token management**, generate a forwarder token. Copy it immediately or
+   click **Use in setup form**.
+3. Fill in the device identity, network settings, server URL, reader targets,
+   display name, and UPS option.
+4. Download both generated files:
+   - `user-data`
+   - `network-config`
+5. Copy both files to the SD card's **boot** partition. Keep the exact filenames
+   with no extension.
 
-From the repository root:
-
-```bash
-uv run scripts/sbc_cloud_init.py
-```
-
-The script asks for hostname, SSH admin username, SSH key, static IP settings,
-DNS servers, and optional Wi-Fi settings, then writes ready-to-copy
-`user-data` and `network-config` files.
+Files generated by the server UI embed an automatic first-boot `rt-setup.sh`
+run. On first boot, the Pi installs the forwarder, writes the config, enables
+the local web UI, and registers with the server using the generated enrollment
+token. A server operator still needs to approve the newly registered forwarder
+before receivers can use it.
 
 > **Why this matters:** Raspberry Pi OS no longer guarantees a default `pi`
-> login user. This wizard writes an explicit SSH admin user so SSH access is
-> deterministic.
+> login user. The generated cloud-init file writes an explicit SSH admin user so
+> SSH access is deterministic.
 > See: [Raspberry Pi April 2022 update](https://www.raspberrypi.com/news/raspberry-pi-bullseye-update-april-2022/)
 > and [Raspberry Pi OS customization docs](https://www.raspberrypi.com/documentation/computers/configuration.html#configuring-a-user).
-
-To enable fully automatic first boot (no SSH setup commands), use:
-
-```bash
-uv run scripts/sbc_cloud_init.py --auto-first-boot
-```
-
-This mode also asks for forwarder setup values (server URL, enrollment voucher,
-reader targets), then embeds a one-time non-interactive `rt-setup.sh` run in
-`user-data`.
-The setup writes `display_name` to match the configured hostname.
-It also enables forwarder device power controls by default
-(`RT_SETUP_ALLOW_POWER_ACTIONS=1`).
-
-> **Security note:** `--auto-first-boot` stores the forwarder enrollment voucher
-> in cloud-init data on the SD card. Use a scoped voucher and revoke/rotate as
-> needed.
+>
+> **Security note:** automatic first boot stores the forwarder enrollment token
+> in cloud-init data on the SD card. Use scoped tokens and revoke unused tokens
+> from the server UI.
 >
 > **Network trust model:** LAN-accessible unauthenticated status/control endpoints
 > are expected in this deployment model. Treat the forwarder network as trusted
 > infrastructure (for example private VLAN / physically controlled LAN only).
 
-### Option B -- Edit files manually
+<details>
+<summary>Alternative: generate files with the local Python helper</summary>
+
+From the repository root:
+
+```bash
+uv run scripts/sbc_cloud_init.py --auto-first-boot
+```
+
+The script asks for hostname, SSH admin username, SSH key, static IP settings,
+DNS servers, optional Wi-Fi settings, server URL, enrollment token, reader
+targets, and status bind address. It then writes ready-to-copy `user-data` and
+`network-config` files.
+
+Use this path only when the server UI is unavailable. You must create or obtain
+the forwarder enrollment token separately.
+
+</details>
+
+<details>
+<summary>Alternative: edit cloud-init files manually</summary>
 
 1. Open `deploy/sbc/user-data.yaml` from this repository in a text editor.
 
@@ -92,27 +181,38 @@ It also enables forwarder device power controls by default
    - **`addresses`** -- the static IP for this Pi (default: `192.168.1.50/24`).
    - **`routes` → `via`** -- the default gateway (default: `192.168.1.1`).
    - **`nameservers`** -- DNS servers (default: `8.8.8.8`, `8.8.4.4`).
-   - **Optional Wi-Fi** -- under `wifis.wlan0`, set `regulatory-domain`,
-     SSID under `access-points`, and `password` if needed.
+   - **Optional Wi-Fi** -- under `wifis.wlan0`, set `regulatory-domain`, SSID
+     under `access-points`, and `password` if needed.
 
 4. Copy both files to the SD card's **boot** partition:
 
    - `user-data.yaml` → `user-data` (no extension)
    - `network-config` → `network-config` (no extension)
 
+Manual files do not include the one-time setup run unless you add it yourself.
+Use Step 4 after boot.
+
+</details>
+
 > **Tip:** Some versions of Raspberry Pi Imager can apply cloud-init settings
 > directly in the UI -- check under the advanced/customization options.
 
-## Step 3 -- Boot and Connect
+## Step 3 -- Boot, Connect, and Approve
 
-If you used `--auto-first-boot`, boot the Pi and wait 2--3 minutes. The
-forwarder install/config is applied automatically via cloud-init on first boot.
-SSH is optional for troubleshooting only.
+If you used the server UI's generated files, boot the Pi and wait 2--3 minutes.
+The forwarder install/config is applied automatically via cloud-init on first
+boot. SSH is optional for troubleshooting only.
 
 1. Insert the SD card into the Pi and power it on.
 2. Wait approximately **2 minutes** for the first boot and cloud-init to finish.
-3. Connect via SSH using the static IP you configured in `network-config` and
-   the SSH admin username from `user-data`:
+3. Open the forwarder dashboard at `http://<hostname>.local` (include `:<port>`
+   if you configured a non-default status bind). If the generated setup values
+   are correct, the device should be ready to operate from the local web UI.
+4. In the server UI, open **Device approval** (`/admin`) and approve the pending
+   forwarder. Receivers cannot use the forwarder until it is approved.
+
+For troubleshooting, connect via SSH using the static IP you configured in
+`network-config` and the SSH admin username from `user-data`:
 
    ```bash
    ssh <ssh-admin-username>@<static-ip-from-network-config>
@@ -131,14 +231,11 @@ SSH is optional for troubleshooting only.
    ssh <ssh-admin-username>@<hostname>.local
    ```
 
-   After the forwarder is installed/configured (`--auto-first-boot` or Step 4),
-   the dashboard is available at `http://<hostname>.local` (include `:<port>`
-   if you configured a non-default status bind).
+## Step 4 -- Run the Setup Script Manually
 
-## Step 4 -- Run the Setup Script
-
-If you used `--auto-first-boot`, skip this step. `rt-setup.sh` already ran
-automatically during first boot.
+Skip this step when you used files generated by the server UI or the local
+Python helper with `--auto-first-boot`. `rt-setup.sh` already ran automatically
+during first boot.
 
 You have two options:
 
@@ -166,6 +263,7 @@ The wizard will prompt you for:
 | Auth token | *(hidden input)* | Enrollment voucher used to register with the server and mint a per-device token |
 | Reader target(s) | `192.168.1.100:10000` | IP:PORT of each IPICO reader; enter one per line, blank line to finish |
 | Status HTTP bind address | `0.0.0.0:80` | Press Enter to accept the default |
+| PiSugar UPS | `y` | Optional. Installs PiSugar support, enables I2C, asks for shutdown settings/model, and adds `[ups]` monitoring to the forwarder config. |
 
 SBC setup writes this control block by default:
 
@@ -193,6 +291,12 @@ For non-interactive installs:
   remote config. Because the product default is on, an unrecognized value
   falls back to the default (`true`) rather than disabling the feature;
   disabling requires an explicit recognized falsey value.
+- Set `RT_SETUP_UPS_ENABLED=1` when installing non-interactively on a build
+  with a PiSugar UPS. The script installs `pisugar-server`, enables I2C, and
+  writes an `[ups]` section with `enabled = true` to the forwarder config.
+  Optional UPS knobs are `RT_SETUP_UPS_MODEL` (default: `PiSugar 3`),
+  `RT_SETUP_UPS_SHUTDOWN_LEVEL` (default: `5`), and
+  `RT_SETUP_UPS_SHUTDOWN_DELAY` (default: `30`).
 
 Power-action control endpoints are intentionally unauthenticated on the
 forwarder; this is expected for trusted-LAN SBC deployments.
@@ -218,7 +322,15 @@ journalctl -u rt-forwarder -f
 
 ## Updating the Forwarder
 
-To update to a newer version, choose one of:
+Use the forwarder web UI for normal updates. Open the local forwarder dashboard,
+use the update controls to check/download/apply the new version, and let the UI
+restart the forwarder when prompted. You do not need to SSH into the Pi or rerun
+setup scripts for normal updates.
+
+<details>
+<summary>Fallback: manual update paths</summary>
+
+If the web UI is unavailable, use one of these fallback paths:
 
 - **Re-run the setup script.** Answer **yes** when asked to re-download the
   binary, and **no** when asked to overwrite the existing configuration.
@@ -234,6 +346,8 @@ To update to a newer version, choose one of:
   ```bash
   sudo systemctl restart rt-forwarder
   ```
+
+</details>
 
 When the forwarder self-updater stages an artifact at
 `/var/lib/rusty-timer/.forwarder-staged`, `systemd` applies it automatically on
