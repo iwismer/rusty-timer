@@ -306,6 +306,7 @@ async fn main() {
         restart_signal.clone(),
     ));
     let reader_control_handler = Arc::new(forwarder::p2p::ForwarderReaderControlHandler::new(
+        cfg.control.allow_reader_control,
         status_server.reader_control_service(),
         Arc::clone(&journal),
     ));

@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct ForwarderReaderControlHandler {
+    allow_reader_control: bool,
     service: ReaderControlService,
     journal: Arc<Mutex<crate::storage::journal::Journal>>,
 }
@@ -23,16 +24,21 @@ impl std::fmt::Debug for ForwarderReaderControlHandler {
 impl ForwarderReaderControlHandler {
     #[must_use]
     pub fn new(
+        allow_reader_control: bool,
         service: ReaderControlService,
         journal: Arc<Mutex<crate::storage::journal::Journal>>,
     ) -> Self {
-        Self { service, journal }
+        Self {
+            allow_reader_control,
+            service,
+            journal,
+        }
     }
 }
 
 impl ReaderControlHandler for ForwarderReaderControlHandler {
     fn supports_reader_control(&self) -> bool {
-        true
+        self.allow_reader_control
     }
 
     fn handle(&self, request: ReaderControlRequest) -> ReaderControlFuture<'_> {
@@ -247,6 +253,52 @@ mod tests {
             enabled: None,
             epoch_name: None,
         }
+    }
+
+    fn handler_with_reader_control_flag(
+        allow_reader_control: bool,
+    ) -> (ForwarderReaderControlHandler, tempfile::TempDir) {
+        let subsystem = Arc::new(Mutex::new(crate::status_http::SubsystemStatus::ready()));
+        let control_clients = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let download_trackers = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let reconnect_notifies = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let (ui_tx, _) = tokio::sync::broadcast::channel(16);
+        let (status_event_tx, _) = tokio::sync::broadcast::channel(16);
+        let logger = Arc::new(rt_ui_log::UiLogger::with_buffer(
+            ui_tx.clone(),
+            |entry| crate::ui_events::ForwarderUiEvent::LogEntry { entry },
+            16,
+        ));
+        let service = ReaderControlService::new(
+            subsystem,
+            control_clients,
+            download_trackers,
+            reconnect_notifies,
+            ui_tx,
+            status_event_tx,
+            logger,
+        );
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let journal =
+            crate::storage::journal::Journal::open(&tempdir.path().join("journal.sqlite3"))
+                .expect("journal");
+        (
+            ForwarderReaderControlHandler::new(
+                allow_reader_control,
+                service,
+                Arc::new(Mutex::new(journal)),
+            ),
+            tempdir,
+        )
+    }
+
+    #[test]
+    fn supports_reader_control_returns_constructor_flag() {
+        let (handler, _dir) = handler_with_reader_control_flag(false);
+        assert!(!handler.supports_reader_control());
+
+        let (handler, _dir) = handler_with_reader_control_flag(true);
+        assert!(handler.supports_reader_control());
     }
 
     #[test]

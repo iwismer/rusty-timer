@@ -84,6 +84,7 @@ or `server_url`.
 |-------|------|----------|---------|-------------|
 | `allow_power_actions` | `bool` | No | `false` | Enables local control API actions that restart or shut down the host. |
 | `allow_remote_config` | `bool` | No | `true` | Allows receivers to read/write forwarder config over the P2P control plane. |
+| `allow_reader_control` | `bool` | No | `true` | Allows receivers to execute reader-control verbs (status, download, clear, epoch) over the P2P control plane. |
 
 ### `[update]`
 
@@ -147,6 +148,7 @@ bind = "127.0.0.1:8080"
 [control]
 allow_power_actions = false
 allow_remote_config = true
+allow_reader_control = true
 
 [update]
 mode = "check-and-download"

@@ -307,6 +307,7 @@ async fn handle_connection(
     let control_result = run_control_stream_loop(
         control_send,
         control_recv,
+        capabilities,
         config.heartbeat,
         outbound_events,
         config.reader_control,

@@ -30,7 +30,7 @@ use rt_p2p_protocol::{
     MAX_FRAME_BYTES, Ping, Pong, ProtocolError, ProtocolErrorCode, ReaderControlRequest,
     ReaderControlResponse, ReaderInfo, ReaderStatus, RestartRequest, RestartResponse,
     StreamCatalog, SyncClock, UpsStatus, WireProtocolError, control_c2f, control_f2c, encode_frame,
-    negotiate,
+    has_capability, negotiate,
 };
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
@@ -426,6 +426,7 @@ pub(crate) async fn negotiate_control_stream(
 pub(crate) async fn run_control_stream_loop(
     send: SendStream,
     recv: RecvStream,
+    capabilities: Vec<String>,
     heartbeat: HeartbeatConfig,
     outbound_events: Option<ControlEventReceiver>,
     reader_control: Arc<dyn ReaderControlHandler>,
@@ -434,6 +435,7 @@ pub(crate) async fn run_control_stream_loop(
     run_control_loop(
         send,
         recv,
+        capabilities,
         heartbeat,
         reader_control,
         outbound_events,
@@ -480,7 +482,7 @@ pub(crate) async fn serve_control_stream_with_typed_control(
     outbound_events: Option<ControlEventReceiver>,
     remote_config: Arc<dyn RemoteConfigHandler>,
 ) -> Result<(), BoxError> {
-    let (send, recv, _capabilities) = negotiate_control_stream(
+    let (send, recv, capabilities) = negotiate_control_stream(
         send,
         recv,
         catalog,
@@ -494,6 +496,7 @@ pub(crate) async fn serve_control_stream_with_typed_control(
     run_control_loop(
         send,
         recv,
+        capabilities,
         heartbeat,
         reader_control,
         outbound_events,
@@ -590,6 +593,7 @@ async fn negotiate_and_serve_catalog_stream(
 async fn run_control_loop(
     mut send: SendStream,
     mut recv: RecvStream,
+    capabilities: Vec<String>,
     config: HeartbeatConfig,
     reader_control: Arc<dyn ReaderControlHandler>,
     mut outbound_events: Option<ControlEventReceiver>,
@@ -620,6 +624,8 @@ async fn run_control_loop(
     // response channel served by its own select arm below.
     let (config_response_tx, mut config_response_rx) = mpsc::channel::<ControlF2C>(16);
     let mut control_tasks = tokio::task::JoinSet::new();
+    let reader_control_negotiated = has_capability(&capabilities, CAP_READER_CONTROL);
+    let remote_config_negotiated = has_capability(&capabilities, CAP_REMOTE_CONFIG);
 
     let result = loop {
         tokio::select! {
@@ -655,6 +661,15 @@ async fn run_control_loop(
                             }
                         }
                         Some(control_c2f::Msg::ReaderControlRequest(request)) => {
+                            if !reader_control_negotiated {
+                                let response = reader_control_error_response(
+                                    &request,
+                                    "reader control was not negotiated on this connection",
+                                );
+                                let _ = control_response_tx.send(response).await;
+                                continue;
+                            }
+
                             let stream_id = request.stream_id.clone();
                             let request_id = request.request_id.clone();
                             let reader_control = Arc::clone(&reader_control);
@@ -667,6 +682,19 @@ async fn run_control_loop(
                             });
                         }
                         Some(control_c2f::Msg::ConfigGetRequest(request)) => {
+                            if !remote_config_negotiated {
+                                let response = ConfigGetResponse {
+                                    request_id: request.request_id,
+                                    config_json: String::new(),
+                                    restart_needed: false,
+                                };
+                                let frame = ControlF2C {
+                                    msg: Some(control_f2c::Msg::ConfigGetResponse(response)),
+                                };
+                                let _ = config_response_tx.send(frame).await;
+                                continue;
+                            }
+
                             let remote_config = Arc::clone(&remote_config);
                             let config_response_tx = config_response_tx.clone();
                             control_tasks.spawn(async move {
@@ -678,6 +706,21 @@ async fn run_control_loop(
                             });
                         }
                         Some(control_c2f::Msg::ConfigSetRequest(request)) => {
+                            if !remote_config_negotiated {
+                                let response = ConfigSetResponse {
+                                    request_id: request.request_id,
+                                    ok: false,
+                                    restart_needed: false,
+                                    error: "remote config was not negotiated on this connection"
+                                        .to_owned(),
+                                };
+                                let frame = ControlF2C {
+                                    msg: Some(control_f2c::Msg::ConfigSetResponse(response)),
+                                };
+                                let _ = config_response_tx.send(frame).await;
+                                continue;
+                            }
+
                             let remote_config = Arc::clone(&remote_config);
                             let config_response_tx = config_response_tx.clone();
                             control_tasks.spawn(async move {
@@ -689,6 +732,20 @@ async fn run_control_loop(
                             });
                         }
                         Some(control_c2f::Msg::RestartRequest(request)) => {
+                            if !remote_config_negotiated {
+                                let response = RestartResponse {
+                                    request_id: request.request_id,
+                                    accepted: false,
+                                    error: "remote config was not negotiated on this connection"
+                                        .to_owned(),
+                                };
+                                let frame = ControlF2C {
+                                    msg: Some(control_f2c::Msg::RestartResponse(response)),
+                                };
+                                let _ = config_response_tx.send(frame).await;
+                                continue;
+                            }
+
                             let remote_config = Arc::clone(&remote_config);
                             let config_response_tx = config_response_tx.clone();
                             control_tasks.spawn(async move {
@@ -745,6 +802,19 @@ async fn run_control_loop(
     reader.abort();
     control_tasks.abort_all();
     result
+}
+
+fn reader_control_error_response(
+    request: &ReaderControlRequest,
+    message: &str,
+) -> ReaderControlResponse {
+    ReaderControlResponse {
+        stream_id: request.stream_id.clone(),
+        request_id: request.request_id.clone(),
+        success: false,
+        message: message.to_owned(),
+        reader_info_json: None,
+    }
 }
 
 async fn recv_control_event(events: &mut Option<ControlEventReceiver>) -> Option<ControlEvent> {
@@ -920,6 +990,30 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct SpyControlHandler {
+        calls: AtomicUsize,
+    }
+
+    impl ReaderControlHandler for SpyControlHandler {
+        fn supports_reader_control(&self) -> bool {
+            true
+        }
+
+        fn handle(&self, request: ReaderControlRequest) -> ReaderControlFuture<'_> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                rt_p2p_protocol::ReaderControlResponse {
+                    stream_id: request.stream_id,
+                    request_id: request.request_id,
+                    success: true,
+                    message: "spy invoked".to_owned(),
+                    reader_info_json: None,
+                }
+            })
+        }
+    }
+
+    #[derive(Debug)]
     struct SlowControlHandler {
         started_tx: Mutex<Option<oneshot::Sender<()>>>,
         release_rx: Mutex<Option<oneshot::Receiver<()>>>,
@@ -985,6 +1079,7 @@ mod tests {
         config_json: String,
         restart_needed: bool,
         last_set: Mutex<Option<String>>,
+        set_calls: AtomicUsize,
         restart_calls: AtomicUsize,
     }
 
@@ -995,6 +1090,7 @@ mod tests {
                 config_json: r#"{"schema_version":1}"#.to_owned(),
                 restart_needed: false,
                 last_set: Mutex::new(None),
+                set_calls: AtomicUsize::new(0),
                 restart_calls: AtomicUsize::new(0),
             }
         }
@@ -1032,6 +1128,7 @@ mod tests {
                         error: REMOTE_CONFIG_DISABLED.to_owned(),
                     };
                 }
+                self.set_calls.fetch_add(1, Ordering::SeqCst);
                 *self.last_set.lock().unwrap() = Some(request.config_json.clone());
                 ConfigSetResponse {
                     request_id: request.request_id,
@@ -1066,6 +1163,14 @@ mod tests {
     fn hello_with_remote_config() -> Hello {
         let mut hello = forwarder_hello();
         hello.capabilities.push(CAP_REMOTE_CONFIG.to_owned());
+        hello
+    }
+
+    /// Builds a client `Hello` that advertises reader-control support so the
+    /// negotiated capability set can include [`CAP_READER_CONTROL`].
+    fn hello_with_reader_control() -> Hello {
+        let mut hello = forwarder_hello();
+        hello.capabilities.push(CAP_READER_CONTROL.to_owned());
         hello
     }
 
@@ -1150,6 +1255,75 @@ mod tests {
             }
             other => return Err(format!("expected HelloOk, got {other:?}").into()),
         }
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reader_control_request_rejected_when_capability_not_negotiated() -> TestResult {
+        let handler = Arc::new(SpyControlHandler {
+            calls: AtomicUsize::new(0),
+        });
+        let (forwarder, forwarder_addr, handle) = spawn_forwarder_with_control(
+            [54; 32],
+            StaticCatalog::new(sample_catalog()),
+            LONG_HANDSHAKE,
+            quiet_heartbeat(),
+            Arc::clone(&handler) as _,
+            None,
+            Arc::new(NoopRemoteConfigHandler),
+        )
+        .await?;
+
+        let receiver = EndpointBuilder::test([55; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        let stream_id = vec![6u8; 16];
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::ReaderControlRequest(
+                    ReaderControlRequest {
+                        stream_id: stream_id.clone(),
+                        command: "clear_records".to_owned(),
+                        request_id: "req-no-cap".to_owned(),
+                        mode: None,
+                        timeout: None,
+                        enabled: None,
+                        epoch_name: None,
+                    },
+                )),
+            },
+        )
+        .await?;
+
+        let frame =
+            tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::ReaderControlResponse(response)) => {
+                assert_eq!(response.stream_id, stream_id);
+                assert_eq!(response.request_id, "req-no-cap");
+                assert!(!response.success);
+                assert!(
+                    response.message.contains("not negotiated"),
+                    "message should mention negotiation, got {:?}",
+                    response.message
+                );
+            }
+            other => return Err(format!("expected ReaderControlResponse, got {other:?}").into()),
+        }
+        assert_eq!(handler.calls.load(Ordering::SeqCst), 0);
 
         connection.close(0u32.into(), b"done");
         handle.abort();
@@ -1292,6 +1466,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn config_set_rejected_when_capability_not_negotiated() -> TestResult {
+        let handler = Arc::new(FakeRemoteConfigHandler::new(true));
+        let (forwarder, forwarder_addr, handle) =
+            spawn_forwarder_with_remote_config([56; 32], Arc::clone(&handler) as _).await?;
+
+        let receiver = EndpointBuilder::test([59; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::ConfigSetRequest(ConfigSetRequest {
+                    request_id: "set-no-cap".to_owned(),
+                    config_json: r#"{"schema_version":1}"#.to_owned(),
+                })),
+            },
+        )
+        .await?;
+
+        let frame =
+            tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::ConfigSetResponse(response)) => {
+                assert_eq!(response.request_id, "set-no-cap");
+                assert!(!response.ok);
+                assert!(
+                    response.error.contains("not negotiated"),
+                    "error should mention negotiation, got {:?}",
+                    response.error
+                );
+            }
+            other => return Err(format!("expected ConfigSetResponse, got {other:?}").into()),
+        }
+        assert_eq!(handler.set_calls.load(Ordering::SeqCst), 0);
+        assert!(handler.last_set.lock().unwrap().is_none());
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn config_set_rejected_when_disabled() -> TestResult {
         let (forwarder, forwarder_addr, handle) = spawn_forwarder_with_remote_config(
             [68; 32],
@@ -1326,7 +1551,11 @@ mod tests {
             Some(control_f2c::Msg::ConfigSetResponse(response)) => {
                 assert_eq!(response.request_id, "set-2");
                 assert!(!response.ok, "set must be rejected when disabled");
-                assert_eq!(response.error, REMOTE_CONFIG_DISABLED);
+                assert!(
+                    response.error.contains("not negotiated"),
+                    "error should mention negotiation, got {:?}",
+                    response.error
+                );
             }
             other => return Err(format!("expected ConfigSetResponse, got {other:?}").into()),
         }
@@ -1417,7 +1646,11 @@ mod tests {
             Some(control_f2c::Msg::RestartResponse(response)) => {
                 assert_eq!(response.request_id, "restart-2");
                 assert!(!response.accepted, "restart must be rejected when disabled");
-                assert_eq!(response.error, REMOTE_CONFIG_DISABLED);
+                assert!(
+                    response.error.contains("not negotiated"),
+                    "error should mention negotiation, got {:?}",
+                    response.error
+                );
             }
             other => return Err(format!("expected RestartResponse, got {other:?}").into()),
         }
@@ -1549,7 +1782,7 @@ mod tests {
         let receiver = EndpointBuilder::test([47; 32]).bind().await?;
         let (connection, mut send, mut recv) = tokio::time::timeout(
             LONG_HANDSHAKE,
-            open_control(&receiver, forwarder_addr, forwarder_hello()),
+            open_control(&receiver, forwarder_addr, hello_with_reader_control()),
         )
         .await??;
 
@@ -1616,7 +1849,7 @@ mod tests {
         let receiver = EndpointBuilder::test([49; 32]).bind().await?;
         let (connection, mut send, mut recv) = tokio::time::timeout(
             LONG_HANDSHAKE,
-            open_control(&receiver, forwarder_addr, forwarder_hello()),
+            open_control(&receiver, forwarder_addr, hello_with_reader_control()),
         )
         .await??;
 
@@ -1715,7 +1948,7 @@ mod tests {
         let receiver = EndpointBuilder::test([51; 32]).bind().await?;
         let (connection, mut send, mut recv) = tokio::time::timeout(
             LONG_HANDSHAKE,
-            open_control(&receiver, forwarder_addr, forwarder_hello()),
+            open_control(&receiver, forwarder_addr, hello_with_reader_control()),
         )
         .await??;
 
