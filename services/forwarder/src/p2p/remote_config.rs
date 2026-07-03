@@ -150,7 +150,8 @@ impl RemoteConfigHandler for ForwarderRemoteConfigHandler {
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(%peer, %error, "p2p: remote config set failed");
+                    // UiLogger::log_at also echoes to tracing at warn level, so
+                    // no separate tracing::warn! here (it would double-log).
                     self.ui_logger.log_at(
                         rt_ui_log::UiLogLevel::Warn,
                         format!("Remote config write from receiver {peer} rejected: {error}"),

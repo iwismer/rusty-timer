@@ -685,12 +685,12 @@ async fn run_control_loop(
                         }
                         Some(control_c2f::Msg::ReaderControlRequest(request)) => {
                             if !reader_control_negotiated {
-                                tracing::info!(
+                                tracing::warn!(
                                     %peer,
                                     verb = "reader_control",
-                                    command = %request.command,
+                                    command = ?request.command,
                                     request_id = %request.request_id,
-                                    stream_id = %String::from_utf8_lossy(&request.stream_id),
+                                    stream_id = ?String::from_utf8_lossy(&request.stream_id),
                                     outcome = "denied",
                                     "p2p: control verb denied (capability not negotiated)"
                                 );
@@ -723,9 +723,9 @@ async fn run_control_loop(
                                 tracing::info!(
                                     %peer,
                                     verb = "reader_control",
-                                    command = %command,
+                                    command = ?command,
                                     request_id = %response.request_id,
-                                    stream_id = %String::from_utf8_lossy(&response.stream_id),
+                                    stream_id = ?String::from_utf8_lossy(&response.stream_id),
                                     outcome = if response.success { "ok" } else { "error" },
                                     "p2p: control verb handled"
                                 );
@@ -734,7 +734,7 @@ async fn run_control_loop(
                         }
                         Some(control_c2f::Msg::ConfigGetRequest(request)) => {
                             if !remote_config_negotiated {
-                                tracing::info!(
+                                tracing::warn!(
                                     %peer,
                                     verb = "config_get",
                                     request_id = %request.request_id,
@@ -763,6 +763,10 @@ async fn run_control_loop(
                             let config_response_tx = config_response_tx.clone();
                             control_tasks.spawn(async move {
                                 let response = remote_config.get_config(request).await;
+                                // Empty config_json is also the handler's "disabled"
+                                // signal, but the capability gate above fires first when
+                                // remote config is disabled, so on this path emptiness
+                                // means a real read/serialize failure.
                                 tracing::info!(
                                     %peer,
                                     verb = "config_get",
@@ -782,7 +786,7 @@ async fn run_control_loop(
                         }
                         Some(control_c2f::Msg::ConfigSetRequest(request)) => {
                             if !remote_config_negotiated {
-                                tracing::info!(
+                                tracing::warn!(
                                     %peer,
                                     verb = "config_set",
                                     request_id = %request.request_id,
@@ -823,7 +827,7 @@ async fn run_control_loop(
                         }
                         Some(control_c2f::Msg::RestartRequest(request)) => {
                             if !remote_config_negotiated {
-                                tracing::info!(
+                                tracing::warn!(
                                     %peer,
                                     verb = "restart",
                                     request_id = %request.request_id,
