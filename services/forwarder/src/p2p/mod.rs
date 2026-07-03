@@ -122,6 +122,10 @@ pub async fn start_forwarder_p2p(
     // this a freshly configured reader could be advertised and subscribed before
     // its reader task has appended anything, and the subscription would fail on
     // missing stream state instead of returning SubscribeOk/CaughtUp.
+    //
+    // NOTE: startup stream-identity restore (main.rs) runs BEFORE this, so this
+    // idempotent seq-1 seeding never pre-empts a registry high-water restore
+    // for a journal-lost stream.
     {
         let mut journal = journal.lock().await;
         for stream in reader_streams {
@@ -348,7 +352,10 @@ fn server_credentials(config: &P2pConfig) -> Result<Option<(String, String)>, P2
 
 /// Writable path for the minted per-device token: the configured
 /// `device_token_file`, else a `p2p-device-token` sibling of the secret-key path.
-fn device_token_path(config: &P2pConfig) -> PathBuf {
+///
+/// `pub` so startup stream-identity restore (main.rs) can read the persisted
+/// token before the P2P endpoint exists.
+pub fn device_token_path(config: &P2pConfig) -> PathBuf {
     if let Some(path) = &config.device_token_file {
         return PathBuf::from(path);
     }
@@ -395,7 +402,9 @@ async fn resolve_device_token(
     }
 }
 
-fn read_device_token(path: &Path) -> Result<Option<String>, P2pStartError> {
+/// Read the persisted minted device token, if any. `pub` for startup
+/// stream-identity restore; it never bootstraps (that needs the endpoint id).
+pub fn read_device_token(path: &Path) -> Result<Option<String>, P2pStartError> {
     match std::fs::read_to_string(path) {
         Ok(contents) => {
             let trimmed = contents.trim();

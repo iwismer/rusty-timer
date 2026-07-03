@@ -718,7 +718,11 @@ impl Journal {
         current_epoch(&self.conn, stream_key)
     }
 
-    fn stream_exists(&self, stream_id: &str) -> Result<bool, JournalError> {
+    /// Whether the journal has any stream state for `stream_id`.
+    ///
+    /// Startup restore uses this to detect journal loss for configured reader
+    /// stream keys before reader tasks or the P2P catalog seed them.
+    pub fn stream_exists(&self, stream_id: &str) -> Result<bool, JournalError> {
         self.conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM streams WHERE stream_id = ?1)",

@@ -258,7 +258,11 @@ pub async fn run_reader(
             .update_reader_state(&target_addr, ReaderConnectionState::Connected)
             .await;
 
-        // Ensure journal has stream state for this reader (idempotent)
+        // Ensure journal has stream state for this reader (idempotent).
+        // Startup stream-identity restore (main.rs, before reader tasks spawn)
+        // already seeded every configured stream key — possibly from the server
+        // registry high-water — so this is only a cheap safety net for stream
+        // keys startup did not seed. Do not remove it.
         {
             let mut j = journal.lock().await;
             let epoch = 1_i64;

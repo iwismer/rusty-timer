@@ -34,6 +34,7 @@ use std::time::Duration;
 
 use rt_iroh::{Connection, EndpointId};
 pub use rt_server_api::allowlist::ReceiverAllowListResponse as ReceiverAllowListUpdate;
+use rt_server_api::catalog::ForwarderOwnCatalogResponse;
 pub use rt_server_api::catalog::{
     ForwarderCatalogRequest as ForwarderCatalog, ForwarderCatalogStream,
 };
@@ -414,6 +415,27 @@ impl ServerCatalogClient {
         response
             .device_token
             .ok_or(CatalogPushError::MissingMintedToken)
+    }
+
+    /// Fetches this forwarder's own stored stream catalog from the server
+    /// (`GET /forwarder/catalog`, self-scoped by the device token).
+    ///
+    /// Used at startup to restore per-stream epoch/next_seq high-water after
+    /// local journal loss. An older server without this route returns 404,
+    /// which surfaces as an `Err` here — callers treat any error as
+    /// "registry unavailable".
+    pub async fn fetch_own_catalog(&self) -> Result<Vec<ForwarderCatalogStream>, CatalogPushError> {
+        let url = format!("{}/forwarder/catalog", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(self.bearer_token.as_ref())
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<ForwarderOwnCatalogResponse>()
+            .await?;
+        Ok(response.streams)
     }
 
     /// Pushes this forwarder's latest identity and stream catalog.

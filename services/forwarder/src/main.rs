@@ -218,6 +218,99 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // Restore stream identity for any journal-missing stream keys BEFORE
+    // `start_forwarder_p2p` (which idempotently seeds advertised streams at
+    // seq 1 and would pre-empt a restore) and before reader tasks spawn.
+    // Receivers dedup on (stream_id, seq); if the journal was lost, restarting
+    // an existing stream key at seq 1 would make them silently discard reads.
+    // See `forwarder::storage::restore` for the high-water + slack rationale.
+    {
+        use forwarder::storage::restore::{
+            RegistryFetch, RegistryStreamRecord, fetch_registry_snapshot_with_retries,
+            restore_streams_at_startup,
+        };
+
+        let stream_keys: Vec<String> = all_readers.iter().map(|(addr, _)| addr.clone()).collect();
+        let any_missing = {
+            let j = journal.lock().await;
+            stream_keys
+                .iter()
+                .any(|key| !j.stream_exists(key).unwrap_or(false))
+        };
+        if any_missing {
+            let fetch = if cfg.p2p.enabled && cfg.p2p.server_url.is_some() {
+                // Reuse the persisted minted device token (it lives at a
+                // different path than the journal, so it typically survives a
+                // journal-loss reboot). Never bootstrap here: minting needs the
+                // P2P endpoint id, which does not exist yet. A missing token is
+                // treated as "registry unavailable" (loud fallback); on a true
+                // first boot the journal is expected to be empty anyway.
+                let token_path = forwarder::p2p::device_token_path(&cfg.p2p);
+                match forwarder::p2p::read_device_token(&token_path) {
+                    Ok(Some(device_token)) => {
+                        let client = forwarder::p2p::ServerCatalogClient::with_timeout(
+                            cfg.p2p.server_url.clone().unwrap_or_default(),
+                            device_token,
+                            Duration::from_secs(cfg.p2p.allowlist_request_timeout_secs),
+                        );
+                        fetch_registry_snapshot_with_retries(
+                            || {
+                                let client = client.clone();
+                                async move {
+                                    client.fetch_own_catalog().await.map(|streams| {
+                                        streams
+                                            .into_iter()
+                                            .map(|s| RegistryStreamRecord {
+                                                stream_id: s.stream_id,
+                                                epoch: s.epoch,
+                                                next_seq: s.next_seq,
+                                            })
+                                            .collect()
+                                    })
+                                }
+                            },
+                            3,
+                            Duration::from_secs(5),
+                        )
+                        .await
+                    }
+                    Ok(None) => {
+                        warn!(
+                            path = %token_path.display(),
+                            "no persisted device token; cannot fetch registry high-water for stream restore"
+                        );
+                        RegistryFetch::Unavailable
+                    }
+                    Err(e) => {
+                        warn!(
+                            path = %token_path.display(),
+                            error = %e,
+                            "failed to read device token for stream restore"
+                        );
+                        RegistryFetch::Unavailable
+                    }
+                }
+            } else {
+                RegistryFetch::NotConfigured
+            };
+
+            let restore_result = {
+                let mut j = journal.lock().await;
+                restore_streams_at_startup(&mut j, &stream_keys, &fetch, Some(logger.as_ref()))
+            };
+            if let Err(e) = restore_result {
+                // Reader tasks retry `ensure_stream_state` as a safety net, so
+                // local capture still proceeds; but a failed restore means a
+                // previously forwarded stream key may restart at seq 1.
+                error!(error = %e, "startup stream identity restore failed");
+                logger.log_at(
+                    UiLogLevel::Error,
+                    format!("stream identity restore failed: {e}"),
+                );
+            }
+        }
+    }
+
     // Seed historical totals once at startup to avoid per-request DB counting.
     for (reader_addr, _) in &all_readers {
         let total = {
