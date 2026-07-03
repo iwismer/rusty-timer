@@ -67,6 +67,9 @@ pub const DEFAULT_ALLOWLIST_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 struct State {
     /// Endpoint ids currently permitted to connect.
     allowed: HashSet<EndpointId>,
+    /// Operator-pinned (static config) receivers. Always allowed; never
+    /// revoked or persisted by server snapshots.
+    pinned: HashSet<EndpointId>,
     /// Open admitted connections, keyed by remote endpoint id then a per-connection
     /// registration id so multiple connections from one peer are tracked
     /// independently.
@@ -130,23 +133,26 @@ impl AllowList {
         self.lock().allowed.contains(endpoint_id)
     }
 
-    /// Unions `additional` endpoint ids into the allowed set in memory only.
-    ///
-    /// Unlike [`AllowList::apply_update`], this neither persists to the cache
-    /// nor revokes anything: it is additive. It exists so statically configured
-    /// receivers can be allowed *on top of* the cached/last-known (or
-    /// server-fetched) set at startup, rather than replacing it.
-    pub fn add_allowed(&self, additional: impl IntoIterator<Item = EndpointId>) {
+    /// Pins operator-configured receivers: always allowed, never revoked by
+    /// [`AllowList::apply_update`], never persisted to the server-snapshot
+    /// cache. Intended to be called once at startup; a later call with a
+    /// smaller set does not un-pin previously pinned nodes until the next
+    /// `apply_update`.
+    pub fn set_pinned(&self, pinned: impl IntoIterator<Item = EndpointId>) {
         let mut state = self.lock();
-        state.allowed.extend(additional);
+        state.pinned = pinned.into_iter().collect();
+        let pinned = state.pinned.clone();
+        state.allowed.extend(pinned);
     }
 
-    /// Atomically replaces the allowed set with `allowed`, persisting it and
+    /// Atomically replaces the allowed set with `allowed` ∪ the pinned set,
+    /// persisting the server snapshot (`allowed` only, never pinned) and
     /// force-closing every open connection whose endpoint id was removed.
     ///
-    /// Returns the revoked endpoint ids. Persistence happens before the in-memory
-    /// swap: if the cache cannot be written the in-memory state is left at its
-    /// last-known value and the error is returned.
+    /// Returns the revoked endpoint ids; pinned endpoints are never revoked.
+    /// Persistence happens before the in-memory swap: if the cache cannot be
+    /// written the in-memory state is left at its last-known value and the
+    /// error is returned.
     ///
     /// # Errors
     ///
@@ -166,9 +172,11 @@ impl AllowList {
                 persist(path, &new_allowed)?;
             }
 
+            let effective: HashSet<EndpointId> =
+                new_allowed.union(&state.pinned).copied().collect();
             let revoked: Vec<EndpointId> =
-                state.allowed.difference(&new_allowed).copied().collect();
-            state.allowed = new_allowed;
+                state.allowed.difference(&effective).copied().collect();
+            state.allowed = effective;
             let mut connections_to_close = Vec::new();
             for endpoint_id in &revoked {
                 if let Some(connections) = state.connections.remove(endpoint_id) {
@@ -924,6 +932,119 @@ mod tests {
         server.abort();
         receiver.close().await;
         forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn apply_update_preserves_pinned_receivers() -> TestResult {
+        let pinned = EndpointBuilder::test([70; 32]).bind().await?;
+        let server_only = EndpointBuilder::test([71; 32]).bind().await?;
+
+        let allow = AllowList::new(vec![]);
+        allow.set_pinned([pinned.endpoint_id()]);
+
+        // Server snapshot that does NOT contain the pinned receiver.
+        let revoked = allow.apply_update([server_only.endpoint_id()])?;
+
+        assert!(
+            allow.contains(&pinned.endpoint_id()),
+            "pinned receiver must survive server snapshot"
+        );
+        assert!(allow.contains(&server_only.endpoint_id()));
+        assert!(
+            !revoked.contains(&pinned.endpoint_id()),
+            "pinned receiver must never be revoked"
+        );
+
+        pinned.close().await;
+        server_only.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn apply_update_does_not_persist_pinned_to_cache() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let cache_path = dir.path().join("allowlist");
+
+        let pinned = EndpointBuilder::test([72; 32]).bind().await?;
+        let server_only = EndpointBuilder::test([73; 32]).bind().await?;
+
+        let allow = AllowList::load(&cache_path)?;
+        allow.set_pinned([pinned.endpoint_id()]);
+        allow.apply_update([server_only.endpoint_id()])?;
+
+        let cached = parse_endpoint_ids(&std::fs::read_to_string(&cache_path)?)?;
+        assert_eq!(
+            cached,
+            HashSet::from([server_only.endpoint_id()]),
+            "cache must hold the server snapshot only, never pinned receivers"
+        );
+
+        pinned.close().await;
+        server_only.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn apply_update_does_not_force_close_pinned_connection() -> TestResult {
+        let receiver = EndpointBuilder::test([74; 32]).bind().await?;
+        let forwarder = EndpointBuilder::test([75; 32]).bind().await?;
+        let forwarder_addr = forwarder.endpoint_addr().await;
+
+        let allow = AllowList::new(vec![]);
+        allow.set_pinned([receiver.endpoint_id()]);
+        let server = tokio::spawn(admission_server(forwarder.clone(), allow.clone()));
+
+        // Establish and confirm an admitted, registered subscription.
+        let (connection, reply) =
+            tokio::time::timeout(Duration::from_secs(5), subscribe(&receiver, forwarder_addr))
+                .await??;
+        assert_eq!(&reply, SUBSCRIBE_OK);
+
+        // An empty server snapshot must not revoke or force-close the pinned peer.
+        let revoked = allow.apply_update([])?;
+        assert!(revoked.is_empty(), "pinned peer must not be revoked");
+
+        // The connection stays functional: a fresh subscription probe on the
+        // same connection still succeeds.
+        let (mut send, mut recv) = connection.open_bi().await?;
+        send.write_all(SUBSCRIBE).await?;
+        send.finish()?;
+        let mut buf = [0u8; SUBSCRIBE_OK.len()];
+        tokio::time::timeout(Duration::from_secs(5), recv.read_exact(&mut buf)).await??;
+        assert_eq!(&buf, SUBSCRIBE_OK);
+
+        server.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pinned_receivers_removed_from_config_are_not_resurrected_on_reboot() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let cache_path = dir.path().join("allowlist");
+
+        let pinned = EndpointBuilder::test([76; 32]).bind().await?;
+        let server_only = EndpointBuilder::test([77; 32]).bind().await?;
+
+        // First boot: the receiver is pinned via static config and a server
+        // snapshot is persisted to the cache.
+        let first_boot = AllowList::load(&cache_path)?;
+        first_boot.set_pinned([pinned.endpoint_id()]);
+        first_boot.apply_update([server_only.endpoint_id()])?;
+
+        // Reboot with the receiver removed from static config (no set_pinned):
+        // the cache must not resurrect it.
+        let second_boot = AllowList::load(&cache_path)?;
+        assert!(
+            !second_boot.contains(&pinned.endpoint_id()),
+            "removing a receiver from static config must take effect on reboot"
+        );
+        assert!(second_boot.contains(&server_only.endpoint_id()));
+
+        pinned.close().await;
+        server_only.close().await;
         Ok(())
     }
 

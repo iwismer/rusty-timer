@@ -326,16 +326,12 @@ fn build_allow_list(config: &P2pConfig) -> Result<AllowList, P2pStartError> {
 
     let static_receivers = parse_endpoint_ids(&config.static_allowed_receivers)?;
     let allow_list = match &config.allowlist_cache_path {
-        Some(path) => {
-            // Static receivers are additive: union them on top of the cached
-            // last-known set rather than replacing it (which would revoke every
-            // cached receiver). `add_allowed` does not persist or revoke.
-            let allow_list = AllowList::load(path)?;
-            allow_list.add_allowed(static_receivers);
-            allow_list
-        }
-        None => AllowList::new(static_receivers),
+        Some(path) => AllowList::load(path)?,
+        None => AllowList::new(vec![]),
     };
+    // Static receivers are pinned: always allowed on top of the cached
+    // last-known set, never revoked or persisted by later server snapshots.
+    allow_list.set_pinned(static_receivers);
     Ok(allow_list)
 }
 
