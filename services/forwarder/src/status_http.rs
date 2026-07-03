@@ -674,29 +674,6 @@ fn get_config_state<J: JournalAccess + Send + 'static>(
 }
 
 #[derive(serde::Serialize)]
-struct ServerDeviceStatusJson {
-    configured: bool,
-    endpoint_id: Option<String>,
-    reachable: Option<bool>,
-    approval_state: Option<String>,
-    waiting_for_approval: bool,
-    message: Option<String>,
-}
-
-impl ServerDeviceStatusJson {
-    fn not_configured() -> Self {
-        Self {
-            configured: false,
-            endpoint_id: None,
-            reachable: None,
-            approval_state: None,
-            waiting_for_approval: false,
-            message: None,
-        }
-    }
-}
-
-#[derive(serde::Serialize)]
 struct StatusJsonResponse {
     forwarder_id: String,
     version: String,
@@ -705,7 +682,7 @@ struct StatusJsonResponse {
     p2p_connected: bool,
     restart_needed: bool,
     ups_status: Option<UpsStatusState>,
-    server: ServerDeviceStatusJson,
+    server: crate::status_store::ServerDeviceStatus,
     readers: Vec<ReaderStatusJson>,
 }
 
@@ -721,137 +698,18 @@ struct ReaderStatusJson {
     reader_info: Option<crate::reader_control::ReaderInfo>,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct ServerStatusBoardJson {
-    #[serde(default)]
-    devices: Vec<ServerStatusDeviceJson>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct ServerStatusDeviceJson {
-    endpoint_id: String,
-    approval_state: String,
-}
-
-async fn forwarder_server_status<J: JournalAccess + Send + 'static>(
-    state: &AppState<J>,
-) -> ServerDeviceStatusJson {
-    let endpoint_id = state.subsystem.lock().await.p2p_endpoint_id.clone();
-    let Some(endpoint_id) = endpoint_id else {
-        return ServerDeviceStatusJson::not_configured();
-    };
-    let Some(config_state) = get_config_state(state) else {
-        return ServerDeviceStatusJson::not_configured();
-    };
-    let server_url = {
-        let _guard = config_state.write_lock.lock().await;
-        match crate::config::load_config_from_path(&config_state.path) {
-            Ok(config) => config.p2p.server_url,
-            Err(error) => {
-                return ServerDeviceStatusJson {
-                    configured: true,
-                    endpoint_id: Some(endpoint_id),
-                    reachable: None,
-                    approval_state: None,
-                    waiting_for_approval: false,
-                    message: Some(format!("Forwarder config unavailable: {error}")),
-                };
-            }
-        }
-    };
-    let Some(server_url) = server_url else {
-        return ServerDeviceStatusJson::not_configured();
-    };
-
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(1))
-        .build()
-    {
-        Ok(client) => client,
-        Err(error) => {
-            return ServerDeviceStatusJson {
-                configured: true,
-                endpoint_id: Some(endpoint_id),
-                reachable: Some(false),
-                approval_state: None,
-                waiting_for_approval: false,
-                message: Some(format!("Server status client unavailable: {error}")),
-            };
-        }
-    };
-    let status_url = format!("{}/status", server_url.trim_end_matches('/'));
-    let response = match client.get(status_url).send().await {
-        Ok(response) => response,
-        Err(error) => {
-            return ServerDeviceStatusJson {
-                configured: true,
-                endpoint_id: Some(endpoint_id),
-                reachable: Some(false),
-                approval_state: None,
-                waiting_for_approval: false,
-                message: Some(format!("Server status unavailable: {error}")),
-            };
-        }
-    };
-    let board = match response.error_for_status() {
-        Ok(response) => match response.json::<ServerStatusBoardJson>().await {
-            Ok(board) => board,
-            Err(error) => {
-                return ServerDeviceStatusJson {
-                    configured: true,
-                    endpoint_id: Some(endpoint_id),
-                    reachable: Some(false),
-                    approval_state: None,
-                    waiting_for_approval: false,
-                    message: Some(format!("Server status response was invalid: {error}")),
-                };
-            }
-        },
-        Err(error) => {
-            return ServerDeviceStatusJson {
-                configured: true,
-                endpoint_id: Some(endpoint_id),
-                reachable: Some(false),
-                approval_state: None,
-                waiting_for_approval: false,
-                message: Some(format!("Server status returned an error: {error}")),
-            };
-        }
-    };
-
-    match board
-        .devices
-        .into_iter()
-        .find(|device| device.endpoint_id == endpoint_id)
-    {
-        Some(device) => {
-            let waiting_for_approval = device.approval_state == "pending";
-            ServerDeviceStatusJson {
-                configured: true,
-                endpoint_id: Some(endpoint_id),
-                reachable: Some(true),
-                approval_state: Some(device.approval_state),
-                waiting_for_approval,
-                message: waiting_for_approval
-                    .then(|| "Waiting for server admin approval".to_owned()),
-            }
-        }
-        None => ServerDeviceStatusJson {
-            configured: true,
-            endpoint_id: Some(endpoint_id),
-            reachable: Some(true),
-            approval_state: None,
-            waiting_for_approval: true,
-            message: Some("Waiting for this forwarder to register with the server".to_owned()),
-        },
-    }
-}
-
 async fn status_json_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> Response {
-    let server = forwarder_server_status(&state).await;
     let ss = state.subsystem.lock().await;
+    // Served from the cache maintained by `server_status_task`; the handler
+    // itself performs no outbound I/O so local status latency never depends
+    // on WAN state. Before the first poll completes (or when no poll task
+    // runs), serve the not-configured shape with `checked_unix_ms: None`.
+    let server = ss
+        .server_status()
+        .cloned()
+        .unwrap_or_else(crate::status_store::ServerDeviceStatus::not_configured);
     let mut readers: Vec<_> = ss
         .readers
         .iter()
@@ -970,7 +828,6 @@ async fn events_handler<J: JournalAccess + Send + 'static>(
     >,
 > {
     use axum::response::sse::{Event, KeepAlive, Sse};
-    use std::time::Duration;
     use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
     let rx = state.ui_tx.subscribe();
@@ -2104,6 +1961,88 @@ mod tests {
         assert_eq!(body["ups_status"]["status"]["power_plugged"], false);
         assert_eq!(body["readers"][0]["ip"], "192.168.1.10");
         assert_eq!(body["readers"][0]["state"], "connected");
+    }
+
+    #[tokio::test]
+    async fn status_json_serves_cached_server_status_without_outbound_io() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // A "server" that accepts TCP connections but never responds: any
+        // inline outbound HTTP call in the status handler would block on it
+        // until the request timeout (~1s).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind hang listener");
+        let hang_addr = listener.local_addr().expect("hang listener addr");
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(s) => held.push(s),
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let mut config_file = NamedTempFile::new().expect("create temp config");
+        let (_token_dir, token_path) = temp_token_file();
+        write!(
+            config_file,
+            r#"schema_version = 1
+[p2p]
+server_url = "http://{hang_addr}"
+[auth]
+token_file = "{token_path}"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+        )
+        .expect("write config");
+
+        let server = StatusServer::start_with_config(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            Arc::new(Mutex::new(NoJournal)),
+            Arc::new(ConfigState::new(config_file.path().to_path_buf())),
+            Arc::new(Notify::new()),
+        )
+        .await
+        .expect("start status server");
+        server
+            .store()
+            .set_p2p_endpoint_id("endpoint-under-test".to_owned())
+            .await;
+
+        let client = reqwest::Client::new();
+        let start = std::time::Instant::now();
+        let resp = client
+            .get(format!("http://{}/api/v1/status", server.local_addr()))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        let elapsed = start.elapsed();
+        assert_eq!(resp.status(), 200);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "status endpoint must not perform outbound I/O inline (took {elapsed:?})"
+        );
+
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        let server_json = body.get("server").expect("server object");
+        assert!(
+            server_json.get("reachable").is_some(),
+            "server.reachable missing: {server_json}"
+        );
+        assert_eq!(
+            server_json["cached"], true,
+            "server.cached must be true: {server_json}"
+        );
+        assert!(
+            server_json.get("checked_unix_ms").is_some(),
+            "server.checked_unix_ms missing: {server_json}"
+        );
     }
 
     #[tokio::test]

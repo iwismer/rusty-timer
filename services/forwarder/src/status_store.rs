@@ -60,6 +60,44 @@ pub struct UpsStatusState {
     pub status: Option<rt_domain::UpsStatus>,
 }
 
+/// Cached snapshot of this forwarder's registration status on the central
+/// server, refreshed by the background poll task (`server_status_task`).
+///
+/// The `/api/v1/status` handler serves this snapshot directly and never
+/// performs outbound I/O; `checked_unix_ms` is the staleness signal (None
+/// until the first poll completes).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ServerDeviceStatus {
+    pub configured: bool,
+    pub endpoint_id: Option<String>,
+    pub reachable: Option<bool>,
+    pub approval_state: Option<String>,
+    pub waiting_for_approval: bool,
+    pub message: Option<String>,
+    /// Always `true`: signals to clients that this snapshot is served from
+    /// the poll cache rather than a live server round-trip.
+    pub cached: bool,
+    /// Unix ms timestamp of the poll that produced this snapshot.
+    pub checked_unix_ms: Option<i64>,
+}
+
+impl ServerDeviceStatus {
+    /// Shape served when no server is configured — and before the first poll
+    /// completes (with `checked_unix_ms: None`).
+    pub fn not_configured() -> Self {
+        Self {
+            configured: false,
+            endpoint_id: None,
+            reachable: None,
+            approval_state: None,
+            waiting_for_approval: false,
+            message: None,
+            cached: true,
+            checked_unix_ms: None,
+        }
+    }
+}
+
 /// Forwarder-local status updates consumed by P2P control sessions.
 #[derive(Debug, Clone)]
 pub enum ForwarderStatusEvent {
@@ -143,6 +181,8 @@ pub struct SubsystemStatus {
     pub(crate) restart_needed: bool,
     /// UPS status snapshot (None if UPS monitoring is not configured).
     pub(crate) ups_status: Option<UpsStatusState>,
+    /// Cached server reachability snapshot (None until the first poll).
+    pub(crate) server_status: Option<ServerDeviceStatus>,
     /// Readers whose read counters changed since the last coalesced P2P
     /// status broadcast (see [`spawn_read_count_broadcaster`]).
     pub(crate) read_counts_dirty: HashSet<String>,
@@ -164,6 +204,7 @@ impl SubsystemStatus {
             update_mode: rt_updater::UpdateMode::default(),
             restart_needed: false,
             ups_status: None,
+            server_status: None,
             read_counts_dirty: HashSet::new(),
         }
     }
@@ -183,6 +224,7 @@ impl SubsystemStatus {
             update_mode: rt_updater::UpdateMode::default(),
             restart_needed: false,
             ups_status: None,
+            server_status: None,
             read_counts_dirty: HashSet::new(),
         }
     }
@@ -263,6 +305,16 @@ impl SubsystemStatus {
     /// Return the current UPS status snapshot, if any.
     pub fn ups_status(&self) -> Option<&UpsStatusState> {
         self.ups_status.as_ref()
+    }
+
+    /// Set the cached server reachability snapshot.
+    pub fn set_server_status(&mut self, status: ServerDeviceStatus) {
+        self.server_status = Some(status);
+    }
+
+    /// Return the cached server reachability snapshot, if any poll completed.
+    pub fn server_status(&self) -> Option<&ServerDeviceStatus> {
+        self.server_status.as_ref()
     }
 }
 
@@ -731,6 +783,16 @@ impl StatusStore {
             }
         }
         self.publish_display_state().await;
+    }
+
+    /// Store the latest server reachability snapshot from the poll task.
+    pub async fn set_server_status(&self, status: ServerDeviceStatus) {
+        self.subsystem.lock().await.set_server_status(status);
+    }
+
+    /// Return the cached server reachability snapshot, if any poll completed.
+    pub async fn server_status(&self) -> Option<ServerDeviceStatus> {
+        self.subsystem.lock().await.server_status().cloned()
     }
 
     pub fn control_clients(

@@ -712,6 +712,17 @@ async fn main() {
         });
     }
 
+    // Spawn background server reachability poll (only when a server URL is
+    // configured — the status endpoint serves this cache instead of making
+    // outbound requests inline).
+    if cfg.p2p.server_url.is_some() {
+        forwarder::server_status_task::spawn_server_status_task(
+            config_state.clone(),
+            status_store.clone(),
+            shutdown_rx.clone(),
+        );
+    }
+
     // Spawn UPS monitoring task (if enabled)
     let ups_handle = if cfg.ups.enabled {
         let ss = status_store.clone();

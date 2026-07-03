@@ -13,6 +13,7 @@ pub mod reader_control;
 pub mod reader_control_service;
 pub mod reader_task;
 pub mod replay;
+pub mod server_status_task;
 pub mod status_http;
 pub mod status_store;
 pub mod storage;
