@@ -301,6 +301,14 @@ type PollFetch = std::pin::Pin<
     >,
 >;
 
+fn start_poll_fetch(client: &ServerAllowListClient, generation: u64) -> (u64, PollFetch) {
+    let client = client.clone();
+    (
+        generation,
+        Box::pin(async move { client.fetch().await }) as PollFetch,
+    )
+}
+
 /// Keeps `allow_list` fresh from startup fetches, pushed snapshots, and polling.
 pub async fn run_allowlist_distribution(
     allow_list: AllowList,
@@ -326,6 +334,7 @@ pub async fn run_allowlist_distribution(
     // outstanding. At most one poll fetch runs at a time; a tick that lands
     // while one is still in flight is dropped (the next tick re-polls).
     let mut poll_fetch: Option<PollFetch> = None;
+    let mut poll_retry_after_current = false;
     // Monotonic count of applied updates. Bumped on every successful apply
     // (pushed or polled). A poll captures this when it begins fetching; if the
     // count has moved by the time the fetch completes, a newer update applied
@@ -343,10 +352,20 @@ pub async fn run_allowlist_distribution(
                     Some(update) => {
                         match apply_receiver_update(&allow_list, update) {
                             Ok(_) => generation = generation.wrapping_add(1),
-                            Err(err) => tracing::warn!(
-                                error = %err,
-                                "pushed receiver allow-list update failed",
-                            ),
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    "pushed receiver allow-list update failed",
+                                );
+                                if poll_fetch.is_none() {
+                                    let (generation_at_start, fetch) =
+                                        start_poll_fetch(&client, generation);
+                                    poll_generation = generation_at_start;
+                                    poll_fetch = Some(fetch);
+                                } else {
+                                    poll_retry_after_current = true;
+                                }
+                            }
                         }
                     }
                     None => push_closed = true,
@@ -354,9 +373,9 @@ pub async fn run_allowlist_distribution(
             }
             _ = ticker.tick() => {
                 if poll_fetch.is_none() {
-                    let client = client.clone();
-                    poll_generation = generation;
-                    poll_fetch = Some(Box::pin(async move { client.fetch().await }));
+                    let (generation_at_start, fetch) = start_poll_fetch(&client, generation);
+                    poll_generation = generation_at_start;
+                    poll_fetch = Some(fetch);
                 }
             }
             result = async { poll_fetch.as_mut().expect("poll fetch present").await }, if poll_fetch.is_some() => {
@@ -382,6 +401,12 @@ pub async fn run_allowlist_distribution(
                         error = %err,
                         "polled receiver allow-list refresh failed",
                     ),
+                }
+                if poll_retry_after_current {
+                    poll_retry_after_current = false;
+                    let (generation_at_start, fetch) = start_poll_fetch(&client, generation);
+                    poll_generation = generation_at_start;
+                    poll_fetch = Some(fetch);
                 }
             }
         }
@@ -643,7 +668,8 @@ mod tests {
     #[tokio::test]
     async fn approved_receiver_appears_in_forwarder_list() -> TestResult {
         let receiver = EndpointBuilder::test([50; 32]).bind().await?;
-        let receiver_endpoint_ids = Arc::new(TokioMutex::new(vec![receiver.endpoint_id().to_string()]));
+        let receiver_endpoint_ids =
+            Arc::new(TokioMutex::new(vec![receiver.endpoint_id().to_string()]));
         let (base_url, _fetches, server) =
             spawn_test_allowlist_server(receiver_endpoint_ids).await?;
         let client = ServerAllowListClient::new(base_url, "thin-secret");
@@ -661,7 +687,8 @@ mod tests {
     async fn revoke_propagates() -> TestResult {
         let receiver = EndpointBuilder::test([51; 32]).bind().await?;
         let allow = AllowList::new([receiver.endpoint_id()]);
-        let receiver_endpoint_ids = Arc::new(TokioMutex::new(vec![receiver.endpoint_id().to_string()]));
+        let receiver_endpoint_ids =
+            Arc::new(TokioMutex::new(vec![receiver.endpoint_id().to_string()]));
         let (base_url, _fetches, server) =
             spawn_test_allowlist_server(receiver_endpoint_ids).await?;
         let client = ServerAllowListClient::new(base_url, "thin-secret");
@@ -730,6 +757,77 @@ mod tests {
         sync.abort();
         server.abort();
         receiver.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pushed_apply_failure_triggers_prompt_poll_retry() -> TestResult {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt as _;
+
+        #[cfg(unix)]
+        struct PermissionGuard {
+            path: std::path::PathBuf,
+            mode: u32,
+        }
+
+        #[cfg(unix)]
+        impl Drop for PermissionGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(
+                    &self.path,
+                    std::fs::Permissions::from_mode(self.mode),
+                );
+            }
+        }
+
+        let dir = tempfile::tempdir()?;
+        let cache_dir = dir.path().join("cache");
+        std::fs::create_dir(&cache_dir)?;
+        let cache_path = cache_dir.join("allowlist");
+        let allow = AllowList::load(&cache_path)?;
+
+        #[cfg(unix)]
+        let _guard = {
+            let original_mode = std::fs::metadata(&cache_dir)?.permissions().mode();
+            std::fs::set_permissions(&cache_dir, std::fs::Permissions::from_mode(0o555))?;
+            PermissionGuard {
+                path: cache_dir.clone(),
+                mode: original_mode,
+            }
+        };
+
+        let receiver_endpoint_ids = Arc::new(TokioMutex::new(Vec::new()));
+        let (base_url, mut fetches, server) =
+            spawn_test_allowlist_server(receiver_endpoint_ids).await?;
+        let client = ServerAllowListClient::new(base_url, "thin-secret");
+        let (tx, rx) = mpsc::channel(1);
+        let sync = tokio::spawn(run_allowlist_distribution(
+            allow,
+            client,
+            rx,
+            Duration::from_secs(5),
+        ));
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            fetches.wait_for(|&count| count >= 1),
+        )
+        .await??;
+
+        tx.send(ReceiverAllowListUpdate::replace(vec![
+            "receiver-1".to_owned(),
+        ]))
+        .await?;
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            fetches.wait_for(|&count| count >= 2),
+        )
+        .await??;
+
+        sync.abort();
+        server.abort();
         Ok(())
     }
 

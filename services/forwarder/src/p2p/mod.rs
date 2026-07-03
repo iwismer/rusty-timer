@@ -59,11 +59,17 @@ pub use server_client::{
 
 const DEFAULT_P2P_SECRET_KEY_PATH: &str = "/var/lib/rusty-timer/p2p-secret.key";
 const DEFAULT_FORWARDER_CATALOG_PUSH_INTERVAL: Duration = Duration::from_secs(30);
-
 /// Backoff bounds for retrying the first-boot device-token bootstrap when the
-/// server is unreachable (e.g. the forwarder started before the network came up).
+/// server is unreachable (e.g. the forwarder started before the network came
+/// up). Test builds use tiny delays so the retry loop is exercised quickly.
+#[cfg(not(test))]
 const BOOTSTRAP_RETRY_INITIAL: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const BOOTSTRAP_RETRY_INITIAL: Duration = Duration::from_millis(10);
+#[cfg(not(test))]
 const BOOTSTRAP_RETRY_MAX: Duration = Duration::from_secs(300);
+#[cfg(test)]
+const BOOTSTRAP_RETRY_MAX: Duration = Duration::from_millis(40);
 
 /// Running forwarder P2P server tasks.
 #[derive(Debug)]
@@ -595,6 +601,13 @@ mod tests {
     use crate::status_http::{StatusConfig, StatusServer};
     use crate::status_store::SubsystemStatus;
     use crate::storage::journal::Journal;
+    use axum::{
+        Json, Router,
+        extract::State,
+        http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+        response::{IntoResponse, Response},
+        routing::{get, post},
+    };
     use rt_iroh::EndpointBuilder;
     use rt_p2p_protocol::{
         ControlC2F, ControlF2C, DataC2F, DataF2C, DataSubscribe, SubscribeMode, control_c2f,
@@ -675,6 +688,139 @@ mod tests {
         let client = ServerCatalogClient::new("http://127.0.0.1:1", "unused-voucher");
         let token = resolve_device_token(&path, "ep-1", &client).await?;
         assert_eq!(token.as_deref(), Some("rtk_persisted_token"));
+        Ok(())
+    }
+
+    #[derive(Clone)]
+    struct BootstrapRetryServerState {
+        register_attempts: Arc<std::sync::atomic::AtomicU64>,
+        catalog_pushes: tokio::sync::watch::Sender<u64>,
+    }
+
+    async fn bootstrap_retry_register_handler(
+        State(state): State<BootstrapRetryServerState>,
+        headers: HeaderMap,
+        Json(_body): Json<serde_json::Value>,
+    ) -> Response {
+        let authorized = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == "Bearer thin-voucher");
+        if !authorized {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+
+        let attempt = state
+            .register_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if attempt <= 2 {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+
+        Json(serde_json::json!({
+            "endpoint_id": "fwd-node-1",
+            "device_kind": "forwarder",
+            "approval_state": "pending",
+            "device_token": "rtk_minted_secret"
+        }))
+        .into_response()
+    }
+
+    async fn bootstrap_retry_catalog_handler(
+        State(state): State<BootstrapRetryServerState>,
+        headers: HeaderMap,
+        Json(_body): Json<serde_json::Value>,
+    ) -> Response {
+        let authorized = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == "Bearer rtk_minted_secret");
+        if !authorized {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+
+        state.catalog_pushes.send_modify(|count| *count += 1);
+        StatusCode::OK.into_response()
+    }
+
+    async fn bootstrap_retry_allowlist_handler(headers: HeaderMap) -> Response {
+        let authorized = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == "Bearer rtk_minted_secret");
+        if !authorized {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        Json(serde_json::json!({ "receiver_endpoint_ids": [] })).into_response()
+    }
+
+    #[tokio::test]
+    async fn server_integration_retries_bootstrap_until_catalog_starts() -> TestResult {
+        let receiver = EndpointBuilder::test([44; 32]).bind().await?;
+        let dir = tempfile::tempdir()?;
+        let journal_path = dir.path().join("journal.sqlite3");
+        let journal = Arc::new(Mutex::new(Journal::open(&journal_path)?));
+        let token_file = dir.path().join("server-token");
+        std::fs::write(&token_file, "thin-voucher\n")?;
+        let device_token_file = dir.path().join("p2p-device-token");
+        let (catalog_pushes, mut catalog_pushes_rx) = tokio::sync::watch::channel(0u64);
+        let state = BootstrapRetryServerState {
+            register_attempts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            catalog_pushes,
+        };
+        let app = Router::new()
+            .route("/register", post(bootstrap_retry_register_handler))
+            .route("/forwarder/catalog", post(bootstrap_retry_catalog_handler))
+            .route(
+                "/allowlist/receivers",
+                get(bootstrap_retry_allowlist_handler),
+            )
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let base_url = format!("http://{}", listener.local_addr()?);
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let mut config = p2p_config(receiver.endpoint_id().to_string());
+        config.server_url = Some(base_url);
+        config.server_token_file = Some(token_file.to_string_lossy().into_owned());
+        config.device_token_file = Some(device_token_file.to_string_lossy().into_owned());
+        config.allowlist_request_timeout_secs = 1;
+        let runtime = start_forwarder_p2p(
+            &config,
+            &journal_path,
+            Arc::clone(&journal),
+            &["10.0.0.5:10000".to_owned()],
+            None,
+            status_feed().await?,
+            Arc::new(NoopRemoteConfigHandler),
+            Arc::new(NoopReaderControlHandler),
+        )
+        .await?
+        .expect("p2p enabled");
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            catalog_pushes_rx.wait_for(|&count| count >= 1),
+        )
+        .await??;
+        assert_eq!(
+            state
+                .register_attempts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "bootstrap should retry in-process after initial failures"
+        );
+        assert_eq!(
+            read_device_token(&device_token_file)?.as_deref(),
+            Some("rtk_minted_secret")
+        );
+
+        runtime.shutdown().await;
+        server.abort();
+        receiver.close().await;
         Ok(())
     }
 

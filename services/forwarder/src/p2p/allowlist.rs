@@ -147,8 +147,7 @@ impl AllowList {
 
             let effective: HashSet<EndpointId> =
                 new_allowed.union(&state.pinned).copied().collect();
-            let revoked: Vec<EndpointId> =
-                state.allowed.difference(&effective).copied().collect();
+            let revoked: Vec<EndpointId> = state.allowed.difference(&effective).copied().collect();
             state.allowed = effective;
             let mut connections_to_close = Vec::new();
             for endpoint_id in &revoked {
@@ -272,7 +271,7 @@ mod tests {
 
     use std::time::Duration;
 
-    use rt_iroh::{Endpoint, EndpointBuilder, EndpointAddr};
+    use rt_iroh::{Endpoint, EndpointAddr, EndpointBuilder};
 
     type BoxError = Box<dyn std::error::Error + Send + Sync>;
     type TestResult = Result<(), BoxError>;
