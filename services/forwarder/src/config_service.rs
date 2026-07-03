@@ -68,7 +68,7 @@ async fn read_allow_power_actions(config_state: &ConfigState) -> Result<bool, (u
 }
 
 #[cfg(unix)]
-pub(crate) fn map_power_action_command_result(
+fn map_power_action_command_result(
     systemctl_action: &'static str,
     result: std::io::Result<std::process::Output>,
     logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
@@ -1025,6 +1025,134 @@ fn validate_server_url(url: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[cfg(unix)]
+    #[test]
+    fn power_action_execution_does_not_use_sudo_fallback() {
+        let source = include_str!("config_service.rs");
+        assert!(
+            !source.contains("Command::new(\"sudo\")"),
+            "power actions must not invoke sudo fallback"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn power_action_command_result_returns_500_on_spawn_error() {
+        let result = map_power_action_command_result(
+            "reboot",
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "systemctl not found",
+            )),
+            None,
+        );
+
+        let (status, body) = result.expect_err("spawn errors must return an HTTP error");
+        assert_eq!(status, 500);
+        assert!(body.contains("control action command failed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn power_action_command_result_returns_500_on_non_zero_exit() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let result = map_power_action_command_result(
+            "poweroff",
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: vec![],
+                stderr: vec![],
+            }),
+            None,
+        );
+
+        let (http_status, body) = result.expect_err("non-zero exit must return an HTTP error");
+        assert_eq!(http_status, 500);
+        assert!(body.contains("control action command exited with failure"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn power_action_command_result_returns_403_on_auth_failure() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let result = map_power_action_command_result(
+            "poweroff",
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: vec![],
+                stderr: b"Call to PowerOff failed: Interactive authentication required.\n".to_vec(),
+            }),
+            None,
+        );
+
+        let (http_status, body) = result.expect_err("auth failures must return an HTTP error");
+        assert_eq!(http_status, 403);
+        assert!(
+            body.to_ascii_lowercase()
+                .contains("interactive authentication required")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn power_action_command_result_returns_500_on_non_auth_polkit_error() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let result = map_power_action_command_result(
+            "poweroff",
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: vec![],
+                stderr: b"polkit daemon unavailable".to_vec(),
+            }),
+            None,
+        );
+
+        let (http_status, body) =
+            result.expect_err("non-auth polkit failures must return an HTTP error");
+        assert_eq!(http_status, 500);
+        assert!(body.contains("polkit daemon unavailable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn power_action_command_result_includes_stderr_in_error_body() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let result = map_power_action_command_result(
+            "reboot",
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: vec![],
+                stderr: b"sudo: a password is required".to_vec(),
+            }),
+            None,
+        );
+
+        let (http_status, body) = result.expect_err("non-zero exit must return an HTTP error");
+        assert_eq!(http_status, 403);
+        assert!(body.contains("sudo: a password is required"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn power_action_command_result_returns_ok_on_success_exit() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let result = map_power_action_command_result(
+            "reboot",
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: vec![],
+                stderr: vec![],
+            }),
+            None,
+        );
+        assert!(result.is_ok());
+    }
 
     #[cfg(unix)]
     #[tokio::test]
