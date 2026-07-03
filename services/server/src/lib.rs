@@ -95,11 +95,11 @@ mod tests {
     }
 
     #[test]
-    fn db_migrates_legacy_announcer_rows_to_composite_key() {
+    fn db_rebuilds_announcer_rows_dropping_legacy_table() {
         // A pre-v4 database whose announcer_rows table is keyed by
         // (stream_id, seq) only. Migration must rebuild it with the composite
-        // (forwarder_endpoint_id, stream_id, seq) key (dropping legacy rows;
-        // the system is undeployed).
+        // (forwarder_endpoint_id, stream_id, seq) key and drop legacy rows; the
+        // system is undeployed, so there is no safe forwarder identity to backfill.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("server.sqlite3");
         {
@@ -117,6 +117,13 @@ mod tests {
                      division TEXT,
                      PRIMARY KEY(stream_id, seq)
                  );
+                 INSERT INTO announcer_rows (
+                     stream_id, seq, source_generation, chip_id, bib,
+                     display_name, reader_timestamp, received_unix_ms, division
+                 ) VALUES (
+                     'finish-line', 1, 0, 'chip-1', 1001,
+                     'Legacy Runner', '10:00:00', 1000, '5k'
+                 );
                  PRAGMA user_version = 3;",
             )
             .unwrap();
@@ -131,6 +138,10 @@ mod tests {
             )
             .unwrap();
         assert!(create_sql.contains("PRIMARY KEY(forwarder_endpoint_id, stream_id, seq)"));
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM announcer_rows", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "legacy rows must be dropped during the rebuild");
         let user_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();

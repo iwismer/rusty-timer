@@ -3,7 +3,6 @@
 
 pub(crate) const MAX_ID_LEN: usize = 256; // endpoint_id, stream_id, chip_id, token_id path param
 pub(crate) const MAX_NAME_LEN: usize = 256; // display_name, division
-pub(crate) const MAX_TIMESTAMP_LEN: usize = 64; // reader_timestamp
 pub(crate) const MAX_DIRECT_ADDRS: usize = 32;
 pub(crate) const MAX_ADDR_LEN: usize = 256;
 pub(crate) const MAX_CATALOG_STREAMS: usize = 256;

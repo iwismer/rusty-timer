@@ -7,10 +7,14 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{TimeZone, Utc};
-use rt_server_api::announcer::{MAX_PUSH_ROWS, PushRowResponse, PushRowsRequest, TakeoverResponse};
+use rt_server_api::announcer::{
+    MAX_ANNOUNCER_DISPLAY_NAME_LEN, MAX_ANNOUNCER_DIVISION_LEN, MAX_ANNOUNCER_ID_LEN,
+    MAX_ANNOUNCER_READER_TIMESTAMP_LEN, MAX_PUSH_ROWS, PushRowResponse, PushRowsRequest,
+    TakeoverResponse,
+};
 
 use crate::announcer::{AnnouncerInputEvent, AnnouncerRuntime};
-use crate::http::validate::{MAX_ID_LEN, MAX_NAME_LEN, MAX_TIMESTAMP_LEN, check_len};
+use crate::http::validate::check_len;
 use crate::http::{AppState, authorize_active_device_kind};
 use crate::registry::{self, AnnouncerRowRecord, AnnouncerStorageError, DeviceKind};
 
@@ -82,8 +86,8 @@ pub async fn push_rows(
         .collect();
 
     let result = {
-        let conn = state.conn.lock().expect("registry mutex poisoned");
-        registry::upsert_announcer_rows(&conn, &records).and_then(|()| {
+        let mut conn = state.conn.lock().expect("registry mutex poisoned");
+        registry::upsert_announcer_rows(&mut conn, &records).and_then(|()| {
             let rows = registry::list_announcer_rows_ordered(&conn)?;
             Ok(rebuild_runtime(
                 &state.announcer_runtime,
@@ -124,17 +128,25 @@ fn validate_push_rows(req: &PushRowsRequest) -> Result<(), &'static str> {
     check_len(
         "forwarder_endpoint_id",
         &req.forwarder_endpoint_id,
-        MAX_ID_LEN,
+        MAX_ANNOUNCER_ID_LEN,
     )?;
-    check_len("stream_id", &req.stream_id, MAX_ID_LEN)?;
+    check_len("stream_id", &req.stream_id, MAX_ANNOUNCER_ID_LEN)?;
     for row in &req.rows {
-        check_len("chip_id", &row.chip_id, MAX_ID_LEN)?;
-        check_len("display_name", &row.display_name, MAX_NAME_LEN)?;
+        check_len("chip_id", &row.chip_id, MAX_ANNOUNCER_ID_LEN)?;
+        check_len(
+            "display_name",
+            &row.display_name,
+            MAX_ANNOUNCER_DISPLAY_NAME_LEN,
+        )?;
         if let Some(timestamp) = row.reader_timestamp.as_deref() {
-            check_len("reader_timestamp", timestamp, MAX_TIMESTAMP_LEN)?;
+            check_len(
+                "reader_timestamp",
+                timestamp,
+                MAX_ANNOUNCER_READER_TIMESTAMP_LEN,
+            )?;
         }
         if let Some(division) = row.division.as_deref() {
-            check_len("division", division, MAX_NAME_LEN)?;
+            check_len("division", division, MAX_ANNOUNCER_DIVISION_LEN)?;
         }
     }
     Ok(())
@@ -353,6 +365,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exactly_max_sized_batch_is_accepted() {
+        let state = test_state();
+        let app = router(state.clone());
+        let rows: Vec<serde_json::Value> = (1..=500u64)
+            .map(|seq| row_json(seq, 1_000 * i64::try_from(seq).unwrap()))
+            .collect();
+        let resp = app
+            .oneshot(json_request("/announcer/rows", &batch_body(0, &rows)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(announcer_rows_count(&state), 500);
+    }
+
+    #[tokio::test]
     async fn oversized_batch_rejected_without_persisting() {
         let state = test_state();
         let app = router(state.clone());
@@ -430,6 +457,21 @@ mod tests {
             2,
             "same (stream_id, seq) from two forwarders must store two rows"
         );
+        let stored_endpoint_ids: Vec<String> = {
+            let conn = state.conn.lock().unwrap();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT forwarder_endpoint_id FROM announcer_rows
+                     WHERE stream_id = 'finish-line' AND seq = 1
+                     ORDER BY forwarder_endpoint_id",
+                )
+                .unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(stored_endpoint_ids, vec!["fwd-a", "fwd-b"]);
         let runtime = state.announcer_runtime.lock().unwrap();
         assert_eq!(runtime.finisher_count(), 2);
     }
@@ -642,9 +684,9 @@ mod tests {
         let db_path = dir.path().join("server.sqlite");
 
         {
-            let conn = crate::db::open(&db_path).unwrap();
+            let mut conn = crate::db::open(&db_path).unwrap();
             crate::registry::upsert_announcer_rows(
-                &conn,
+                &mut conn,
                 &[crate::registry::AnnouncerRowRecord {
                     announcer_source_generation: 0,
                     forwarder_endpoint_id: "fwd-endpoint".to_string(),

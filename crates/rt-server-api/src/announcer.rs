@@ -5,6 +5,15 @@ use serde::{Deserialize, Serialize};
 /// rejects larger (or empty) batches with `400`.
 pub const MAX_PUSH_ROWS: usize = 500;
 
+/// Maximum byte length for announcer stream and chip identity fields.
+pub const MAX_ANNOUNCER_ID_LEN: usize = 256;
+/// Maximum byte length for announcer display names.
+pub const MAX_ANNOUNCER_DISPLAY_NAME_LEN: usize = 256;
+/// Maximum byte length for announcer division display names.
+pub const MAX_ANNOUNCER_DIVISION_LEN: usize = 256;
+/// Maximum byte length for announcer reader timestamp strings.
+pub const MAX_ANNOUNCER_READER_TIMESTAMP_LEN: usize = 64;
+
 /// A batch of announcer rows pushed by a receiver.
 ///
 /// One announcer source generation and one stream identity per request BY

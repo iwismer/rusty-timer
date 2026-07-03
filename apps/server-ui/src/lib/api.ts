@@ -34,6 +34,7 @@ export interface AnnouncerRow {
   display_name: string;
   reader_timestamp: string | null;
   received_at: string;
+  division: string | null;
 }
 
 export interface StatusResponse {

@@ -1343,30 +1343,24 @@ async fn start_stream_worker(
     if let (true, Some(thin), Some(generation)) =
         (announce, config.server.clone(), announcer_generation)
     {
-        match ServerAnnouncerClient::new(&thin.url, thin.token.clone()) {
-            Ok(client) => {
-                let client: Arc<dyn AnnouncerPushClient + Send + Sync> = Arc::new(client);
-                let db = Arc::clone(&state.db);
-                let chip_lookup = Arc::clone(&state.chip_lookup);
-                let hint_rx = hint_tx.subscribe();
-                let ann_shutdown = shutdown_rx.clone();
-                tasks.push(tokio::spawn(run_announcer_worker(
-                    db,
-                    chip_lookup,
-                    local_stream_key.clone(),
-                    client,
-                    generation,
-                    Arc::clone(announcer_stale),
-                    config.reconcile_interval,
-                    hint_rx,
-                    ann_shutdown,
-                )));
-                announcer_active = true;
-            }
-            Err(e) => {
-                warn!(error = %e, stream_id = %stream_id_for_log, "failed to build announcer client; skipping announcer push");
-            }
-        }
+        let client: Arc<dyn AnnouncerPushClient + Send + Sync> =
+            Arc::new(ServerAnnouncerClient::new(&thin.url, thin.token.clone()));
+        let db = Arc::clone(&state.db);
+        let chip_lookup = Arc::clone(&state.chip_lookup);
+        let hint_rx = hint_tx.subscribe();
+        let ann_shutdown = shutdown_rx.clone();
+        tasks.push(tokio::spawn(run_announcer_worker(
+            db,
+            chip_lookup,
+            local_stream_key.clone(),
+            client,
+            generation,
+            Arc::clone(announcer_stale),
+            config.reconcile_interval,
+            hint_rx,
+            ann_shutdown,
+        )));
+        announcer_active = true;
     }
 
     StreamWorker {

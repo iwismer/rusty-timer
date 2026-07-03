@@ -23,9 +23,12 @@
 //! * **Resolved participant name when available.** Names/bibs are resolved
 //!   locally from race/participant data via the injected resolver.
 
-use rt_server_api::announcer::{MAX_PUSH_ROWS, PushRow, PushRowsRequest, TakeoverResponse};
+use rt_server_api::announcer::{
+    MAX_ANNOUNCER_DISPLAY_NAME_LEN, MAX_ANNOUNCER_DIVISION_LEN, MAX_ANNOUNCER_ID_LEN,
+    MAX_PUSH_ROWS, PushRow, PushRowsRequest, TakeoverResponse,
+};
 use rt_server_api::register::{RegisterRequest, RegisterResponse};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, MutexGuard as StdMutexGuard, PoisonError};
 use std::time::Duration;
@@ -71,16 +74,13 @@ where
 /// `seq` (with the batch's composite stream identity) forms the idempotency
 /// key and `received_unix_ms` is the ordering key. `bib`/`name` are populated
 /// when the chip resolves to a known participant.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnouncerRow {
     pub seq: i64,
     pub received_unix_ms: i64,
     pub chip_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub bib: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub division: Option<String>,
 }
 
@@ -143,12 +143,23 @@ pub struct ServerAnnouncerClient {
 
 impl ServerAnnouncerClient {
     /// Build a client targeting `base_url` (e.g. `http://127.0.0.1:8080`).
-    pub fn new(base_url: &str, token: impl Into<String>) -> Result<Self, AnnouncerPushError> {
-        Ok(Self {
+    pub fn new(base_url: &str, token: impl Into<String>) -> Self {
+        Self {
             rows_url: format!("{}/announcer/rows", base_url.trim_end_matches('/')),
             token: token.into(),
-        })
+        }
     }
+}
+
+fn clamp_wire_string(value: &str, max_len: usize) -> String {
+    if value.len() <= max_len {
+        return value.to_owned();
+    }
+    let mut boundary = max_len;
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value[..boundary].to_owned()
 }
 
 /// Build the `PushRowsRequest` body posted to the server `/announcer/rows`
@@ -172,25 +183,32 @@ fn push_rows_request_body(
             let seq = u64::try_from(row.seq).map_err(|_| {
                 AnnouncerPushError::Transport("seq must be non-negative".to_owned())
             })?;
+            let display_name = row.name.clone().unwrap_or_else(|| {
+                row.bib
+                    .as_deref()
+                    .map_or_else(String::new, |bib| format!("Unknown Participant {bib}"))
+            });
+            // Clamp receiver-sourced strings at the HTTP boundary. Truncating a
+            // too-long imported participant field is preferable to letting one
+            // poison row wedge this stream's push backlog forever.
             Ok(PushRow {
                 seq,
-                chip_id: row.chip_id.clone(),
+                chip_id: clamp_wire_string(&row.chip_id, MAX_ANNOUNCER_ID_LEN),
                 bib: row.bib.as_deref().and_then(|b| b.parse::<i32>().ok()),
-                display_name: row.name.clone().unwrap_or_else(|| {
-                    row.bib
-                        .as_deref()
-                        .map_or_else(String::new, |bib| format!("Unknown Participant {bib}"))
-                }),
+                display_name: clamp_wire_string(&display_name, MAX_ANNOUNCER_DISPLAY_NAME_LEN),
                 reader_timestamp: None,
                 received_unix_ms: row.received_unix_ms,
-                division: row.division.clone(),
+                division: row
+                    .division
+                    .as_deref()
+                    .map(|division| clamp_wire_string(division, MAX_ANNOUNCER_DIVISION_LEN)),
             })
         })
         .collect::<Result<Vec<_>, AnnouncerPushError>>()?;
     Ok(PushRowsRequest {
         announcer_source_generation,
-        forwarder_endpoint_id: batch.forwarder_endpoint_id.to_owned(),
-        stream_id: batch.stream_id.to_owned(),
+        forwarder_endpoint_id: clamp_wire_string(batch.forwarder_endpoint_id, MAX_ANNOUNCER_ID_LEN),
+        stream_id: clamp_wire_string(batch.stream_id, MAX_ANNOUNCER_ID_LEN),
         rows,
         max_list_size: Some(batch.max_list_size),
     })
@@ -383,6 +401,11 @@ pub enum AnnouncerPushError {
     Db(#[from] DbError),
     #[error("announcer push transport: {0}")]
     Transport(String),
+    /// The server rejected the push with 400. With receiver-side clamping this
+    /// means the receiver sent a structurally invalid request, so the batch is
+    /// left unmarked and the worker reports the terminal pass failure.
+    #[error("announcer push bad request: {0}")]
+    BadRequest(String),
     /// The server rejected the push with 409: our announcer source generation
     /// diverged from the server's (server DB reset, or another receiver took
     /// over). The caller must re-run register + takeover to re-fence before
@@ -393,14 +416,19 @@ pub enum AnnouncerPushError {
 
 /// Classify a non-success `/announcer/rows` response. A 409 means the server's
 /// generation fence rejected our generation ([`AnnouncerPushError::StaleGeneration`],
-/// recoverable only via re-takeover); anything else is a transient transport
-/// failure worth a plain retry.
+/// recoverable only via re-takeover). A 400 means receiver-side request
+/// construction is invalid; log the response body at error level and leave the
+/// rows pending rather than marking a poisoned batch as pushed. Other statuses
+/// are transient transport failures worth a plain retry.
 pub(crate) fn classify_push_failure(
     status: reqwest::StatusCode,
     body: String,
 ) -> AnnouncerPushError {
     if status == reqwest::StatusCode::CONFLICT {
         AnnouncerPushError::StaleGeneration(body)
+    } else if status == reqwest::StatusCode::BAD_REQUEST {
+        tracing::error!(response_body = %body, "server rejected announcer rows as bad request");
+        AnnouncerPushError::BadRequest(body)
     } else {
         AnnouncerPushError::Transport(format!("server /announcer/rows returned {status}: {body}"))
     }
@@ -525,10 +553,17 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
-    fn conflict_status_maps_to_stale_generation() {
+    fn conflict_status_maps_to_stale_generation_and_bad_request_is_terminal() {
         assert!(matches!(
             classify_push_failure(reqwest::StatusCode::CONFLICT, "gen".into()),
             AnnouncerPushError::StaleGeneration(_)
+        ));
+        assert!(matches!(
+            classify_push_failure(
+                reqwest::StatusCode::BAD_REQUEST,
+                "display_name too long".into()
+            ),
+            AnnouncerPushError::BadRequest(_)
         ));
         assert!(matches!(
             classify_push_failure(reqwest::StatusCode::BAD_GATEWAY, "x".into()),
@@ -575,6 +610,28 @@ mod tests {
     #[derive(Default)]
     struct RecordingClient {
         batches: Mutex<Vec<RecordedBatch>>,
+    }
+
+    /// Records the real HTTP request-body type built from a pushed batch.
+    #[derive(Default)]
+    struct RecordingRequestClient {
+        requests: Mutex<Vec<PushRowsRequest>>,
+    }
+
+    impl RecordingRequestClient {
+        fn recorded(&self) -> Vec<PushRowsRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl AnnouncerPushClient for RecordingRequestClient {
+        fn push(&self, batch: &AnnouncerBatch<'_>) -> Result<(), AnnouncerPushError> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push(push_rows_request_body(batch)?);
+            Ok(())
+        }
     }
 
     impl RecordingClient {
@@ -879,7 +936,7 @@ mod tests {
         let raw = sample_raw_frame();
         insert_event(&db, stream_key.as_str(), 1, &raw, 1_700_000_000_100);
 
-        let client = RecordingClient::default();
+        let client = RecordingRequestClient::default();
         // A resolver that carries a division display name through resolve.
         let resolver = |chip_id: &str| {
             (chip_id == "000000012345").then(|| ResolvedParticipant {
@@ -898,14 +955,55 @@ mod tests {
             1_700_000_010_000,
         )
         .unwrap();
-        let rows = client.all_rows();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].division.as_deref(), Some("5k"));
-        // And it survives serialization to the wire payload.
-        let json = serde_json::to_value(&rows[0]).unwrap();
-        assert_eq!(json["division"], "5k");
-        assert_eq!(json["bib"], "42");
-        assert_eq!(json["name"], "Ada Lovelace");
+        let requests = client.recorded();
+        assert_eq!(requests.len(), 1);
+        let row = &requests[0].rows[0];
+        assert_eq!(row.division.as_deref(), Some("5k"));
+        assert_eq!(row.bib, Some(42));
+        assert_eq!(row.display_name, "Ada Lovelace");
+    }
+
+    #[test]
+    fn over_limit_display_name_is_clamped_in_push_request_body() {
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_key = key("fwd-endpoint", "127.0.0.1:10000");
+        let raw = sample_raw_frame();
+        insert_event(&db, stream_key.as_str(), 1, &raw, 1_700_000_000_100);
+
+        let client = RecordingRequestClient::default();
+        let over_limit_name = format!("{}étail", "a".repeat(MAX_ANNOUNCER_DISPLAY_NAME_LEN - 1));
+        let over_limit_division =
+            format!("{}étail", "b".repeat(MAX_ANNOUNCER_DISPLAY_NAME_LEN - 1));
+        let resolver = |chip_id: &str| {
+            (chip_id == "000000012345").then(|| ResolvedParticipant {
+                bib: "42".to_owned(),
+                name: Some(over_limit_name.clone()),
+                division: Some(over_limit_division.clone()),
+            })
+        };
+
+        let outcome = push_announcer_rows(
+            &mut db,
+            &client,
+            &resolver,
+            &stream_key,
+            7,
+            1_700_000_010_000,
+        )
+        .unwrap();
+        assert_eq!(outcome, PushOutcome::Pushed { rows: 1 });
+
+        let requests = client.recorded();
+        assert_eq!(requests.len(), 1);
+        let row = &requests[0].rows[0];
+        assert_eq!(row.display_name.len(), MAX_ANNOUNCER_DISPLAY_NAME_LEN - 1);
+        assert_eq!(
+            row.display_name,
+            "a".repeat(MAX_ANNOUNCER_DISPLAY_NAME_LEN - 1)
+        );
+        let division = row.division.as_deref().unwrap();
+        assert_eq!(division.len(), MAX_ANNOUNCER_DISPLAY_NAME_LEN - 1);
+        assert_eq!(division, "b".repeat(MAX_ANNOUNCER_DISPLAY_NAME_LEN - 1));
     }
 
     #[test]

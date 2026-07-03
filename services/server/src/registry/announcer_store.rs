@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, TransactionBehavior, params};
 
 use super::sql_i64_to_u64;
 
@@ -65,18 +65,17 @@ pub fn takeover_announcer_source(conn: &Connection) -> Result<u64, AnnouncerStor
 ///
 /// [`StaleGeneration`]: AnnouncerStorageError::StaleGeneration
 pub fn upsert_announcer_rows(
-    conn: &Connection,
+    conn: &mut Connection,
     rows: &[AnnouncerRowRecord],
 ) -> Result<(), AnnouncerStorageError> {
-    let current_generation = current_announcer_source_generation(conn)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current_generation = current_announcer_source_generation(&tx)?;
     if rows
         .iter()
         .any(|row| row.announcer_source_generation != current_generation)
     {
         return Err(AnnouncerStorageError::StaleGeneration { current_generation });
     }
-
-    let tx = conn.unchecked_transaction()?;
     {
         let mut stmt = tx.prepare(
             "INSERT INTO announcer_rows (
@@ -150,9 +149,17 @@ fn u64_to_i64(value: u64, field: &'static str) -> Result<i64, AnnouncerStorageEr
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
     use crate::registry::migrate;
+
+    static BUSY_SEEN: AtomicBool = AtomicBool::new(false);
+
+    fn mark_busy_seen(_count: i32) -> bool {
+        BUSY_SEEN.store(true, Ordering::SeqCst);
+        true
+    }
 
     fn test_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -183,8 +190,9 @@ mod tests {
 
     #[test]
     fn upsert_announcer_rows_rejects_generation_above_current() {
-        let conn = test_conn();
-        let err = upsert_announcer_rows(&conn, &[row("fwd-a", "finish-line", 1, 1)]).unwrap_err();
+        let mut conn = test_conn();
+        let err =
+            upsert_announcer_rows(&mut conn, &[row("fwd-a", "finish-line", 1, 1)]).unwrap_err();
         assert!(matches!(
             err,
             AnnouncerStorageError::StaleGeneration {
@@ -199,9 +207,9 @@ mod tests {
 
     #[test]
     fn same_wire_stream_id_from_different_forwarders_does_not_collide() {
-        let conn = test_conn();
+        let mut conn = test_conn();
         upsert_announcer_rows(
-            &conn,
+            &mut conn,
             &[
                 row("fwd-a", "finish-line", 1, 0),
                 row("fwd-b", "finish-line", 1, 0),
@@ -224,13 +232,53 @@ mod tests {
 
     #[test]
     fn replayed_composite_key_upserts_in_place() {
-        let conn = test_conn();
-        upsert_announcer_rows(&conn, &[row("fwd-a", "finish-line", 1, 0)]).unwrap();
-        upsert_announcer_rows(&conn, &[row("fwd-a", "finish-line", 1, 0)]).unwrap();
+        let mut conn = test_conn();
+        upsert_announcer_rows(&mut conn, &[row("fwd-a", "finish-line", 1, 0)]).unwrap();
+        upsert_announcer_rows(&mut conn, &[row("fwd-a", "finish-line", 1, 0)]).unwrap();
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM announcer_rows", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1, "a replayed row is an idempotent no-op");
+    }
+
+    #[test]
+    fn generation_fence_is_read_inside_immediate_write_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("server.sqlite3");
+        let mut upsert_conn = crate::db::open(&db_path).unwrap();
+        let blocker = crate::db::open(&db_path).unwrap();
+        upsert_conn.busy_handler(Some(mark_busy_seen)).unwrap();
+        BUSY_SEEN.store(false, Ordering::SeqCst);
+
+        blocker.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        let upsert = std::thread::spawn(move || {
+            upsert_announcer_rows(&mut upsert_conn, &[row("fwd-a", "finish-line", 1, 0)])
+        });
+
+        while !BUSY_SEEN.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        blocker
+            .execute(
+                "UPDATE announcer_source_state SET generation = generation + 1 WHERE id = 1",
+                [],
+            )
+            .unwrap();
+        blocker.execute_batch("COMMIT;").unwrap();
+
+        let err = upsert.join().unwrap().unwrap_err();
+        assert!(matches!(
+            err,
+            AnnouncerStorageError::StaleGeneration {
+                current_generation: 1
+            }
+        ));
+
+        let verifier = crate::db::open(&db_path).unwrap();
+        let count: i64 = verifier
+            .query_row("SELECT COUNT(*) FROM announcer_rows", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "stale rows must not slip in after a takeover");
     }
 }
