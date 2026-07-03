@@ -7,6 +7,7 @@ use axum::{
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
+use crate::http::validate::{MAX_NAME_LEN, MAX_VOUCHER_LEN, check_len};
 use crate::http::{AppState, status};
 use crate::registry::{self, DeviceKind};
 
@@ -76,6 +77,9 @@ pub async fn create_token(
             if trimmed.len() < MIN_MANUAL_VOUCHER_LEN {
                 return (StatusCode::BAD_REQUEST, "token too short (min 16 chars)").into_response();
             }
+            if check_len("token", trimmed, MAX_VOUCHER_LEN).is_err() {
+                return (StatusCode::BAD_REQUEST, "token too long").into_response();
+            }
             trimmed.to_owned()
         }
         None => generate_token(),
@@ -85,6 +89,11 @@ pub async fn create_token(
         .as_deref()
         .map(str::trim)
         .filter(|name| !name.is_empty());
+    if let Some(name) = display_name
+        && check_len("display_name", name, MAX_NAME_LEN).is_err()
+    {
+        return (StatusCode::BAD_REQUEST, "display_name too long").into_response();
+    }
     let token_id = generate_token_id();
 
     let result = {
@@ -304,6 +313,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn create_token_rejects_oversized_display_name() {
+        let resp = router(test_state())
+            .oneshot(create_request(
+                Some("alice"),
+                &serde_json::json!({
+                    "device_kind": "receiver",
+                    "display_name": "n".repeat(10_000)
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

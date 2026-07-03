@@ -8,6 +8,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::http::validate::{
+    MAX_ADDR_LEN, MAX_CATALOG_STREAMS, MAX_DIRECT_ADDRS, MAX_ID_LEN, MAX_NAME_LEN, check_len,
+};
 use crate::http::{AppState, authorize_forwarder_catalog};
 use crate::registry::{self, ForwarderCatalogStreamRecord};
 
@@ -45,6 +48,16 @@ pub async fn push_catalog(
 ) -> Response {
     if let Err(status) = authorize_forwarder_catalog(&state, &headers, &req.endpoint_id) {
         return status.into_response();
+    }
+    if let Err(message) = validate_catalog(&req) {
+        return (StatusCode::BAD_REQUEST, message).into_response();
+    }
+    // Values are persisted as SQLite INTEGERs (i64); reject out-of-range
+    // counters here rather than surfacing a 500 from the storage layer.
+    for stream in &req.streams {
+        if i64::try_from(stream.epoch).is_err() || i64::try_from(stream.next_seq).is_err() {
+            return (StatusCode::BAD_REQUEST, "epoch/next_seq out of range").into_response();
+        }
     }
 
     let streams = req
@@ -85,6 +98,29 @@ pub async fn push_catalog(
     }
 }
 
+fn validate_catalog(req: &ForwarderCatalogRequest) -> Result<(), String> {
+    let check = |field: &'static str, value: &str, max: usize| {
+        check_len(field, value, max).map_err(|field| format!("{field} too long"))
+    };
+    check("endpoint_id", &req.endpoint_id, MAX_ID_LEN)?;
+    if let Some(name) = req.display_name.as_deref() {
+        check("display_name", name, MAX_NAME_LEN)?;
+    }
+    if req.direct_addrs.len() > MAX_DIRECT_ADDRS {
+        return Err("too many direct_addrs".to_owned());
+    }
+    for addr in &req.direct_addrs {
+        check("direct_addrs entry", addr, MAX_ADDR_LEN)?;
+    }
+    if req.streams.len() > MAX_CATALOG_STREAMS {
+        return Err("too many streams".to_owned());
+    }
+    for stream in &req.streams {
+        check("stream_id", &stream.stream_id, MAX_ID_LEN)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::http::{AppState, router};
@@ -101,24 +137,28 @@ mod tests {
     }
 
     fn catalog_request(token: &str, endpoint_id: &str) -> Request<Body> {
+        catalog_request_with_body(
+            token,
+            &serde_json::json!({
+                "endpoint_id": endpoint_id,
+                "display_name": "Start Line",
+                "direct_addrs": ["127.0.0.1:5000"],
+                "streams": [{
+                    "stream_id": "reader-a",
+                    "epoch": 1,
+                    "next_seq": 2
+                }]
+            }),
+        )
+    }
+
+    fn catalog_request_with_body(token: &str, body: &serde_json::Value) -> Request<Body> {
         Request::builder()
             .method("POST")
             .uri("/forwarder/catalog")
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", "application/json")
-            .body(Body::from(
-                serde_json::to_vec(&serde_json::json!({
-                    "endpoint_id": endpoint_id,
-                    "display_name": "Start Line",
-                    "direct_addrs": ["127.0.0.1:5000"],
-                    "streams": [{
-                        "stream_id": "reader-a",
-                        "epoch": 1,
-                        "next_seq": 2
-                    }]
-                }))
-                .unwrap(),
-            ))
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
             .unwrap()
     }
 
@@ -163,6 +203,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn catalog_rejects_too_many_direct_addrs() {
+        let state = test_state();
+        let token = forwarder_token(&state, "ep-fwd");
+        let addrs: Vec<String> = (0..33).map(|i| format!("10.0.0.{i}:5000")).collect();
+        let resp = router(state)
+            .oneshot(catalog_request_with_body(
+                &token,
+                &serde_json::json!({
+                    "endpoint_id": "ep-fwd",
+                    "display_name": null,
+                    "direct_addrs": addrs,
+                    "streams": []
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn catalog_rejects_oversized_stream_id() {
+        let state = test_state();
+        let token = forwarder_token(&state, "ep-fwd");
+        let resp = router(state)
+            .oneshot(catalog_request_with_body(
+                &token,
+                &serde_json::json!({
+                    "endpoint_id": "ep-fwd",
+                    "display_name": null,
+                    "direct_addrs": [],
+                    "streams": [{
+                        "stream_id": "s".repeat(10_000),
+                        "epoch": 1,
+                        "next_seq": 2
+                    }]
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn catalog_rejects_epoch_above_i64_max_with_400() {
+        let state = test_state();
+        let token = forwarder_token(&state, "ep-fwd");
+        let resp = router(state)
+            .oneshot(catalog_request_with_body(
+                &token,
+                &serde_json::json!({
+                    "endpoint_id": "ep-fwd",
+                    "display_name": null,
+                    "direct_addrs": [],
+                    "streams": [{
+                        "stream_id": "reader-a",
+                        "epoch": u64::MAX,
+                        "next_seq": 2
+                    }]
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

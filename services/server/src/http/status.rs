@@ -6,9 +6,12 @@
 //! node assumes a Caddy + Authelia reverse proxy sits in front of it and is
 //! responsible for terminating user authentication. The matrix is:
 //!
-//! - **Public read** (`GET /status`): unauthenticated. The status board is
-//!   intended to be readable by anyone who can reach the node (e.g. on the
-//!   local race network) and carries no secrets.
+//! - **Public read** (`GET /status`): unauthenticated, but trimmed. The
+//!   status board is intended to be readable by anyone who can reach the node
+//!   (e.g. on the local race network); the public view carries the announcer
+//!   board and device approval states but hides forwarder `direct_addrs` and
+//!   the `forwarder_streams` catalog. Requests carrying the trusted admin
+//!   identity header ([`ADMIN_HEADER`], see below) get the full view.
 //! - **Admin routes** (`POST /admin/*`, e.g. device approval): require the
 //!   upstream-injected admin identity header [`ADMIN_HEADER`]. Authelia injects
 //!   this header *after* authenticating the user and strips any client-supplied
@@ -70,7 +73,12 @@ pub struct ApproveRequest {
 }
 
 /// `GET /status` — public, unauthenticated status board.
-pub async fn status(State(state): State<AppState>) -> Response {
+///
+/// The public (unauthenticated) view hides forwarder `direct_addrs` and the
+/// `forwarder_streams` catalog; an admin-authorized request (trusted-proxy
+/// [`ADMIN_HEADER`]) receives the full data.
+pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let admin = admin_authorized(&headers, state.admin_proxy_trusted);
     let snapshot = {
         let conn = state.conn.lock().expect("registry mutex poisoned");
         let generation = match registry::current_announcer_source_generation(&conn) {
@@ -103,7 +111,17 @@ pub async fn status(State(state): State<AppState>) -> Response {
         };
         (generation, devices, forwarders, forwarder_streams)
     };
-    let (announcer_source_generation, devices, forwarders, forwarder_streams) = snapshot;
+    let (announcer_source_generation, devices, mut forwarders, mut forwarder_streams) = snapshot;
+    if !admin {
+        // Public status keeps the announcer board and device approval states
+        // (device clients poll their own approval here) but hides internal
+        // addresses and the stream catalog; those mirror the data the
+        // authenticated GET /forwarders gate protects.
+        for forwarder in &mut forwarders {
+            forwarder.direct_addrs.clear();
+        }
+        forwarder_streams.clear();
+    }
 
     let (finisher_count, announcer_rows) = {
         let runtime = state
@@ -264,11 +282,14 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
+        // The direct_addrs / forwarder_streams assertions below require the
+        // admin view; the trimmed public view is covered separately.
         let status = app
             .oneshot(
                 Request::builder()
                     .method("GET")
                     .uri("/status")
+                    .header(ADMIN_HEADER, "alice")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -300,6 +321,73 @@ mod tests {
             device.approval_state,
             crate::registry::ApprovalState::Pending
         );
+    }
+
+    /// Seed a forwarder whose catalog has a direct address and one stream.
+    fn seed_forwarder_catalog(state: &AppState) {
+        let conn = state.conn.lock().unwrap();
+        crate::registry::register_device_minted(
+            &conn,
+            "fwd-node-1",
+            crate::registry::DeviceKind::Forwarder,
+        )
+        .unwrap();
+        crate::registry::upsert_forwarder_catalog(
+            &conn,
+            "fwd-node-1",
+            Some("Start Line"),
+            &["127.0.0.1:12345".to_string()],
+            &[crate::registry::ForwarderCatalogStreamRecord {
+                stream_id: "reader-a".to_string(),
+                epoch: 3,
+                next_seq: 42,
+            }],
+        )
+        .unwrap();
+    }
+
+    fn status_request(admin_header: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder().method("GET").uri("/status");
+        if let Some(value) = admin_header {
+            builder = builder.header(ADMIN_HEADER, value);
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn public_status_omits_direct_addrs_and_streams() {
+        let state = test_state();
+        seed_forwarder_catalog(&state);
+
+        let resp = router(state).oneshot(status_request(None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await;
+
+        // The forwarder itself is still listed (with approval state), but its
+        // internal addresses and the stream catalog are hidden.
+        assert_eq!(body["forwarders"][0]["endpoint_id"], "fwd-node-1");
+        assert_eq!(body["forwarders"][0]["direct_addrs"], serde_json::json!([]));
+        assert_eq!(body["forwarder_streams"], serde_json::json!([]));
+        assert_eq!(body["devices"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn admin_status_includes_direct_addrs_and_streams() {
+        let state = test_state();
+        seed_forwarder_catalog(&state);
+
+        let resp = router(state)
+            .oneshot(status_request(Some("alice")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await;
+
+        assert_eq!(
+            body["forwarders"][0]["direct_addrs"],
+            serde_json::json!(["127.0.0.1:12345"])
+        );
+        assert_eq!(body["forwarder_streams"][0]["stream_id"], "reader-a");
     }
 
     #[tokio::test]

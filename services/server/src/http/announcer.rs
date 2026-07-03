@@ -10,6 +10,7 @@ use chrono::{TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::announcer::{AnnouncerInputEvent, AnnouncerRuntime};
+use crate::http::validate::{MAX_ID_LEN, MAX_NAME_LEN, MAX_TIMESTAMP_LEN, check_len};
 use crate::http::{AppState, authorize_active_device_kind};
 use crate::registry::{self, AnnouncerRowRecord, AnnouncerStorageError, DeviceKind};
 
@@ -57,6 +58,9 @@ pub async fn push_row(
 ) -> Response {
     if let Err(status) = authorize_active_device_kind(&state, &headers, DeviceKind::Receiver) {
         return status.into_response();
+    }
+    if let Err(field) = validate_push_row(&req) {
+        return (StatusCode::BAD_REQUEST, format!("{field} too long")).into_response();
     }
 
     if Utc
@@ -118,6 +122,19 @@ pub async fn push_row(
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+fn validate_push_row(req: &PushRowRequest) -> Result<(), &'static str> {
+    check_len("stream_id", &req.stream_id, MAX_ID_LEN)?;
+    check_len("chip_id", &req.chip_id, MAX_ID_LEN)?;
+    check_len("display_name", &req.display_name, MAX_NAME_LEN)?;
+    if let Some(timestamp) = req.reader_timestamp.as_deref() {
+        check_len("reader_timestamp", timestamp, MAX_TIMESTAMP_LEN)?;
+    }
+    if let Some(division) = req.division.as_deref() {
+        check_len("division", division, MAX_NAME_LEN)?;
+    }
+    Ok(())
 }
 
 pub async fn takeover(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -495,6 +512,26 @@ mod tests {
         let body = response_json(resp).await;
         assert_eq!(body["finisher_count"], 1);
         assert_eq!(body["announcer_rows"][0]["chip_id"], "chip-1");
+    }
+
+    #[tokio::test]
+    async fn push_rejects_oversized_display_name() {
+        let state = test_state();
+        let app = router(state.clone());
+        let mut body = row_body(1, 0, 1_000);
+        body["display_name"] = serde_json::json!("x".repeat(10_000));
+
+        let resp = app
+            .oneshot(json_request("/announcer/rows", &body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let conn = state.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM announcer_rows", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]

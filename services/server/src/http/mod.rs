@@ -7,6 +7,7 @@ pub mod enrollment_tokens;
 pub mod forwarders;
 pub mod register;
 pub mod status;
+mod validate;
 
 use std::sync::{Arc, Mutex};
 

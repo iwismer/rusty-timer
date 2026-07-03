@@ -10,6 +10,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::http::AppState;
+use crate::http::validate::{MAX_ID_LEN, MAX_NAME_LEN, check_len};
 use crate::registry::{self, ApprovalState, DeviceKind, DeviceRecord};
 
 #[derive(Debug, Deserialize)]
@@ -47,6 +48,11 @@ pub async fn register(
     headers: HeaderMap,
     Json(req): Json<RegisterRequest>,
 ) -> Response {
+    // Validate before auth: auth reads the body anyway, and rejecting an
+    // oversized field first is cheaper than a registry lookup.
+    if let Err(field) = validate_register(&req) {
+        return (StatusCode::BAD_REQUEST, format!("{field} too long")).into_response();
+    }
     let Some(device_kind) = DeviceKind::parse(&req.device_kind) else {
         return (StatusCode::BAD_REQUEST, "invalid device_kind").into_response();
     };
@@ -82,6 +88,14 @@ pub async fn register(
 ///    request → idempotent, no new token;
 /// 2. an unused/own enrollment voucher of the matching kind → consume + mint;
 /// 3. otherwise `None`.
+fn validate_register(req: &RegisterRequest) -> Result<(), &'static str> {
+    check_len("endpoint_id", &req.endpoint_id, MAX_ID_LEN)?;
+    if let Some(name) = req.display_name.as_deref() {
+        check_len("display_name", name, MAX_NAME_LEN)?;
+    }
+    Ok(())
+}
+
 fn register_authorized_device(
     conn: &rusqlite::Connection,
     headers: &HeaderMap,
@@ -649,6 +663,27 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn register_rejects_oversized_endpoint_id() {
+        let state = test_state();
+        make_voucher(
+            &state,
+            crate::registry::DeviceKind::Forwarder,
+            "enroll-secret",
+        );
+        let resp = router(state)
+            .oneshot(register_request(
+                "enroll-secret",
+                &serde_json::json!({
+                    "endpoint_id": "e".repeat(10_000),
+                    "device_kind": "forwarder"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

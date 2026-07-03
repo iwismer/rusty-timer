@@ -8,7 +8,7 @@ protect. The in-code source of truth is the module doc on
 
 | Route | Method | Auth posture | Enforced by |
 | --- | --- | --- | --- |
-| `/status` | GET | Public | none; exposes operational device, forwarder, stream, and announcer metadata but no tokens/secrets |
+| `/status` | GET | Public (trimmed) | none; the public view exposes the announcer board and device/forwarder approval metadata but hides forwarder `direct_addrs` and the `forwarder_streams` catalog. Requests carrying a trusted `Remote-User` header (`SERVER_TRUSTED_PROXY=1`) get the full view. No tokens/secrets in either view |
 | `/healthz` | GET | Public | none |
 | `/admin/devices/approve` | POST | Admin | upstream `Remote-User` header; requires `SERVER_TRUSTED_PROXY=1` |
 | `/admin/enrollment-tokens` | GET | Admin | upstream `Remote-User` header; requires `SERVER_TRUSTED_PROXY=1` |
@@ -31,12 +31,21 @@ protect. The in-code source of truth is the module doc on
   client-supplied copy of the admin identity header before forwarding, so it
   cannot be spoofed.
 - **Public routes** (`/status`, `/healthz`) may be allow-listed without
-  authentication. `/status` exposes operational metadata; protect it at the
-  proxy if device/forwarder/stream visibility should be private for a
+  authentication. The unauthenticated `/status` view is trimmed (no forwarder
+  `direct_addrs`, no stream catalog); forward the authenticated `Remote-User`
+  header so admin sessions see the full view. Protect `/status` at the proxy
+  if even the trimmed device/announcer visibility should be private for a
   deployment.
 - **M2M/device routes** authenticate in-process with `Authorization: Bearer ...`
   and do not depend on the proxy. The proxy should forward the `Authorization`
   header unchanged and should not require a browser session for these routes.
 - **Enrollment vouchers** are bootstrap/recovery secrets. Devices should persist
   the server-minted per-device token returned by `/register` and use that token
-  for steady-state server requests.
+  for steady-state server requests. Voucher lifecycle:
+  - Vouchers expire **24 hours** after creation (fixed TTL; expired vouchers
+    cannot register or recover).
+  - A voucher is single-use across endpoints. Re-presenting a **used** voucher
+    from the same endpoint is allowed as a recovery path: it rotates the device
+    token but **demotes the device to `pending`**, so an admin must re-approve.
+  - Manually chosen voucher secrets must be at least **16 characters**
+    (generated vouchers are longer and unaffected).

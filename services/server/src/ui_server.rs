@@ -16,11 +16,17 @@ pub async fn serve_ui(method: Method, uri: Uri) -> Response {
     let raw_path = match rt_ui_http::validate_ui_request(
         &method,
         &uri,
+        // Exact API paths (and their slash-delimited children). Blanket
+        // "/admin" or "/announcer" entries would 404 real server-ui pages
+        // under those paths, so block only the real API surface.
         &[
             "/status",
-            "/admin/devices/approve",
-            "/admin/devices/rename",
+            "/healthz",
             "/register",
+            "/admin/devices/approve",
+            "/admin/enrollment-tokens",
+            "/forwarder",
+            "/forwarders",
             "/announcer/rows",
             "/announcer/takeover",
             "/allowlist",
