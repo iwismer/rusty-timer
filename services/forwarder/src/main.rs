@@ -238,7 +238,7 @@ async fn main() {
                 .any(|key| !j.stream_exists(key).unwrap_or(false))
         };
         if any_missing {
-            let fetch = if cfg.p2p.enabled && cfg.p2p.server_url.is_some() {
+            let fetch = if let (true, Some(server_url)) = (cfg.p2p.enabled, &cfg.p2p.server_url) {
                 // Reuse the persisted minted device token (it lives at a
                 // different path than the journal, so it typically survives a
                 // journal-loss reboot). Never bootstrap here: minting needs the
@@ -249,7 +249,7 @@ async fn main() {
                 match forwarder::p2p::read_device_token(&token_path) {
                     Ok(Some(device_token)) => {
                         let client = forwarder::p2p::ServerCatalogClient::with_timeout(
-                            cfg.p2p.server_url.clone().unwrap_or_default(),
+                            server_url.clone(),
                             device_token,
                             Duration::from_secs(cfg.p2p.allowlist_request_timeout_secs),
                         );
@@ -273,6 +273,17 @@ async fn main() {
                             Duration::from_secs(5),
                         )
                         .await
+                    }
+                    Ok(None) if !forwarder::p2p::persistent_identity_exists(&cfg.p2p) => {
+                        // No token AND no P2P identity yet: a true first boot.
+                        // The registry cannot hold records for an identity
+                        // that is about to be freshly generated, so this is
+                        // benign (info), not a lost token (error).
+                        info!(
+                            path = %token_path.display(),
+                            "no device token and no p2p identity yet: first boot, skipping registry restore"
+                        );
+                        RegistryFetch::FreshIdentity
                     }
                     Ok(None) => {
                         warn!(

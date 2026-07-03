@@ -125,6 +125,39 @@ fn restore_seeds_seq_one_when_server_has_no_record() {
     );
 }
 
+/// First boot with a server configured but no P2P identity yet: the registry
+/// cannot hold records for a freshly generated identity, so seeding at seq 1
+/// is benign — info log only, no warn/error noise.
+#[test]
+fn restore_fresh_identity_seeds_seq_one_without_error_noise() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("journal.sqlite");
+    let mut journal = Journal::open(&path).unwrap();
+
+    let logger = test_logger();
+    let outcomes = restore_streams_at_startup(
+        &mut journal,
+        &[STREAM_KEY.to_owned()],
+        &RegistryFetch::FreshIdentity,
+        Some(&logger),
+    )
+    .unwrap();
+
+    assert_eq!(outcomes[0].1, StreamRestoreOutcome::SeededFirstBoot);
+    let (_, seq) = journal
+        .append_read(STREAM_KEY, None, b"aa0000000000000000000000000000", "RAW")
+        .unwrap();
+    assert_eq!(seq, 1);
+    assert!(
+        !logger
+            .entries()
+            .iter()
+            .any(|e| e.contains("[ERROR]") || e.contains("[WARN]")),
+        "fresh-identity first boot must not emit warn/error UI logs: {:?}",
+        logger.entries()
+    );
+}
+
 /// Case (c): registry unavailable (unreachable, errored, or 404 from an older
 /// server) — seed seq 1 but emit a loud error UI log warning that receiver
 /// dedup may discard reads.

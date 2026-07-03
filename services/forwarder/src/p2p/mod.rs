@@ -370,6 +370,26 @@ pub fn device_token_path(config: &P2pConfig) -> PathBuf {
         .join("p2p-device-token")
 }
 
+/// Whether a persistent P2P identity already exists for this config: true
+/// when a deterministic seed is configured or the secret-key file is present.
+///
+/// `pub` so startup stream-identity restore (main.rs) can distinguish a true
+/// first boot (fresh identity → the server registry cannot hold records for
+/// it) from a lost device token on an established identity.
+#[must_use]
+pub fn persistent_identity_exists(config: &P2pConfig) -> bool {
+    if config.secret_key_seed_hex.is_some() {
+        return true;
+    }
+    Path::new(
+        config
+            .secret_key_path
+            .as_deref()
+            .unwrap_or(DEFAULT_P2P_SECRET_KEY_PATH),
+    )
+    .exists()
+}
+
 /// Resolve the minted per-device token: return the persisted one if present,
 /// otherwise bootstrap via the voucher and persist the result.
 ///

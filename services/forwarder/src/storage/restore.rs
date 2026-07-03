@@ -9,12 +9,15 @@
 //! `epoch`/`next_seq` from the server's stored catalog
 //! (`GET /forwarder/catalog`), with fixed slack added on top.
 //!
-//! Known design gap (accepted): with no coordination server configured there
+//! Known design gaps (accepted): with no coordination server configured there
 //! is no durable high-water source, so journal loss on a server-less
 //! deployment still risks seq reuse — the loud log is the mitigation. Even
 //! with a server, the restored high-water can lag the lost journal by up to
 //! one catalog-push interval; [`RESTORE_SEQ_SLACK`] is the mitigation for
-//! that.
+//! that. Finally, a server whose registry database was reset returns a
+//! successful *empty* snapshot that is indistinguishable from a first boot,
+//! so simultaneous journal + server-registry loss still silently reseeds at
+//! seq 1 — the server is the durable source of truth by design.
 
 use std::time::Duration;
 
@@ -49,6 +52,11 @@ pub enum RegistryFetch {
     /// No server is configured — there is no durable high-water source at all
     /// (accepted design gap; see module docs).
     NotConfigured,
+    /// A server is configured but the P2P endpoint identity is about to be
+    /// freshly generated (no secret-key file and no deterministic seed), so
+    /// the registry cannot hold records for it: a true first boot, not a
+    /// lost token. Streams are seeded at seq 1 with an info log only.
+    FreshIdentity,
     /// The server was unreachable or errored after bounded retries. This
     /// includes 404 from an older server without `GET /forwarder/catalog` and
     /// a missing device token.
@@ -193,6 +201,19 @@ fn restore_one_stream(
             );
             if let Some(logger) = logger {
                 logger.log(format!("stream {key}: first boot, starting at seq 1"));
+            }
+            Ok(StreamRestoreOutcome::SeededFirstBoot)
+        }
+        RegistryFetch::FreshIdentity => {
+            tracing::info!(
+                stream = %key,
+                "p2p identity freshly generated: no registry record can exist; seeding at seq 1 \
+                 (first boot)"
+            );
+            if let Some(logger) = logger {
+                logger.log(format!(
+                    "stream {key}: first boot with new p2p identity, starting at seq 1"
+                ));
             }
             Ok(StreamRestoreOutcome::SeededFirstBoot)
         }
