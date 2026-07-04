@@ -1,12 +1,14 @@
 use receiver::headless::{HeadlessConfig, HeadlessHost};
 use receiver::p2p_runtime::{
-    ForwarderPeerConfig, MIN_RECONCILE_INTERVAL, P2pReceiverConfig, ReceiverIdentity,
-    ServerClientConfig, endpoint_id_for_seed, parse_secret_key_seed_hex,
+    ENV_P2P_DISCOVERY_DISABLED, ENV_P2P_FORWARDER_DIRECT_ADDR, ENV_P2P_FORWARDER_NODE_ID,
+    ENV_P2P_RECONCILE_MS, ENV_P2P_RELAY_DISABLED, ENV_P2P_SECRET_KEY_PATH,
+    ENV_P2P_SECRET_KEY_SEED_HEX, ENV_P2P_SERVER_TOKEN, ENV_P2P_SERVER_URL, endpoint_id_for_seed,
+    p2p_config_from_lookup, parse_secret_key_seed_hex,
 };
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::Duration;
 
 #[tokio::main]
 async fn main() {
@@ -37,7 +39,7 @@ async fn run() -> Result<(), String> {
         )
         .init();
 
-    let config = parse_args(args)?;
+    let config = parse_args(args, |key| std::env::var(key).ok())?;
     let host = HeadlessHost::start(config).await?;
     println!(
         "receiver-headless listening on http://{}",
@@ -77,21 +79,29 @@ fn endpoint_id_subcommand(args: &[OsString]) -> Result<Option<String>, String> {
         .ok_or_else(|| "print-endpoint-id requires --p2p-secret-key-seed-hex <64-hex>".to_owned())
 }
 
-fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<HeadlessConfig, String> {
+/// Parse CLI arguments into a [`HeadlessConfig`].
+///
+/// The binary keeps only flag parsing and error decoration; every P2P
+/// assembly rule (flag pairing, seed-implied loopback defaults, reconcile
+/// minimum, default key path, `server_override` recording) lives in
+/// [`p2p_config_from_lookup`]. CLI flags are converted into the lookup's
+/// key/value format and layered over `env` with precedence (highest first):
+/// explicit CLI flag > env value > seed-implied default. The CLI booleans
+/// (`--p2p-relay-disabled`, `--p2p-discovery-disabled`) are disable-only and
+/// cannot re-enable what a seed default disables; an explicit env value
+/// (e.g. `RT_P2P_RELAY_DISABLED=0`) can.
+fn parse_args(
+    args: impl IntoIterator<Item = OsString>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<HeadlessConfig, String> {
     let mut data_dir: Option<PathBuf> = None;
     let mut bind_addr: SocketAddr = "127.0.0.1:0"
         .parse()
         .expect("default bind address must parse");
     let mut receiver_id: Option<String> = None;
-    let mut forwarder_endpoint_id: Option<String> = None;
-    let mut forwarder_direct_addr: Option<SocketAddr> = None;
-    let mut secret_key_seed: Option<[u8; 32]> = None;
-    let mut secret_key_path: Option<PathBuf> = None;
-    let mut relay_disabled = false;
-    let mut discovery_disabled = false;
-    let mut server_url: Option<String> = None;
-    let mut server_token: Option<String> = None;
-    let mut reconcile_ms: Option<u64> = None;
+    // CLI-provided P2P values, keyed by the canonical lookup keys shared with
+    // the env config path.
+    let mut cli: HashMap<&'static str, String> = HashMap::new();
     let mut args = args.into_iter();
 
     while let Some(arg) = args.next() {
@@ -124,59 +134,61 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<HeadlessConfig
                 let value = args
                     .next()
                     .ok_or_else(|| "--p2p-forwarder-endpoint-id requires a value".to_owned())?;
-                forwarder_endpoint_id = Some(value.to_string_lossy().into_owned());
+                cli.insert(
+                    ENV_P2P_FORWARDER_NODE_ID,
+                    value.to_string_lossy().into_owned(),
+                );
             }
             "--p2p-forwarder-direct-addr" => {
                 let value = args
                     .next()
                     .ok_or_else(|| "--p2p-forwarder-direct-addr requires an address".to_owned())?;
-                forwarder_direct_addr = Some(
-                    value
-                        .to_string_lossy()
-                        .parse()
-                        .map_err(|e| format!("invalid --p2p-forwarder-direct-addr: {e}"))?,
+                cli.insert(
+                    ENV_P2P_FORWARDER_DIRECT_ADDR,
+                    value.to_string_lossy().into_owned(),
                 );
             }
             "--p2p-secret-key-seed-hex" => {
                 let value = args
                     .next()
                     .ok_or_else(|| "--p2p-secret-key-seed-hex requires a value".to_owned())?;
-                secret_key_seed = Some(parse_secret_key_seed_hex(&value.to_string_lossy())?);
+                cli.insert(
+                    ENV_P2P_SECRET_KEY_SEED_HEX,
+                    value.to_string_lossy().into_owned(),
+                );
             }
             "--p2p-secret-key-path" => {
                 let value = args
                     .next()
                     .ok_or_else(|| "--p2p-secret-key-path requires a path".to_owned())?;
-                secret_key_path = Some(PathBuf::from(value));
+                cli.insert(
+                    ENV_P2P_SECRET_KEY_PATH,
+                    value.to_string_lossy().into_owned(),
+                );
             }
             "--p2p-relay-disabled" => {
-                relay_disabled = true;
+                cli.insert(ENV_P2P_RELAY_DISABLED, "1".to_owned());
             }
             "--p2p-discovery-disabled" => {
-                discovery_disabled = true;
+                cli.insert(ENV_P2P_DISCOVERY_DISABLED, "1".to_owned());
             }
             "--p2p-server-url" => {
                 let value = args
                     .next()
                     .ok_or_else(|| "--p2p-server-url requires a URL".to_owned())?;
-                server_url = Some(value.to_string_lossy().into_owned());
+                cli.insert(ENV_P2P_SERVER_URL, value.to_string_lossy().into_owned());
             }
             "--p2p-server-token" => {
                 let value = args
                     .next()
                     .ok_or_else(|| "--p2p-server-token requires a value".to_owned())?;
-                server_token = Some(value.to_string_lossy().into_owned());
+                cli.insert(ENV_P2P_SERVER_TOKEN, value.to_string_lossy().into_owned());
             }
             "--p2p-reconcile-ms" => {
                 let value = args
                     .next()
                     .ok_or_else(|| "--p2p-reconcile-ms requires a value".to_owned())?;
-                reconcile_ms = Some(
-                    value
-                        .to_string_lossy()
-                        .parse()
-                        .map_err(|e| format!("invalid --p2p-reconcile-ms: {e}"))?,
-                );
+                cli.insert(ENV_P2P_RECONCILE_MS, value.to_string_lossy().into_owned());
             }
             "--help" | "-h" => return Err(usage()),
             other => return Err(format!("unknown argument: {other}\n{}", usage())),
@@ -185,18 +197,11 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<HeadlessConfig
 
     let data_dir = data_dir.ok_or_else(|| format!("--data-dir is required\n{}", usage()))?;
     let default_key_path = data_dir.join("p2p_secret.key");
-    let p2p = build_p2p_config(
-        forwarder_endpoint_id,
-        forwarder_direct_addr,
-        secret_key_seed,
-        secret_key_path,
-        relay_disabled,
-        discovery_disabled,
-        server_url,
-        server_token,
-        reconcile_ms,
+    let p2p = p2p_config_from_lookup(
+        |key| cli.get(key).cloned().or_else(|| env(key)),
         default_key_path,
-    )?;
+    )
+    .map_err(|e| decorate_p2p_error(&e))?;
 
     Ok(HeadlessConfig {
         data_dir,
@@ -206,118 +211,26 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<HeadlessConfig
     })
 }
 
-/// Assemble the optional P2P config from parsed flags. P2P is enabled only when
-/// at least one P2P flag is present; the forwarder endpoint id and direct address
-/// must be supplied together (both or neither); and the server URL and token
-/// must be supplied together. A config with only identity/transport/reconcile
-/// flags (no forwarder, no server) is valid: the stored profile then supplies
-/// the server, which `HeadlessHost::start` resolves with the CLI flags as the
-/// override.
-///
-/// Identity: a seed and an explicit key path are mutually exclusive; when
-/// neither is given, a persistent key at `default_key_path` is used. A seed
-/// implies the loopback/dev transport (relays + discovery off, loopback bind);
-/// a key path uses production transport unless the disable flags are set.
-#[allow(clippy::too_many_arguments)]
-fn build_p2p_config(
-    forwarder_endpoint_id: Option<String>,
-    forwarder_direct_addr: Option<SocketAddr>,
-    secret_key_seed: Option<[u8; 32]>,
-    secret_key_path: Option<PathBuf>,
-    relay_disabled: bool,
-    discovery_disabled: bool,
-    server_url: Option<String>,
-    server_token: Option<String>,
-    reconcile_ms: Option<u64>,
-    default_key_path: PathBuf,
-) -> Result<Option<P2pReceiverConfig>, String> {
-    let any_p2p = forwarder_endpoint_id.is_some()
-        || forwarder_direct_addr.is_some()
-        || secret_key_seed.is_some()
-        || secret_key_path.is_some()
-        || relay_disabled
-        || discovery_disabled
-        || server_url.is_some()
-        || server_token.is_some()
-        || reconcile_ms.is_some();
-    if !any_p2p {
-        return Ok(None);
+/// Rewrite lookup-key names in a [`p2p_config_from_lookup`] error to the CLI
+/// flag spellings and append usage, so `receiver-headless` errors speak the
+/// binary's own flag language.
+fn decorate_p2p_error(err: &str) -> String {
+    const KEY_TO_FLAG: &[(&str, &str)] = &[
+        (ENV_P2P_FORWARDER_NODE_ID, "--p2p-forwarder-endpoint-id"),
+        (ENV_P2P_FORWARDER_DIRECT_ADDR, "--p2p-forwarder-direct-addr"),
+        (ENV_P2P_SECRET_KEY_SEED_HEX, "--p2p-secret-key-seed-hex"),
+        (ENV_P2P_SECRET_KEY_PATH, "--p2p-secret-key-path"),
+        (ENV_P2P_RELAY_DISABLED, "--p2p-relay-disabled"),
+        (ENV_P2P_DISCOVERY_DISABLED, "--p2p-discovery-disabled"),
+        (ENV_P2P_SERVER_URL, "--p2p-server-url"),
+        (ENV_P2P_SERVER_TOKEN, "--p2p-server-token"),
+        (ENV_P2P_RECONCILE_MS, "--p2p-reconcile-ms"),
+    ];
+    let mut msg = err.to_owned();
+    for (key, flag) in KEY_TO_FLAG {
+        msg = msg.replace(key, flag);
     }
-
-    let forwarder = match (forwarder_endpoint_id, forwarder_direct_addr) {
-        (Some(endpoint_id), Some(direct_addr)) => Some(ForwarderPeerConfig {
-            endpoint_id,
-            direct_addr,
-        }),
-        (None, None) => None,
-        (Some(_), None) => {
-            return Err(format!(
-                "--p2p-forwarder-direct-addr is required when --p2p-forwarder-endpoint-id is set\n{}",
-                usage()
-            ));
-        }
-        (None, Some(_)) => {
-            return Err(format!(
-                "--p2p-forwarder-endpoint-id is required when --p2p-forwarder-direct-addr is set\n{}",
-                usage()
-            ));
-        }
-    };
-
-    let server = match (server_url, server_token) {
-        (Some(url), Some(token)) => Some(ServerClientConfig { url, token }),
-        (None, None) => None,
-        _ => {
-            return Err(format!(
-                "--p2p-server-url and --p2p-server-token must be set together\n{}",
-                usage()
-            ));
-        }
-    };
-    // A config with only identity/transport/reconcile flags (no forwarder, no
-    // server) is valid: the stored profile supplies the server. `start`
-    // resolves `(profile, CLI override)` and sets `server`/`server_override`.
-
-    let identity = match (secret_key_seed, secret_key_path) {
-        (Some(_), Some(_)) => {
-            return Err(format!(
-                "--p2p-secret-key-seed-hex and --p2p-secret-key-path are mutually exclusive\n{}",
-                usage()
-            ));
-        }
-        (Some(seed), None) => ReceiverIdentity::Seed(seed),
-        (None, Some(path)) => ReceiverIdentity::KeyPath(path),
-        (None, None) => ReceiverIdentity::KeyPath(default_key_path),
-    };
-    // A seed is loopback/dev: force relays + discovery off and bind loopback.
-    let seed_identity = matches!(identity, ReceiverIdentity::Seed(_));
-    let relay_disabled = relay_disabled || seed_identity;
-    let discovery_disabled = discovery_disabled || seed_identity;
-    let bind_addr_v4 =
-        seed_identity.then(|| std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0));
-
-    let reconcile_interval = Duration::from_millis(reconcile_ms.unwrap_or(1000));
-    if reconcile_interval < MIN_RECONCILE_INTERVAL {
-        return Err(format!(
-            "--p2p-reconcile-ms must be at least {} ms\n{}",
-            MIN_RECONCILE_INTERVAL.as_millis(),
-            usage()
-        ));
-    }
-
-    Ok(Some(P2pReceiverConfig {
-        identity,
-        relay_disabled,
-        discovery_disabled,
-        bind_addr_v4,
-        forwarder,
-        server,
-        // Placeholder; `HeadlessHost::start` takes `server` as the CLI override
-        // and sets both `server` and `server_override` after profile
-        // resolution so a profile save cannot drop the CLI override.
-        server_override: (None, None),
-        reconcile_interval,
-    }))
+    format!("{msg}\n{}", usage())
 }
 
 fn usage() -> String {
@@ -330,7 +243,9 @@ fn usage() -> String {
         "  [--p2p-relay-disabled] [--p2p-discovery-disabled]  (transport; forced on for a seed)\n",
         "  [--p2p-forwarder-endpoint-id <endpoint-id> --p2p-forwarder-direct-addr <ip:port>]\n",
         "  [--p2p-server-url <url> --p2p-server-token <token>]\n",
-        "  [--p2p-reconcile-ms <ms>]  (must be >= 50)",
+        "  [--p2p-reconcile-ms <ms>]  (must be >= 50)\n",
+        "\n",
+        "Each P2P flag falls back to its RT_P2P_* environment variable when omitted.",
     )
     .to_owned()
 }
@@ -338,9 +253,29 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use receiver::p2p_runtime::ReceiverIdentity;
+    use std::time::Duration;
 
     fn args(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
+    }
+
+    /// CLI-only parse: shadows the binary's `parse_args` with an empty env
+    /// lookup so tests are hermetic against ambient `RT_P2P_*` variables.
+    fn parse_args(args: Vec<OsString>) -> Result<HeadlessConfig, String> {
+        super::parse_args(args, |_| None)
+    }
+
+    /// Parse with an injected env lookup for precedence tests.
+    fn parse_args_with_env(
+        args: Vec<OsString>,
+        env: &[(&str, &str)],
+    ) -> Result<HeadlessConfig, String> {
+        let map: HashMap<String, String> = env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        super::parse_args(args, move |key| map.get(key).cloned())
     }
 
     const SEED_HEX: &str = "abababababababababababababababababababababababababababababababab";
@@ -618,5 +553,160 @@ mod tests {
         ]))
         .unwrap_err();
         assert!(err.contains("mutually exclusive"), "got: {err}");
+    }
+
+    #[test]
+    fn seed_implies_loopback_transport_defaults() {
+        let config = parse_args(args(&[
+            "--data-dir",
+            "/tmp/x",
+            "--p2p-secret-key-seed-hex",
+            SEED_HEX,
+        ]))
+        .unwrap();
+        let p2p = config.p2p.expect("p2p config present");
+        assert!(p2p.relay_disabled, "seed must default relays off");
+        assert!(p2p.discovery_disabled, "seed must default discovery off");
+        let bind = p2p.bind_addr_v4.expect("seed must default loopback bind");
+        assert!(bind.ip().is_loopback());
+    }
+
+    #[test]
+    fn server_override_recorded_by_lookup_assembly() {
+        let config = parse_args(args(&[
+            "--data-dir",
+            "/tmp/x",
+            "--p2p-server-url",
+            "http://127.0.0.1:8080",
+            "--p2p-server-token",
+            "secret-token",
+        ]))
+        .unwrap();
+        let p2p = config.p2p.expect("p2p config present");
+        assert_eq!(
+            p2p.server_override,
+            (
+                Some("http://127.0.0.1:8080".to_owned()),
+                Some("secret-token".to_owned())
+            ),
+            "lookup assembly must record the CLI server flags as the override"
+        );
+    }
+
+    #[test]
+    fn cli_flag_overrides_env_value() {
+        let config = parse_args_with_env(
+            args(&[
+                "--data-dir",
+                "/tmp/x",
+                "--p2p-secret-key-seed-hex",
+                SEED_HEX,
+                "--p2p-reconcile-ms",
+                "250",
+            ]),
+            &[(ENV_P2P_RECONCILE_MS, "999")],
+        )
+        .unwrap();
+        assert_eq!(
+            config.p2p.unwrap().reconcile_interval,
+            Duration::from_millis(250),
+            "explicit CLI flag must win over the env value"
+        );
+    }
+
+    #[test]
+    fn env_value_applies_when_cli_flag_absent() {
+        let config = parse_args_with_env(
+            args(&[
+                "--data-dir",
+                "/tmp/x",
+                "--p2p-secret-key-seed-hex",
+                SEED_HEX,
+            ]),
+            &[
+                (ENV_P2P_SERVER_URL, "http://127.0.0.1:9090"),
+                (ENV_P2P_SERVER_TOKEN, "env-token"),
+            ],
+        )
+        .unwrap();
+        let p2p = config.p2p.expect("p2p config present");
+        let server = p2p.server.expect("env server must apply");
+        assert_eq!(server.url, "http://127.0.0.1:9090");
+        assert_eq!(server.token, "env-token");
+    }
+
+    #[test]
+    fn env_alone_enables_p2p_without_cli_flags() {
+        let config = parse_args_with_env(
+            args(&["--data-dir", "/tmp/x"]),
+            &[(ENV_P2P_SECRET_KEY_SEED_HEX, SEED_HEX)],
+        )
+        .unwrap();
+        let p2p = config
+            .p2p
+            .expect("env-only P2P config must enable the lane");
+        assert!(matches!(p2p.identity, ReceiverIdentity::Seed(s) if s == [0xab; 32]));
+    }
+
+    #[test]
+    fn explicit_env_false_reenables_seed_disabled_relay() {
+        let config = parse_args_with_env(
+            args(&[
+                "--data-dir",
+                "/tmp/x",
+                "--p2p-secret-key-seed-hex",
+                SEED_HEX,
+            ]),
+            &[(ENV_P2P_RELAY_DISABLED, "0")],
+        )
+        .unwrap();
+        let p2p = config.p2p.expect("p2p config present");
+        assert!(
+            !p2p.relay_disabled,
+            "explicit env false must override the seed-implied default"
+        );
+        assert!(
+            p2p.discovery_disabled,
+            "unset discovery flag must keep the seed-implied default"
+        );
+    }
+
+    #[test]
+    fn cli_disable_flag_wins_over_env_false() {
+        let config = parse_args_with_env(
+            args(&[
+                "--data-dir",
+                "/tmp/x",
+                "--p2p-secret-key-seed-hex",
+                SEED_HEX,
+                "--p2p-relay-disabled",
+            ]),
+            &[(ENV_P2P_RELAY_DISABLED, "0")],
+        )
+        .unwrap();
+        assert!(
+            config.p2p.unwrap().relay_disabled,
+            "CLI disable flag must win over an env re-enable"
+        );
+    }
+
+    #[test]
+    fn empty_flag_value_treated_as_absent() {
+        // Lookup semantics: empty/whitespace values are absent, so an empty
+        // server URL with a real token is a pairing error, not an empty URL.
+        let err = parse_args(args(&[
+            "--data-dir",
+            "/tmp/x",
+            "--p2p-server-url",
+            "  ",
+            "--p2p-server-token",
+            "secret-token",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("must be set together"), "got: {err}");
+        assert!(
+            err.contains("--p2p-server-url"),
+            "error must be decorated with flag names, got: {err}"
+        );
     }
 }

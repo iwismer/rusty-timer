@@ -57,21 +57,21 @@ impl HeadlessHost {
         let p2p_runtime = match config.p2p {
             Some(mut p2p_config) => {
                 // The stored profile is the source of truth for the server
-                // URL+token; the CLI flags (already parsed into
-                // `p2p_config.server`) are the override.
-                let cli_override = p2p_config
-                    .server
-                    .take()
-                    .map_or((None, None), |s| (Some(s.url), Some(s.token)));
+                // URL+token; `server_override` (recorded once by
+                // `p2p_config_from_lookup` from CLI flags/env) takes
+                // precedence. This block only *applies* that precedence
+                // against the profile — it never re-derives the override.
+                let server_override = p2p_config.server_override.clone();
                 let profile = state.db.lock().await.load_profile().ok().flatten();
-                p2p_config.server =
-                    crate::runtime::resolve_server_config(profile.as_ref(), cli_override.clone());
+                p2p_config.server = crate::runtime::resolve_server_config(
+                    profile.as_ref(),
+                    server_override.clone(),
+                );
                 // Record the override on shared state so control handlers
                 // (profile/status) resolve and gate consistently with the
-                // runtime, then preserve it on the config so a later
-                // profile-save reconfigure keeps `CLI override > profile`.
-                state.set_server_override(cli_override.clone()).await;
-                p2p_config.server_override = cli_override;
+                // runtime; the config keeps it so a later profile-save
+                // reconfigure preserves `override > profile`.
+                state.set_server_override(server_override).await;
                 Some(start_receiver_p2p(Arc::clone(&state), p2p_config).await?)
             }
             None => None,
