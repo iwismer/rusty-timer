@@ -2,7 +2,7 @@ use bytes::{BufMut, BytesMut};
 use prost::Message;
 use rt_p2p_protocol::{
     CAP_CONTROL_EVENTS, CAP_REMOTE_CONFIG, Hello, Ping, ProtocolError, decode_frame,
-    decode_message_frame, encode_frame, has_capability, negotiate,
+    decode_frame_payload, decode_message_frame, encode_frame, has_capability, negotiate,
 };
 
 #[test]
@@ -24,6 +24,39 @@ fn roundtrip_frame() {
 
     assert!(buf.is_empty());
     assert_eq!(decoded, original);
+}
+
+#[test]
+fn decode_frame_payload_roundtrips_encoded_message() {
+    let original = Ping { nonce: 42 };
+    let encoded = encode_frame(&original);
+    let len_buf = encoded[..4].try_into().expect("length prefix");
+
+    let decoded = decode_frame_payload::<Ping>(len_buf, &encoded[4..]).expect("decode payload");
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn decode_frame_payload_rejects_oversize_prefix() {
+    let len_buf = u32::try_from(8 * 1024 * 1024 + 1)
+        .expect("fits u32")
+        .to_le_bytes();
+
+    let err = decode_frame_payload::<Ping>(len_buf, &[]).expect_err("oversize frame");
+
+    assert!(matches!(err, ProtocolError::FrameTooLarge { .. }));
+}
+
+#[test]
+fn decode_frame_payload_rejects_payload_shorter_than_prefix() {
+    let encoded = encode_frame(&Ping { nonce: 42 });
+    let len_buf = encoded[..4].try_into().expect("length prefix");
+
+    let err = decode_frame_payload::<Ping>(len_buf, &encoded[4..encoded.len() - 1])
+        .expect_err("truncated payload");
+
+    assert!(matches!(err, ProtocolError::ProtocolViolation { .. }));
 }
 
 #[test]

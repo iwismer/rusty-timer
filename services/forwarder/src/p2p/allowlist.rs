@@ -7,20 +7,20 @@
 //! 1. **Authoritative in-memory set.** [`AllowList::try_register_connection`]
 //!    admits and tracks a connection under one lock, before any control or data
 //!    stream work happens.
-//! 2. **Last-known persistence.** The allowed set is cached on disk so a
-//!    refresh failure (e.g. an offline server) falls back to the previously
-//!    persisted list rather than failing open or failing closed-empty. Updates
-//!    persist *before* the in-memory swap, so a write failure leaves the
-//!    last-known set in force ([`AllowList::apply_update`]).
+//! 2. **Last-known persistence.** The server-snapshot portion of the allowed
+//!    set is cached on disk (pinned/static receivers are re-derived from
+//!    config at startup, never persisted) so a refresh failure (e.g. an
+//!    offline server) falls back to the previously persisted list rather than
+//!    failing open or failing closed-empty. Updates persist *before* the
+//!    in-memory swap, so a write failure leaves the last-known set in force
+//!    ([`AllowList::apply_update`]).
 //! 3. **Revocation / force-close.** Admitted connections are tracked by remote
 //!    endpoint id ([`AllowList::try_register_connection`]); when an update removes a
 //!    peer, its open connections are force-closed immediately.
 //!
-//! Updates are sourced from the server: [`ServerAllowListClient`] fetches
-//! the active receiver set over bearer-authenticated HTTP, and
-//! [`run_allowlist_distribution`] keeps the list fresh from a startup fetch,
-//! pushed snapshots, and periodic polling. Reader control/status event mapping
-//! remains out of scope for this allow-list module.
+//! Server refresh and catalog HTTP clients live in the sibling
+//! `server_client` module; this module owns only the admission state machine and
+//! last-known cache.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -28,45 +28,21 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
 
 use rt_iroh::{Connection, EndpointId};
-pub use rt_server_api::allowlist::ReceiverAllowListResponse as ReceiverAllowListUpdate;
-pub use rt_server_api::catalog::{
-    ForwarderCatalogRequest as ForwarderCatalog, ForwarderCatalogStream,
-};
-use rt_server_api::register::{RegisterRequest, RegisterResponse};
-use tokio::sync::mpsc;
 
 /// QUIC application error code used when force-closing a revoked peer's
 /// connection after it is removed from the allow-list.
 const REVOKED_ERROR_CODE: u32 = 3;
-
-/// Production poll cadence for refreshing receiver authorization from the server.
-pub const DEFAULT_ALLOWLIST_POLL_INTERVAL: Duration = Duration::from_secs(60);
-
-/// How long each long-poll request asks the server to hold open while waiting
-/// for an allow-list change. Bounds how long a forwarder waits between re-arming
-/// the push subscription, and is kept under typical proxy idle timeouts.
-pub const ALLOWLIST_PUSH_HOLD: Duration = Duration::from_secs(25);
-
-/// Initial reconnect backoff for the long-poll push subscription after a server
-/// error, doubled up to [`ALLOWLIST_PUSH_MAX_BACKOFF`].
-const ALLOWLIST_PUSH_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
-
-/// Cap on the long-poll push subscription reconnect backoff.
-const ALLOWLIST_PUSH_MAX_BACKOFF: Duration = Duration::from_secs(30);
-
-/// Conservative bound on a single server allow-list HTTP request. Without a
-/// timeout a hung server would stall the distribution loop's initial refresh
-/// and polling indefinitely; this caps how long any one fetch can block.
-pub const DEFAULT_ALLOWLIST_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Shared, mutable allow-list state guarded by a single mutex.
 #[derive(Debug, Default)]
 struct State {
     /// Endpoint ids currently permitted to connect.
     allowed: HashSet<EndpointId>,
+    /// Operator-pinned (static config) receivers. Always allowed; never
+    /// revoked or persisted by server snapshots.
+    pinned: HashSet<EndpointId>,
     /// Open admitted connections, keyed by remote endpoint id then a per-connection
     /// registration id so multiple connections from one peer are tracked
     /// independently.
@@ -130,23 +106,26 @@ impl AllowList {
         self.lock().allowed.contains(endpoint_id)
     }
 
-    /// Unions `additional` endpoint ids into the allowed set in memory only.
-    ///
-    /// Unlike [`AllowList::apply_update`], this neither persists to the cache
-    /// nor revokes anything: it is additive. It exists so statically configured
-    /// receivers can be allowed *on top of* the cached/last-known (or
-    /// server-fetched) set at startup, rather than replacing it.
-    pub fn add_allowed(&self, additional: impl IntoIterator<Item = EndpointId>) {
+    /// Pins operator-configured receivers: always allowed, never revoked by
+    /// [`AllowList::apply_update`], never persisted to the server-snapshot
+    /// cache. Intended to be called once at startup; the pinned set itself is
+    /// replaced immediately, but endpoints removed from it remain allowed
+    /// until the next `apply_update`.
+    pub fn set_pinned(&self, pinned: impl IntoIterator<Item = EndpointId>) {
         let mut state = self.lock();
-        state.allowed.extend(additional);
+        let state = &mut *state;
+        state.pinned = pinned.into_iter().collect();
+        state.allowed.extend(state.pinned.iter().copied());
     }
 
-    /// Atomically replaces the allowed set with `allowed`, persisting it and
+    /// Atomically replaces the allowed set with `allowed` ∪ the pinned set,
+    /// persisting the server snapshot (`allowed` only, never pinned) and
     /// force-closing every open connection whose endpoint id was removed.
     ///
-    /// Returns the revoked endpoint ids. Persistence happens before the in-memory
-    /// swap: if the cache cannot be written the in-memory state is left at its
-    /// last-known value and the error is returned.
+    /// Returns the revoked endpoint ids; pinned endpoints are never revoked.
+    /// Persistence happens before the in-memory swap: if the cache cannot be
+    /// written the in-memory state is left at its last-known value and the
+    /// error is returned.
     ///
     /// # Errors
     ///
@@ -166,9 +145,10 @@ impl AllowList {
                 persist(path, &new_allowed)?;
             }
 
-            let revoked: Vec<EndpointId> =
-                state.allowed.difference(&new_allowed).copied().collect();
-            state.allowed = new_allowed;
+            let effective: HashSet<EndpointId> =
+                new_allowed.union(&state.pinned).copied().collect();
+            let revoked: Vec<EndpointId> = state.allowed.difference(&effective).copied().collect();
+            state.allowed = effective;
             let mut connections_to_close = Vec::new();
             for endpoint_id in &revoked {
                 if let Some(connections) = state.connections.remove(endpoint_id) {
@@ -226,407 +206,6 @@ impl AllowList {
         // cascade the panic into every admission check.
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
-}
-
-/// HTTP client for fetching receiver allow-list snapshots from the server.
-#[derive(Clone)]
-pub struct ServerAllowListClient {
-    http: reqwest::Client,
-    base_url: String,
-    bearer_token: Arc<str>,
-}
-
-// Manual `Debug` so the bearer token can never leak through formatting (e.g.
-// when a struct holding the client is logged or asserted on).
-impl std::fmt::Debug for ServerAllowListClient {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ServerAllowListClient")
-            .field("base_url", &self.base_url)
-            .field("bearer_token", &"<redacted>")
-            .finish()
-    }
-}
-
-impl ServerAllowListClient {
-    /// Builds a client with the [`DEFAULT_ALLOWLIST_REQUEST_TIMEOUT`] applied to
-    /// every allow-list request.
-    #[must_use]
-    pub fn new(base_url: impl Into<String>, bearer_token: impl Into<String>) -> Self {
-        Self::with_timeout(base_url, bearer_token, DEFAULT_ALLOWLIST_REQUEST_TIMEOUT)
-    }
-
-    /// Builds a client that bounds every allow-list request to `request_timeout`.
-    #[must_use]
-    pub fn with_timeout(
-        base_url: impl Into<String>,
-        bearer_token: impl Into<String>,
-        request_timeout: Duration,
-    ) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(request_timeout)
-            .build()
-            // A builder failure here only means the platform TLS/transport
-            // backend could not initialise. Never fall back to an untimed
-            // client: that would silently drop the request timeout and let a
-            // hung server stall the distribution loop indefinitely. Such a
-            // failure is a fatal environment problem, so surface it loudly.
-            .expect(
-                "reqwest client builder with request timeout must initialise; \
-                 a failure here indicates the platform TLS/transport backend is unavailable",
-            );
-        Self {
-            http,
-            base_url: base_url.into().trim_end_matches('/').to_owned(),
-            bearer_token: Arc::from(bearer_token.into()),
-        }
-    }
-
-    async fn fetch(&self) -> Result<ReceiverAllowListUpdate, AllowListRefreshError> {
-        let url = format!("{}/allowlist/receivers", self.base_url);
-        Ok(self
-            .http
-            .get(url)
-            .bearer_auth(self.bearer_token.as_ref())
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
-    }
-
-    /// Long-polls the server allow-list: sends `since` (the last applied
-    /// version) and a `wait` budget, so the server holds the request until the
-    /// allow-list changes and returns the fresh snapshot — giving near-instant
-    /// approval propagation. The per-request timeout is overridden to exceed
-    /// `wait` so the held request is not aborted by the client's short default
-    /// timeout. A `since` of `None` requests an immediate snapshot (initial
-    /// fetch / resync).
-    async fn fetch_waiting(
-        &self,
-        since: Option<u64>,
-        wait: Duration,
-    ) -> Result<ReceiverAllowListUpdate, AllowListRefreshError> {
-        // Built by hand (rather than reqwest's `query` builder) so no extra
-        // reqwest feature is required; both values are plain integers, so no
-        // percent-encoding is needed.
-        let url = match since {
-            Some(since) => format!(
-                "{}/allowlist/receivers?wait={}&since={since}",
-                self.base_url,
-                wait.as_secs()
-            ),
-            None => format!(
-                "{}/allowlist/receivers?wait={}",
-                self.base_url,
-                wait.as_secs()
-            ),
-        };
-        Ok(self
-            .http
-            .get(url)
-            .bearer_auth(self.bearer_token.as_ref())
-            // Allow the response to arrive any time within the server hold plus
-            // a transport margin, regardless of the client's short default.
-            .timeout(wait + Duration::from_secs(10))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
-    }
-}
-
-/// HTTP client for registering the forwarder and pushing its stream catalog.
-#[derive(Clone)]
-pub struct ServerCatalogClient {
-    http: reqwest::Client,
-    base_url: String,
-    bearer_token: Arc<str>,
-}
-
-impl std::fmt::Debug for ServerCatalogClient {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ServerCatalogClient")
-            .field("base_url", &self.base_url)
-            .field("bearer_token", &"<redacted>")
-            .finish()
-    }
-}
-
-impl ServerCatalogClient {
-    /// Builds a client with the default server request timeout.
-    #[must_use]
-    pub fn new(base_url: impl Into<String>, bearer_token: impl Into<String>) -> Self {
-        Self::with_timeout(base_url, bearer_token, DEFAULT_ALLOWLIST_REQUEST_TIMEOUT)
-    }
-
-    /// Builds a client that bounds every registration/catalog request.
-    #[must_use]
-    pub fn with_timeout(
-        base_url: impl Into<String>,
-        bearer_token: impl Into<String>,
-        request_timeout: Duration,
-    ) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(request_timeout)
-            .build()
-            .expect(
-                "reqwest client builder with request timeout must initialise; \
-                 a failure here indicates the platform TLS/transport backend is unavailable",
-            );
-        Self {
-            http,
-            base_url: base_url.into().trim_end_matches('/').to_owned(),
-            bearer_token: Arc::from(bearer_token.into()),
-        }
-    }
-
-    /// Bootstrap this forwarder against the server `/register` endpoint using the
-    /// configured bearer (an enrollment voucher on first boot, or the device's
-    /// own token for same-endpoint recovery), returning the server-minted
-    /// per-device token. The caller persists it and uses it for all later calls.
-    pub async fn bootstrap(&self, endpoint_id: &str) -> Result<String, CatalogPushError> {
-        let url = format!("{}/register", self.base_url);
-        let response = self
-            .http
-            .post(url)
-            .bearer_auth(self.bearer_token.as_ref())
-            .json(&RegisterRequest {
-                endpoint_id: endpoint_id.to_owned(),
-                device_kind: "forwarder".to_owned(),
-                display_name: None,
-            })
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<RegisterResponse>()
-            .await?;
-        response
-            .device_token
-            .ok_or(CatalogPushError::MissingMintedToken)
-    }
-
-    /// Pushes this forwarder's latest identity and stream catalog.
-    pub async fn push_catalog(&self, catalog: &ForwarderCatalog) -> Result<(), CatalogPushError> {
-        let url = format!("{}/forwarder/catalog", self.base_url);
-        self.http
-            .post(url)
-            .bearer_auth(self.bearer_token.as_ref())
-            .json(catalog)
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum CatalogPushError {
-    // `reqwest::Error`'s `Display` covers URL/status/transport but never
-    // request headers, so the bearer token cannot leak here.
-    #[error("server catalog request failed: {0}")]
-    Http(#[from] reqwest::Error),
-    #[error("server /register did not return a minted device token")]
-    MissingMintedToken,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum AllowListRefreshError {
-    // `reqwest::Error`'s `Display` covers the failing URL and transport cause
-    // but never request headers, so the bearer token cannot leak here.
-    #[error("server allow-list request failed: {0}")]
-    Http(#[from] reqwest::Error),
-    #[error("failed to apply receiver allow-list update: {0}")]
-    Apply(#[from] io::Error),
-}
-
-/// Fetches the current server allow-list and applies it to `allow_list`.
-pub async fn fetch_and_apply_once(
-    client: &ServerAllowListClient,
-    allow_list: &AllowList,
-) -> Result<Vec<EndpointId>, AllowListRefreshError> {
-    let update = client.fetch().await?;
-    apply_receiver_update(allow_list, update)
-}
-
-/// Applies a pushed or fetched wire-format receiver allow-list update.
-pub fn apply_receiver_update(
-    allow_list: &AllowList,
-    update: ReceiverAllowListUpdate,
-) -> Result<Vec<EndpointId>, AllowListRefreshError> {
-    let allowed = parse_update(update);
-    Ok(allow_list.apply_update(allowed)?)
-}
-
-/// In-flight poll-fetch future held across `select!` iterations so pushed
-/// updates stay responsive while a slow poll request is outstanding.
-///
-/// The poll *fetches only*; it does not apply. Applying is deferred to the
-/// distribution loop so a snapshot captured before a newer pushed update can be
-/// discarded instead of clobbering the newer state (see the generation guard in
-/// [`run_allowlist_distribution`]).
-type PollFetch = std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = Result<ReceiverAllowListUpdate, AllowListRefreshError>>
-            + Send,
-    >,
->;
-
-/// Keeps `allow_list` fresh from startup fetches, pushed snapshots, and polling.
-pub async fn run_allowlist_distribution(
-    allow_list: AllowList,
-    client: ServerAllowListClient,
-    mut pushed_updates: mpsc::Receiver<ReceiverAllowListUpdate>,
-    poll_interval: Duration,
-) {
-    if let Err(err) = fetch_and_apply_once(&client, &allow_list).await {
-        tracing::warn!(error = %err, "initial receiver allow-list refresh failed");
-    }
-
-    let poll_interval = if poll_interval.is_zero() {
-        DEFAULT_ALLOWLIST_POLL_INTERVAL
-    } else {
-        poll_interval
-    };
-    let mut ticker = tokio::time::interval(poll_interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    ticker.tick().await;
-    let mut push_closed = false;
-    // An in-flight poll fetch is held here rather than awaited inline so pushed
-    // updates stay responsive even while a slow (or timing-out) poll request is
-    // outstanding. At most one poll fetch runs at a time; a tick that lands
-    // while one is still in flight is dropped (the next tick re-polls).
-    let mut poll_fetch: Option<PollFetch> = None;
-    // Monotonic count of applied updates. Bumped on every successful apply
-    // (pushed or polled). A poll captures this when it begins fetching; if the
-    // count has moved by the time the fetch completes, a newer update applied
-    // while the poll was in flight, so the (now stale) poll snapshot is
-    // discarded rather than overwriting the newer state. Without this guard a
-    // slow poll holding a pre-revocation snapshot could re-authorize a receiver
-    // that a pushed revocation had already removed.
-    let mut generation: u64 = 0;
-    let mut poll_generation: u64 = 0;
-
-    loop {
-        tokio::select! {
-            update = pushed_updates.recv(), if !push_closed => {
-                match update {
-                    Some(update) => {
-                        match apply_receiver_update(&allow_list, update) {
-                            Ok(_) => generation = generation.wrapping_add(1),
-                            Err(err) => tracing::warn!(
-                                error = %err,
-                                "pushed receiver allow-list update failed",
-                            ),
-                        }
-                    }
-                    None => push_closed = true,
-                }
-            }
-            _ = ticker.tick() => {
-                if poll_fetch.is_none() {
-                    let client = client.clone();
-                    poll_generation = generation;
-                    poll_fetch = Some(Box::pin(async move { client.fetch().await }));
-                }
-            }
-            result = async { poll_fetch.as_mut().expect("poll fetch present").await }, if poll_fetch.is_some() => {
-                poll_fetch = None;
-                match result {
-                    Ok(update) => {
-                        if generation == poll_generation {
-                            match apply_receiver_update(&allow_list, update) {
-                                Ok(_) => generation = generation.wrapping_add(1),
-                                Err(err) => tracing::warn!(
-                                    error = %err,
-                                    "polled receiver allow-list refresh failed",
-                                ),
-                            }
-                        } else {
-                            tracing::debug!(
-                                "discarding stale polled receiver allow-list snapshot \
-                                 superseded by a newer update",
-                            );
-                        }
-                    }
-                    Err(err) => tracing::warn!(
-                        error = %err,
-                        "polled receiver allow-list refresh failed",
-                    ),
-                }
-            }
-        }
-    }
-}
-
-/// Long-poll the server for receiver allow-list changes and forward each fresh
-/// snapshot into `push_tx`, which [`run_allowlist_distribution`] applies.
-///
-/// This is the push transport that complements the periodic poll backstop: an
-/// approval on the server releases the held request within milliseconds, so a
-/// newly approved receiver is admitted almost immediately instead of waiting
-/// up to a full poll interval. Loops until the receiving distribution loop is
-/// gone (the channel send fails). Server errors back off and retry; the
-/// distribution loop's polling keeps the allow-list correct meanwhile.
-pub async fn run_allowlist_push_subscription(
-    client: ServerAllowListClient,
-    push_tx: mpsc::Sender<ReceiverAllowListUpdate>,
-    hold: Duration,
-) {
-    // `None` requests an immediate snapshot; afterwards we echo the server's
-    // version as `since` to long-poll for the *next* change.
-    let mut since: Option<u64> = None;
-    let mut backoff = ALLOWLIST_PUSH_INITIAL_BACKOFF;
-
-    loop {
-        let started = tokio::time::Instant::now();
-        match client.fetch_waiting(since, hold).await {
-            Ok(update) => {
-                backoff = ALLOWLIST_PUSH_INITIAL_BACKOFF;
-                let version = update.version;
-                let changed = since != Some(version);
-                since = Some(version);
-                if changed {
-                    // A real change (or the initial snapshot): hand it to the
-                    // distribution loop. A closed channel means that loop is
-                    // gone, so this subscription has no consumer left.
-                    if push_tx.send(update).await.is_err() {
-                        return;
-                    }
-                } else {
-                    // No change within the hold. Pace the next request to the
-                    // intended hold window so a non-holding or older server
-                    // (which returns immediately and never sets a moving
-                    // version) is not hammered; a compliant server already
-                    // consumed ~`hold`, so this adds nothing.
-                    tokio::time::sleep_until(started + hold).await;
-                }
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "receiver allow-list push subscription failed; retrying");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(ALLOWLIST_PUSH_MAX_BACKOFF);
-            }
-        }
-    }
-}
-
-fn parse_update(update: ReceiverAllowListUpdate) -> Vec<EndpointId> {
-    update
-        .receiver_endpoint_ids
-        .into_iter()
-        .filter_map(|endpoint_id| match EndpointId::from_str(&endpoint_id) {
-            Ok(endpoint_id) => Some(endpoint_id),
-            Err(error) => {
-                tracing::warn!(
-                    endpoint_id = %endpoint_id,
-                    error = %error,
-                    "skipping malformed receiver endpoint id in allow-list update",
-                );
-                None
-            }
-        })
-        .collect()
 }
 
 /// Deregisters a tracked connection when dropped, keeping the connection
@@ -690,18 +269,9 @@ fn persist(path: &Path, allowed: &HashSet<EndpointId>) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    use std::sync::Arc;
     use std::time::Duration;
 
-    use axum::{
-        Json, Router,
-        extract::State,
-        http::{HeaderMap, StatusCode, header::AUTHORIZATION},
-        response::{IntoResponse, Response},
-        routing::{get, post},
-    };
     use rt_iroh::{Endpoint, EndpointAddr, EndpointBuilder};
-    use tokio::sync::{Mutex as TokioMutex, mpsc, watch};
 
     type BoxError = Box<dyn std::error::Error + Send + Sync>;
     type TestResult = Result<(), BoxError>;
@@ -755,56 +325,6 @@ mod tests {
         let mut buf = [0u8; SUBSCRIBE_OK.len()];
         recv.read_exact(&mut buf).await?;
         Ok((connection, buf))
-    }
-
-    #[derive(Clone)]
-    struct TestAllowListServerState {
-        bearer_token: &'static str,
-        receiver_endpoint_ids: Arc<TokioMutex<Vec<String>>>,
-        // Retained count of completed authorized fetches. Unlike a `Notify`,
-        // a `watch` holds its latest value, so a fetch that completes before a
-        // waiter starts observing is not lost — letting tests deterministically
-        // sequence "initial fetch happened" against later poll fetches.
-        fetches: watch::Sender<u64>,
-    }
-
-    async fn test_allowlist_handler(
-        State(state): State<TestAllowListServerState>,
-        headers: HeaderMap,
-    ) -> Response {
-        let authorized = headers
-            .get(AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value == format!("Bearer {}", state.bearer_token));
-        if !authorized {
-            return StatusCode::UNAUTHORIZED.into_response();
-        }
-
-        let receiver_endpoint_ids = state.receiver_endpoint_ids.lock().await.clone();
-        // Count the fetch only after the current id set has been read, so an
-        // observed count of N guarantees N fetches each saw the id set in force
-        // at their read.
-        state.fetches.send_modify(|count| *count += 1);
-        Json(serde_json::json!({ "receiver_endpoint_ids": receiver_endpoint_ids })).into_response()
-    }
-
-    async fn spawn_test_allowlist_server(
-        receiver_endpoint_ids: Arc<TokioMutex<Vec<String>>>,
-    ) -> Result<(String, watch::Receiver<u64>, tokio::task::JoinHandle<()>), BoxError> {
-        let (fetches, fetches_rx) = watch::channel(0u64);
-        let app = Router::new()
-            .route("/allowlist/receivers", get(test_allowlist_handler))
-            .with_state(TestAllowListServerState {
-                bearer_token: "thin-secret",
-                receiver_endpoint_ids,
-                fetches,
-            });
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let url = format!("http://{}", listener.local_addr()?);
-        let server = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        Ok((url, fetches_rx, server))
     }
 
     #[tokio::test]
@@ -927,498 +447,116 @@ mod tests {
         Ok(())
     }
 
-    #[derive(Clone)]
-    struct TestCatalogServerState {
-        bearer_token: &'static str,
-        received: Arc<TokioMutex<Option<(HeaderMap, serde_json::Value)>>>,
-    }
+    #[tokio::test]
+    async fn apply_update_preserves_pinned_receivers() -> TestResult {
+        let pinned = EndpointBuilder::test([70; 32]).bind().await?;
+        let server_only = EndpointBuilder::test([71; 32]).bind().await?;
 
-    async fn test_catalog_handler(
-        State(state): State<TestCatalogServerState>,
-        headers: HeaderMap,
-        Json(body): Json<serde_json::Value>,
-    ) -> Response {
-        let authorized = headers
-            .get(AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value == format!("Bearer {}", state.bearer_token));
-        if !authorized {
-            return StatusCode::UNAUTHORIZED.into_response();
-        }
-        *state.received.lock().await = Some((headers.clone(), body));
-        StatusCode::OK.into_response()
-    }
+        let allow = AllowList::new(vec![]);
+        allow.set_pinned([pinned.endpoint_id()]);
 
-    /// `/register` mock: records the request and returns a minted device token.
-    async fn test_register_handler(
-        State(state): State<TestCatalogServerState>,
-        headers: HeaderMap,
-        Json(body): Json<serde_json::Value>,
-    ) -> Response {
-        let authorized = headers
-            .get(AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value == format!("Bearer {}", state.bearer_token));
-        if !authorized {
-            return StatusCode::UNAUTHORIZED.into_response();
-        }
-        *state.received.lock().await = Some((headers.clone(), body));
-        Json(serde_json::json!({
-            "endpoint_id": "fwd-node-1",
-            "device_kind": "forwarder",
-            "approval_state": "pending",
-            "device_token": "rtk_minted_secret"
-        }))
-        .into_response()
+        // Server snapshot that does NOT contain the pinned receiver.
+        let revoked = allow.apply_update([server_only.endpoint_id()])?;
+
+        assert!(
+            allow.contains(&pinned.endpoint_id()),
+            "pinned receiver must survive server snapshot"
+        );
+        assert!(allow.contains(&server_only.endpoint_id()));
+        assert!(
+            !revoked.contains(&pinned.endpoint_id()),
+            "pinned receiver must never be revoked"
+        );
+
+        pinned.close().await;
+        server_only.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn catalog_client_posts_registration_and_catalog_with_bearer() -> TestResult {
-        let received = Arc::new(TokioMutex::new(None));
-        let app = Router::new()
-            .route("/register", post(test_register_handler))
-            .route("/forwarder/catalog", post(test_catalog_handler))
-            .with_state(TestCatalogServerState {
-                bearer_token: "thin-secret",
-                received: received.clone(),
-            });
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let base_url = format!("http://{}", listener.local_addr()?);
-        let server = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
+    async fn apply_update_does_not_persist_pinned_to_cache() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let cache_path = dir.path().join("allowlist");
 
-        let client = ServerCatalogClient::new(base_url, "thin-secret");
-        let minted = client
-            .bootstrap("fwd-node-1")
-            .await
-            .expect("bootstrap request succeeds");
-        assert_eq!(minted, "rtk_minted_secret");
-        let (headers, register_body) = received
-            .lock()
-            .await
-            .take()
-            .expect("server captured registration request");
+        let pinned = EndpointBuilder::test([72; 32]).bind().await?;
+        let server_only = EndpointBuilder::test([73; 32]).bind().await?;
+
+        let allow = AllowList::load(&cache_path)?;
+        allow.set_pinned([pinned.endpoint_id()]);
+        allow.apply_update([server_only.endpoint_id()])?;
+
+        let cached = parse_endpoint_ids(&std::fs::read_to_string(&cache_path)?)?;
         assert_eq!(
-            headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
-            "Bearer thin-secret"
+            cached,
+            HashSet::from([server_only.endpoint_id()]),
+            "cache must hold the server snapshot only, never pinned receivers"
         );
-        assert_eq!(register_body["endpoint_id"], "fwd-node-1");
-        assert_eq!(register_body["device_kind"], "forwarder");
 
-        client
-            .push_catalog(&ForwarderCatalog {
-                endpoint_id: "fwd-node-1".to_owned(),
-                display_name: Some("Start Line".to_owned()),
-                direct_addrs: vec!["127.0.0.1:12345".to_owned()],
-                streams: vec![ForwarderCatalogStream {
-                    stream_id: "reader-a".to_owned(),
-                    epoch: 3,
-                    next_seq: 42,
-                }],
-            })
-            .await
-            .expect("catalog request succeeds");
-        let (headers, catalog_body) = received
-            .lock()
-            .await
-            .take()
-            .expect("server captured catalog request");
-        assert_eq!(
-            headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
-            "Bearer thin-secret"
-        );
-        assert_eq!(catalog_body["endpoint_id"], "fwd-node-1");
-        assert_eq!(catalog_body["display_name"], "Start Line");
-        assert_eq!(
-            catalog_body["direct_addrs"],
-            serde_json::json!(["127.0.0.1:12345"])
-        );
-        assert_eq!(catalog_body["streams"][0]["stream_id"], "reader-a");
-        assert_eq!(catalog_body["streams"][0]["epoch"], 3);
-        assert_eq!(catalog_body["streams"][0]["next_seq"], 42);
-
-        server.abort();
+        pinned.close().await;
+        server_only.close().await;
         Ok(())
     }
 
     #[tokio::test]
-    async fn approved_receiver_appears_in_forwarder_list() -> TestResult {
-        let receiver = EndpointBuilder::test([50; 32]).bind().await?;
-        let receiver_endpoint_ids =
-            Arc::new(TokioMutex::new(vec![receiver.endpoint_id().to_string()]));
-        let (base_url, _fetches, server) =
-            spawn_test_allowlist_server(receiver_endpoint_ids).await?;
-        let client = ServerAllowListClient::new(base_url, "thin-secret");
-        let allow = AllowList::default();
+    async fn apply_update_does_not_force_close_pinned_connection() -> TestResult {
+        let receiver = EndpointBuilder::test([74; 32]).bind().await?;
+        let forwarder = EndpointBuilder::test([75; 32]).bind().await?;
+        let forwarder_addr = forwarder.endpoint_addr().await;
 
-        fetch_and_apply_once(&client, &allow).await?;
+        let allow = AllowList::new(vec![]);
+        allow.set_pinned([receiver.endpoint_id()]);
+        let server = tokio::spawn(admission_server(forwarder.clone(), allow.clone()));
 
-        assert!(allow.contains(&receiver.endpoint_id()));
+        // Establish and confirm an admitted, registered subscription.
+        let (connection, reply) =
+            tokio::time::timeout(Duration::from_secs(5), subscribe(&receiver, forwarder_addr))
+                .await??;
+        assert_eq!(&reply, SUBSCRIBE_OK);
+
+        // An empty server snapshot must not revoke or force-close the pinned peer.
+        let revoked = allow.apply_update([])?;
+        assert!(revoked.is_empty(), "pinned peer must not be revoked");
+
+        // The connection stays functional: a fresh subscription probe on the
+        // same connection still succeeds.
+        let (mut send, mut recv) = connection.open_bi().await?;
+        send.write_all(SUBSCRIBE).await?;
+        send.finish()?;
+        let mut buf = [0u8; SUBSCRIBE_OK.len()];
+        tokio::time::timeout(Duration::from_secs(5), recv.read_exact(&mut buf)).await??;
+        assert_eq!(&buf, SUBSCRIBE_OK);
+
         server.abort();
         receiver.close().await;
+        forwarder.close().await;
         Ok(())
     }
 
     #[tokio::test]
-    async fn revoke_propagates() -> TestResult {
-        let receiver = EndpointBuilder::test([51; 32]).bind().await?;
-        let allow = AllowList::new([receiver.endpoint_id()]);
-        let receiver_endpoint_ids =
-            Arc::new(TokioMutex::new(vec![receiver.endpoint_id().to_string()]));
-        let (base_url, _fetches, server) =
-            spawn_test_allowlist_server(receiver_endpoint_ids).await?;
-        let client = ServerAllowListClient::new(base_url, "thin-secret");
-        let (tx, rx) = mpsc::channel(1);
-        let sync = tokio::spawn(run_allowlist_distribution(
-            allow.clone(),
-            client,
-            rx,
-            Duration::from_secs(60),
-        ));
+    async fn pinned_receivers_removed_from_config_are_not_resurrected_on_reboot() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let cache_path = dir.path().join("allowlist");
 
-        tx.send(ReceiverAllowListUpdate::replace(Vec::new()))
-            .await?;
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while allow.contains(&receiver.endpoint_id()) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await?;
+        let pinned = EndpointBuilder::test([76; 32]).bind().await?;
+        let server_only = EndpointBuilder::test([77; 32]).bind().await?;
 
-        assert!(!allow.contains(&receiver.endpoint_id()));
-        sync.abort();
-        server.abort();
-        receiver.close().await;
-        Ok(())
-    }
+        // First boot: the receiver is pinned via static config and a server
+        // snapshot is persisted to the cache.
+        let first_boot = AllowList::load(&cache_path)?;
+        first_boot.set_pinned([pinned.endpoint_id()]);
+        first_boot.apply_update([server_only.endpoint_id()])?;
 
-    #[tokio::test]
-    async fn poll_backstop_refreshes() -> TestResult {
-        let receiver = EndpointBuilder::test([52; 32]).bind().await?;
-        let receiver_endpoint_ids = Arc::new(TokioMutex::new(Vec::new()));
-        let (base_url, mut fetches, server) =
-            spawn_test_allowlist_server(receiver_endpoint_ids.clone()).await?;
-        let client = ServerAllowListClient::new(base_url, "thin-secret");
-        let allow = AllowList::default();
-        let (_tx, rx) = mpsc::channel(1);
-        // Short poll interval with real time: the backstop must re-fetch on its
-        // own without any pushed update.
-        let sync = tokio::spawn(run_allowlist_distribution(
-            allow.clone(),
-            client,
-            rx,
-            Duration::from_millis(50),
-        ));
-
-        // Wait (on retained state) until the initial fetch has read the empty
-        // set, so the receiver can only be admitted by a later poll fetch.
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            fetches.wait_for(|&count| count >= 1),
-        )
-        .await??;
-        assert!(!allow.contains(&receiver.endpoint_id()));
-
-        // Publish the receiver; only the polling backstop can pick this up.
-        *receiver_endpoint_ids.lock().await = vec![receiver.endpoint_id().to_string()];
-
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !allow.contains(&receiver.endpoint_id()) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await?;
-
-        assert!(allow.contains(&receiver.endpoint_id()));
-        sync.abort();
-        server.abort();
-        receiver.close().await;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn stale_poll_does_not_override_newer_revocation() -> TestResult {
-        use std::sync::atomic::{AtomicU64, Ordering};
-
-        let receiver = EndpointBuilder::test([55; 32]).bind().await?;
-        // Start empty; the initial fetch admits the receiver from the old list.
-        let allow = AllowList::default();
-
-        #[derive(Clone)]
-        struct StallState {
-            // Old, pre-revocation list returned by every fetch: it still
-            // authorizes the receiver.
-            old_list: Vec<String>,
-            // 1-based count of requests received by the server.
-            requests: Arc<AtomicU64>,
-            // Broadcasts the latest request count so the test can sequence on it.
-            observed: watch::Sender<u64>,
-            // Releases exactly one gated (poll) request when notified once.
-            release: Arc<tokio::sync::Notify>,
-        }
-
-        async fn stall_handler(State(state): State<StallState>) -> Response {
-            let n = state.requests.fetch_add(1, Ordering::SeqCst) + 1;
-            state.observed.send_modify(|count| *count = (*count).max(n));
-            // The initial fetch (request 1) returns immediately so the receiver
-            // is admitted. Every later (poll) request blocks until explicitly
-            // released, so the test controls exactly when a poll completes.
-            if n >= 2 {
-                state.release.notified().await;
-            }
-            Json(serde_json::json!({ "receiver_endpoint_ids": state.old_list })).into_response()
-        }
-
-        let (observed_tx, mut observed_rx) = watch::channel(0u64);
-        let release = Arc::new(tokio::sync::Notify::new());
-        let app = Router::new()
-            .route("/allowlist/receivers", get(stall_handler))
-            .with_state(StallState {
-                old_list: vec![receiver.endpoint_id().to_string()],
-                requests: Arc::new(AtomicU64::new(0)),
-                observed: observed_tx,
-                release: release.clone(),
-            });
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let base_url = format!("http://{}", listener.local_addr()?);
-        let server = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-
-        let client = ServerAllowListClient::new(base_url, "thin-secret");
-        let (tx, rx) = mpsc::channel(1);
-        // Short poll interval so a poll fetch starts promptly after the initial
-        // fetch admits the receiver.
-        let sync = tokio::spawn(run_allowlist_distribution(
-            allow.clone(),
-            client,
-            rx,
-            Duration::from_millis(50),
-        ));
-
-        // Initial fetch (request 1) admits the receiver from the old list.
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !allow.contains(&receiver.endpoint_id()) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await?;
-
-        // A poll (request 2) is now in flight and blocked on the release gate.
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            observed_rx.wait_for(|&count| count >= 2),
-        )
-        .await??;
-
-        // Apply a pushed revocation while the poll fetch is still in flight.
-        tx.send(ReceiverAllowListUpdate::replace(Vec::new()))
-            .await?;
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while allow.contains(&receiver.endpoint_id()) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await?;
-
-        // Let the stale poll (request 2) complete with the old, pre-revocation
-        // list. notify_one releases exactly one waiter, so request 3 stays
-        // blocked and cannot itself re-admit the receiver.
-        release.notify_one();
-
-        // Request 3 starting proves the stale poll result has been fully
-        // processed by the distribution loop (the poll slot freed, a new tick
-        // fired). Request 3 then blocks on the gate without responding.
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            observed_rx.wait_for(|&count| count >= 3),
-        )
-        .await??;
-
+        // Reboot with the receiver removed from static config (no set_pinned):
+        // the cache must not resurrect it.
+        let second_boot = AllowList::load(&cache_path)?;
         assert!(
-            !allow.contains(&receiver.endpoint_id()),
-            "a stale in-flight poll must not re-authorize a receiver revoked while it was outstanding"
+            !second_boot.contains(&pinned.endpoint_id()),
+            "removing a receiver from static config must take effect on reboot"
         );
+        assert!(second_boot.contains(&server_only.endpoint_id()));
 
-        sync.abort();
-        server.abort();
-        receiver.close().await;
-        Ok(())
-    }
-
-    #[derive(Clone)]
-    struct PushServerState {
-        bearer_token: &'static str,
-        ids: Arc<TokioMutex<Vec<String>>>,
-        version: Arc<std::sync::atomic::AtomicU64>,
-        changed: Arc<tokio::sync::Notify>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct PushQuery {
-        since: Option<u64>,
-        wait: Option<u64>,
-    }
-
-    /// Mock long-poll allow-list endpoint mirroring the real server: holds the
-    /// request when the caller's `since` matches the current version, releasing
-    /// on a version bump, and always echoes the current `version`.
-    async fn push_allowlist_handler(
-        State(state): State<PushServerState>,
-        headers: HeaderMap,
-        axum::extract::Query(query): axum::extract::Query<PushQuery>,
-    ) -> Response {
-        let authorized = headers
-            .get(AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value == format!("Bearer {}", state.bearer_token));
-        if !authorized {
-            return StatusCode::UNAUTHORIZED.into_response();
-        }
-        let current = state.version.load(std::sync::atomic::Ordering::SeqCst);
-        let wait = query.wait.unwrap_or(0);
-        if wait > 0 && query.since == Some(current) {
-            let _ = tokio::time::timeout(Duration::from_secs(wait), state.changed.notified()).await;
-        }
-        let version = state.version.load(std::sync::atomic::Ordering::SeqCst);
-        let ids = state.ids.lock().await.clone();
-        Json(serde_json::json!({ "receiver_endpoint_ids": ids, "version": version }))
-            .into_response()
-    }
-
-    #[tokio::test]
-    async fn push_subscription_delivers_initial_snapshot_then_releases_on_bump() -> TestResult {
-        let ids = Arc::new(TokioMutex::new(Vec::<String>::new()));
-        let version = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let changed = Arc::new(tokio::sync::Notify::new());
-        let app = Router::new()
-            .route("/allowlist/receivers", get(push_allowlist_handler))
-            .with_state(PushServerState {
-                bearer_token: "thin-secret",
-                ids: ids.clone(),
-                version: version.clone(),
-                changed: changed.clone(),
-            });
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let base_url = format!("http://{}", listener.local_addr()?);
-        let server = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-
-        let client = ServerAllowListClient::new(base_url, "thin-secret");
-        let (tx, mut rx) = mpsc::channel(8);
-        let sub = tokio::spawn(run_allowlist_push_subscription(
-            client,
-            tx,
-            Duration::from_secs(5),
-        ));
-
-        // The initial request omits `since`, so the server returns immediately
-        // with the empty snapshot at version 0.
-        let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await?
-            .expect("initial snapshot delivered");
-        assert_eq!(first.version, 0);
-        assert!(first.receiver_endpoint_ids.is_empty());
-
-        // The subscription is now held at version 0. An approval bumps the
-        // version and must release it within milliseconds with the new set.
-        *ids.lock().await = vec!["receiver-1".to_owned()];
-        version.store(1, std::sync::atomic::Ordering::SeqCst);
-        changed.notify_waiters();
-
-        let second = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await?
-            .expect("approval releases the held long-poll");
-        assert_eq!(second.version, 1);
-        assert_eq!(second.receiver_endpoint_ids, vec!["receiver-1".to_owned()]);
-
-        sub.abort();
-        server.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn debug_redacts_bearer_token() {
-        let client = ServerAllowListClient::new("http://thin.example", "super-secret-token");
-        let rendered = format!("{client:?}");
-        assert!(
-            !rendered.contains("super-secret-token"),
-            "bearer token must never appear in Debug output: {rendered}"
-        );
-        assert!(rendered.contains("<redacted>"));
-    }
-
-    #[tokio::test]
-    async fn hung_server_request_times_out() -> TestResult {
-        // A handler that never responds: only the client request timeout can
-        // unblock the fetch.
-        async fn hang() -> Response {
-            std::future::pending::<()>().await;
-            StatusCode::OK.into_response()
-        }
-        let app = Router::new().route("/allowlist/receivers", get(hang));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let base_url = format!("http://{}", listener.local_addr()?);
-        let server = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-
-        let client = ServerAllowListClient::with_timeout(
-            base_url,
-            "thin-secret",
-            Duration::from_millis(200),
-        );
-        let allow = AllowList::default();
-
-        // Outer guard far exceeds the request timeout: if the request timeout
-        // works, the fetch returns an error well before this elapses.
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            fetch_and_apply_once(&client, &allow),
-        )
-        .await?;
-        assert!(
-            matches!(result, Err(AllowListRefreshError::Http(_))),
-            "hung request must surface as a bounded HTTP error, got {result:?}"
-        );
-
-        server.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn malformed_active_id_does_not_block_valid_revocation() -> TestResult {
-        let retained = EndpointBuilder::test([53; 32]).bind().await?;
-        let revoked = EndpointBuilder::test([54; 32]).bind().await?;
-        let allow = AllowList::new([retained.endpoint_id(), revoked.endpoint_id()]);
-
-        // The server can contain arbitrary endpoint_id text from receiver
-        // registration. An invalid active id must be ignored, while the valid
-        // omission of `revoked` still removes its authorization.
-        let receiver_endpoint_ids = Arc::new(TokioMutex::new(vec![
-            retained.endpoint_id().to_string(),
-            "not-a-valid-endpoint-id".to_owned(),
-        ]));
-        let (base_url, _fetches, server) =
-            spawn_test_allowlist_server(receiver_endpoint_ids).await?;
-        let client = ServerAllowListClient::new(base_url, "thin-secret");
-
-        let result = fetch_and_apply_once(&client, &allow).await?;
-        assert_eq!(result, vec![revoked.endpoint_id()]);
-        assert!(
-            allow.contains(&retained.endpoint_id()),
-            "valid active receiver must remain authorized"
-        );
-        assert!(
-            !allow.contains(&revoked.endpoint_id()),
-            "valid revocation must apply even when the response also contains a malformed id"
-        );
-
-        server.abort();
-        retained.close().await;
-        revoked.close().await;
+        pinned.close().await;
+        server_only.close().await;
         Ok(())
     }
 }

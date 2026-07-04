@@ -84,6 +84,9 @@ or `server_url`.
 |-------|------|----------|---------|-------------|
 | `allow_power_actions` | `bool` | No | `false` | Enables local control API actions that restart or shut down the host. |
 | `allow_remote_config` | `bool` | No | `true` | Allows receivers to read/write forwarder config over the P2P control plane. |
+| `allow_reader_control` | `bool` | No | `true` | Allows receivers to execute reader-control verbs (status, download, clear, epoch) over the P2P control plane. |
+
+Remote (P2P) config writes may not modify `[auth]`, `[p2p]`, or `[control]`; those sections are only editable locally.
 
 ### `[update]`
 
@@ -147,6 +150,7 @@ bind = "127.0.0.1:8080"
 [control]
 allow_power_actions = false
 allow_remote_config = true
+allow_reader_control = true
 
 [update]
 mode = "check-and-download"
@@ -160,3 +164,13 @@ enabled = true
 
 See [Forwarder operations](../../docs/runbooks/forwarder-operations.md) for
 startup, recovery, retention, and epoch procedures.
+
+### Startup pause after journal loss
+
+When the journal is missing for a configured reader and a coordination server
+is configured, startup fetches the server's stored stream high-water to avoid
+reusing sequence numbers (which would make receivers silently discard reads).
+If the server is unreachable, this retries up to 3 times, 5 seconds apart, so
+a boot can pause roughly 15–20 seconds before local capture starts. The
+fallback is loud: an error-level log and UI log entry note that receiver dedup
+may discard reads if this host previously forwarded the stream.

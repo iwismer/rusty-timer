@@ -22,3 +22,11 @@ pub struct ForwarderCatalogResponse {
     pub endpoint_id: String,
     pub stream_count: usize,
 }
+
+/// Wire-format response for `GET /forwarder/catalog`: the caller's own stored
+/// stream catalog (per-stream `epoch`/`next_seq` high-water), used by a forwarder
+/// to restore stream identity after local journal loss.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwarderOwnCatalogResponse {
+    pub streams: Vec<ForwarderCatalogStream>,
+}

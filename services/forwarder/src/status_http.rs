@@ -46,6 +46,13 @@
 //! # Security
 //! No authentication in v1.
 
+use crate::config_service::{ConfigState, apply_control_action, require_object_payload};
+use crate::status_store::{
+    ForwarderStatusEvent, ForwarderStatusFeed, ReaderConnectionState, StatusStore, SubsystemStatus,
+    UpsStatusState,
+};
+#[cfg(test)]
+use crate::status_store::{ReaderStatus, broadcast_dirty_read_counts};
 use crate::storage::journal::Journal;
 use axum::Router;
 use axum::body::Bytes;
@@ -55,17 +62,15 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use rt_updater::UpdateStatus;
-use rt_updater::workflow::{RealChecker, WorkflowState, run_check, run_download};
-use serde::Serialize;
+use rt_updater::workflow::{RealChecker, run_check, run_download};
 use serde::de::DeserializeOwned;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::Infallible;
-use std::future::Future;
-use std::io::Write as _;
-use std::net::{SocketAddr, SocketAddrV4};
-use std::pin::Pin;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, broadcast};
 
@@ -83,316 +88,6 @@ pub struct StatusConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Subsystem readiness
-// ---------------------------------------------------------------------------
-
-/// Connection state of a reader TCP socket.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ReaderConnectionState {
-    Connecting,
-    Connected,
-    Disconnected,
-}
-
-impl From<&ReaderConnectionState> for crate::ui_events::ReaderConnectionState {
-    fn from(state: &ReaderConnectionState) -> Self {
-        match state {
-            ReaderConnectionState::Connected => crate::ui_events::ReaderConnectionState::Connected,
-            ReaderConnectionState::Connecting => {
-                crate::ui_events::ReaderConnectionState::Connecting
-            }
-            ReaderConnectionState::Disconnected => {
-                crate::ui_events::ReaderConnectionState::Disconnected
-            }
-        }
-    }
-}
-
-/// Per-reader status tracked in memory.
-#[derive(Debug, Clone)]
-pub struct ReaderStatus {
-    pub state: ReaderConnectionState,
-    pub last_seen: Option<Instant>,
-    pub reads_since_restart: u64,
-    pub reads_total: i64,
-    /// The local port the forwarder listens on to re-expose reads from this reader.
-    pub local_port: u16,
-    /// The name of the current epoch, if any.
-    pub current_epoch_name: Option<String>,
-    /// Control protocol info (firmware, clock, etc.) — populated on connect.
-    pub reader_info: Option<crate::reader_control::ReaderInfo>,
-}
-
-/// UPS daemon availability + latest readings snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct UpsStatusState {
-    pub available: bool,
-    pub status: Option<rt_domain::UpsStatus>,
-}
-
-/// Forwarder-local status updates consumed by P2P control sessions.
-#[derive(Debug, Clone)]
-pub enum ForwarderStatusEvent {
-    ReaderStatus {
-        stream_id: String,
-        status: ReaderStatus,
-    },
-    ReaderInfo {
-        stream_id: String,
-        info: crate::reader_control::ReaderInfo,
-    },
-    DownloadProgress {
-        stream_id: String,
-        event: crate::reader_control::DownloadEvent,
-    },
-    UpsStatus(UpsStatusState),
-}
-
-/// Current forwarder status snapshot consumed by a newly connected P2P peer.
-#[derive(Debug, Clone, Default)]
-pub struct ForwarderStatusSnapshot {
-    pub readers: Vec<(String, ReaderStatus)>,
-    pub ups_status: Option<UpsStatusState>,
-}
-
-/// Read-only status feed for P2P control sessions.
-#[derive(Clone)]
-pub struct ForwarderStatusFeed {
-    subsystem: Arc<Mutex<SubsystemStatus>>,
-    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
-}
-
-impl ForwarderStatusFeed {
-    /// Atomically subscribe to the status broadcast and capture the current
-    /// snapshot under the same `SubsystemStatus` lock.
-    ///
-    /// Holding the lock across both operations guarantees the returned snapshot
-    /// and the delta stream do not overlap: every status update either landed in
-    /// the snapshot (and was broadcast before this subscription existed) or is
-    /// delivered as a post-snapshot delta on the returned receiver. This relies
-    /// on all `ForwarderStatusEvent` broadcasts being emitted while holding the
-    /// same lock. No `.await` is held across the lock.
-    pub async fn subscribe_and_snapshot(
-        &self,
-    ) -> (
-        broadcast::Receiver<ForwarderStatusEvent>,
-        ForwarderStatusSnapshot,
-    ) {
-        let ss = self.subsystem.lock().await;
-        let receiver = self.status_event_tx.subscribe();
-        let snapshot = ForwarderStatusSnapshot {
-            readers: ss
-                .readers()
-                .iter()
-                .map(|(stream_id, status)| (stream_id.clone(), status.clone()))
-                .collect(),
-            ups_status: ss.ups_status().cloned(),
-        };
-        (receiver, snapshot)
-    }
-}
-
-/// Tracks local subsystem readiness for the `/readyz` endpoint.
-///
-/// Ready = config loaded + journal open + worker tasks started.
-/// P2P session connectivity is explicitly excluded from readiness.
-#[derive(Debug, Clone)]
-pub struct SubsystemStatus {
-    ready: bool,
-    reason: Option<String>,
-    /// P2P session state is tracked for the status page but does NOT affect readiness.
-    p2p_connected: bool,
-    p2p_endpoint_id: Option<String>,
-    forwarder_id: String,
-    local_ip: Option<String>,
-    pub(crate) readers: HashMap<String, ReaderStatus>,
-    update_status: UpdateStatus,
-    staged_update_path: Option<std::path::PathBuf>,
-    pub update_mode: rt_updater::UpdateMode,
-    /// Set to `true` when config is saved and the forwarder needs a restart to apply changes.
-    restart_needed: bool,
-    /// UPS status snapshot (None if UPS monitoring is not configured).
-    ups_status: Option<UpsStatusState>,
-    /// Readers whose read counters changed since the last coalesced P2P
-    /// status broadcast (see [`spawn_read_count_broadcaster`]).
-    read_counts_dirty: HashSet<String>,
-}
-
-impl SubsystemStatus {
-    /// Create a fully-ready subsystem status.
-    pub fn ready() -> Self {
-        SubsystemStatus {
-            ready: true,
-            reason: None,
-            p2p_connected: false,
-            p2p_endpoint_id: None,
-            forwarder_id: String::new(),
-            local_ip: None,
-            readers: HashMap::new(),
-            update_status: UpdateStatus::UpToDate,
-            staged_update_path: None,
-            update_mode: rt_updater::UpdateMode::default(),
-            restart_needed: false,
-            ups_status: None,
-            read_counts_dirty: HashSet::new(),
-        }
-    }
-
-    /// Create a not-ready subsystem status with a reason.
-    pub fn not_ready(reason: String) -> Self {
-        SubsystemStatus {
-            ready: false,
-            reason: Some(reason),
-            p2p_connected: false,
-            p2p_endpoint_id: None,
-            forwarder_id: String::new(),
-            local_ip: None,
-            readers: HashMap::new(),
-            update_status: UpdateStatus::UpToDate,
-            staged_update_path: None,
-            update_mode: rt_updater::UpdateMode::default(),
-            restart_needed: false,
-            ups_status: None,
-            read_counts_dirty: HashSet::new(),
-        }
-    }
-
-    /// Set the P2P session state (does NOT affect `/readyz` result).
-    pub fn set_p2p_connected(&mut self, connected: bool) {
-        self.p2p_connected = connected;
-    }
-
-    /// Return true if all local subsystems are ready.
-    pub fn is_ready(&self) -> bool {
-        self.ready
-    }
-
-    /// Return the P2P session state.
-    pub fn p2p_connected(&self) -> bool {
-        self.p2p_connected
-    }
-
-    pub fn set_p2p_endpoint_id(&mut self, endpoint_id: String) {
-        self.p2p_endpoint_id = Some(endpoint_id);
-    }
-
-    /// Return whether a restart is needed to apply saved config changes.
-    pub fn restart_needed(&self) -> bool {
-        self.restart_needed
-    }
-
-    /// Mark that a restart is needed to apply saved config changes.
-    pub fn set_restart_needed(&mut self) {
-        self.restart_needed = true;
-    }
-
-    /// Return the connection state for a given reader IP, if tracked.
-    pub fn reader_connection_state(&self, reader_ip: &str) -> Option<ReaderConnectionState> {
-        self.readers.get(reader_ip).map(|r| r.state.clone())
-    }
-
-    /// Return a reference to the readers map.
-    pub fn readers(&self) -> &HashMap<String, ReaderStatus> {
-        &self.readers
-    }
-
-    pub(crate) fn cached_reader_info(
-        &self,
-        reader_ip: &str,
-    ) -> Option<crate::reader_control::ReaderInfo> {
-        self.readers
-            .get(reader_ip)
-            .and_then(|r| r.reader_info.clone())
-    }
-
-    pub(crate) fn update_cached_reader_info_unless_disconnected(
-        &mut self,
-        reader_ip: &str,
-        info: crate::reader_control::ReaderInfo,
-    ) -> bool {
-        let Some(reader) = self.readers.get_mut(reader_ip) else {
-            tracing::warn!(reader_ip = %reader_ip, "update_cached_reader_info: reader not found in status map, skipping broadcast");
-            return false;
-        };
-        if reader.state == ReaderConnectionState::Disconnected {
-            tracing::debug!(
-                reader_ip,
-                "dropping cached reader info update for disconnected reader"
-            );
-            return false;
-        }
-        reader.reader_info = Some(info);
-        true
-    }
-
-    /// Set the UPS status snapshot.
-    pub fn set_ups_status(&mut self, state: UpsStatusState) {
-        self.ups_status = Some(state);
-    }
-
-    /// Return the current UPS status snapshot, if any.
-    pub fn ups_status(&self) -> Option<&UpsStatusState> {
-        self.ups_status.as_ref()
-    }
-}
-
-#[cfg(any(feature = "eink", feature = "lcd"))]
-fn subsystem_to_display_state(
-    ss: &SubsystemStatus,
-    forwarder_name: Option<String>,
-    cpu_temp: Option<f32>,
-) -> rt_screen::state::DisplayState {
-    let readers = ss
-        .readers()
-        .iter()
-        .map(|(addr, r)| {
-            // Reader addresses are "ip:port" — extract just the IP.
-            let ip = addr
-                .rsplit_once(':')
-                .map_or(addr.as_str(), |(ip, _)| ip)
-                .to_owned();
-            rt_screen::state::ReaderDisplayState {
-                ip,
-                state: match r.state {
-                    ReaderConnectionState::Connected => {
-                        rt_screen::state::ReaderConnectionState::Connected
-                    }
-                    ReaderConnectionState::Connecting => {
-                        rt_screen::state::ReaderConnectionState::Connecting
-                    }
-                    ReaderConnectionState::Disconnected => {
-                        rt_screen::state::ReaderConnectionState::Disconnected
-                    }
-                },
-                drift_ms: r
-                    .reader_info
-                    .as_ref()
-                    .and_then(|info| info.clock.as_ref())
-                    .map(|c| c.drift_ms),
-                session_reads: r.reads_since_restart,
-            }
-        })
-        .collect();
-
-    let total_reads: u64 = ss.readers().values().map(|r| r.reads_since_restart).sum();
-
-    rt_screen::state::DisplayState {
-        forwarder_name,
-        local_ip: ss.local_ip.clone(),
-        p2p_connected: ss.p2p_connected(),
-        readers,
-        total_reads,
-        cpu_temp_celsius: cpu_temp,
-        battery: ss.ups_status().and_then(|u| {
-            u.status.as_ref().map(|s| rt_screen::state::BatteryState {
-                percent: s.battery_percent,
-                charging: s.charging,
-            })
-        }),
-    }
-}
-
-// ---------------------------------------------------------------------------
 // StatusServer handle
 // ---------------------------------------------------------------------------
 
@@ -400,42 +95,11 @@ fn subsystem_to_display_state(
 #[derive(Clone)]
 pub struct StatusServer {
     local_addr: SocketAddr,
-    subsystem: Arc<Mutex<SubsystemStatus>>,
-    ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
-    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
-    logger: Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-    control_clients:
-        Arc<std::sync::RwLock<HashMap<String, Arc<crate::reader_control::ControlClient>>>>,
-    download_trackers: Arc<
-        std::sync::RwLock<
-            HashMap<String, Arc<tokio::sync::Mutex<crate::reader_control::DownloadTracker>>>,
-        >,
-    >,
-    reconnect_notifies: Arc<std::sync::RwLock<HashMap<String, Arc<Notify>>>>,
-    #[cfg(any(feature = "eink", feature = "lcd"))]
-    display_tx: Option<tokio::sync::watch::Sender<rt_screen::state::DisplayState>>,
-    #[cfg(any(feature = "eink", feature = "lcd"))]
-    display_name: Arc<Mutex<Option<String>>>,
-    #[cfg(any(feature = "eink", feature = "lcd"))]
-    cpu_temp: Arc<Mutex<Option<f32>>>,
-}
-
-/// Holds the config file path and a write lock for read-modify-write operations.
-pub struct ConfigState {
-    pub path: std::path::PathBuf,
-    pub(crate) write_lock: Mutex<()>,
-}
-
-impl ConfigState {
-    pub fn new(path: std::path::PathBuf) -> Self {
-        ConfigState {
-            path,
-            write_lock: Mutex::new(()),
-        }
-    }
+    store: StatusStore,
 }
 
 struct AppState<J: JournalAccess + Send + 'static> {
+    store: StatusStore,
     subsystem: Arc<Mutex<SubsystemStatus>>,
     journal: Arc<Mutex<J>>,
     version: Arc<String>,
@@ -452,10 +116,6 @@ struct AppState<J: JournalAccess + Send + 'static> {
         >,
     >,
     reconnect_notifies: Arc<std::sync::RwLock<HashMap<String, Arc<Notify>>>>,
-    #[cfg(any(feature = "eink", feature = "lcd"))]
-    display_name: Arc<Mutex<Option<String>>>,
-    #[cfg(any(feature = "eink", feature = "lcd"))]
-    cpu_temp: Arc<Mutex<Option<f32>>>,
 }
 
 impl<J: JournalAccess + Send + 'static> AppState<J> {
@@ -475,6 +135,7 @@ impl<J: JournalAccess + Send + 'static> AppState<J> {
 impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
     fn clone(&self) -> Self {
         Self {
+            store: self.store.clone(),
             subsystem: self.subsystem.clone(),
             journal: self.journal.clone(),
             version: self.version.clone(),
@@ -486,101 +147,8 @@ impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
             control_clients: self.control_clients.clone(),
             download_trackers: self.download_trackers.clone(),
             reconnect_notifies: self.reconnect_notifies.clone(),
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            display_name: self.display_name.clone(),
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            cpu_temp: self.cpu_temp.clone(),
         }
     }
-}
-
-fn bridge_download_progress_events(
-    stream_id: String,
-    tracker: Arc<tokio::sync::Mutex<crate::reader_control::DownloadTracker>>,
-    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
-) {
-    if let Ok(tracker) = tracker.try_lock() {
-        spawn_download_progress_bridge(stream_id, tracker.subscribe(), status_event_tx);
-        return;
-    }
-
-    tokio::spawn(async move {
-        let rx = {
-            let tracker = tracker.lock().await;
-            tracker.subscribe()
-        };
-        spawn_download_progress_bridge(stream_id, rx, status_event_tx);
-    });
-}
-
-fn spawn_download_progress_bridge(
-    stream_id: String,
-    mut rx: broadcast::Receiver<crate::reader_control::DownloadEvent>,
-    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
-) {
-    tokio::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    let _ = status_event_tx.send(ForwarderStatusEvent::DownloadProgress {
-                        stream_id: stream_id.clone(),
-                        event,
-                    });
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::debug!(skipped = n, "download status bridge lagged");
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    });
-}
-
-/// Interval at which accumulated read-count changes are broadcast to P2P
-/// control sessions as `ReaderStatus` deltas.
-const READ_COUNT_BROADCAST_INTERVAL: Duration = Duration::from_secs(2);
-
-/// Broadcast a `ReaderStatus` delta for every reader whose read counters
-/// changed since the last tick (see `record_read`).
-///
-/// Sends while holding the `SubsystemStatus` lock so deltas stay ordered
-/// against `subscribe_and_snapshot`, like every other status broadcast.
-/// Broadcasting current state (not increments) makes a dropped or duplicated
-/// delta harmless: the next tick carries the up-to-date counters.
-async fn broadcast_dirty_read_counts(
-    subsystem: &Mutex<SubsystemStatus>,
-    status_event_tx: &broadcast::Sender<ForwarderStatusEvent>,
-) {
-    let mut ss = subsystem.lock().await;
-    if ss.read_counts_dirty.is_empty() {
-        return;
-    }
-    let dirty = std::mem::take(&mut ss.read_counts_dirty);
-    for reader_ip in dirty {
-        if let Some(status) = ss.readers.get(&reader_ip) {
-            let _ = status_event_tx.send(ForwarderStatusEvent::ReaderStatus {
-                stream_id: reader_ip,
-                status: status.clone(),
-            });
-        }
-    }
-}
-
-/// Spawn the coalescing task that pushes read-count updates to P2P peers at a
-/// bounded rate. Quiet when no reads arrive; at most one delta per reader per
-/// interval during bursts.
-fn spawn_read_count_broadcaster(
-    subsystem: Arc<Mutex<SubsystemStatus>>,
-    status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
-) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(READ_COUNT_BROADCAST_INTERVAL);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            ticker.tick().await;
-            broadcast_dirty_read_counts(&subsystem, &status_event_tx).await;
-        }
-    });
 }
 
 impl StatusServer {
@@ -589,149 +157,94 @@ impl StatusServer {
         self.local_addr
     }
 
+    /// Return a clone of the pure status store.
+    pub fn store(&self) -> StatusStore {
+        self.store.clone()
+    }
+
     /// Return a clone of the internal subsystem status Arc.
     pub fn subsystem_arc(&self) -> Arc<Mutex<SubsystemStatus>> {
-        self.subsystem.clone()
+        self.store.subsystem_arc()
     }
 
     /// Return a clone of the UI event broadcast sender.
     pub fn ui_sender(&self) -> tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent> {
-        self.ui_tx.clone()
+        self.store.ui_sender()
     }
 
     /// Return a read-only status feed for P2P control sessions.
     pub fn status_feed(&self) -> ForwarderStatusFeed {
-        ForwarderStatusFeed {
-            subsystem: self.subsystem.clone(),
-            status_event_tx: self.status_event_tx.clone(),
-        }
+        self.store.status_feed()
     }
 
     /// Return the shared reader-control service used by HTTP and P2P control paths.
     pub fn reader_control_service(&self) -> crate::reader_control_service::ReaderControlService {
-        crate::reader_control_service::ReaderControlService::new(
-            self.subsystem.clone(),
-            self.control_clients.clone(),
-            self.download_trackers.clone(),
-            self.reconnect_notifies.clone(),
-            self.ui_tx.clone(),
-            self.status_event_tx.clone(),
-            self.logger.clone(),
-        )
+        self.store.reader_control_service()
     }
 
     /// Return a clone of the shared UI logger Arc.
     pub fn logger(&self) -> Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>> {
-        self.logger.clone()
+        self.store.logger()
     }
 
     /// Mark all local subsystems as ready.
     pub async fn set_ready(&self) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            ss.ready = true;
-            ss.reason = None;
-            let _ = self
-                .ui_tx
-                .send(crate::ui_events::ForwarderUiEvent::StatusChanged {
-                    ready: ss.is_ready(),
-                    p2p_connected: ss.p2p_connected(),
-                    restart_needed: ss.restart_needed(),
-                });
-        }
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
+        self.store.set_ready().await;
     }
 
     /// Mark that a restart is needed to apply saved config changes.
     pub async fn set_restart_needed(&self) {
-        mark_restart_needed_and_emit(&self.subsystem, &self.ui_tx).await;
+        self.store.set_restart_needed().await;
     }
 
     /// Return whether a restart is needed to apply saved config changes.
     pub async fn restart_needed(&self) -> bool {
-        self.subsystem.lock().await.restart_needed()
+        self.store.restart_needed().await
     }
 
     pub async fn set_p2p_endpoint_id(&self, endpoint_id: String) {
-        let mut ss = self.subsystem.lock().await;
-        ss.set_p2p_endpoint_id(endpoint_id);
+        self.store.set_p2p_endpoint_id(endpoint_id).await;
     }
 
     /// Update the P2P session state (does not affect readiness).
     pub async fn set_p2p_connected(&self, connected: bool) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            ss.set_p2p_connected(connected);
-            let _ = self
-                .ui_tx
-                .send(crate::ui_events::ForwarderUiEvent::StatusChanged {
-                    ready: ss.is_ready(),
-                    p2p_connected: connected,
-                    restart_needed: ss.restart_needed(),
-                });
-        }
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
+        self.store.set_p2p_connected(connected).await;
     }
 
     /// Set the forwarder ID (call once at startup).
     pub async fn set_forwarder_id(&self, id: &str) {
-        self.subsystem.lock().await.forwarder_id = id.to_owned();
+        self.store.set_forwarder_id(id).await;
     }
 
     /// Set the detected local IP (at startup and on reader connect/disconnect).
     pub async fn set_local_ip(&self, ip: Option<String>) {
-        self.subsystem.lock().await.local_ip = ip;
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
+        self.store.set_local_ip(ip).await;
     }
 
     /// Set the update mode (controls check-only vs check-and-download behavior).
     pub async fn set_update_mode(&self, mode: rt_updater::UpdateMode) {
-        self.subsystem.lock().await.update_mode = mode;
+        self.store.set_update_mode(mode).await;
     }
 
     /// Update the current rt-updater status (shown on `/update/status`).
     pub async fn set_update_status(&self, status: UpdateStatus) {
-        self.subsystem.lock().await.update_status = status.clone();
-        let _ = self
-            .ui_tx
-            .send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged { status });
+        self.store.set_update_status(status).await;
     }
 
     /// Record the filesystem path of a downloaded update artifact ready to apply.
     pub async fn set_staged_update_path(&self, path: std::path::PathBuf) {
-        self.subsystem.lock().await.staged_update_path = Some(path);
+        self.store.set_staged_update_path(path).await;
     }
 
     /// Update the UPS status snapshot in the subsystem state.
-    ///
-    /// The local HTTP/UI snapshot is always updated, but the P2P control-event
-    /// broadcast only fires when the UPS status actually changed from the stored
-    /// previous value. The UPS poller calls this every interval, so gating the
-    /// broadcast on a real change avoids spamming connected receivers with
-    /// identical `UpsStatus` frames. The send happens under the subsystem lock so
-    /// it is ordered against `subscribe_and_snapshot`.
     pub async fn set_ups_status(&self, state: UpsStatusState) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            let changed = ss.ups_status() != Some(&state);
-            ss.set_ups_status(state.clone());
-            if changed {
-                let _ = self
-                    .status_event_tx
-                    .send(ForwarderStatusEvent::UpsStatus(state));
-            }
-        }
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
+        self.store.set_ups_status(state).await;
     }
 
     pub fn control_clients(
         &self,
     ) -> &Arc<std::sync::RwLock<HashMap<String, Arc<crate::reader_control::ControlClient>>>> {
-        &self.control_clients
+        self.store.control_clients()
     }
 
     #[allow(clippy::type_complexity)]
@@ -742,7 +255,7 @@ impl StatusServer {
             HashMap<String, Arc<tokio::sync::Mutex<crate::reader_control::DownloadTracker>>>,
         >,
     > {
-        &self.download_trackers
+        self.store.download_trackers()
     }
 
     pub fn register_download_tracker(
@@ -750,51 +263,23 @@ impl StatusServer {
         reader_ip: &str,
         tracker: Arc<tokio::sync::Mutex<crate::reader_control::DownloadTracker>>,
     ) {
-        self.download_trackers
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(reader_ip.to_owned(), tracker.clone());
-        bridge_download_progress_events(
-            reader_ip.to_owned(),
-            tracker,
-            self.status_event_tx.clone(),
-        );
+        self.store.register_download_tracker(reader_ip, tracker);
     }
 
     pub fn deregister_download_tracker(&self, reader_ip: &str) {
-        self.download_trackers
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(reader_ip);
+        self.store.deregister_download_tracker(reader_ip);
     }
 
     pub fn register_reconnect_notify(&self, reader_ip: &str, notify: Arc<Notify>) {
-        self.reconnect_notifies
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(reader_ip.to_owned(), notify);
+        self.store.register_reconnect_notify(reader_ip, notify);
     }
 
     pub fn deregister_reconnect_notify(&self, reader_ip: &str) {
-        self.reconnect_notifies
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(reader_ip);
+        self.store.deregister_reconnect_notify(reader_ip);
     }
 
     pub fn reconnect_notifies(&self) -> &Arc<std::sync::RwLock<HashMap<String, Arc<Notify>>>> {
-        &self.reconnect_notifies
-    }
-
-    #[cfg(any(feature = "eink", feature = "lcd"))]
-    async fn publish_display_state(&self) {
-        if let Some(ref tx) = self.display_tx {
-            let ss = self.subsystem.lock().await;
-            let forwarder_name = self.display_name.lock().await.clone();
-            let cpu_temp = *self.cpu_temp.lock().await;
-            let state = subsystem_to_display_state(&ss, forwarder_name, cpu_temp);
-            tx.send_replace(state);
-        }
+        self.store.reconnect_notifies()
     }
 
     #[cfg(any(feature = "eink", feature = "lcd"))]
@@ -802,24 +287,22 @@ impl StatusServer {
         &mut self,
         tx: tokio::sync::watch::Sender<rt_screen::state::DisplayState>,
     ) {
-        self.display_tx = Some(tx);
+        self.store.set_display_sender(tx);
     }
 
     #[cfg(any(feature = "eink", feature = "lcd"))]
     pub async fn set_display_name(&self, name: Option<String>) {
-        *self.display_name.lock().await = name;
-        self.publish_display_state().await;
+        self.store.set_display_name(name).await;
     }
 
     #[cfg(any(feature = "eink", feature = "lcd"))]
     pub async fn set_cpu_temp(&self, temp: Option<f32>) {
-        self.set_cpu_temp_cached(temp).await;
-        self.publish_display_state().await;
+        self.store.set_cpu_temp(temp).await;
     }
 
     #[cfg(any(feature = "eink", feature = "lcd"))]
     pub async fn set_cpu_temp_cached(&self, temp: Option<f32>) {
-        *self.cpu_temp.lock().await = temp;
+        self.store.set_cpu_temp_cached(temp).await;
     }
 
     /// Retrieve a clone of the cached reader info for a given reader IP.
@@ -827,10 +310,7 @@ impl StatusServer {
         &self,
         reader_ip: &str,
     ) -> Option<crate::reader_control::ReaderInfo> {
-        let ss = self.subsystem.lock().await;
-        ss.readers
-            .get(reader_ip)
-            .and_then(|r| r.reader_info.clone())
+        self.store.get_reader_info(reader_ip).await
     }
 
     pub async fn update_reader_info(
@@ -838,70 +318,18 @@ impl StatusServer {
         reader_ip: &str,
         info: crate::reader_control::ReaderInfo,
     ) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            if let Some(r) = ss.readers.get_mut(reader_ip) {
-                r.reader_info = Some(info.clone());
-            }
-            let _ = self
-                .ui_tx
-                .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
-                    ip: reader_ip.to_owned(),
-                    info: info.clone(),
-                });
-            // Broadcast under the lock so it is ordered against
-            // `subscribe_and_snapshot`.
-            let _ = self.status_event_tx.send(ForwarderStatusEvent::ReaderInfo {
-                stream_id: reader_ip.to_owned(),
-                info,
-            });
-        }
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
+        self.store.update_reader_info(reader_ip, info).await;
     }
 
     /// Update reader info only if the reader has not transitioned to Disconnected.
-    ///
-    /// This is used by the background poller so a late poll result cannot restore
-    /// stale info after the read loop has already marked the reader disconnected.
     pub async fn update_reader_info_unless_disconnected(
         &self,
         reader_ip: &str,
         info: crate::reader_control::ReaderInfo,
     ) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            if let Some(r) = ss.readers.get_mut(reader_ip) {
-                if r.state == ReaderConnectionState::Disconnected {
-                    tracing::debug!(
-                        reader_ip,
-                        "dropping reader info update for disconnected reader"
-                    );
-                    return;
-                }
-                r.reader_info = Some(info.clone());
-            } else {
-                tracing::debug!(
-                    reader_ip,
-                    "reader IP not found in map, skipping info update"
-                );
-                return;
-            }
-            let _ = self
-                .ui_tx
-                .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
-                    ip: reader_ip.to_owned(),
-                    info: info.clone(),
-                });
-            // Broadcast under the lock so it is ordered against
-            // `subscribe_and_snapshot`.
-            let _ = self.status_event_tx.send(ForwarderStatusEvent::ReaderInfo {
-                stream_id: reader_ip.to_owned(),
-                info,
-            });
-        }
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
+        self.store
+            .update_reader_info_unless_disconnected(reader_ip, info)
+            .await;
     }
 
     pub fn register_control_client(
@@ -909,143 +337,36 @@ impl StatusServer {
         reader_ip: &str,
         client: Arc<crate::reader_control::ControlClient>,
     ) {
-        self.control_clients
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(reader_ip.to_owned(), client);
+        self.store.register_control_client(reader_ip, client);
     }
 
     pub fn deregister_control_client(&self, reader_ip: &str) {
-        self.control_clients
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(reader_ip);
+        self.store.deregister_control_client(reader_ip);
     }
 
     /// Pre-populate all configured reader IPs as Disconnected.
-    ///
-    /// Each entry is `(reader_addr, local_port)` where `reader_addr` is `"ip:port"`
-    /// and `local_port` is the port the forwarder listens on to re-expose reads.
     pub async fn init_readers(&self, readers: &[(String, u16)]) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            for (addr, local_port) in readers {
-                ss.readers.entry(addr.clone()).or_insert(ReaderStatus {
-                    state: ReaderConnectionState::Disconnected,
-                    last_seen: None,
-                    reads_since_restart: 0,
-                    reads_total: 0,
-                    local_port: *local_port,
-                    current_epoch_name: None,
-                    reader_info: None,
-                });
-            }
-        }
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
+        self.store.init_readers(readers).await;
     }
 
     /// Seed a reader's total historical count from durable journal state.
     pub async fn set_reader_total(&self, reader_ip: &str, total: i64) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            if let Some(r) = ss.readers.get_mut(reader_ip) {
-                r.reads_total = total;
-            }
-        }
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
+        self.store.set_reader_total(reader_ip, total).await;
     }
 
     /// Set the current epoch name for a reader and broadcast a ReaderUpdated SSE event.
     pub async fn set_reader_epoch_name(&self, reader_ip: &str, name: Option<String>) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            if let Some(r) = ss.readers.get_mut(reader_ip) {
-                r.current_epoch_name = name;
-                let _ = self
-                    .ui_tx
-                    .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
-                        ip: reader_ip.to_owned(),
-                        state: (&r.state).into(),
-                        reads_session: r.reads_since_restart,
-                        reads_total: r.reads_total,
-                        last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
-                        local_port: r.local_port,
-                        current_epoch_name: r.current_epoch_name.clone(),
-                    });
-            }
-        }
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
+        self.store.set_reader_epoch_name(reader_ip, name).await;
     }
 
     /// Update a reader's connection state.
     pub async fn update_reader_state(&self, reader_ip: &str, state: ReaderConnectionState) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            if let Some(r) = ss.readers.get_mut(reader_ip) {
-                let changed = r.state != state;
-                if state == ReaderConnectionState::Disconnected {
-                    r.reader_info = None;
-                }
-                r.state = state;
-                let _ = self
-                    .ui_tx
-                    .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
-                        ip: reader_ip.to_owned(),
-                        state: (&r.state).into(),
-                        reads_session: r.reads_since_restart,
-                        reads_total: r.reads_total,
-                        last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
-                        local_port: r.local_port,
-                        current_epoch_name: r.current_epoch_name.clone(),
-                    });
-                // Only broadcast a P2P control delta on an actual state
-                // transition, and do so under the lock so it is ordered against
-                // `subscribe_and_snapshot`. The local UI event above is always
-                // emitted.
-                if changed {
-                    let _ = self
-                        .status_event_tx
-                        .send(ForwarderStatusEvent::ReaderStatus {
-                            stream_id: reader_ip.to_owned(),
-                            status: r.clone(),
-                        });
-                }
-            }
-        }
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
+        self.store.update_reader_state(reader_ip, state).await;
     }
 
     /// Record a successful chip read for a reader.
     pub async fn record_read(&self, reader_ip: &str) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            if let Some(r) = ss.readers.get_mut(reader_ip) {
-                r.reads_since_restart += 1;
-                r.reads_total += 1;
-                r.last_seen = Some(Instant::now());
-                let _ = self
-                    .ui_tx
-                    .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
-                        ip: reader_ip.to_owned(),
-                        state: (&r.state).into(),
-                        reads_session: r.reads_since_restart,
-                        reads_total: r.reads_total,
-                        last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
-                        local_port: r.local_port,
-                        current_epoch_name: r.current_epoch_name.clone(),
-                    });
-                // Per-read P2P broadcasts would flood the control stream during
-                // bursts, so reads only mark the reader dirty; the coalescing
-                // task broadcasts the latest counters at a bounded rate.
-                ss.read_counts_dirty.insert(reader_ip.to_owned());
-            }
-        }
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        self.publish_display_state().await;
+        self.store.record_read(reader_ip).await;
     }
 
     /// Start the status HTTP server without a journal (epoch reset returns 404).
@@ -1065,37 +386,20 @@ impl StatusServer {
         let listener = TcpListener::bind(&cfg.bind).await?;
         let local_addr = listener.local_addr()?;
 
-        let (ui_tx, _) = tokio::sync::broadcast::channel(256);
-        let (status_event_tx, _) = broadcast::channel(256);
-        let logger = Arc::new(rt_ui_log::UiLogger::with_buffer(
-            ui_tx.clone(),
-            |entry| crate::ui_events::ForwarderUiEvent::LogEntry { entry },
-            500,
-        ));
-        let subsystem = Arc::new(Mutex::new(subsystem));
-        let control_clients = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let download_trackers = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let reconnect_notifies = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        let display_name = Arc::new(Mutex::new(None));
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        let cpu_temp = Arc::new(Mutex::new(None));
+        let store = StatusStore::new(subsystem);
         let state = AppState {
-            subsystem: subsystem.clone(),
+            store: store.clone(),
+            subsystem: store.subsystem_arc(),
             journal,
             version: Arc::new(cfg.forwarder_version),
             config_state: None,
             restart_signal: None,
-            ui_tx: ui_tx.clone(),
-            status_event_tx: status_event_tx.clone(),
-            logger: logger.clone(),
-            control_clients: control_clients.clone(),
-            download_trackers: download_trackers.clone(),
-            reconnect_notifies: reconnect_notifies.clone(),
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            display_name: display_name.clone(),
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            cpu_temp: cpu_temp.clone(),
+            ui_tx: store.ui_sender(),
+            status_event_tx: store.status_event_sender(),
+            logger: store.logger(),
+            control_clients: store.control_clients().clone(),
+            download_trackers: store.download_trackers().clone(),
+            reconnect_notifies: store.reconnect_notifies().clone(),
         };
 
         let app = build_router(state);
@@ -1104,24 +408,8 @@ impl StatusServer {
                 tracing::error!(error = %err, "status HTTP server fatal error");
             }
         });
-        spawn_read_count_broadcaster(subsystem.clone(), status_event_tx.clone());
 
-        Ok(StatusServer {
-            local_addr,
-            subsystem,
-            ui_tx,
-            status_event_tx,
-            logger,
-            control_clients,
-            download_trackers,
-            reconnect_notifies,
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            display_tx: None,
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            display_name,
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            cpu_temp,
-        })
+        Ok(StatusServer { local_addr, store })
     }
 
     /// Start the status HTTP server with config editing support.
@@ -1135,37 +423,20 @@ impl StatusServer {
         let listener = TcpListener::bind(&cfg.bind).await?;
         let local_addr = listener.local_addr()?;
 
-        let (ui_tx, _) = tokio::sync::broadcast::channel(256);
-        let (status_event_tx, _) = broadcast::channel(256);
-        let logger = Arc::new(rt_ui_log::UiLogger::with_buffer(
-            ui_tx.clone(),
-            |entry| crate::ui_events::ForwarderUiEvent::LogEntry { entry },
-            500,
-        ));
-        let subsystem = Arc::new(Mutex::new(subsystem));
-        let control_clients = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let download_trackers = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let reconnect_notifies = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        let display_name = Arc::new(Mutex::new(None));
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        let cpu_temp = Arc::new(Mutex::new(None));
+        let store = StatusStore::new(subsystem);
         let state = AppState {
-            subsystem: subsystem.clone(),
+            store: store.clone(),
+            subsystem: store.subsystem_arc(),
             journal,
             version: Arc::new(cfg.forwarder_version),
             config_state: Some(config_state),
             restart_signal: Some(restart_signal),
-            ui_tx: ui_tx.clone(),
-            status_event_tx: status_event_tx.clone(),
-            logger: logger.clone(),
-            control_clients: control_clients.clone(),
-            download_trackers: download_trackers.clone(),
-            reconnect_notifies: reconnect_notifies.clone(),
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            display_name: display_name.clone(),
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            cpu_temp: cpu_temp.clone(),
+            ui_tx: store.ui_sender(),
+            status_event_tx: store.status_event_sender(),
+            logger: store.logger(),
+            control_clients: store.control_clients().clone(),
+            download_trackers: store.download_trackers().clone(),
+            reconnect_notifies: store.reconnect_notifies().clone(),
         };
 
         let app = build_router(state);
@@ -1174,24 +445,8 @@ impl StatusServer {
                 tracing::error!(error = %err, "status HTTP server fatal error");
             }
         });
-        spawn_read_count_broadcaster(subsystem.clone(), status_event_tx.clone());
 
-        Ok(StatusServer {
-            local_addr,
-            subsystem,
-            ui_tx,
-            status_event_tx,
-            logger,
-            control_clients,
-            download_trackers,
-            reconnect_notifies,
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            display_tx: None,
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            display_name,
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            cpu_temp,
-        })
+        Ok(StatusServer { local_addr, store })
     }
 }
 
@@ -1256,543 +511,6 @@ impl JournalAccess for NoJournal {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    let original_permissions = std::fs::metadata(path).map(|m| m.permissions()).ok();
-
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("path has no parent: {}", path.display()),
-        )
-    })?;
-    let file_name = path.file_name().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("path has no file name: {}", path.display()),
-        )
-    })?;
-
-    let file_name = file_name.to_string_lossy();
-    let pid = std::process::id();
-
-    for attempt in 0..=16 {
-        let tmp_name = format!(".{}.tmp.{}.{}", file_name, pid, attempt);
-        let tmp_path = parent.join(tmp_name);
-        match std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp_path)
-        {
-            Ok(mut temp_file) => {
-                let result = (|| -> std::io::Result<()> {
-                    temp_file.write_all(content.as_bytes())?;
-                    temp_file.sync_all()?;
-
-                    if let Some(perms) = &original_permissions {
-                        std::fs::set_permissions(&tmp_path, perms.clone())?;
-                    }
-
-                    std::fs::rename(&tmp_path, path)?;
-                    if let Ok(parent_dir) = std::fs::File::open(parent) {
-                        let _ = parent_dir.sync_all();
-                    }
-                    Ok(())
-                })();
-                if result.is_err() {
-                    let _ = std::fs::remove_file(&tmp_path);
-                }
-                return result;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        }
-    }
-
-    Err(std::io::Error::new(
-        std::io::ErrorKind::AlreadyExists,
-        format!("failed to allocate temp path for {}", path.display()),
-    ))
-}
-
-/// Read the TOML config file, apply a mutation, and write it back.
-///
-/// Returns Ok(()) on success or Err((status_code, json_error_body)) on failure.
-async fn update_config_file(
-    config_state: &ConfigState,
-    subsystem: &Arc<Mutex<SubsystemStatus>>,
-    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
-    mutate: impl FnOnce(&mut crate::config::RawConfig) -> Result<(), String>,
-) -> Result<(), (u16, String)> {
-    let _lock = config_state.write_lock.lock().await;
-
-    let toml_str = std::fs::read_to_string(&config_state.path).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
-                .to_string(),
-        )
-    })?;
-
-    let mut raw: crate::config::RawConfig = toml::from_str(&toml_str).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("TOML parse error: {}", e)})
-                .to_string(),
-        )
-    })?;
-
-    mutate(&mut raw).map_err(|e| {
-        (
-            400u16,
-            serde_json::json!({"ok": false, "error": e}).to_string(),
-        )
-    })?;
-
-    let new_toml = toml::to_string_pretty(&raw).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("TOML serialize error: {}", e)})
-                .to_string(),
-        )
-    })?;
-
-    write_atomic(&config_state.path, &new_toml).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("File write error: {}", e)})
-                .to_string(),
-        )
-    })?;
-
-    mark_restart_needed_and_emit(subsystem, ui_tx).await;
-    Ok(())
-}
-
-async fn mark_restart_needed_and_emit(
-    subsystem: &Arc<Mutex<SubsystemStatus>>,
-    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
-) {
-    let mut ss = subsystem.lock().await;
-    ss.set_restart_needed();
-    let _ = ui_tx.send(crate::ui_events::ForwarderUiEvent::StatusChanged {
-        ready: ss.is_ready(),
-        p2p_connected: ss.p2p_connected(),
-        restart_needed: true,
-    });
-}
-
-/// Apply a config section update by name.
-///
-/// Dispatches to the right mutation logic based on `section`, validates the
-/// payload, and calls `update_config_file` to persist the change.
-///
-/// Recognised sections: `"general"`, `"auth"`, `"journal"`, `"status_http"`,
-/// `"control"`, `"update"`, `"p2p"`, `"ups"`, `"readers"`, and `"screen"`.
-/// Screen config changes require a restart to apply.
-pub async fn apply_section_update(
-    section: &str,
-    payload: &serde_json::Value,
-    config_state: &ConfigState,
-    subsystem: &Arc<Mutex<SubsystemStatus>>,
-    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
-    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-) -> Result<(), (u16, String)> {
-    require_object_payload(payload)?;
-
-    match section {
-        "general" => {
-            let display_name = optional_string_field(payload, "display_name")?;
-            update_config_file(config_state, subsystem, ui_tx, |raw| {
-                raw.display_name = display_name;
-                Ok(())
-            })
-            .await
-        }
-        "auth" => {
-            let token_file_opt = optional_string_field(payload, "token_file")?;
-            let token_file = require_non_empty_trimmed("token_file", token_file_opt)
-                .map_err(bad_request_error)?;
-            validate_token_file(&token_file).map_err(bad_request_error)?;
-            update_config_file(config_state, subsystem, ui_tx, |raw| {
-                raw.auth = Some(crate::config::RawAuthConfig {
-                    token_file: Some(token_file),
-                });
-                Ok(())
-            })
-            .await
-        }
-        "journal" => {
-            let sqlite_path = optional_string_field(payload, "sqlite_path")?;
-            let prune_watermark_pct = optional_u8_field(payload, "prune_watermark_pct")?;
-            let min_retention = optional_string_field(payload, "min_retention")?;
-            let max_retention = optional_string_field(payload, "max_retention")?;
-            let emergency_free_disk_bytes =
-                optional_u64_field(payload, "emergency_free_disk_bytes")?;
-            let emergency_max_rows = optional_u64_field(payload, "emergency_max_rows")?
-                .map(|value| {
-                    i64::try_from(value)
-                        .map_err(|_| bad_request_error("emergency_max_rows must be <= i64::MAX"))
-                })
-                .transpose()?;
-            if let Some(pct) = prune_watermark_pct
-                && pct > 100
-            {
-                return Err(bad_request_error(
-                    "prune_watermark_pct must be between 0 and 100",
-                ));
-            }
-            crate::config::validate_retention_settings(
-                min_retention.as_deref(),
-                max_retention.as_deref(),
-                emergency_max_rows,
-            )
-            .map_err(bad_request_error)?;
-            update_config_file(config_state, subsystem, ui_tx, |raw| {
-                raw.journal = Some(crate::config::RawJournalConfig {
-                    sqlite_path,
-                    prune_watermark_pct,
-                    min_retention,
-                    max_retention,
-                    emergency_free_disk_bytes,
-                    emergency_max_rows,
-                });
-                Ok(())
-            })
-            .await
-        }
-        "status_http" => {
-            let bind = optional_string_field(payload, "bind")?.and_then(|s| {
-                let trimmed = s.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_owned())
-                }
-            });
-            if let Some(ref bind_addr) = bind {
-                validate_status_bind(bind_addr).map_err(bad_request_error)?;
-            }
-            update_config_file(config_state, subsystem, ui_tx, |raw| {
-                raw.status_http = Some(crate::config::RawStatusHttpConfig { bind });
-                Ok(())
-            })
-            .await
-        }
-        "control" => {
-            let allow_power_actions = optional_bool_field(payload, "allow_power_actions")?;
-            let action = optional_string_field(payload, "action")?;
-            if let Some(action) = action {
-                return apply_control_action_from_config(&action, config_state, logger).await;
-            }
-            update_config_file(config_state, subsystem, ui_tx, |raw| {
-                // Preserve any existing allow_remote_config setting; this handler
-                // only mutates allow_power_actions.
-                let allow_remote_config = raw.control.as_ref().and_then(|c| c.allow_remote_config);
-                raw.control = Some(crate::config::RawControlConfig {
-                    allow_power_actions,
-                    allow_remote_config,
-                });
-                Ok(())
-            })
-            .await
-        }
-        "p2p" => {
-            let enabled = optional_bool_field(payload, "enabled")?;
-            let server_url = optional_string_field(payload, "server_url")?.and_then(|url| {
-                let trimmed = url.trim();
-                (!trimmed.is_empty()).then(|| trimmed.to_owned())
-            });
-            let server_token_file =
-                optional_string_field(payload, "server_token_file")?.and_then(|path| {
-                    let trimmed = path.trim();
-                    (!trimmed.is_empty()).then(|| trimmed.to_owned())
-                });
-            if let Some(ref url) = server_url {
-                validate_server_url(url).map_err(bad_request_error)?;
-            }
-            if let Some(ref token_file) = server_token_file {
-                validate_token_file(token_file).map_err(bad_request_error)?;
-            }
-            update_config_file(config_state, subsystem, ui_tx, |raw| {
-                let previous = raw.p2p.take();
-                raw.p2p = Some(crate::config::RawP2pConfig {
-                    enabled,
-                    secret_key_path: previous
-                        .as_ref()
-                        .and_then(|cfg| cfg.secret_key_path.clone()),
-                    secret_key_seed_hex: previous
-                        .as_ref()
-                        .and_then(|cfg| cfg.secret_key_seed_hex.clone()),
-                    bind_addr_v4: previous.as_ref().and_then(|cfg| cfg.bind_addr_v4.clone()),
-                    relay_disabled: previous.as_ref().and_then(|cfg| cfg.relay_disabled),
-                    discovery_disabled: previous.as_ref().and_then(|cfg| cfg.discovery_disabled),
-                    max_concurrent_bidi_streams: previous
-                        .as_ref()
-                        .and_then(|cfg| cfg.max_concurrent_bidi_streams),
-                    static_allowed_receivers: previous
-                        .as_ref()
-                        .and_then(|cfg| cfg.static_allowed_receivers.clone()),
-                    allowlist_cache_path: previous
-                        .as_ref()
-                        .and_then(|cfg| cfg.allowlist_cache_path.clone()),
-                    server_url,
-                    server_token_file,
-                    device_token_file: previous
-                        .as_ref()
-                        .and_then(|cfg| cfg.device_token_file.clone()),
-                    allowlist_poll_interval_secs: previous
-                        .as_ref()
-                        .and_then(|cfg| cfg.allowlist_poll_interval_secs),
-                    allowlist_request_timeout_secs: previous
-                        .as_ref()
-                        .and_then(|cfg| cfg.allowlist_request_timeout_secs),
-                });
-                Ok(())
-            })
-            .await
-        }
-        "update" => {
-            let mode_str = optional_string_field(payload, "mode")?;
-            let parsed_mode = match mode_str.as_ref() {
-                Some(m) => serde_json::from_value::<rt_updater::UpdateMode>(
-                    serde_json::Value::String(m.clone()),
-                )
-                .map_err(|_| {
-                    (
-                        400u16,
-                        serde_json::json!({"ok": false, "error": format!(
-                            "mode must be 'disabled', 'check-only', or 'check-and-download', got '{}'", m
-                        )})
-                        .to_string(),
-                    )
-                })?,
-                None => rt_updater::UpdateMode::default(),
-            };
-            update_config_file(config_state, subsystem, ui_tx, |raw| {
-                raw.update = Some(crate::config::RawUpdateConfig { mode: mode_str });
-                Ok(())
-            })
-            .await?;
-            subsystem.lock().await.update_mode = parsed_mode;
-            Ok(())
-        }
-        "ups" => {
-            let enabled = optional_bool_field(payload, "enabled")?;
-            let daemon_addr = optional_string_field(payload, "daemon_addr")?.and_then(|addr| {
-                let trimmed = addr.trim();
-                (!trimmed.is_empty()).then(|| trimmed.to_owned())
-            });
-            let poll_interval_secs = optional_u64_field(payload, "poll_interval_secs")?;
-            let upstream_heartbeat_secs = optional_u64_field(payload, "upstream_heartbeat_secs")?;
-
-            if let Some(interval) = poll_interval_secs
-                && !(1..=60).contains(&interval)
-            {
-                return Err(bad_request_error(
-                    "poll_interval_secs must be between 1 and 60",
-                ));
-            }
-            if let Some(heartbeat) = upstream_heartbeat_secs
-                && !(10..=300).contains(&heartbeat)
-            {
-                return Err(bad_request_error(
-                    "upstream_heartbeat_secs must be between 10 and 300",
-                ));
-            }
-            if let Some(ref addr) = daemon_addr
-                && addr.parse::<std::net::SocketAddr>().is_err()
-            {
-                let parts: Vec<&str> = addr.rsplitn(2, ':').collect();
-                if parts.len() != 2 || parts[0].parse::<u16>().is_err() {
-                    return Err(bad_request_error(format!(
-                        "daemon_addr must be a valid host:port, got '{}'",
-                        addr
-                    )));
-                }
-            }
-
-            update_config_file(config_state, subsystem, ui_tx, |raw| {
-                raw.ups = Some(crate::config::RawUpsConfig {
-                    enabled,
-                    daemon_addr,
-                    poll_interval_secs,
-                    upstream_heartbeat_secs,
-                });
-                Ok(())
-            })
-            .await
-        }
-        "readers" => {
-            let readers_val = payload.get("readers").ok_or_else(|| {
-                (
-                    400u16,
-                    serde_json::json!({"ok": false, "error": "readers field is required"})
-                        .to_string(),
-                )
-            })?;
-            let readers_arr = readers_val.as_array().ok_or_else(|| {
-                (
-                    400u16,
-                    serde_json::json!({"ok": false, "error": "readers must be an array"})
-                        .to_string(),
-                )
-            })?;
-
-            if readers_arr.is_empty() {
-                return Err((
-                    400u16,
-                    "{\"ok\":false,\"error\":\"at least one reader is required\"}".to_owned(),
-                ));
-            }
-
-            let mut raw_readers = Vec::with_capacity(readers_arr.len());
-            for (i, entry) in readers_arr.iter().enumerate() {
-                let target = optional_string_field(entry, "target")?;
-
-                let target_str = match &target {
-                    Some(t) => t,
-                    None => {
-                        return Err((
-                            400u16,
-                            serde_json::json!({"ok": false, "error": format!("readers[{}].target is required", i)}).to_string(),
-                        ));
-                    }
-                };
-
-                if let Err(e) = crate::discovery::expand_target(target_str) {
-                    return Err((
-                        400u16,
-                        serde_json::json!({"ok": false, "error": format!("readers[{}].target invalid: {}", i, e)}).to_string(),
-                    ));
-                }
-
-                let enabled = optional_bool_field(entry, "enabled")?;
-                let local_fallback_port = optional_u16_field(entry, "local_fallback_port")?;
-
-                raw_readers.push(crate::config::RawReaderConfig {
-                    target,
-                    enabled,
-                    local_fallback_port,
-                });
-            }
-
-            update_config_file(config_state, subsystem, ui_tx, |raw| {
-                raw.readers = Some(raw_readers);
-                Ok(())
-            })
-            .await
-        }
-        #[cfg(any(feature = "eink", feature = "lcd"))]
-        "screen" => {
-            let parsed = serde_json::from_value::<rt_screen::state::ScreenConfig>(payload.clone())
-                .map_err(|e| bad_request_error(e.to_string()))?;
-            // Validate before persisting so the endpoint can't accept values the
-            // loader would later reject (which would make the forwarder fail to
-            // boot on the very restart this change requests).
-            crate::config::validate_screen_config(&parsed)
-                .map_err(|e| bad_request_error(e.to_string()))?;
-            update_config_file(config_state, subsystem, ui_tx, |raw| {
-                raw.screen = Some(parsed);
-                Ok(())
-            })
-            .await
-        }
-        _ => Err((
-            400u16,
-            serde_json::json!({"ok": false, "error": format!("unknown section: {}", section)})
-                .to_string(),
-        )),
-    }
-}
-
-/// Read the config TOML file as a JSON value plus the current `restart_needed`
-/// state, returning a plain error message on failure.
-///
-/// Shared core for both the HTTP `GET /api/v1/config` endpoint and the P2P
-/// remote-config get verb, so the two always agree on the serialized shape.
-async fn read_config_value(
-    config_state: &ConfigState,
-    subsystem: &Arc<Mutex<SubsystemStatus>>,
-) -> Result<(serde_json::Value, bool), String> {
-    let _lock = config_state.write_lock.lock().await;
-
-    let toml_str =
-        std::fs::read_to_string(&config_state.path).map_err(|e| format!("File read error: {e}"))?;
-
-    let raw: crate::config::RawConfig =
-        toml::from_str(&toml_str).map_err(|e| format!("TOML parse error: {e}"))?;
-
-    let json = serde_json::to_value(&raw).map_err(|e| format!("JSON serialize error: {e}"))?;
-
-    let restart_needed = subsystem.lock().await.restart_needed();
-    Ok((json, restart_needed))
-}
-
-/// Read the config TOML file as JSON.
-///
-/// Returns `(config_json, restart_needed)` on success.
-pub async fn read_config_json(
-    config_state: &ConfigState,
-    subsystem: &Arc<Mutex<SubsystemStatus>>,
-) -> Result<(serde_json::Value, bool), (u16, String)> {
-    read_config_value(config_state, subsystem)
-        .await
-        .map_err(|e| {
-            (
-                500u16,
-                serde_json::json!({"ok": false, "error": e}).to_string(),
-            )
-        })
-}
-
-/// Serialize the current config to a JSON string (identical to the body
-/// `GET /api/v1/config` returns) plus the current `restart_needed` state.
-///
-/// Used by the P2P remote-config get verb so the receiver UI round-trips the
-/// same document whether it reads config over HTTP or P2P.
-pub async fn config_json_string(
-    config_state: &ConfigState,
-    subsystem: &Arc<Mutex<SubsystemStatus>>,
-) -> Result<(String, bool), String> {
-    let (value, restart_needed) = read_config_value(config_state, subsystem).await?;
-    let json = serde_json::to_string(&value).map_err(|e| format!("JSON serialize error: {e}"))?;
-    Ok((json, restart_needed))
-}
-
-/// Persist a full config document (the same JSON shape `config_json_string`
-/// returns) to the TOML config file, then mark a restart as needed.
-///
-/// The document is parsed into the same [`crate::config::RawConfig`] the get
-/// path serializes, re-serialized to TOML, and validated by running the
-/// canonical loader before anything is written — so a document that would fail
-/// to load on restart is rejected without corrupting the on-disk file. Reuses
-/// the same atomic writer and `restart_needed` signal as the per-section HTTP
-/// writers. Returns a plain error message on failure.
-pub async fn write_config_json(
-    config_json: &str,
-    config_state: &ConfigState,
-    subsystem: &Arc<Mutex<SubsystemStatus>>,
-    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
-) -> Result<(), String> {
-    let raw: crate::config::RawConfig =
-        serde_json::from_str(config_json).map_err(|e| format!("invalid config JSON: {e}"))?;
-
-    let _lock = config_state.write_lock.lock().await;
-
-    let new_toml =
-        toml::to_string_pretty(&raw).map_err(|e| format!("TOML serialize error: {e}"))?;
-
-    // Validate via the canonical loader so we never persist a config that would
-    // fail to load on the next restart.
-    crate::config::load_config_from_str(&new_toml, &config_state.path)
-        .map_err(|e| format!("config validation failed: {e}"))?;
-
-    write_atomic(&config_state.path, &new_toml).map_err(|e| format!("File write error: {e}"))?;
-
-    mark_restart_needed_and_emit(subsystem, ui_tx).await;
-    Ok(())
-}
-
 fn text_response(status: StatusCode, body: impl Into<String>) -> Response {
     (status, [(header::CONTENT_TYPE, "text/plain")], body.into()).into_response()
 }
@@ -1803,118 +521,6 @@ fn json_response(status: StatusCode, body: String) -> Response {
 
 fn parse_json_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, String> {
     serde_json::from_slice::<T>(body).map_err(|e| format!("Invalid JSON: {}", e))
-}
-
-fn bad_request_error(message: impl Into<String>) -> (u16, String) {
-    (
-        400u16,
-        serde_json::json!({"ok": false, "error": message.into()}).to_string(),
-    )
-}
-
-fn require_object_payload(payload: &serde_json::Value) -> Result<(), (u16, String)> {
-    if payload.is_object() {
-        Ok(())
-    } else {
-        Err(bad_request_error("payload must be a JSON object"))
-    }
-}
-
-fn optional_string_field(
-    payload: &serde_json::Value,
-    field: &str,
-) -> Result<Option<String>, (u16, String)> {
-    match payload.get(field) {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
-        Some(_) => Err(bad_request_error(format!(
-            "{} must be a string or null",
-            field
-        ))),
-    }
-}
-
-fn optional_bool_field(
-    payload: &serde_json::Value,
-    field: &str,
-) -> Result<Option<bool>, (u16, String)> {
-    match payload.get(field) {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::Bool(b)) => Ok(Some(*b)),
-        Some(_) => Err(bad_request_error(format!(
-            "{} must be a boolean or null",
-            field
-        ))),
-    }
-}
-
-fn optional_u64_field(
-    payload: &serde_json::Value,
-    field: &str,
-) -> Result<Option<u64>, (u16, String)> {
-    match payload.get(field) {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(value) => {
-            let raw = value.as_u64().ok_or_else(|| {
-                bad_request_error(format!("{} must be a non-negative integer or null", field))
-            })?;
-            Ok(Some(raw))
-        }
-    }
-}
-
-fn optional_u16_field(
-    payload: &serde_json::Value,
-    field: &str,
-) -> Result<Option<u16>, (u16, String)> {
-    let raw = optional_u64_field(payload, field)?;
-    raw.map(|value| {
-        u16::try_from(value)
-            .map_err(|_| bad_request_error(format!("{} must be <= {}", field, u16::MAX)))
-    })
-    .transpose()
-}
-
-fn optional_u8_field(
-    payload: &serde_json::Value,
-    field: &str,
-) -> Result<Option<u8>, (u16, String)> {
-    let raw = optional_u64_field(payload, field)?;
-    raw.map(|value| {
-        u8::try_from(value)
-            .map_err(|_| bad_request_error(format!("{} must be <= {}", field, u8::MAX)))
-    })
-    .transpose()
-}
-
-fn require_non_empty_trimmed(field: &str, value: Option<String>) -> Result<String, String> {
-    let raw = value.ok_or_else(|| format!("{} is required", field))?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(format!("{} must not be empty", field));
-    }
-    Ok(trimmed.to_owned())
-}
-
-fn validate_token_file(token_file: &str) -> Result<(), String> {
-    if token_file.contains('\n') || token_file.contains('\r') {
-        return Err("token_file must be a single-line path".to_owned());
-    }
-    Ok(())
-}
-
-fn validate_status_bind(bind: &str) -> Result<(), String> {
-    bind.parse::<SocketAddrV4>()
-        .map(|_| ())
-        .map_err(|_| "bind must be a valid IPv4 address with port (e.g. 127.0.0.1:8080)".to_owned())
-}
-
-fn validate_server_url(url: &str) -> Result<(), String> {
-    if url.starts_with("http://") || url.starts_with("https://") {
-        Ok(())
-    } else {
-        Err("server_url must start with http:// or https://".to_owned())
-    }
 }
 
 fn config_not_available() -> Response {
@@ -1941,279 +547,6 @@ async fn restart_handler<J: JournalAccess + Send + 'static>(
             }
         }
         None => config_not_available(),
-    }
-}
-
-async fn read_allow_power_actions(config_state: &ConfigState) -> Result<bool, (u16, String)> {
-    let _lock = config_state.write_lock.lock().await;
-    let toml_str = std::fs::read_to_string(&config_state.path).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
-                .to_string(),
-        )
-    })?;
-    let raw: crate::config::RawConfig = toml::from_str(&toml_str).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("TOML parse error: {}", e)})
-                .to_string(),
-        )
-    })?;
-    Ok(raw
-        .control
-        .and_then(|c| c.allow_power_actions)
-        .unwrap_or(false))
-}
-
-#[cfg(unix)]
-fn map_power_action_command_result(
-    systemctl_action: &'static str,
-    result: std::io::Result<std::process::Output>,
-    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-) -> Result<(), (u16, String)> {
-    match result {
-        Ok(output) if output.status.success() => Ok(()),
-        Ok(output) => {
-            let detail = power_action_command_detail(&output);
-            let status_code = if power_action_auth_failed(&detail) {
-                403u16
-            } else {
-                500u16
-            };
-            tracing::error!(
-                action = systemctl_action,
-                exit_status = ?output.status.code(),
-                detail = %detail,
-                "control action command exited with failure"
-            );
-            if let Some(logger) = logger {
-                logger.log_at(
-                    rt_ui_log::UiLogLevel::Error,
-                    format!(
-                        "systemctl {} exited with failure (code {:?})",
-                        systemctl_action,
-                        output.status.code(),
-                    ),
-                );
-            }
-            Err((
-                status_code,
-                serde_json::json!({
-                    "ok": false,
-                    "error": format!(
-                        "control action command exited with failure: systemctl {} ({})",
-                        systemctl_action,
-                        detail
-                    )
-                })
-                .to_string(),
-            ))
-        }
-        Err(e) => {
-            tracing::error!(action = systemctl_action, error = %e, "control action command failed");
-            if let Some(logger) = logger {
-                logger.log_at(
-                    rt_ui_log::UiLogLevel::Error,
-                    format!("systemctl {} failed: {}", systemctl_action, e),
-                );
-            }
-            Err((
-                500u16,
-                serde_json::json!({
-                    "ok": false,
-                    "error": format!("control action command failed: {}", e)
-                })
-                .to_string(),
-            ))
-        }
-    }
-}
-
-#[cfg(unix)]
-fn map_power_action_join_error(
-    systemctl_action: &'static str,
-    e: tokio::task::JoinError,
-    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-) -> (u16, String) {
-    tracing::error!(action = systemctl_action, error = %e, "control action task failed");
-    if let Some(logger) = logger {
-        logger.log_at(
-            rt_ui_log::UiLogLevel::Error,
-            format!("systemctl {} task failed: {}", systemctl_action, e),
-        );
-    }
-    (
-        500u16,
-        serde_json::json!({
-            "ok": false,
-            "error": format!("control action task failed: {}", e)
-        })
-        .to_string(),
-    )
-}
-
-#[cfg(unix)]
-async fn run_device_power_action(
-    systemctl_action: &'static str,
-    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-) -> Result<(), (u16, String)> {
-    match tokio::task::spawn_blocking(move || run_power_action_command(systemctl_action)).await {
-        Ok(result) => map_power_action_command_result(systemctl_action, result, logger),
-        Err(e) => Err(map_power_action_join_error(systemctl_action, e, logger)),
-    }
-}
-
-#[cfg(unix)]
-fn run_power_action_command(
-    systemctl_action: &'static str,
-) -> std::io::Result<std::process::Output> {
-    std::process::Command::new("systemctl")
-        .arg("--no-ask-password")
-        .arg(systemctl_action)
-        .output()
-}
-
-#[cfg(unix)]
-fn power_action_command_detail(output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if !stderr.is_empty() {
-        return stderr;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if !stdout.is_empty() {
-        return stdout;
-    }
-    "no command output".to_owned()
-}
-
-#[cfg(unix)]
-fn power_action_auth_failed(detail: &str) -> bool {
-    let lower = detail.to_ascii_lowercase();
-    lower.contains("interactive authentication required")
-        || lower.contains("authentication is required")
-        || lower.contains("not authorized")
-        || lower.contains("access denied")
-        || lower.contains("permission denied")
-        || lower.contains("a password is required")
-}
-
-#[cfg(not(unix))]
-async fn run_device_power_action(
-    _systemctl_action: &'static str,
-    _logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-) -> Result<(), (u16, String)> {
-    Err((
-        501u16,
-        serde_json::json!({
-            "ok": false,
-            "error": "power actions not supported on non-unix platforms"
-        })
-        .to_string(),
-    ))
-}
-
-async fn apply_control_action_from_config(
-    action: &str,
-    config_state: &ConfigState,
-    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-) -> Result<(), (u16, String)> {
-    apply_control_action_from_config_with(
-        action,
-        config_state,
-        logger,
-        |action, config_state, restart_signal, logger| {
-            Box::pin(async move {
-                apply_control_action(action, config_state, restart_signal, logger).await
-            })
-        },
-    )
-    .await
-}
-
-async fn apply_control_action_from_config_with<F>(
-    action: &str,
-    config_state: &ConfigState,
-    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-    apply_fn: F,
-) -> Result<(), (u16, String)>
-where
-    F: for<'a> FnOnce(
-        &'a str,
-        Option<&'a ConfigState>,
-        Option<&'a Arc<Notify>>,
-        Option<&'a rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), (u16, String)>> + Send + 'a>>,
-{
-    apply_fn(action, Some(config_state), None, logger).await
-}
-
-pub async fn apply_control_action(
-    action: &str,
-    config_state: Option<&ConfigState>,
-    restart_signal: Option<&Arc<Notify>>,
-    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
-) -> Result<(), (u16, String)> {
-    match action {
-        "restart_service" => {
-            let signal = restart_signal.ok_or_else(|| {
-                (
-                    404u16,
-                    serde_json::json!({"ok": false, "error": "restart signal not available"})
-                        .to_string(),
-                )
-            })?;
-            if cfg!(unix) {
-                signal.notify_one();
-                Ok(())
-            } else {
-                Err((
-                    501u16,
-                    serde_json::json!({
-                        "ok": false,
-                        "error": "restart not supported on non-unix platforms"
-                    })
-                    .to_string(),
-                ))
-            }
-        }
-        "restart_device" | "shutdown_device" => {
-            let cs = config_state.ok_or_else(|| {
-                (
-                    404u16,
-                    serde_json::json!({"ok": false, "error": "Config editing not available"})
-                        .to_string(),
-                )
-            })?;
-            let allow_power_actions = read_allow_power_actions(cs).await?;
-            if !allow_power_actions {
-                return Err((
-                    403u16,
-                    serde_json::json!({"ok": false, "error": "power actions disabled"}).to_string(),
-                ));
-            }
-            if !cfg!(unix) {
-                return Err((
-                    501u16,
-                    serde_json::json!({
-                        "ok": false,
-                        "error": format!("{} not supported on non-unix platforms", action)
-                    })
-                    .to_string(),
-                ));
-            }
-            let systemctl_action = if action == "restart_device" {
-                "reboot"
-            } else {
-                "poweroff"
-            };
-            run_device_power_action(systemctl_action, logger).await?;
-            Ok(())
-        }
-        _ => Err(bad_request_error(format!(
-            "unknown control action: {}",
-            action
-        ))),
     }
 }
 
@@ -2341,29 +674,6 @@ fn get_config_state<J: JournalAccess + Send + 'static>(
 }
 
 #[derive(serde::Serialize)]
-struct ServerDeviceStatusJson {
-    configured: bool,
-    endpoint_id: Option<String>,
-    reachable: Option<bool>,
-    approval_state: Option<String>,
-    waiting_for_approval: bool,
-    message: Option<String>,
-}
-
-impl ServerDeviceStatusJson {
-    fn not_configured() -> Self {
-        Self {
-            configured: false,
-            endpoint_id: None,
-            reachable: None,
-            approval_state: None,
-            waiting_for_approval: false,
-            message: None,
-        }
-    }
-}
-
-#[derive(serde::Serialize)]
 struct StatusJsonResponse {
     forwarder_id: String,
     version: String,
@@ -2372,7 +682,9 @@ struct StatusJsonResponse {
     p2p_connected: bool,
     restart_needed: bool,
     ups_status: Option<UpsStatusState>,
-    server: ServerDeviceStatusJson,
+    server: crate::status_store::ServerDeviceStatus,
+    /// Total local-fanout messages dropped because consumers lagged.
+    fanout_dropped_total: u64,
     readers: Vec<ReaderStatusJson>,
 }
 
@@ -2388,137 +700,18 @@ struct ReaderStatusJson {
     reader_info: Option<crate::reader_control::ReaderInfo>,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct ServerStatusBoardJson {
-    #[serde(default)]
-    devices: Vec<ServerStatusDeviceJson>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct ServerStatusDeviceJson {
-    endpoint_id: String,
-    approval_state: String,
-}
-
-async fn forwarder_server_status<J: JournalAccess + Send + 'static>(
-    state: &AppState<J>,
-) -> ServerDeviceStatusJson {
-    let endpoint_id = state.subsystem.lock().await.p2p_endpoint_id.clone();
-    let Some(endpoint_id) = endpoint_id else {
-        return ServerDeviceStatusJson::not_configured();
-    };
-    let Some(config_state) = get_config_state(state) else {
-        return ServerDeviceStatusJson::not_configured();
-    };
-    let server_url = {
-        let _guard = config_state.write_lock.lock().await;
-        match crate::config::load_config_from_path(&config_state.path) {
-            Ok(config) => config.p2p.server_url,
-            Err(error) => {
-                return ServerDeviceStatusJson {
-                    configured: true,
-                    endpoint_id: Some(endpoint_id),
-                    reachable: None,
-                    approval_state: None,
-                    waiting_for_approval: false,
-                    message: Some(format!("Forwarder config unavailable: {error}")),
-                };
-            }
-        }
-    };
-    let Some(server_url) = server_url else {
-        return ServerDeviceStatusJson::not_configured();
-    };
-
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(1))
-        .build()
-    {
-        Ok(client) => client,
-        Err(error) => {
-            return ServerDeviceStatusJson {
-                configured: true,
-                endpoint_id: Some(endpoint_id),
-                reachable: Some(false),
-                approval_state: None,
-                waiting_for_approval: false,
-                message: Some(format!("Server status client unavailable: {error}")),
-            };
-        }
-    };
-    let status_url = format!("{}/status", server_url.trim_end_matches('/'));
-    let response = match client.get(status_url).send().await {
-        Ok(response) => response,
-        Err(error) => {
-            return ServerDeviceStatusJson {
-                configured: true,
-                endpoint_id: Some(endpoint_id),
-                reachable: Some(false),
-                approval_state: None,
-                waiting_for_approval: false,
-                message: Some(format!("Server status unavailable: {error}")),
-            };
-        }
-    };
-    let board = match response.error_for_status() {
-        Ok(response) => match response.json::<ServerStatusBoardJson>().await {
-            Ok(board) => board,
-            Err(error) => {
-                return ServerDeviceStatusJson {
-                    configured: true,
-                    endpoint_id: Some(endpoint_id),
-                    reachable: Some(false),
-                    approval_state: None,
-                    waiting_for_approval: false,
-                    message: Some(format!("Server status response was invalid: {error}")),
-                };
-            }
-        },
-        Err(error) => {
-            return ServerDeviceStatusJson {
-                configured: true,
-                endpoint_id: Some(endpoint_id),
-                reachable: Some(false),
-                approval_state: None,
-                waiting_for_approval: false,
-                message: Some(format!("Server status returned an error: {error}")),
-            };
-        }
-    };
-
-    match board
-        .devices
-        .into_iter()
-        .find(|device| device.endpoint_id == endpoint_id)
-    {
-        Some(device) => {
-            let waiting_for_approval = device.approval_state == "pending";
-            ServerDeviceStatusJson {
-                configured: true,
-                endpoint_id: Some(endpoint_id),
-                reachable: Some(true),
-                approval_state: Some(device.approval_state),
-                waiting_for_approval,
-                message: waiting_for_approval
-                    .then(|| "Waiting for server admin approval".to_owned()),
-            }
-        }
-        None => ServerDeviceStatusJson {
-            configured: true,
-            endpoint_id: Some(endpoint_id),
-            reachable: Some(true),
-            approval_state: None,
-            waiting_for_approval: true,
-            message: Some("Waiting for this forwarder to register with the server".to_owned()),
-        },
-    }
-}
-
 async fn status_json_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> Response {
-    let server = forwarder_server_status(&state).await;
     let ss = state.subsystem.lock().await;
+    // Served from the cache maintained by `server_status_task`; the handler
+    // itself performs no outbound I/O so local status latency never depends
+    // on WAN state. Before the first poll completes (or when no poll task
+    // runs), serve the not-configured shape with `checked_unix_ms: None`.
+    let server = ss
+        .server_status()
+        .cloned()
+        .unwrap_or_else(crate::status_store::ServerDeviceStatus::not_configured);
     let mut readers: Vec<_> = ss
         .readers
         .iter()
@@ -2551,6 +744,7 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
         restart_needed: ss.restart_needed(),
         ups_status: ss.ups_status().cloned(),
         server,
+        fanout_dropped_total: state.store.fanout_dropped_total(),
         readers,
     };
 
@@ -2574,19 +768,17 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
 async fn display_state_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> axum::Json<serde_json::Value> {
-    let ss = state.subsystem.lock().await;
     #[cfg(any(feature = "eink", feature = "lcd"))]
     {
-        let forwarder_name = state.display_name.lock().await.clone();
-        let cpu_temp = *state.cpu_temp.lock().await;
         return axum::Json(
-            serde_json::to_value(subsystem_to_display_state(&ss, forwarder_name, cpu_temp))
+            serde_json::to_value(state.store.display_state().await)
                 .expect("display state serializes"),
         );
     }
 
     #[cfg(not(any(feature = "eink", feature = "lcd")))]
     {
+        let ss = state.subsystem.lock().await;
         let readers: Vec<serde_json::Value> = ss
             .readers
             .iter()
@@ -2639,7 +831,6 @@ async fn events_handler<J: JournalAccess + Send + 'static>(
     >,
 > {
     use axum::response::sse::{Event, KeepAlive, Sse};
-    use std::time::Duration;
     use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
     let rx = state.ui_tx.subscribe();
@@ -2656,6 +847,9 @@ async fn events_handler<J: JournalAccess + Send + 'static>(
                     "reader_info_updated"
                 }
                 crate::ui_events::ForwarderUiEvent::UpsStatusChanged { .. } => "ups_status_changed",
+                crate::ui_events::ForwarderUiEvent::ServerStatusChanged { .. } => {
+                    "server_status_changed"
+                }
             };
             match serde_json::to_string(&event) {
                 Ok(json) => Some(Ok(Event::default().event(event_type).data(json))),
@@ -2701,53 +895,6 @@ async fn reader_info_handler<J: JournalAccess + Send + 'static>(
         },
         None => text_response(StatusCode::NOT_FOUND, "unknown reader"),
     }
-}
-
-/// Compute the target second boundary and pre-SET wait duration for clock sync.
-///
-/// Given the current wall time, one-way latency estimate, and the fixed sync delay,
-/// returns `(target_boundary, pre_set_wait)` where:
-/// - `target_boundary` is the `DateTime<Local>` whole-second that the rollover should align with
-/// - `pre_set_wait` is how long to sleep before sending SET_DATE_TIME
-pub fn compute_sync_timing(
-    wall_now: chrono::DateTime<chrono::Local>,
-    one_way: std::time::Duration,
-    sync_delay_ms: u64,
-) -> (chrono::DateTime<chrono::Local>, std::time::Duration) {
-    use chrono::Timelike;
-
-    let arrival_offset = chrono::Duration::from_std(one_way).unwrap_or_else(|_| {
-        tracing::warn!(
-            one_way_ms = one_way.as_millis(),
-            "one-way latency exceeds chrono Duration range, falling back to zero"
-        );
-        chrono::Duration::zero()
-    });
-    let sync_delay = chrono::Duration::milliseconds(sync_delay_ms as i64);
-    let wall_at_rollover_if_now = wall_now + arrival_offset + sync_delay;
-    let rollover_frac = wall_at_rollover_if_now.nanosecond() as f64 / 1_000_000_000.0;
-
-    let target = if rollover_frac >= 0.5 {
-        wall_at_rollover_if_now + chrono::Duration::seconds(1)
-    } else {
-        wall_at_rollover_if_now
-    };
-    let target_boundary_initial = target
-        .with_nanosecond(0)
-        .expect("nanosecond 0 is always valid");
-
-    let mut target_boundary = target_boundary_initial;
-    let mut ideal_send = target_boundary - arrival_offset - sync_delay;
-    if ideal_send < wall_now {
-        target_boundary += chrono::Duration::seconds(1);
-        ideal_send = target_boundary - arrival_offset - sync_delay;
-    }
-    let pre_set_wait = ideal_send
-        .signed_duration_since(wall_now)
-        .to_std()
-        .unwrap_or(std::time::Duration::ZERO);
-
-    (target_boundary, pre_set_wait)
 }
 
 /// POST /api/v1/readers/{ip}/sync-clock
@@ -3355,10 +1502,7 @@ fn status_from_u16_or_internal(status: u16) -> StatusCode {
 async fn update_status_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> Response {
-    let update_status = {
-        let ss = state.subsystem.lock().await;
-        ss.update_status.clone()
-    };
+    let update_status = state.store.update_status().await;
     let body = serde_json::to_string(&update_status)
         .unwrap_or_else(|_| r#"{"status":"failed","error":"serialization error"}"#.to_owned());
     json_response(StatusCode::OK, body)
@@ -3367,16 +1511,13 @@ async fn update_status_handler<J: JournalAccess + Send + 'static>(
 async fn update_apply_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> Response {
-    let ss = state.subsystem.lock().await;
-    match &ss.staged_update_path {
+    match state.store.staged_update_path().await {
         Some(path) => {
-            let path = path.clone();
-            drop(ss);
             if apply_via_restart_enabled() {
                 schedule_process_restart();
                 json_response(StatusCode::OK, r#"{"status":"restarting"}"#.to_owned())
             } else {
-                let sub = state.subsystem.clone();
+                let store = state.store.clone();
                 let restart = state.restart_signal.clone();
                 tokio::spawn(async move {
                     match tokio::task::spawn_blocking(move || {
@@ -3391,38 +1532,36 @@ async fn update_apply_handler<J: JournalAccess + Send + 'static>(
                         }
                         Ok(Err(e)) => {
                             tracing::error!(error = %e, "update apply failed");
-                            sub.lock().await.update_status = rt_updater::UpdateStatus::Failed {
-                                error: e.to_string(),
-                            };
+                            store
+                                .set_update_status(rt_updater::UpdateStatus::Failed {
+                                    error: e.to_string(),
+                                })
+                                .await;
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "update apply task failed");
-                            sub.lock().await.update_status = rt_updater::UpdateStatus::Failed {
-                                error: e.to_string(),
-                            };
+                            store
+                                .set_update_status(rt_updater::UpdateStatus::Failed {
+                                    error: e.to_string(),
+                                })
+                                .await;
                         }
                     }
                 });
                 json_response(StatusCode::OK, r#"{"status":"applying"}"#.to_owned())
             }
         }
-        None => {
-            drop(ss);
-            json_response(
-                StatusCode::NOT_FOUND,
-                r#"{"error":"no update staged"}"#.to_owned(),
-            )
-        }
+        None => json_response(
+            StatusCode::NOT_FOUND,
+            r#"{"error":"no update staged"}"#.to_owned(),
+        ),
     }
 }
 
 async fn update_check_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> Response {
-    let update_mode = {
-        let ss = state.subsystem.lock().await;
-        ss.update_mode
-    };
+    let update_mode = state.store.update_mode().await;
 
     let checker = match rt_updater::UpdateChecker::new(
         "iwismer",
@@ -3435,7 +1574,7 @@ async fn update_check_handler<J: JournalAccess + Send + 'static>(
             let status = rt_updater::UpdateStatus::Failed {
                 error: e.to_string(),
             };
-            state.subsystem.lock().await.update_status = status.clone();
+            state.store.set_update_status(status.clone()).await;
             let body = serde_json::to_string(&status).unwrap_or_else(|_| {
                 r#"{"status":"failed","error":"serialization error"}"#.to_owned()
             });
@@ -3443,66 +1582,11 @@ async fn update_check_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    let workflow_state =
-        ForwarderWorkflowAdapter::new(state.subsystem.clone(), state.ui_tx.clone());
+    let workflow_state = state.store.workflow_state();
     let status = run_check(&workflow_state, &checker, update_mode).await;
     let body = serde_json::to_string(&status)
         .unwrap_or_else(|_| r#"{"status":"failed","error":"serialization error"}"#.to_owned());
     json_response(StatusCode::OK, body)
-}
-
-struct ForwarderWorkflowAdapter {
-    subsystem: Arc<Mutex<SubsystemStatus>>,
-    ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
-}
-
-impl ForwarderWorkflowAdapter {
-    fn new(
-        subsystem: Arc<Mutex<SubsystemStatus>>,
-        ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
-    ) -> Self {
-        Self { subsystem, ui_tx }
-    }
-}
-
-impl WorkflowState for ForwarderWorkflowAdapter {
-    fn current_status<'a>(
-        &'a self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = UpdateStatus> + Send + 'a>> {
-        Box::pin(async move { self.subsystem.lock().await.update_status.clone() })
-    }
-
-    fn set_status<'a>(
-        &'a self,
-        status: UpdateStatus,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            self.subsystem.lock().await.update_status = status;
-        })
-    }
-
-    fn set_downloaded<'a>(
-        &'a self,
-        status: UpdateStatus,
-        path: std::path::PathBuf,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            let mut ss = self.subsystem.lock().await;
-            ss.update_status = status;
-            ss.staged_update_path = Some(path);
-        })
-    }
-
-    fn emit_status_changed<'a>(
-        &'a self,
-        status: UpdateStatus,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            let _ = self
-                .ui_tx
-                .send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged { status });
-        })
-    }
 }
 
 async fn update_download_handler<J: JournalAccess + Send + 'static>(
@@ -3519,7 +1603,7 @@ async fn update_download_handler<J: JournalAccess + Send + 'static>(
             let status = rt_updater::UpdateStatus::Failed {
                 error: e.to_string(),
             };
-            state.subsystem.lock().await.update_status = status.clone();
+            state.store.set_update_status(status.clone()).await;
             let body = serde_json::to_string(&status).unwrap_or_else(|_| {
                 r#"{"status":"failed","error":"serialization error"}"#.to_owned()
             });
@@ -3527,8 +1611,7 @@ async fn update_download_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    let workflow_state =
-        ForwarderWorkflowAdapter::new(state.subsystem.clone(), state.ui_tx.clone());
+    let workflow_state = state.store.workflow_state();
     match run_download(&workflow_state, &checker).await {
         Ok(status) => {
             let body = serde_json::to_string(&status).unwrap_or_default();
@@ -3549,7 +1632,7 @@ async fn config_json_handler<J: JournalAccess + Send + 'static>(
         None => return config_not_available(),
     };
 
-    match read_config_json(&cs, &state.subsystem).await {
+    match crate::config_service::read_config_json(&cs, &state.subsystem).await {
         Ok((json_value, _restart_needed)) => {
             let json_str = serde_json::to_string(&json_value).unwrap_or_else(|e| {
                 serde_json::json!({"ok": false, "error": format!("JSON serialize error: {}", e)})
@@ -3584,7 +1667,7 @@ async fn post_config_section_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update(
+    match crate::config_service::apply_section_update(
         section,
         &payload,
         &cs,
@@ -3705,7 +1788,7 @@ mod tests {
     use rt_updater::workflow::{Checker, run_check, run_download};
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::time::{Duration, sleep};
 
     struct FakeChecker {
@@ -3765,6 +1848,15 @@ mod tests {
         let body = format!("000209{:02x}{timeout:02x}", mode.config3_value());
         let lrc = control::lrc(body.as_bytes());
         format!("ab{body}{lrc:02x}")
+    }
+
+    fn temp_token_file() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("create temp token dir");
+        let path = dir.path().join("fake-token");
+        std::fs::write(&path, "test-token\n")
+            .unwrap_or_else(|e| panic!("write token {}: {e}", path.display()));
+        let token_path = path.display().to_string().replace('\\', "/");
+        (dir, token_path)
     }
 
     #[tokio::test]
@@ -3875,6 +1967,118 @@ mod tests {
         assert_eq!(body["ups_status"]["status"]["power_plugged"], false);
         assert_eq!(body["readers"][0]["ip"], "192.168.1.10");
         assert_eq!(body["readers"][0]["state"], "connected");
+    }
+
+    #[tokio::test]
+    async fn status_json_includes_fanout_dropped_total() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server
+            .store()
+            .fanout_drop_counter()
+            .fetch_add(3, Ordering::SeqCst);
+
+        let addr = server.local_addr();
+        let resp = reqwest::get(format!("http://{}/api/v1/status", addr))
+            .await
+            .expect("GET /api/v1/status");
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert_eq!(
+            body["fanout_dropped_total"], 3,
+            "status JSON must surface the fanout drop total"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_json_serves_cached_server_status_without_outbound_io() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // A "server" that accepts TCP connections but never responds: any
+        // inline outbound HTTP call in the status handler would block on it
+        // until the request timeout (~1s).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind hang listener");
+        let hang_addr = listener.local_addr().expect("hang listener addr");
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(s) => held.push(s),
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let mut config_file = NamedTempFile::new().expect("create temp config");
+        let (_token_dir, token_path) = temp_token_file();
+        write!(
+            config_file,
+            r#"schema_version = 1
+[p2p]
+server_url = "http://{hang_addr}"
+[auth]
+token_file = "{token_path}"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+        )
+        .expect("write config");
+
+        let server = StatusServer::start_with_config(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            Arc::new(Mutex::new(NoJournal)),
+            Arc::new(ConfigState::new(config_file.path().to_path_buf())),
+            Arc::new(Notify::new()),
+        )
+        .await
+        .expect("start status server");
+        server
+            .store()
+            .set_p2p_endpoint_id("endpoint-under-test".to_owned())
+            .await;
+
+        let client = reqwest::Client::new();
+        let start = std::time::Instant::now();
+        let resp = client
+            .get(format!("http://{}/api/v1/status", server.local_addr()))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        let elapsed = start.elapsed();
+        assert_eq!(resp.status(), 200);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "status endpoint must not perform outbound I/O inline (took {elapsed:?})"
+        );
+
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        let server_json = body.get("server").expect("server object");
+        assert!(
+            server_json.get("reachable").is_some(),
+            "server.reachable missing: {server_json}"
+        );
+        assert_eq!(
+            server_json["cached"], true,
+            "server.cached must be true: {server_json}"
+        );
+        assert!(
+            server_json.get("checked_unix_ms").is_some(),
+            "server.checked_unix_ms missing: {server_json}"
+        );
     }
 
     #[tokio::test]
@@ -4013,7 +2217,7 @@ mod tests {
             .update_reader_state(reader_ip, ReaderConnectionState::Connected)
             .await;
 
-        let mut ui_rx = server.ui_tx.subscribe();
+        let mut ui_rx = server.ui_sender().subscribe();
 
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
         let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
@@ -4180,21 +2384,18 @@ mod tests {
             .await;
 
         let state = AppState {
-            subsystem: server.subsystem.clone(),
+            store: server.store(),
+            subsystem: server.subsystem_arc(),
             journal: Arc::new(Mutex::new(NoJournal)),
             version: Arc::new("0.2.0".to_owned()),
             config_state: None,
             restart_signal: None,
-            logger: server.logger.clone(),
-            ui_tx: server.ui_tx.clone(),
-            status_event_tx: server.status_event_tx.clone(),
-            control_clients: server.control_clients.clone(),
-            download_trackers: server.download_trackers.clone(),
-            reconnect_notifies: server.reconnect_notifies.clone(),
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            display_name: server.display_name.clone(),
-            #[cfg(any(feature = "eink", feature = "lcd"))]
-            cpu_temp: server.cpu_temp.clone(),
+            logger: server.logger(),
+            ui_tx: server.ui_sender(),
+            status_event_tx: server.store.status_event_sender(),
+            control_clients: server.control_clients().clone(),
+            download_trackers: server.download_trackers().clone(),
+            reconnect_notifies: server.reconnect_notifies().clone(),
         };
         update_cached_reader_info(
             &state,
@@ -5143,7 +3344,7 @@ mod tests {
             .update_reader_info(reader_ip, crate::reader_control::ReaderInfo::default())
             .await;
 
-        let mut rx = server.ui_tx.subscribe();
+        let mut rx = server.ui_sender().subscribe();
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
         let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
         server.register_control_client(reader_ip, Arc::new(control_client));
@@ -5205,7 +3406,7 @@ mod tests {
         .await
         .expect("start status server");
 
-        let mut rx = server.ui_tx.subscribe();
+        let mut rx = server.ui_sender().subscribe();
         server.set_ready().await;
 
         let evt = tokio::time::timeout(Duration::from_millis(250), rx.recv())
@@ -5232,7 +3433,7 @@ mod tests {
         .await
         .expect("start status server");
 
-        let mut rx = server.ui_tx.subscribe();
+        let mut rx = server.ui_sender().subscribe();
         server
             .set_update_status(UpdateStatus::Downloaded {
                 version: "1.2.3".to_owned(),
@@ -5260,6 +3461,7 @@ mod tests {
         use tempfile::NamedTempFile;
 
         let mut config_file = NamedTempFile::new().expect("create temp config");
+        let (_token_dir, token_path) = temp_token_file();
         write!(
             config_file,
             r#"schema_version = 1
@@ -5267,7 +3469,7 @@ display_name = "Start Line"
 [p2p]
 server_url = "https://timing.example.com"
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -5288,7 +3490,7 @@ target = "192.168.1.100:10000"
         .await
         .expect("start status server");
 
-        let mut rx = server.ui_tx.subscribe();
+        let mut rx = server.ui_sender().subscribe();
         let client = reqwest::Client::new();
         let resp = client
             .post(format!(
@@ -5320,13 +3522,14 @@ target = "192.168.1.100:10000"
         use tempfile::NamedTempFile;
 
         let mut config_file = NamedTempFile::new().expect("create temp config");
+        let (_token_dir, token_path) = temp_token_file();
         write!(
             config_file,
             r#"schema_version = 1
 [p2p]
 server_url = "https://timing.example.com"
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -5348,7 +3551,7 @@ target = "192.168.1.100:10000"
         .expect("start status server");
 
         assert_eq!(
-            server.subsystem.lock().await.update_mode,
+            server.subsystem_arc().lock().await.update_mode,
             rt_updater::UpdateMode::CheckAndDownload
         );
 
@@ -5365,7 +3568,7 @@ target = "192.168.1.100:10000"
             .expect("post config update");
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
-            server.subsystem.lock().await.update_mode,
+            server.subsystem_arc().lock().await.update_mode,
             rt_updater::UpdateMode::CheckOnly
         );
         assert!(
@@ -5380,13 +3583,14 @@ target = "192.168.1.100:10000"
         use tempfile::NamedTempFile;
 
         let mut config_file = NamedTempFile::new().expect("create temp config");
+        let (_token_dir, token_path) = temp_token_file();
         write!(
             config_file,
             r#"schema_version = 1
 [p2p]
 server_url = "https://timing.example.com"
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -5420,9 +3624,70 @@ target = "192.168.1.100:10000"
             .expect("post config update");
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
-            server.subsystem.lock().await.update_mode,
+            server.subsystem_arc().lock().await.update_mode,
             rt_updater::UpdateMode::CheckAndDownload
         );
+    }
+
+    #[tokio::test]
+    async fn config_p2p_section_rejects_cross_field_loader_validation_failure() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let token_file = NamedTempFile::new().expect("create temp token");
+        let token_path = token_file.path().display().to_string().replace('\\', "/");
+        std::fs::write(token_file.path(), "test-token\n").expect("write temp token");
+
+        let mut config_file = NamedTempFile::new().expect("create temp config");
+        write!(
+            config_file,
+            r#"schema_version = 1
+[p2p]
+enabled = false
+max_concurrent_bidi_streams = 1
+server_url = "https://timing.example.com"
+[auth]
+token_file = "{token_path}"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+        )
+        .expect("write config");
+
+        let restart_signal = Arc::new(Notify::new());
+        let server = StatusServer::start_with_config(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            Arc::new(Mutex::new(NoJournal)),
+            Arc::new(ConfigState::new(config_file.path().to_path_buf())),
+            restart_signal,
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{}/api/v1/config/p2p", server.local_addr()))
+            .header("content-type", "application/json")
+            .body(r#"{"enabled":true}"#)
+            .send()
+            .await
+            .expect("post p2p config update");
+
+        let status = resp.status();
+        let body = resp.text().await.expect("read response body");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "response body: {body}");
+        assert!(
+            body.contains("config validation failed")
+                && body.contains("max_concurrent_bidi_streams"),
+            "unexpected response body: {body}"
+        );
+
+        let loaded = crate::config::load_config_from_path(config_file.path()).expect("load config");
+        assert!(!loaded.p2p.enabled);
     }
 
     #[cfg(any(feature = "eink", feature = "lcd"))]
@@ -5432,13 +3697,14 @@ target = "192.168.1.100:10000"
         use tempfile::NamedTempFile;
 
         let mut config_file = NamedTempFile::new().expect("create temp config");
+        let (_token_dir, token_path) = temp_token_file();
         write!(
             config_file,
             r#"schema_version = 1
 [p2p]
 server_url = "https://timing.example.com"
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -5493,13 +3759,14 @@ target = "192.168.1.100:10000"
         use tempfile::NamedTempFile;
 
         let mut config_file = NamedTempFile::new().expect("create temp config");
+        let (_token_dir, token_path) = temp_token_file();
         write!(
             config_file,
             r#"schema_version = 1
 [p2p]
 server_url = "https://timing.example.com"
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -5561,8 +3828,7 @@ target = "192.168.1.100:10000"
             download_calls: Arc::clone(&download_calls),
         };
 
-        let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+        let workflow_state = server.store().workflow_state();
         let status = run_check(&workflow_state, &checker, rt_updater::UpdateMode::CheckOnly).await;
 
         assert_eq!(
@@ -5594,8 +3860,7 @@ target = "192.168.1.100:10000"
             download_calls: Arc::clone(&download_calls),
         };
 
-        let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+        let workflow_state = server.store().workflow_state();
         let status = run_check(&workflow_state, &checker, rt_updater::UpdateMode::Disabled).await;
 
         assert_eq!(
@@ -5627,8 +3892,7 @@ target = "192.168.1.100:10000"
             download_calls: Arc::clone(&download_calls),
         };
 
-        let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+        let workflow_state = server.store().workflow_state();
         let status = run_check(
             &workflow_state,
             &checker,
@@ -5644,191 +3908,9 @@ target = "192.168.1.100:10000"
         );
         assert_eq!(download_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
-            server.subsystem.lock().await.staged_update_path,
+            server.subsystem_arc().lock().await.staged_update_path,
             Some(std::path::PathBuf::from("/tmp/staged-forwarder"))
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn power_action_execution_does_not_use_sudo_fallback() {
-        let source = include_str!("status_http.rs");
-        assert!(
-            !source.contains("Command::new(\"sudo\")"),
-            "power actions must not invoke sudo fallback"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn power_action_command_result_returns_500_on_spawn_error() {
-        let result = map_power_action_command_result(
-            "reboot",
-            Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "systemctl not found",
-            )),
-            None,
-        );
-
-        let (status, body) = result.expect_err("spawn errors must return an HTTP error");
-        assert_eq!(status, 500);
-        assert!(body.contains("control action command failed"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn power_action_command_result_returns_500_on_non_zero_exit() {
-        use std::os::unix::process::ExitStatusExt;
-
-        let result = map_power_action_command_result(
-            "poweroff",
-            Ok(std::process::Output {
-                status: std::process::ExitStatus::from_raw(1 << 8),
-                stdout: vec![],
-                stderr: vec![],
-            }),
-            None,
-        );
-
-        let (http_status, body) = result.expect_err("non-zero exit must return an HTTP error");
-        assert_eq!(http_status, 500);
-        assert!(body.contains("control action command exited with failure"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn power_action_command_result_returns_403_on_auth_failure() {
-        use std::os::unix::process::ExitStatusExt;
-
-        let result = map_power_action_command_result(
-            "poweroff",
-            Ok(std::process::Output {
-                status: std::process::ExitStatus::from_raw(1 << 8),
-                stdout: vec![],
-                stderr: b"Call to PowerOff failed: Interactive authentication required.\n".to_vec(),
-            }),
-            None,
-        );
-
-        let (http_status, body) = result.expect_err("auth failures must return an HTTP error");
-        assert_eq!(http_status, 403);
-        assert!(
-            body.to_ascii_lowercase()
-                .contains("interactive authentication required")
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn power_action_command_result_returns_500_on_non_auth_polkit_error() {
-        use std::os::unix::process::ExitStatusExt;
-
-        let result = map_power_action_command_result(
-            "poweroff",
-            Ok(std::process::Output {
-                status: std::process::ExitStatus::from_raw(1 << 8),
-                stdout: vec![],
-                stderr: b"polkit daemon unavailable".to_vec(),
-            }),
-            None,
-        );
-
-        let (http_status, body) =
-            result.expect_err("non-auth polkit failures must return an HTTP error");
-        assert_eq!(http_status, 500);
-        assert!(body.contains("polkit daemon unavailable"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn power_action_command_result_includes_stderr_in_error_body() {
-        use std::os::unix::process::ExitStatusExt;
-
-        let result = map_power_action_command_result(
-            "reboot",
-            Ok(std::process::Output {
-                status: std::process::ExitStatus::from_raw(1 << 8),
-                stdout: vec![],
-                stderr: b"sudo: a password is required".to_vec(),
-            }),
-            None,
-        );
-
-        let (http_status, body) = result.expect_err("non-zero exit must return an HTTP error");
-        assert_eq!(http_status, 403);
-        assert!(body.contains("sudo: a password is required"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn power_action_command_result_returns_ok_on_success_exit() {
-        use std::os::unix::process::ExitStatusExt;
-
-        let result = map_power_action_command_result(
-            "reboot",
-            Ok(std::process::Output {
-                status: std::process::ExitStatus::from_raw(0),
-                stdout: vec![],
-                stderr: vec![],
-            }),
-            None,
-        );
-        assert!(result.is_ok());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn power_action_join_error_logs_to_ui_when_logger_present() {
-        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
-        let logger = rt_ui_log::UiLogger::new(tx, |entry| {
-            crate::ui_events::ForwarderUiEvent::LogEntry { entry }
-        });
-
-        let join_err = tokio::task::spawn_blocking(|| -> () {
-            panic!("boom");
-        })
-        .await
-        .expect_err("task must panic");
-
-        let (_status, _body) = map_power_action_join_error("reboot", join_err, Some(&logger));
-
-        let evt = rx.try_recv().expect("expected UI log event");
-        match evt {
-            crate::ui_events::ForwarderUiEvent::LogEntry { entry } => {
-                assert!(entry.contains("systemctl reboot task failed"));
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn control_action_from_config_forwards_logger_to_apply_fn() {
-        let (tx, _) = tokio::sync::broadcast::channel(16);
-        let logger = rt_ui_log::UiLogger::new(tx, |entry| {
-            crate::ui_events::ForwarderUiEvent::LogEntry { entry }
-        });
-        let config = ConfigState::new(std::path::PathBuf::from("/tmp/unused.toml"));
-
-        let saw_logger = Arc::new(AtomicBool::new(false));
-        let spy = Arc::clone(&saw_logger);
-
-        let _ = apply_control_action_from_config_with(
-            "restart_device",
-            &config,
-            Some(&logger),
-            move |_action, _config_state, _restart_signal, logger| {
-                let spy = Arc::clone(&spy);
-                let has_logger = logger.is_some();
-                Box::pin(async move {
-                    spy.store(has_logger, Ordering::SeqCst);
-                    Err((500u16, "{\"ok\":false}".to_owned()))
-                })
-            },
-        )
-        .await;
-
-        assert!(saw_logger.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -5867,8 +3949,7 @@ target = "192.168.1.100:10000"
             download_calls: Arc::clone(&download_calls),
         };
 
-        let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+        let workflow_state = server.store().workflow_state();
         let status = run_download(&workflow_state, &checker).await;
 
         assert_eq!(
@@ -5879,7 +3960,7 @@ target = "192.168.1.100:10000"
         );
         assert_eq!(download_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
-            server.subsystem.lock().await.staged_update_path,
+            server.subsystem_arc().lock().await.staged_update_path,
             Some(std::path::PathBuf::from("/tmp/staged-forwarder"))
         );
     }
@@ -5901,7 +3982,7 @@ target = "192.168.1.100:10000"
                 version: "2.0.0".to_owned(),
             })
             .await;
-        let mut rx = server.ui_tx.subscribe();
+        let mut rx = server.ui_sender().subscribe();
 
         let checker = FakeChecker {
             check_result: Ok(UpdateStatus::UpToDate),
@@ -5909,8 +3990,7 @@ target = "192.168.1.100:10000"
             download_calls: Arc::new(AtomicUsize::new(0)),
         };
 
-        let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+        let workflow_state = server.store().workflow_state();
         let status = run_download(&workflow_state, &checker).await;
         assert_eq!(
             status,
@@ -5950,8 +4030,7 @@ target = "192.168.1.100:10000"
             download_calls: Arc::new(AtomicUsize::new(0)),
         };
 
-        let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+        let workflow_state = server.store().workflow_state();
         let status = run_download(&workflow_state, &checker).await;
         assert!(status.is_err());
     }
@@ -5980,8 +4059,7 @@ target = "192.168.1.100:10000"
             download_calls: Arc::new(AtomicUsize::new(0)),
         };
 
-        let workflow_state =
-            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+        let workflow_state = server.store().workflow_state();
         let status = run_download(&workflow_state, &checker).await;
         assert_eq!(
             status,
@@ -6010,7 +4088,7 @@ target = "192.168.1.100:10000"
             .update_reader_state("192.168.1.10", ReaderConnectionState::Connected)
             .await;
 
-        let mut rx = server.ui_tx.subscribe();
+        let mut rx = server.ui_sender().subscribe();
 
         // Set epoch name
         server
@@ -6053,7 +4131,7 @@ target = "192.168.1.100:10000"
             .set_reader_epoch_name("192.168.1.10", Some("Race Day".to_owned()))
             .await;
 
-        let mut rx = server.ui_tx.subscribe();
+        let mut rx = server.ui_sender().subscribe();
 
         // Clear epoch name
         server.set_reader_epoch_name("192.168.1.10", None).await;
@@ -6136,7 +4214,7 @@ target = "192.168.1.100:10000"
 
     #[cfg(any(feature = "eink", feature = "lcd"))]
     #[tokio::test]
-    async fn set_ready_with_display_sender_does_not_deadlock() {
+    async fn set_ready_with_display_sender_publishes_once() {
         let mut server = StatusServer::start(
             StatusConfig {
                 bind: "127.0.0.1:0".to_owned(),
@@ -6151,13 +4229,25 @@ target = "192.168.1.100:10000"
             tokio::sync::watch::channel(rt_screen::state::DisplayState::initial());
         server.set_display_sender(display_tx);
 
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::channel(4);
+        let watcher = tokio::spawn(async move {
+            while display_rx.changed().await.is_ok() {
+                let _ = seen_tx.send(()).await;
+            }
+        });
+        tokio::task::yield_now().await;
+
         tokio::time::timeout(Duration::from_millis(100), server.set_ready())
             .await
             .expect("set_ready timed out");
-        tokio::time::timeout(Duration::from_millis(100), display_rx.changed())
+        tokio::time::timeout(Duration::from_millis(100), seen_rx.recv())
             .await
             .expect("display state publish timed out")
             .expect("display state sender dropped");
+        tokio::time::timeout(Duration::from_millis(100), seen_rx.recv())
+            .await
+            .expect_err("display state should publish exactly once");
+        watcher.abort();
     }
 
     #[cfg(any(feature = "eink", feature = "lcd"))]
@@ -6451,7 +4541,8 @@ target = "192.168.1.100:10000"
         // have been consumed if the background broadcaster ticked, in which
         // case the delta must be on the feed instead.)
         let dirty = {
-            let ss = server.subsystem.lock().await;
+            let subsystem = server.subsystem_arc();
+            let ss = subsystem.lock().await;
             ss.read_counts_dirty.contains("10.0.0.9:10000")
         };
         if !dirty {
@@ -6908,88 +4999,20 @@ target = "192.168.1.100:10000"
         assert_eq!(resp.status(), 503);
     }
 
-    #[test]
-    fn sync_timing_rollover_frac_above_half_rounds_up() {
-        use chrono::TimeZone;
-        use chrono::Timelike;
-        // wall_now=.200, one_way=50ms, sync=500ms → rollover_if_now=.750, frac=0.75 → rounds UP
-        let wall_now = chrono::Local
-            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
-            .unwrap()
-            .with_nanosecond(200_000_000)
-            .unwrap();
-        let one_way = std::time::Duration::from_millis(50);
-        let (target, wait) = super::compute_sync_timing(wall_now, one_way, 500);
-        assert_eq!(target.second(), 1);
-        assert_eq!(target.nanosecond(), 0);
-        assert!(wait < std::time::Duration::from_secs(1));
-    }
-
-    #[test]
-    fn sync_timing_rollover_frac_below_half_stays_same_second() {
-        use chrono::TimeZone;
-        use chrono::Timelike;
-        // wall_now=.800, one_way=50ms, sync=500ms → rollover_if_now=1.350, frac=0.35 → truncates to 1.000
-        // ideal_send=1.000-0.050-0.500=0.450 < 0.800 → BUMP → target=2.000
-        let wall_now = chrono::Local
-            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
-            .unwrap()
-            .with_nanosecond(800_000_000)
-            .unwrap();
-        let one_way = std::time::Duration::from_millis(50);
-        let (target, _wait) = super::compute_sync_timing(wall_now, one_way, 500);
-        assert_eq!(target.second(), 2);
-        assert_eq!(target.nanosecond(), 0);
-    }
-
-    #[test]
-    fn sync_timing_ideal_send_past_bumps_target() {
-        use chrono::TimeZone;
-        use chrono::Timelike;
-        // wall_now=.500, one_way=1ms, sync=500ms → rollover_if_now=1.001, frac=0.001 → target=1.000
-        // ideal_send=1.000-0.001-0.500=0.499 < 0.500 → BUMP → target=2.000
-        let wall_now = chrono::Local
-            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
-            .unwrap()
-            .with_nanosecond(500_000_000)
-            .unwrap();
-        let one_way = std::time::Duration::from_millis(1);
-        let (target, wait) = super::compute_sync_timing(wall_now, one_way, 500);
-        assert_eq!(target.second(), 2);
-        assert_eq!(target.nanosecond(), 0);
-        assert!(wait > std::time::Duration::from_millis(900));
-        assert!(wait < std::time::Duration::from_millis(1100));
-    }
-
-    #[test]
-    fn sync_timing_zero_latency() {
-        use chrono::TimeZone;
-        use chrono::Timelike;
-        // wall_now=.300, one_way=0, sync=500ms → rollover_if_now=.800, frac=0.8 → rounds UP
-        let wall_now = chrono::Local
-            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
-            .unwrap()
-            .with_nanosecond(300_000_000)
-            .unwrap();
-        let one_way = std::time::Duration::ZERO;
-        let (target, _wait) = super::compute_sync_timing(wall_now, one_way, 500);
-        assert_eq!(target.second(), 1);
-        assert_eq!(target.nanosecond(), 0);
-    }
-
     #[tokio::test]
     async fn config_ups_section_accepts_valid_values() {
         use std::io::Write;
         use tempfile::NamedTempFile;
 
         let mut config_file = NamedTempFile::new().expect("create temp config");
+        let (_token_dir, token_path) = temp_token_file();
         write!(
             config_file,
             r#"schema_version = 1
 [p2p]
 server_url = "https://timing.example.com"
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -7030,13 +5053,14 @@ target = "192.168.1.100:10000"
         use tempfile::NamedTempFile;
 
         let mut config_file = NamedTempFile::new().expect("create temp config");
+        let (_token_dir, token_path) = temp_token_file();
         write!(
             config_file,
             r#"schema_version = 1
 [p2p]
 server_url = "https://timing.example.com"
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -7074,13 +5098,14 @@ target = "192.168.1.100:10000"
         use tempfile::NamedTempFile;
 
         let mut config_file = NamedTempFile::new().expect("create temp config");
+        let (_token_dir, token_path) = temp_token_file();
         write!(
             config_file,
             r#"schema_version = 1
 [p2p]
 server_url = "https://timing.example.com"
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#

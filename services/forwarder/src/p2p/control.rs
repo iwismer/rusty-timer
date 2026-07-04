@@ -23,14 +23,14 @@ use std::time::Duration;
 use prost::Message;
 #[cfg(test)]
 use rt_iroh::Connection;
-use rt_iroh::{RecvStream, SendStream};
+use rt_iroh::{EndpointId, RecvStream, SendStream};
 use rt_p2p_protocol::{
     CAP_CONTROL_EVENTS, CAP_READER_CONTROL, CAP_REMOTE_CONFIG, ConfigGetRequest, ConfigGetResponse,
     ConfigSetRequest, ConfigSetResponse, ControlC2F, ControlF2C, DownloadProgress, Hello,
     MAX_FRAME_BYTES, Ping, Pong, ProtocolError, ProtocolErrorCode, ReaderControlRequest,
     ReaderControlResponse, ReaderInfo, ReaderStatus, RestartRequest, RestartResponse,
-    StreamCatalog, SyncClock, UpsStatus, WireProtocolError, control_c2f, control_f2c, encode_frame,
-    negotiate,
+    StreamCatalog, SyncClock, UpsStatus, WireProtocolError, control_c2f, control_f2c,
+    decode_frame_len, decode_frame_payload, encode_frame, has_capability, negotiate,
 };
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
@@ -219,7 +219,11 @@ pub trait RemoteConfigHandler: std::fmt::Debug + Send + Sync + 'static {
     /// Persists `config_json` (same shape as get) to the forwarder's TOML
     /// config file and marks a restart as needed. On validation or IO failure
     /// returns `ok = false` with a descriptive error and never panics.
-    fn set_config(&self, request: ConfigSetRequest) -> ConfigSetFuture<'_>;
+    ///
+    /// `peer` is the authenticated endpoint id of the receiver that sent the
+    /// request; implementations use it to attribute the config write in
+    /// UI-visible logs.
+    fn set_config(&self, request: ConfigSetRequest, peer: EndpointId) -> ConfigSetFuture<'_>;
 
     /// Triggers the same graceful restart path as the HTTP restart endpoint.
     fn restart(&self, request: RestartRequest) -> RestartFuture<'_>;
@@ -234,8 +238,8 @@ impl<C: RemoteConfigHandler + ?Sized> RemoteConfigHandler for Arc<C> {
         (**self).get_config(request)
     }
 
-    fn set_config(&self, request: ConfigSetRequest) -> ConfigSetFuture<'_> {
-        (**self).set_config(request)
+    fn set_config(&self, request: ConfigSetRequest, peer: EndpointId) -> ConfigSetFuture<'_> {
+        (**self).set_config(request, peer)
     }
 
     fn restart(&self, request: RestartRequest) -> RestartFuture<'_> {
@@ -252,6 +256,10 @@ pub struct NoopRemoteConfigHandler;
 /// Error returned for any remote-config verb when the feature is disabled.
 pub(crate) const REMOTE_CONFIG_DISABLED: &str = "remote config disabled";
 
+/// Error returned for any remote-config verb when the peer did not negotiate
+/// [`CAP_REMOTE_CONFIG`] on this connection.
+const REMOTE_CONFIG_NOT_NEGOTIATED: &str = "remote config was not negotiated on this connection";
+
 impl RemoteConfigHandler for NoopRemoteConfigHandler {
     fn allow_remote_config(&self) -> bool {
         false
@@ -267,7 +275,7 @@ impl RemoteConfigHandler for NoopRemoteConfigHandler {
         })
     }
 
-    fn set_config(&self, request: ConfigSetRequest) -> ConfigSetFuture<'_> {
+    fn set_config(&self, request: ConfigSetRequest, _peer: EndpointId) -> ConfigSetFuture<'_> {
         Box::pin(async move {
             ConfigSetResponse {
                 request_id: request.request_id,
@@ -421,11 +429,16 @@ pub(crate) async fn negotiate_control_stream(
 
 /// Runs the post-negotiation heartbeat/control loop on an already-negotiated
 /// control stream until the peer disconnects cleanly (`Ok`) or is declared dead
-/// (`Err`). Uses the default no-op reader-control handler and forwards status
-/// updates from the optional `outbound_events` channel to the peer.
+/// (`Err`). Dispatches reader-control and remote-config requests to the
+/// supplied handlers and forwards status updates from the optional
+/// `outbound_events` channel to the peer. `peer` is the authenticated endpoint id
+/// of the connected receiver; every verb dispatch is attributed to it in logs.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_control_stream_loop(
     send: SendStream,
     recv: RecvStream,
+    peer: EndpointId,
+    capabilities: Vec<String>,
     heartbeat: HeartbeatConfig,
     outbound_events: Option<ControlEventReceiver>,
     reader_control: Arc<dyn ReaderControlHandler>,
@@ -434,6 +447,8 @@ pub(crate) async fn run_control_stream_loop(
     run_control_loop(
         send,
         recv,
+        peer,
+        capabilities,
         heartbeat,
         reader_control,
         outbound_events,
@@ -454,10 +469,12 @@ pub(crate) async fn serve_control_with_typed_control(
     outbound_events: Option<ControlEventReceiver>,
     remote_config: Arc<dyn RemoteConfigHandler>,
 ) -> Result<(), BoxError> {
+    let peer = connection.remote_id();
     let (send, recv) = connection.accept_bi().await?;
     serve_control_stream_with_typed_control(
         send,
         recv,
+        peer,
         catalog,
         handshake_timeout,
         heartbeat,
@@ -473,6 +490,7 @@ pub(crate) async fn serve_control_with_typed_control(
 pub(crate) async fn serve_control_stream_with_typed_control(
     send: SendStream,
     recv: RecvStream,
+    peer: EndpointId,
     catalog: &dyn CatalogProvider,
     handshake_timeout: Duration,
     heartbeat: HeartbeatConfig,
@@ -480,7 +498,7 @@ pub(crate) async fn serve_control_stream_with_typed_control(
     outbound_events: Option<ControlEventReceiver>,
     remote_config: Arc<dyn RemoteConfigHandler>,
 ) -> Result<(), BoxError> {
-    let (send, recv, _capabilities) = negotiate_control_stream(
+    let (send, recv, capabilities) = negotiate_control_stream(
         send,
         recv,
         catalog,
@@ -494,6 +512,8 @@ pub(crate) async fn serve_control_stream_with_typed_control(
     run_control_loop(
         send,
         recv,
+        peer,
+        capabilities,
         heartbeat,
         reader_control,
         outbound_events,
@@ -587,9 +607,16 @@ async fn negotiate_and_serve_catalog_stream(
 
 /// Runs the typed control loop until the peer misses `max_missed` consecutive
 /// pongs (returns `Err`) or disconnects cleanly (returns `Ok`).
+///
+/// Every reader-control and remote-config verb dispatch emits a `tracing`
+/// event attributed to `peer` (the authenticated remote endpoint id), including
+/// capability-gate denials, so control-plane operations are auditable.
+#[allow(clippy::too_many_arguments)]
 async fn run_control_loop(
     mut send: SendStream,
     mut recv: RecvStream,
+    peer: EndpointId,
+    capabilities: Vec<String>,
     config: HeartbeatConfig,
     reader_control: Arc<dyn ReaderControlHandler>,
     mut outbound_events: Option<ControlEventReceiver>,
@@ -613,13 +640,16 @@ async fn run_control_loop(
     ticker.tick().await;
 
     let mut nonce: u64 = 0;
-    let mut outstanding: u32 = 0;
+    let mut highest_acked: u64 = 0;
+    let mut outstanding: u64 = 0;
     let (control_response_tx, mut control_response_rx) = mpsc::channel::<ReaderControlResponse>(16);
     // Remote-config verbs (get/set/restart) reply with arbitrary ControlF2C
     // frames rather than a ReaderControlResponse, so they use a dedicated
     // response channel served by its own select arm below.
     let (config_response_tx, mut config_response_rx) = mpsc::channel::<ControlF2C>(16);
     let mut control_tasks = tokio::task::JoinSet::new();
+    let reader_control_negotiated = has_capability(&capabilities, CAP_READER_CONTROL);
+    let remote_config_negotiated = has_capability(&capabilities, CAP_REMOTE_CONFIG);
 
     let result = loop {
         tokio::select! {
@@ -635,7 +665,7 @@ async fn run_control_loop(
                     break Ok(());
                 }
                 outstanding += 1;
-                if outstanding >= config.max_missed {
+                if outstanding >= u64::from(config.max_missed) {
                     break Err(format!(
                         "heartbeat timed out after {outstanding} unanswered pings"
                     )
@@ -645,7 +675,31 @@ async fn run_control_loop(
             frame = rx.recv() => {
                 match frame {
                     Some(control) => match control.msg {
-                        Some(control_c2f::Msg::Pong(_)) => outstanding = 0,
+                        Some(control_c2f::Msg::Pong(pong)) => {
+                            // A pong counts as liveness when it acknowledges a
+                            // ping we actually sent (<= nonce) and haven't seen
+                            // acked yet (> highest_acked). Accepting pongs for
+                            // earlier outstanding pings lets slow-but-alive
+                            // peers survive RTTs up to max_missed * interval
+                            // instead of a single interval. Stale duplicates
+                            // and fabricated nonces are logged and ignored.
+                            if pong.nonce > highest_acked && pong.nonce <= nonce {
+                                highest_acked = pong.nonce;
+                                // Pings after the acked one are still
+                                // unanswered; the guard above guarantees
+                                // nonce >= highest_acked.
+                                outstanding = nonce - highest_acked;
+                            } else {
+                                tracing::warn!(
+                                    %peer,
+                                    expected_min = highest_acked + 1,
+                                    expected_max = nonce,
+                                    got = pong.nonce,
+                                    "p2p: pong nonce outside outstanding window; \
+                                     not counting as liveness"
+                                );
+                            }
+                        }
                         Some(control_c2f::Msg::Ping(ping)) => {
                             let pong = ControlF2C {
                                 msg: Some(control_f2c::Msg::Pong(Pong { nonce: ping.nonce })),
@@ -655,22 +709,100 @@ async fn run_control_loop(
                             }
                         }
                         Some(control_c2f::Msg::ReaderControlRequest(request)) => {
+                            if !reader_control_negotiated {
+                                tracing::warn!(
+                                    %peer,
+                                    verb = "reader_control",
+                                    command = ?request.command,
+                                    request_id = %request.request_id,
+                                    stream_id = ?String::from_utf8_lossy(&request.stream_id),
+                                    outcome = "denied",
+                                    "p2p: control verb denied (capability not negotiated)"
+                                );
+                                // Denials are written inline: the response channels are
+                                // drained by other arms of this same select loop, so
+                                // sending on them from here could fill the bounded channel
+                                // and deadlock the loop under a request flood.
+                                let response = reader_control_error_response(
+                                    request,
+                                    "reader control was not negotiated on this connection",
+                                );
+                                let frame = ControlF2C {
+                                    msg: Some(control_f2c::Msg::ReaderControlResponse(response)),
+                                };
+                                if write_frame(&mut send, &frame).await.is_err() {
+                                    break Ok(());
+                                }
+                                continue;
+                            }
+
                             let stream_id = request.stream_id.clone();
                             let request_id = request.request_id.clone();
+                            let command = request.command.clone();
                             let reader_control = Arc::clone(&reader_control);
                             let control_response_tx = control_response_tx.clone();
                             control_tasks.spawn(async move {
                                 let mut response = reader_control.handle(request).await;
                                 response.stream_id = stream_id;
                                 response.request_id = request_id;
+                                tracing::info!(
+                                    %peer,
+                                    verb = "reader_control",
+                                    command = ?command,
+                                    request_id = %response.request_id,
+                                    stream_id = ?String::from_utf8_lossy(&response.stream_id),
+                                    outcome = if response.success { "ok" } else { "error" },
+                                    "p2p: control verb handled"
+                                );
                                 let _ = control_response_tx.send(response).await;
                             });
                         }
                         Some(control_c2f::Msg::ConfigGetRequest(request)) => {
+                            if !remote_config_negotiated {
+                                tracing::warn!(
+                                    %peer,
+                                    verb = "config_get",
+                                    request_id = %request.request_id,
+                                    outcome = "denied",
+                                    "p2p: control verb denied (capability not negotiated)"
+                                );
+                                let response = ConfigGetResponse {
+                                    request_id: request.request_id,
+                                    config_json: String::new(),
+                                    restart_needed: false,
+                                };
+                                let frame = ControlF2C {
+                                    msg: Some(control_f2c::Msg::ConfigGetResponse(response)),
+                                };
+                                if write_frame(&mut send, &frame).await.is_err() {
+                                    break Ok(());
+                                }
+                                continue;
+                            }
+
+                            // When control.allow_remote_config is false, CAP_REMOTE_CONFIG is
+                            // never advertised, so this negotiated-capability gate fires before
+                            // the handler's disabled check. The handler check remains defense in
+                            // depth.
                             let remote_config = Arc::clone(&remote_config);
                             let config_response_tx = config_response_tx.clone();
                             control_tasks.spawn(async move {
                                 let response = remote_config.get_config(request).await;
+                                // Empty config_json is also the handler's "disabled"
+                                // signal, but the capability gate above fires first when
+                                // remote config is disabled, so on this path emptiness
+                                // means a real read/serialize failure.
+                                tracing::info!(
+                                    %peer,
+                                    verb = "config_get",
+                                    request_id = %response.request_id,
+                                    outcome = if response.config_json.is_empty() {
+                                        "error"
+                                    } else {
+                                        "ok"
+                                    },
+                                    "p2p: control verb handled"
+                                );
                                 let frame = ControlF2C {
                                     msg: Some(control_f2c::Msg::ConfigGetResponse(response)),
                                 };
@@ -678,10 +810,40 @@ async fn run_control_loop(
                             });
                         }
                         Some(control_c2f::Msg::ConfigSetRequest(request)) => {
+                            if !remote_config_negotiated {
+                                tracing::warn!(
+                                    %peer,
+                                    verb = "config_set",
+                                    request_id = %request.request_id,
+                                    outcome = "denied",
+                                    "p2p: control verb denied (capability not negotiated)"
+                                );
+                                let response = ConfigSetResponse {
+                                    request_id: request.request_id,
+                                    ok: false,
+                                    restart_needed: false,
+                                    error: REMOTE_CONFIG_NOT_NEGOTIATED.to_owned(),
+                                };
+                                let frame = ControlF2C {
+                                    msg: Some(control_f2c::Msg::ConfigSetResponse(response)),
+                                };
+                                if write_frame(&mut send, &frame).await.is_err() {
+                                    break Ok(());
+                                }
+                                continue;
+                            }
+
                             let remote_config = Arc::clone(&remote_config);
                             let config_response_tx = config_response_tx.clone();
                             control_tasks.spawn(async move {
-                                let response = remote_config.set_config(request).await;
+                                let response = remote_config.set_config(request, peer).await;
+                                tracing::info!(
+                                    %peer,
+                                    verb = "config_set",
+                                    request_id = %response.request_id,
+                                    outcome = if response.ok { "ok" } else { "error" },
+                                    "p2p: control verb handled"
+                                );
                                 let frame = ControlF2C {
                                     msg: Some(control_f2c::Msg::ConfigSetResponse(response)),
                                 };
@@ -689,10 +851,39 @@ async fn run_control_loop(
                             });
                         }
                         Some(control_c2f::Msg::RestartRequest(request)) => {
+                            if !remote_config_negotiated {
+                                tracing::warn!(
+                                    %peer,
+                                    verb = "restart",
+                                    request_id = %request.request_id,
+                                    outcome = "denied",
+                                    "p2p: control verb denied (capability not negotiated)"
+                                );
+                                let response = RestartResponse {
+                                    request_id: request.request_id,
+                                    accepted: false,
+                                    error: REMOTE_CONFIG_NOT_NEGOTIATED.to_owned(),
+                                };
+                                let frame = ControlF2C {
+                                    msg: Some(control_f2c::Msg::RestartResponse(response)),
+                                };
+                                if write_frame(&mut send, &frame).await.is_err() {
+                                    break Ok(());
+                                }
+                                continue;
+                            }
+
                             let remote_config = Arc::clone(&remote_config);
                             let config_response_tx = config_response_tx.clone();
                             control_tasks.spawn(async move {
                                 let response = remote_config.restart(request).await;
+                                tracing::info!(
+                                    %peer,
+                                    verb = "restart",
+                                    request_id = %response.request_id,
+                                    outcome = if response.accepted { "ok" } else { "error" },
+                                    "p2p: control verb handled"
+                                );
                                 let frame = ControlF2C {
                                     msg: Some(control_f2c::Msg::RestartResponse(response)),
                                 };
@@ -747,6 +938,19 @@ async fn run_control_loop(
     result
 }
 
+fn reader_control_error_response(
+    request: ReaderControlRequest,
+    message: &str,
+) -> ReaderControlResponse {
+    ReaderControlResponse {
+        stream_id: request.stream_id,
+        request_id: request.request_id,
+        success: false,
+        message: message.to_owned(),
+        reader_info_json: None,
+    }
+}
+
 async fn recv_control_event(events: &mut Option<ControlEventReceiver>) -> Option<ControlEvent> {
     match events {
         Some(events) => events.recv().await,
@@ -770,14 +974,10 @@ where
 {
     let mut len_buf = [0u8; 4];
     recv.read_exact(&mut len_buf).await?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    if len > MAX_FRAME_BYTES {
-        return Err(format!("frame length {len} exceeds MAX_FRAME_BYTES {MAX_FRAME_BYTES}").into());
-    }
-
+    let len = decode_frame_len(len_buf)?;
     let mut payload = vec![0u8; len];
     recv.read_exact(&mut payload).await?;
-    Ok(M::decode(payload.as_slice())?)
+    Ok(decode_frame_payload(len_buf, payload.as_slice())?)
 }
 
 #[cfg(test)]
@@ -920,6 +1120,30 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct SpyControlHandler {
+        calls: AtomicUsize,
+    }
+
+    impl ReaderControlHandler for SpyControlHandler {
+        fn supports_reader_control(&self) -> bool {
+            true
+        }
+
+        fn handle(&self, request: ReaderControlRequest) -> ReaderControlFuture<'_> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                rt_p2p_protocol::ReaderControlResponse {
+                    stream_id: request.stream_id,
+                    request_id: request.request_id,
+                    success: true,
+                    message: "spy invoked".to_owned(),
+                    reader_info_json: None,
+                }
+            })
+        }
+    }
+
+    #[derive(Debug)]
     struct SlowControlHandler {
         started_tx: Mutex<Option<oneshot::Sender<()>>>,
         release_rx: Mutex<Option<oneshot::Receiver<()>>>,
@@ -985,6 +1209,9 @@ mod tests {
         config_json: String,
         restart_needed: bool,
         last_set: Mutex<Option<String>>,
+        last_set_peer: Mutex<Option<EndpointId>>,
+        get_calls: AtomicUsize,
+        set_calls: AtomicUsize,
         restart_calls: AtomicUsize,
     }
 
@@ -995,6 +1222,9 @@ mod tests {
                 config_json: r#"{"schema_version":1}"#.to_owned(),
                 restart_needed: false,
                 last_set: Mutex::new(None),
+                last_set_peer: Mutex::new(None),
+                get_calls: AtomicUsize::new(0),
+                set_calls: AtomicUsize::new(0),
                 restart_calls: AtomicUsize::new(0),
             }
         }
@@ -1014,6 +1244,7 @@ mod tests {
                         restart_needed: false,
                     };
                 }
+                self.get_calls.fetch_add(1, Ordering::SeqCst);
                 ConfigGetResponse {
                     request_id: request.request_id,
                     config_json: self.config_json.clone(),
@@ -1022,7 +1253,7 @@ mod tests {
             })
         }
 
-        fn set_config(&self, request: ConfigSetRequest) -> ConfigSetFuture<'_> {
+        fn set_config(&self, request: ConfigSetRequest, peer: EndpointId) -> ConfigSetFuture<'_> {
             Box::pin(async move {
                 if !self.allow {
                     return ConfigSetResponse {
@@ -1032,7 +1263,9 @@ mod tests {
                         error: REMOTE_CONFIG_DISABLED.to_owned(),
                     };
                 }
+                self.set_calls.fetch_add(1, Ordering::SeqCst);
                 *self.last_set.lock().unwrap() = Some(request.config_json.clone());
+                *self.last_set_peer.lock().unwrap() = Some(peer);
                 ConfigSetResponse {
                     request_id: request.request_id,
                     ok: true,
@@ -1066,6 +1299,14 @@ mod tests {
     fn hello_with_remote_config() -> Hello {
         let mut hello = forwarder_hello();
         hello.capabilities.push(CAP_REMOTE_CONFIG.to_owned());
+        hello
+    }
+
+    /// Builds a client `Hello` that advertises reader-control support so the
+    /// negotiated capability set can include [`CAP_READER_CONTROL`].
+    fn hello_with_reader_control() -> Hello {
+        let mut hello = forwarder_hello();
+        hello.capabilities.push(CAP_READER_CONTROL.to_owned());
         hello
     }
 
@@ -1150,6 +1391,75 @@ mod tests {
             }
             other => return Err(format!("expected HelloOk, got {other:?}").into()),
         }
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reader_control_request_rejected_when_capability_not_negotiated() -> TestResult {
+        let handler = Arc::new(SpyControlHandler {
+            calls: AtomicUsize::new(0),
+        });
+        let (forwarder, forwarder_addr, handle) = spawn_forwarder_with_control(
+            [54; 32],
+            StaticCatalog::new(sample_catalog()),
+            LONG_HANDSHAKE,
+            quiet_heartbeat(),
+            Arc::clone(&handler) as _,
+            None,
+            Arc::new(NoopRemoteConfigHandler),
+        )
+        .await?;
+
+        let receiver = EndpointBuilder::test([55; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        let stream_id = vec![6u8; 16];
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::ReaderControlRequest(
+                    ReaderControlRequest {
+                        stream_id: stream_id.clone(),
+                        command: "clear_records".to_owned(),
+                        request_id: "req-no-cap".to_owned(),
+                        mode: None,
+                        timeout: None,
+                        enabled: None,
+                        epoch_name: None,
+                    },
+                )),
+            },
+        )
+        .await?;
+
+        let frame =
+            tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::ReaderControlResponse(response)) => {
+                assert_eq!(response.stream_id, stream_id);
+                assert_eq!(response.request_id, "req-no-cap");
+                assert!(!response.success);
+                assert!(
+                    response.message.contains("not negotiated"),
+                    "message should mention negotiation, got {:?}",
+                    response.message
+                );
+            }
+            other => return Err(format!("expected ReaderControlResponse, got {other:?}").into()),
+        }
+        assert_eq!(handler.calls.load(Ordering::SeqCst), 0);
 
         connection.close(0u32.into(), b"done");
         handle.abort();
@@ -1283,6 +1593,242 @@ mod tests {
             Some(payload),
             "handler must receive the config_json sent over the wire"
         );
+        assert_eq!(
+            *handler.last_set_peer.lock().unwrap(),
+            Some(receiver.endpoint_id()),
+            "handler must be told which peer sent the config write"
+        );
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn config_get_rejected_when_capability_not_negotiated() -> TestResult {
+        let handler = Arc::new(FakeRemoteConfigHandler::new(true));
+        let (forwarder, forwarder_addr, handle) =
+            spawn_forwarder_with_remote_config([74; 32], Arc::clone(&handler) as _).await?;
+
+        let receiver = EndpointBuilder::test([75; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::ConfigGetRequest(ConfigGetRequest {
+                    request_id: "get-no-cap".to_owned(),
+                })),
+            },
+        )
+        .await?;
+
+        let frame =
+            tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::ConfigGetResponse(response)) => {
+                assert_eq!(response.request_id, "get-no-cap");
+                assert!(
+                    response.config_json.is_empty(),
+                    "config_json must be empty when remote-config capability was not negotiated"
+                );
+            }
+            other => return Err(format!("expected ConfigGetResponse, got {other:?}").into()),
+        }
+        assert_eq!(handler.get_calls.load(Ordering::SeqCst), 0);
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn config_set_rejected_when_capability_not_negotiated() -> TestResult {
+        let handler = Arc::new(FakeRemoteConfigHandler::new(true));
+        let (forwarder, forwarder_addr, handle) =
+            spawn_forwarder_with_remote_config([56; 32], Arc::clone(&handler) as _).await?;
+
+        let receiver = EndpointBuilder::test([59; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::ConfigSetRequest(ConfigSetRequest {
+                    request_id: "set-no-cap".to_owned(),
+                    config_json: r#"{"schema_version":1}"#.to_owned(),
+                })),
+            },
+        )
+        .await?;
+
+        let frame =
+            tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::ConfigSetResponse(response)) => {
+                assert_eq!(response.request_id, "set-no-cap");
+                assert!(!response.ok);
+                assert!(
+                    response.error.contains("not negotiated"),
+                    "error should mention negotiation, got {:?}",
+                    response.error
+                );
+            }
+            other => return Err(format!("expected ConfigSetResponse, got {other:?}").into()),
+        }
+        assert_eq!(handler.set_calls.load(Ordering::SeqCst), 0);
+        assert!(handler.last_set.lock().unwrap().is_none());
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restart_rejected_when_capability_not_negotiated() -> TestResult {
+        let handler = Arc::new(FakeRemoteConfigHandler::new(true));
+        let (forwarder, forwarder_addr, handle) =
+            spawn_forwarder_with_remote_config([78; 32], Arc::clone(&handler) as _).await?;
+
+        let receiver = EndpointBuilder::test([79; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::RestartRequest(RestartRequest {
+                    request_id: "restart-no-cap".to_owned(),
+                })),
+            },
+        )
+        .await?;
+
+        let frame =
+            tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::RestartResponse(response)) => {
+                assert_eq!(response.request_id, "restart-no-cap");
+                assert!(!response.accepted);
+                assert!(
+                    response.error.contains("not negotiated"),
+                    "error should mention negotiation, got {:?}",
+                    response.error
+                );
+            }
+            other => return Err(format!("expected RestartResponse, got {other:?}").into()),
+        }
+        assert_eq!(handler.restart_calls.load(Ordering::SeqCst), 0);
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    /// A non-conforming peer that floods gated requests without reading the
+    /// denials must not wedge the control loop: denials are written straight to
+    /// the stream by the select arm, so no bounded internal channel (cap 16,
+    /// drained only by another arm of the same loop) can fill up and deadlock.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gate_denial_flood_does_not_deadlock_control_loop() -> TestResult {
+        // Far above the internal response-channel capacity of 16. The old
+        // channel-based denial path only wedged once channel occupancy hit the
+        // cap, which under the select loop's random branch ordering is a random
+        // walk; a large burst makes hitting it overwhelmingly likely.
+        const FLOOD: usize = 2000;
+
+        let handler = Arc::new(FakeRemoteConfigHandler::new(true));
+        let (forwarder, forwarder_addr, handle) =
+            spawn_forwarder_with_remote_config([76; 32], Arc::clone(&handler) as _).await?;
+
+        let receiver = EndpointBuilder::test([77; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        // Send the whole burst before reading anything back, so far more
+        // denials than the old channel capacity are in flight at once.
+        for i in 0..FLOOD {
+            write_frame(
+                &mut send,
+                &ControlC2F {
+                    msg: Some(control_c2f::Msg::ConfigSetRequest(ConfigSetRequest {
+                        request_id: format!("flood-{i}"),
+                        config_json: r#"{"schema_version":1}"#.to_owned(),
+                    })),
+                },
+            )
+            .await?;
+        }
+
+        // Every request must be denied, in order.
+        for i in 0..FLOOD {
+            let frame = tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv))
+                .await
+                .map_err(|_| format!("control loop wedged: no denial for request {i}/{FLOOD}"))??;
+            match frame.msg {
+                Some(control_f2c::Msg::ConfigSetResponse(response)) => {
+                    assert_eq!(response.request_id, format!("flood-{i}"));
+                    assert!(!response.ok);
+                    assert!(
+                        response.error.contains("not negotiated"),
+                        "error should mention negotiation, got {:?}",
+                        response.error
+                    );
+                }
+                other => return Err(format!("expected ConfigSetResponse, got {other:?}").into()),
+            }
+        }
+        assert_eq!(handler.set_calls.load(Ordering::SeqCst), 0);
+
+        // The loop must still be live after the flood: a Ping gets a Pong.
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::Ping(Ping { nonce: 42 })),
+            },
+        )
+        .await?;
+        let frame = tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv))
+            .await
+            .map_err(|_| "control loop wedged: no Pong after gate-denial flood".to_owned())??;
+        match frame.msg {
+            Some(control_f2c::Msg::Pong(pong)) => assert_eq!(pong.nonce, 42),
+            other => return Err(format!("expected Pong, got {other:?}").into()),
+        }
 
         connection.close(0u32.into(), b"done");
         handle.abort();
@@ -1326,7 +1872,11 @@ mod tests {
             Some(control_f2c::Msg::ConfigSetResponse(response)) => {
                 assert_eq!(response.request_id, "set-2");
                 assert!(!response.ok, "set must be rejected when disabled");
-                assert_eq!(response.error, REMOTE_CONFIG_DISABLED);
+                assert!(
+                    response.error.contains("not negotiated"),
+                    "error should mention negotiation, got {:?}",
+                    response.error
+                );
             }
             other => return Err(format!("expected ConfigSetResponse, got {other:?}").into()),
         }
@@ -1417,7 +1967,11 @@ mod tests {
             Some(control_f2c::Msg::RestartResponse(response)) => {
                 assert_eq!(response.request_id, "restart-2");
                 assert!(!response.accepted, "restart must be rejected when disabled");
-                assert_eq!(response.error, REMOTE_CONFIG_DISABLED);
+                assert!(
+                    response.error.contains("not negotiated"),
+                    "error should mention negotiation, got {:?}",
+                    response.error
+                );
             }
             other => return Err(format!("expected RestartResponse, got {other:?}").into()),
         }
@@ -1549,7 +2103,7 @@ mod tests {
         let receiver = EndpointBuilder::test([47; 32]).bind().await?;
         let (connection, mut send, mut recv) = tokio::time::timeout(
             LONG_HANDSHAKE,
-            open_control(&receiver, forwarder_addr, forwarder_hello()),
+            open_control(&receiver, forwarder_addr, hello_with_reader_control()),
         )
         .await??;
 
@@ -1616,7 +2170,7 @@ mod tests {
         let receiver = EndpointBuilder::test([49; 32]).bind().await?;
         let (connection, mut send, mut recv) = tokio::time::timeout(
             LONG_HANDSHAKE,
-            open_control(&receiver, forwarder_addr, forwarder_hello()),
+            open_control(&receiver, forwarder_addr, hello_with_reader_control()),
         )
         .await??;
 
@@ -1715,7 +2269,7 @@ mod tests {
         let receiver = EndpointBuilder::test([51; 32]).bind().await?;
         let (connection, mut send, mut recv) = tokio::time::timeout(
             LONG_HANDSHAKE,
-            open_control(&receiver, forwarder_addr, forwarder_hello()),
+            open_control(&receiver, forwarder_addr, hello_with_reader_control()),
         )
         .await??;
 
@@ -1778,6 +2332,223 @@ mod tests {
         forwarder.close().await;
         Ok(())
     }
+    #[tokio::test]
+    async fn bogus_pong_nonce_does_not_reset_heartbeat() -> TestResult {
+        let heartbeat = HeartbeatConfig {
+            interval: Duration::from_millis(50),
+            max_missed: 3,
+        };
+        let (forwarder, forwarder_addr, handle) = spawn_forwarder(
+            [80; 32],
+            StaticCatalog::new(sample_catalog()),
+            LONG_HANDSHAKE,
+            heartbeat,
+        )
+        .await?;
+
+        let receiver = EndpointBuilder::test([81; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        // Answer every ping promptly, but with a WRONG nonce. These must not
+        // count as liveness: the loop must still declare the peer dead after
+        // max_missed unanswered pings.
+        let responder = tokio::spawn(async move {
+            while let Ok(frame) = read_frame::<ControlF2C>(&mut recv).await {
+                if let Some(control_f2c::Msg::Ping(ping)) = frame.msg {
+                    let bogus = ControlC2F {
+                        msg: Some(control_c2f::Msg::Pong(Pong {
+                            nonce: ping.nonce + 999,
+                        })),
+                    };
+                    if write_frame(&mut send, &bogus).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+
+        let result = tokio::time::timeout(Duration::from_secs(5), handle).await??;
+        assert!(
+            result.is_err(),
+            "bogus pong nonces must not reset heartbeat liveness, got {result:?}"
+        );
+
+        responder.abort();
+        connection.close(0u32.into(), b"done");
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn matching_pong_nonce_keeps_heartbeat_alive() -> TestResult {
+        let heartbeat = HeartbeatConfig {
+            interval: Duration::from_millis(50),
+            max_missed: 3,
+        };
+        let (forwarder, forwarder_addr, handle) = spawn_forwarder(
+            [82; 32],
+            StaticCatalog::new(sample_catalog()),
+            LONG_HANDSHAKE,
+            heartbeat,
+        )
+        .await?;
+
+        let receiver = EndpointBuilder::test([83; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        // Echo every ping's nonce back: the loop must stay alive well past
+        // max_missed pings. Reply-per-ping (no fixed sleeps) keeps this
+        // immune to scheduler delay on loaded CI.
+        let mut pings_seen = 0u32;
+        while pings_seen < 8 {
+            let frame =
+                tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+            if let Some(control_f2c::Msg::Ping(ping)) = frame.msg {
+                pings_seen += 1;
+                let pong = ControlC2F {
+                    msg: Some(control_c2f::Msg::Pong(Pong { nonce: ping.nonce })),
+                };
+                write_frame(&mut send, &pong).await?;
+            }
+        }
+        assert!(
+            !handle.is_finished(),
+            "matching pong nonces must keep the heartbeat alive"
+        );
+
+        handle.abort();
+        connection.close(0u32.into(), b"done");
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pong_for_previous_outstanding_nonce_keeps_heartbeat_alive() -> TestResult {
+        let heartbeat = HeartbeatConfig {
+            interval: Duration::from_millis(50),
+            max_missed: 3,
+        };
+        let (forwarder, forwarder_addr, handle) = spawn_forwarder(
+            [84; 32],
+            StaticCatalog::new(sample_catalog()),
+            LONG_HANDSHAKE,
+            heartbeat,
+        )
+        .await?;
+
+        let receiver = EndpointBuilder::test([85; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        // Reply one ping late: upon receiving ping N, pong nonce N-1. Every
+        // pong references a previous-but-still-outstanding ping, mimicking a
+        // slow-but-alive peer whose RTT exceeds one heartbeat interval.
+        // Liveness must tolerate this (up to max_missed * interval), so the
+        // loop must survive well past max_missed pings. Reply-per-ping (no
+        // fixed sleeps) keeps this immune to scheduler delay on loaded CI.
+        let mut pings_seen = 0u32;
+        while pings_seen < 8 {
+            let frame =
+                tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+            if let Some(control_f2c::Msg::Ping(ping)) = frame.msg {
+                pings_seen += 1;
+                if ping.nonce > 1 {
+                    let pong = ControlC2F {
+                        msg: Some(control_c2f::Msg::Pong(Pong {
+                            nonce: ping.nonce - 1,
+                        })),
+                    };
+                    write_frame(&mut send, &pong).await?;
+                }
+            }
+        }
+        assert!(
+            !handle.is_finished(),
+            "pongs for previous outstanding nonces must keep the heartbeat alive"
+        );
+
+        handle.abort();
+        connection.close(0u32.into(), b"done");
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_duplicate_pong_does_not_reset_heartbeat() -> TestResult {
+        let heartbeat = HeartbeatConfig {
+            interval: Duration::from_millis(50),
+            max_missed: 3,
+        };
+        let (forwarder, forwarder_addr, handle) = spawn_forwarder(
+            [86; 32],
+            StaticCatalog::new(sample_catalog()),
+            LONG_HANDSHAKE,
+            heartbeat,
+        )
+        .await?;
+
+        let receiver = EndpointBuilder::test([87; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        // Ack the first ping legitimately, then replay that same pong for
+        // every later ping. Duplicates of an already-acked nonce must not
+        // count as liveness, so the heartbeat must still time out.
+        let responder = tokio::spawn(async move {
+            while let Ok(frame) = read_frame::<ControlF2C>(&mut recv).await {
+                if let Some(control_f2c::Msg::Ping(_)) = frame.msg {
+                    let stale = ControlC2F {
+                        msg: Some(control_c2f::Msg::Pong(Pong { nonce: 1 })),
+                    };
+                    if write_frame(&mut send, &stale).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+
+        let result = tokio::time::timeout(Duration::from_secs(5), handle).await??;
+        assert!(
+            result.is_err(),
+            "stale duplicate pongs must not reset heartbeat liveness, got {result:?}"
+        );
+
+        responder.abort();
+        connection.close(0u32.into(), b"done");
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn heartbeat_timeout_closes() -> TestResult {
         let heartbeat = HeartbeatConfig {

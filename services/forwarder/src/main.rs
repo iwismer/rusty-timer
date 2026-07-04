@@ -3,14 +3,11 @@
 // Runtime event loop: wires together journal, local fanout, IPICO TCP readers,
 // the P2P endpoint, and the status HTTP server.
 
-mod reader_task;
-
+use forwarder::config_service::ConfigState;
 use forwarder::discovery::expand_target;
 use forwarder::local_fanout::FanoutServer;
-use forwarder::status_http::{
-    ConfigState, ForwarderStatusEvent, ReaderConnectionState, StatusConfig, StatusServer,
-    SubsystemStatus,
-};
+use forwarder::status_http::{StatusConfig, StatusServer};
+use forwarder::status_store::{ForwarderStatusEvent, ReaderConnectionState, SubsystemStatus};
 use forwarder::storage::journal::Journal;
 use rt_ui_log::UiLogLevel;
 use sha2::{Digest, Sha256};
@@ -22,7 +19,7 @@ use tokio::time::{Duration, sleep};
 use tracing::{error, info, warn};
 
 // run_reader is used by main() in production; NOT cfg(test)-gated.
-use reader_task::run_reader;
+use forwarder::reader_task::run_reader;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -184,7 +181,7 @@ async fn main() {
                 .unwrap_or_else(|| ep.default_local_fallback_port());
 
             let bind_addr = format!("0.0.0.0:{}", local_port);
-            let fanout = match FanoutServer::bind(&bind_addr).await {
+            let mut fanout = match FanoutServer::bind(&bind_addr).await {
                 Ok(f) => f,
                 Err(e) => {
                     eprintln!(
@@ -194,6 +191,9 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
+
+            // Surface lag-induced consumer drops in the status JSON.
+            fanout.set_drop_counter(status_server.store().fanout_drop_counter());
 
             let fanout_addr = fanout.local_addr();
             info!(
@@ -218,6 +218,110 @@ async fn main() {
     if all_readers.is_empty() {
         eprintln!("FATAL: no enabled readers configured");
         std::process::exit(1);
+    }
+
+    // Restore stream identity for any journal-missing stream keys BEFORE
+    // `start_forwarder_p2p` (which idempotently seeds advertised streams at
+    // seq 1 and would pre-empt a restore) and before reader tasks spawn.
+    // Receivers dedup on (stream_id, seq); if the journal was lost, restarting
+    // an existing stream key at seq 1 would make them silently discard reads.
+    // See `forwarder::storage::restore` for the high-water + slack rationale.
+    {
+        use forwarder::storage::restore::{
+            RegistryFetch, RegistryStreamRecord, fetch_registry_snapshot_with_retries,
+            restore_streams_at_startup,
+        };
+
+        let stream_keys: Vec<String> = all_readers.iter().map(|(addr, _)| addr.clone()).collect();
+        let any_missing = {
+            let j = journal.lock().await;
+            stream_keys
+                .iter()
+                .any(|key| !j.stream_exists(key).unwrap_or(false))
+        };
+        if any_missing {
+            let fetch = if let (true, Some(server_url)) = (cfg.p2p.enabled, &cfg.p2p.server_url) {
+                // Reuse the persisted minted device token (it lives at a
+                // different path than the journal, so it typically survives a
+                // journal-loss reboot). Never bootstrap here: minting needs the
+                // P2P endpoint id, which does not exist yet. A missing token is
+                // treated as "registry unavailable" (loud fallback); on a true
+                // first boot the journal is expected to be empty anyway.
+                let token_path = forwarder::p2p::device_token_path(&cfg.p2p);
+                match forwarder::p2p::read_device_token(&token_path) {
+                    Ok(Some(device_token)) => {
+                        let client = forwarder::p2p::ServerCatalogClient::with_timeout(
+                            server_url.clone(),
+                            device_token,
+                            Duration::from_secs(cfg.p2p.allowlist_request_timeout_secs),
+                        );
+                        fetch_registry_snapshot_with_retries(
+                            || {
+                                let client = client.clone();
+                                async move {
+                                    client.fetch_own_catalog().await.map(|streams| {
+                                        streams
+                                            .into_iter()
+                                            .map(|s| RegistryStreamRecord {
+                                                stream_id: s.stream_id,
+                                                epoch: s.epoch,
+                                                next_seq: s.next_seq,
+                                            })
+                                            .collect()
+                                    })
+                                }
+                            },
+                            3,
+                            Duration::from_secs(5),
+                        )
+                        .await
+                    }
+                    Ok(None) if !forwarder::p2p::persistent_identity_exists(&cfg.p2p) => {
+                        // No token AND no P2P identity yet: a true first boot.
+                        // The registry cannot hold records for an identity
+                        // that is about to be freshly generated, so this is
+                        // benign (info), not a lost token (error).
+                        info!(
+                            path = %token_path.display(),
+                            "no device token and no p2p identity yet: first boot, skipping registry restore"
+                        );
+                        RegistryFetch::FreshIdentity
+                    }
+                    Ok(None) => {
+                        warn!(
+                            path = %token_path.display(),
+                            "no persisted device token; cannot fetch registry high-water for stream restore"
+                        );
+                        RegistryFetch::Unavailable
+                    }
+                    Err(e) => {
+                        warn!(
+                            path = %token_path.display(),
+                            error = %e,
+                            "failed to read device token for stream restore"
+                        );
+                        RegistryFetch::Unavailable
+                    }
+                }
+            } else {
+                RegistryFetch::NotConfigured
+            };
+
+            let restore_result = {
+                let mut j = journal.lock().await;
+                restore_streams_at_startup(&mut j, &stream_keys, &fetch, Some(logger.as_ref()))
+            };
+            if let Err(e) = restore_result {
+                // Reader tasks retry `ensure_stream_state` as a safety net, so
+                // local capture still proceeds; but a failed restore means a
+                // previously forwarded stream key may restart at seq 1.
+                error!(error = %e, "startup stream identity restore failed");
+                logger.log_at(
+                    UiLogLevel::Error,
+                    format!("stream identity restore failed: {e}"),
+                );
+            }
+        }
     }
 
     // Seed historical totals once at startup to avoid per-request DB counting.
@@ -290,7 +394,20 @@ async fn main() {
                             }
                         }
                         Ok(_) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            // A burst may have evicted the only reader-state
+                            // transition; re-detect rather than risk serving a
+                            // stale IP until the next transition.
+                            let detected = detect_local_ip(&target);
+                            if detected != last_ip {
+                                info!(
+                                    local_ip = detected.as_deref().unwrap_or("none"),
+                                    "local IP changed (feed lagged), updating status"
+                                );
+                                last_ip = detected.clone();
+                                status.set_local_ip(detected).await;
+                            }
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                     }
                 }
@@ -303,14 +420,17 @@ async fn main() {
         config_state.clone(),
         status_server.subsystem_arc(),
         status_server.ui_sender(),
+        status_server.logger(),
         restart_signal.clone(),
     ));
     let reader_control_handler = Arc::new(forwarder::p2p::ForwarderReaderControlHandler::new(
+        cfg.control.allow_reader_control,
         status_server.reader_control_service(),
         Arc::clone(&journal),
     ));
     let p2p_runtime = match forwarder::p2p::start_forwarder_p2p(
         &cfg.p2p,
+        journal_path,
         Arc::clone(&journal),
         &all_readers
             .iter()
@@ -595,20 +715,33 @@ async fn main() {
         }
     }
 
+    let status_store = status_server.store();
+
     // Spawn reader tasks
     for (reader_ip, reader_port, fanout_addr) in fanout_addrs {
         let j = journal.clone();
         let rx = shutdown_rx.clone();
-        let ss = status_server.clone();
+        let ss = status_store.clone();
         let lg = logger.clone();
         tokio::spawn(async move {
             run_reader(reader_ip, reader_port, fanout_addr, j, rx, ss, lg).await;
         });
     }
 
+    // Spawn background server reachability poll (only when a server URL is
+    // configured — the status endpoint serves this cache instead of making
+    // outbound requests inline).
+    if cfg.p2p.server_url.is_some() {
+        forwarder::server_status_task::spawn_server_status_task(
+            config_state.clone(),
+            status_store.clone(),
+            shutdown_rx.clone(),
+        );
+    }
+
     // Spawn UPS monitoring task (if enabled)
     let ups_handle = if cfg.ups.enabled {
-        let ss = status_server.clone();
+        let ss = status_store.clone();
         let rx = shutdown_rx.clone();
         let fwd_id = forwarder_id.clone();
         Some(forwarder::ups_task::spawn_ups_task(

@@ -4,14 +4,18 @@
 use std::path::PathBuf;
 
 pub mod config;
+pub mod config_service;
 pub mod discovery;
 pub mod local_fanout;
 pub mod p2p;
 pub mod pisugar_client;
 pub mod reader_control;
 pub mod reader_control_service;
+pub mod reader_task;
 pub mod replay;
+pub mod server_status_task;
 pub mod status_http;
+pub mod status_store;
 pub mod storage;
 pub mod ui_events;
 pub mod ui_server;

@@ -508,6 +508,11 @@
       onUpsStatusChanged: (payload) => {
         upsState = { available: payload.available, status: payload.status };
       },
+      onServerStatusChanged: (payload) => {
+        if (status) {
+          status = { ...status, server: payload.server };
+        }
+      },
       onUpdateStatusChanged: (us) => {
         if (
           (us.status === "available" || us.status === "downloaded") &&

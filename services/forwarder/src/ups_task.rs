@@ -7,7 +7,7 @@ use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 
 use crate::config::UpsConfig;
-use crate::status_http::{StatusServer, UpsStatusState};
+use crate::status_store::{StatusStore, UpsStatusState};
 use crate::ui_events::ForwarderUiEvent;
 
 /// Handle returned by [`spawn_ups_task`] carrying the upstream status channel.
@@ -22,7 +22,7 @@ pub struct UpsTaskHandle {
 pub fn spawn_ups_task(
     config: UpsConfig,
     forwarder_id: String,
-    status: StatusServer,
+    status: StatusStore,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> UpsTaskHandle {
     let (ups_tx, ups_rx) = mpsc::unbounded_channel();
@@ -39,7 +39,7 @@ pub fn spawn_ups_task(
 async fn run_ups_loop(
     config: UpsConfig,
     forwarder_id: String,
-    status: StatusServer,
+    status: StatusStore,
     shutdown_rx: &mut watch::Receiver<bool>,
     ups_tx: mpsc::UnboundedSender<ForwarderUpsStatus>,
 ) {
@@ -234,19 +234,9 @@ mod tests {
         };
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let status = StatusStore::new(crate::status_store::SubsystemStatus::ready());
 
-        // Need a StatusServer — use a minimal one
-        let server = crate::status_http::StatusServer::start(
-            crate::status_http::StatusConfig {
-                bind: "127.0.0.1:0".to_owned(),
-                forwarder_version: "test".to_owned(),
-            },
-            crate::status_http::SubsystemStatus::ready(),
-        )
-        .await
-        .expect("start status server");
-
-        let mut handle = spawn_ups_task(config, "fwd-test".to_owned(), server, shutdown_rx);
+        let mut handle = spawn_ups_task(config, "fwd-test".to_owned(), status, shutdown_rx);
 
         // Should receive one status message
         let msg = tokio::time::timeout(Duration::from_secs(5), handle.ups_status_rx.recv())
@@ -274,18 +264,9 @@ mod tests {
         };
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let status = StatusStore::new(crate::status_store::SubsystemStatus::ready());
 
-        let server = crate::status_http::StatusServer::start(
-            crate::status_http::StatusConfig {
-                bind: "127.0.0.1:0".to_owned(),
-                forwarder_version: "test".to_owned(),
-            },
-            crate::status_http::SubsystemStatus::ready(),
-        )
-        .await
-        .expect("start status server");
-
-        let mut handle = spawn_ups_task(config, "fwd-test".to_owned(), server, shutdown_rx);
+        let mut handle = spawn_ups_task(config, "fwd-test".to_owned(), status, shutdown_rx);
 
         let msg = tokio::time::timeout(Duration::from_secs(10), handle.ups_status_rx.recv())
             .await
@@ -311,18 +292,9 @@ mod tests {
         };
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let status = StatusStore::new(crate::status_store::SubsystemStatus::ready());
 
-        let server = crate::status_http::StatusServer::start(
-            crate::status_http::StatusConfig {
-                bind: "127.0.0.1:0".to_owned(),
-                forwarder_version: "test".to_owned(),
-            },
-            crate::status_http::SubsystemStatus::ready(),
-        )
-        .await
-        .expect("start status server");
-
-        let mut handle = spawn_ups_task(config, "fwd-test".to_owned(), server, shutdown_rx);
+        let mut handle = spawn_ups_task(config, "fwd-test".to_owned(), status, shutdown_rx);
 
         let first = tokio::time::timeout(Duration::from_secs(5), handle.ups_status_rx.recv())
             .await

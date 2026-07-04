@@ -11,9 +11,10 @@
 //! Scope: production startup wires the endpoint, accept loop, allow-listed
 //! control-plane handshake, data-stream subscriber handler, server allow-list
 //! distribution components ([`ServerAllowListClient`] and
-//! [`run_allowlist_distribution`]), and forwarder status events. Reader control
-//! actions are still handled by the no-op adapter until a production adapter is
-//! installed.
+//! [`run_allowlist_distribution`]), and forwarder status events. Reader
+//! control actions are served by [`ForwarderReaderControlHandler`], gated by
+//! the negotiated `CAP_READER_CONTROL` capability and
+//! `control.allow_reader_control`.
 
 mod allowlist;
 mod control;
@@ -21,6 +22,7 @@ mod data;
 mod endpoint;
 mod reader_control;
 mod remote_config;
+mod server_client;
 
 use std::net::SocketAddrV4;
 use std::num::TryFromIntError;
@@ -30,19 +32,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::P2pConfig;
-use crate::status_http::ForwarderStatusFeed;
+use crate::status_store::{
+    ForwarderStatusEvent, ForwarderStatusFeed, ForwarderStatusSnapshot, ReaderConnectionState,
+};
 use crate::storage::journal::Journal;
 use rt_iroh::{EndpointAddr, EndpointBuilder, EndpointId, RelayMode, SecretKey};
 use rt_p2p_protocol::{StreamCatalog, StreamEntry};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
-pub use allowlist::{
-    ALLOWLIST_PUSH_HOLD, AllowList, AllowListRefreshError, CatalogPushError,
-    DEFAULT_ALLOWLIST_POLL_INTERVAL, ForwarderCatalog, ForwarderCatalogStream,
-    ReceiverAllowListUpdate, ServerAllowListClient, ServerCatalogClient, apply_receiver_update,
-    fetch_and_apply_once, run_allowlist_distribution, run_allowlist_push_subscription,
-};
+pub use allowlist::AllowList;
 pub use control::{
     CatalogProvider, ConfigGetFuture, ConfigSetFuture, ControlEvent, ControlEventReceiver,
     ControlEventSender, HeartbeatConfig, NoopReaderControlHandler, NoopRemoteConfigHandler,
@@ -54,14 +53,26 @@ pub use data::{DataConfig, serve_data_streams};
 pub use endpoint::P2pEndpoint;
 pub use reader_control::ForwarderReaderControlHandler;
 pub use remote_config::ForwarderRemoteConfigHandler;
+pub use server_client::{
+    ALLOWLIST_PUSH_HOLD, AllowListRefreshError, CatalogPushError, DEFAULT_ALLOWLIST_POLL_INTERVAL,
+    ForwarderCatalog, ForwarderCatalogStream, ReceiverAllowListUpdate, ServerAllowListClient,
+    ServerCatalogClient, apply_receiver_update, fetch_and_apply_once, run_allowlist_distribution,
+    run_allowlist_push_subscription,
+};
 
 const DEFAULT_P2P_SECRET_KEY_PATH: &str = "/var/lib/rusty-timer/p2p-secret.key";
 const DEFAULT_FORWARDER_CATALOG_PUSH_INTERVAL: Duration = Duration::from_secs(30);
-
 /// Backoff bounds for retrying the first-boot device-token bootstrap when the
-/// server is unreachable (e.g. the forwarder started before the network came up).
+/// server is unreachable (e.g. the forwarder started before the network came
+/// up). Test builds use tiny delays so the retry loop is exercised quickly.
+#[cfg(not(test))]
 const BOOTSTRAP_RETRY_INITIAL: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const BOOTSTRAP_RETRY_INITIAL: Duration = Duration::from_millis(10);
+#[cfg(not(test))]
 const BOOTSTRAP_RETRY_MAX: Duration = Duration::from_secs(300);
+#[cfg(test)]
+const BOOTSTRAP_RETRY_MAX: Duration = Duration::from_millis(40);
 
 /// Running forwarder P2P server tasks.
 #[derive(Debug)]
@@ -104,6 +115,7 @@ impl P2pRuntime {
 #[allow(clippy::too_many_arguments)]
 pub async fn start_forwarder_p2p(
     config: &P2pConfig,
+    journal_path: &Path,
     journal: Arc<Mutex<Journal>>,
     reader_streams: &[String],
     display_name: Option<String>,
@@ -122,6 +134,10 @@ pub async fn start_forwarder_p2p(
     // this a freshly configured reader could be advertised and subscribed before
     // its reader task has appended anything, and the subscription would fail on
     // missing stream state instead of returning SubscribeOk/CaughtUp.
+    //
+    // NOTE: startup stream-identity restore (main.rs) runs BEFORE this, so this
+    // idempotent seq-1 seeding never pre-empts a registry high-water restore
+    // for a journal-lost stream.
     {
         let mut journal = journal.lock().await;
         for stream in reader_streams {
@@ -129,13 +145,25 @@ pub async fn start_forwarder_p2p(
         }
     }
 
-    let catalog = Arc::new(ReaderCatalog::new(reader_streams));
+    // Seed the catalog from the status store's current reader states: main.rs
+    // initializes reader status (init_readers) before starting P2P, so the
+    // snapshot already knows every configured reader's connectivity. The
+    // returned delta receiver is handed to the catalog task so no state change
+    // between snapshot and task startup can be missed.
+    let (status_rx, status_snapshot) = status_feed.subscribe_and_snapshot().await;
+    let (catalog, catalog_task) = LiveReaderCatalog::start(
+        reader_streams,
+        status_feed.clone(),
+        &status_snapshot,
+        status_rx,
+    );
+    let catalog = Arc::new(catalog);
     let endpoint = P2pEndpoint::bind_with_builder(
         endpoint_builder(config)?,
         allow_list.clone(),
         catalog,
         Arc::clone(&journal),
-        DataConfig::default(),
+        DataConfig::default().with_read_journal_path(journal_path),
     )
     .await?
     .with_status_feed(status_feed)
@@ -143,7 +171,10 @@ pub async fn start_forwarder_p2p(
     .with_reader_control(reader_control);
 
     let run_endpoint = endpoint.clone();
-    let mut tasks = vec![tokio::spawn(async move { run_endpoint.run().await })];
+    let mut tasks = vec![
+        tokio::spawn(async move { run_endpoint.run().await }),
+        catalog_task,
+    ];
 
     if let Some((base_url, voucher)) = server_credentials(config)? {
         let request_timeout = Duration::from_secs(config.allowlist_request_timeout_secs);
@@ -259,35 +290,122 @@ pub enum P2pStartError {
     CatalogValueOutOfRange(#[from] TryFromIntError),
 }
 
+/// Live [`CatalogProvider`]: serves the forwarder's advertised streams with
+/// current per-reader connectivity.
+///
+/// A background task (tracked in [`P2pRuntime`] tasks) observes the status
+/// feed and updates `reader_connected` per entry, bumping `generation`
+/// monotonically on every real connectivity change, so a receiver that
+/// (re)connects sees fresh state and a changed `HelloOk.catalog_generation`.
+/// Mid-connection catalog pushes are out of scope: peers observe changes at
+/// connect time only.
 #[derive(Debug)]
-struct ReaderCatalog {
-    catalog: StreamCatalog,
+struct LiveReaderCatalog {
+    rx: watch::Receiver<StreamCatalog>,
 }
 
-impl ReaderCatalog {
-    fn new(reader_streams: &[String]) -> Self {
-        Self {
-            catalog: StreamCatalog {
-                generation: 1,
-                entries: reader_streams
-                    .iter()
-                    .map(|stream| StreamEntry {
-                        stream_id: stream.as_bytes().to_vec(),
-                        display_name: stream.clone(),
-                        network_addr: stream.clone(),
-                        reader_connected: true,
-                        hardware_reader_id: stream.clone(),
-                    })
-                    .collect(),
-            },
+impl LiveReaderCatalog {
+    /// Builds the initial catalog (generation 1) seeded from `snapshot` and
+    /// spawns the task that applies status-feed deltas.
+    fn start(
+        reader_streams: &[String],
+        feed: ForwarderStatusFeed,
+        snapshot: &ForwarderStatusSnapshot,
+        status_rx: broadcast::Receiver<ForwarderStatusEvent>,
+    ) -> (Self, JoinHandle<()>) {
+        let initial = StreamCatalog {
+            generation: 1,
+            entries: reader_streams
+                .iter()
+                .map(|stream| StreamEntry {
+                    stream_id: stream.as_bytes().to_vec(),
+                    display_name: stream.clone(),
+                    network_addr: stream.clone(),
+                    reader_connected: snapshot_reader_connected(snapshot, stream),
+                    hardware_reader_id: stream.clone(),
+                })
+                .collect(),
+        };
+        let (tx, rx) = watch::channel(initial);
+        let task = tokio::spawn(run_catalog_updates(feed, status_rx, tx));
+        (Self { rx }, task)
+    }
+}
+
+impl CatalogProvider for LiveReaderCatalog {
+    fn catalog(&self) -> StreamCatalog {
+        self.rx.borrow().clone()
+    }
+}
+
+fn snapshot_reader_connected(snapshot: &ForwarderStatusSnapshot, stream: &str) -> bool {
+    snapshot
+        .readers
+        .iter()
+        .any(|(id, status)| id == stream && status.state == ReaderConnectionState::Connected)
+}
+
+/// Applies reader connectivity deltas from the status feed to the catalog.
+///
+/// Runs until aborted at P2P shutdown: this task holds a feed clone (and thus
+/// a sender clone) itself, so the status channel never closes underneath it.
+async fn run_catalog_updates(
+    feed: ForwarderStatusFeed,
+    mut status_rx: broadcast::Receiver<ForwarderStatusEvent>,
+    tx: watch::Sender<StreamCatalog>,
+) {
+    loop {
+        match status_rx.recv().await {
+            Ok(ForwarderStatusEvent::ReaderStatus { stream_id, status }) => {
+                apply_reader_connectivity(
+                    &tx,
+                    &stream_id,
+                    status.state == ReaderConnectionState::Connected,
+                );
+            }
+            Ok(_) => {}
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                tracing::warn!(
+                    skipped,
+                    "p2p: catalog status receiver lagged; reseeding from snapshot"
+                );
+                // A dropped delta could be a connect/disconnect; re-subscribe
+                // atomically with a fresh snapshot so the catalog cannot stay
+                // stale.
+                let (new_rx, snapshot) = feed.subscribe_and_snapshot().await;
+                status_rx = new_rx;
+                for (stream_id, status) in &snapshot.readers {
+                    apply_reader_connectivity(
+                        &tx,
+                        stream_id,
+                        status.state == ReaderConnectionState::Connected,
+                    );
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
         }
     }
 }
 
-impl CatalogProvider for ReaderCatalog {
-    fn catalog(&self) -> StreamCatalog {
-        self.catalog.clone()
-    }
+/// Sets `reader_connected` for the entry matching `stream_id`, bumping the
+/// catalog generation only on an actual change. Events for unknown streams or
+/// with unchanged connectivity are no-ops (no generation bump).
+fn apply_reader_connectivity(tx: &watch::Sender<StreamCatalog>, stream_id: &str, connected: bool) {
+    tx.send_if_modified(|catalog| {
+        let Some(entry) = catalog
+            .entries
+            .iter_mut()
+            .find(|entry| entry.stream_id == stream_id.as_bytes())
+        else {
+            return false;
+        };
+        if entry.reader_connected == connected {
+            return false;
+        }
+        entry.reader_connected = connected;
+        catalog.generation += 1;
+        true
+    });
 }
 
 fn endpoint_builder(config: &P2pConfig) -> Result<EndpointBuilder, P2pStartError> {
@@ -326,16 +444,12 @@ fn build_allow_list(config: &P2pConfig) -> Result<AllowList, P2pStartError> {
 
     let static_receivers = parse_endpoint_ids(&config.static_allowed_receivers)?;
     let allow_list = match &config.allowlist_cache_path {
-        Some(path) => {
-            // Static receivers are additive: union them on top of the cached
-            // last-known set rather than replacing it (which would revoke every
-            // cached receiver). `add_allowed` does not persist or revoke.
-            let allow_list = AllowList::load(path)?;
-            allow_list.add_allowed(static_receivers);
-            allow_list
-        }
-        None => AllowList::new(static_receivers),
+        Some(path) => AllowList::load(path)?,
+        None => AllowList::new(vec![]),
     };
+    // Static receivers are pinned: always allowed on top of the cached
+    // last-known set, never revoked or persisted by later server snapshots.
+    allow_list.set_pinned(static_receivers);
     Ok(allow_list)
 }
 
@@ -352,7 +466,10 @@ fn server_credentials(config: &P2pConfig) -> Result<Option<(String, String)>, P2
 
 /// Writable path for the minted per-device token: the configured
 /// `device_token_file`, else a `p2p-device-token` sibling of the secret-key path.
-fn device_token_path(config: &P2pConfig) -> PathBuf {
+///
+/// `pub` so startup stream-identity restore (main.rs) can read the persisted
+/// token before the P2P endpoint exists.
+pub fn device_token_path(config: &P2pConfig) -> PathBuf {
     if let Some(path) = &config.device_token_file {
         return PathBuf::from(path);
     }
@@ -365,6 +482,26 @@ fn device_token_path(config: &P2pConfig) -> PathBuf {
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
         .join("p2p-device-token")
+}
+
+/// Whether a persistent P2P identity already exists for this config: true
+/// when a deterministic seed is configured or the secret-key file is present.
+///
+/// `pub` so startup stream-identity restore (main.rs) can distinguish a true
+/// first boot (fresh identity → the server registry cannot hold records for
+/// it) from a lost device token on an established identity.
+#[must_use]
+pub fn persistent_identity_exists(config: &P2pConfig) -> bool {
+    if config.secret_key_seed_hex.is_some() {
+        return true;
+    }
+    Path::new(
+        config
+            .secret_key_path
+            .as_deref()
+            .unwrap_or(DEFAULT_P2P_SECRET_KEY_PATH),
+    )
+    .exists()
 }
 
 /// Resolve the minted per-device token: return the persisted one if present,
@@ -399,7 +536,9 @@ async fn resolve_device_token(
     }
 }
 
-fn read_device_token(path: &Path) -> Result<Option<String>, P2pStartError> {
+/// Read the persisted minted device token, if any. `pub` for startup
+/// stream-identity restore; it never bootstraps (that needs the endpoint id).
+pub fn read_device_token(path: &Path) -> Result<Option<String>, P2pStartError> {
     match std::fs::read_to_string(path) {
         Ok(contents) => {
             let trimmed = contents.trim();
@@ -564,8 +703,16 @@ mod tests {
     use super::*;
 
     use crate::config::P2pConfig;
-    use crate::status_http::{StatusConfig, StatusServer, SubsystemStatus};
+    use crate::status_http::{StatusConfig, StatusServer};
+    use crate::status_store::SubsystemStatus;
     use crate::storage::journal::Journal;
+    use axum::{
+        Json, Router,
+        extract::State,
+        http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+        response::{IntoResponse, Response},
+        routing::{get, post},
+    };
     use rt_iroh::EndpointBuilder;
     use rt_p2p_protocol::{
         ControlC2F, ControlF2C, DataC2F, DataF2C, DataSubscribe, SubscribeMode, control_c2f,
@@ -649,6 +796,139 @@ mod tests {
         Ok(())
     }
 
+    #[derive(Clone)]
+    struct BootstrapRetryServerState {
+        register_attempts: Arc<std::sync::atomic::AtomicU64>,
+        catalog_pushes: tokio::sync::watch::Sender<u64>,
+    }
+
+    async fn bootstrap_retry_register_handler(
+        State(state): State<BootstrapRetryServerState>,
+        headers: HeaderMap,
+        Json(_body): Json<serde_json::Value>,
+    ) -> Response {
+        let authorized = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == "Bearer thin-voucher");
+        if !authorized {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+
+        let attempt = state
+            .register_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if attempt <= 2 {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+
+        Json(serde_json::json!({
+            "endpoint_id": "fwd-node-1",
+            "device_kind": "forwarder",
+            "approval_state": "pending",
+            "device_token": "rtk_minted_secret"
+        }))
+        .into_response()
+    }
+
+    async fn bootstrap_retry_catalog_handler(
+        State(state): State<BootstrapRetryServerState>,
+        headers: HeaderMap,
+        Json(_body): Json<serde_json::Value>,
+    ) -> Response {
+        let authorized = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == "Bearer rtk_minted_secret");
+        if !authorized {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+
+        state.catalog_pushes.send_modify(|count| *count += 1);
+        StatusCode::OK.into_response()
+    }
+
+    async fn bootstrap_retry_allowlist_handler(headers: HeaderMap) -> Response {
+        let authorized = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == "Bearer rtk_minted_secret");
+        if !authorized {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        Json(serde_json::json!({ "receiver_endpoint_ids": [] })).into_response()
+    }
+
+    #[tokio::test]
+    async fn server_integration_retries_bootstrap_until_catalog_starts() -> TestResult {
+        let receiver = EndpointBuilder::test([44; 32]).bind().await?;
+        let dir = tempfile::tempdir()?;
+        let journal_path = dir.path().join("journal.sqlite3");
+        let journal = Arc::new(Mutex::new(Journal::open(&journal_path)?));
+        let token_file = dir.path().join("server-token");
+        std::fs::write(&token_file, "thin-voucher\n")?;
+        let device_token_file = dir.path().join("p2p-device-token");
+        let (catalog_pushes, mut catalog_pushes_rx) = tokio::sync::watch::channel(0u64);
+        let state = BootstrapRetryServerState {
+            register_attempts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            catalog_pushes,
+        };
+        let app = Router::new()
+            .route("/register", post(bootstrap_retry_register_handler))
+            .route("/forwarder/catalog", post(bootstrap_retry_catalog_handler))
+            .route(
+                "/allowlist/receivers",
+                get(bootstrap_retry_allowlist_handler),
+            )
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let base_url = format!("http://{}", listener.local_addr()?);
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let mut config = p2p_config(receiver.endpoint_id().to_string());
+        config.server_url = Some(base_url);
+        config.server_token_file = Some(token_file.to_string_lossy().into_owned());
+        config.device_token_file = Some(device_token_file.to_string_lossy().into_owned());
+        config.allowlist_request_timeout_secs = 1;
+        let runtime = start_forwarder_p2p(
+            &config,
+            &journal_path,
+            Arc::clone(&journal),
+            &["10.0.0.5:10000".to_owned()],
+            None,
+            status_feed().await?,
+            Arc::new(NoopRemoteConfigHandler),
+            Arc::new(NoopReaderControlHandler),
+        )
+        .await?
+        .expect("p2p enabled");
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            catalog_pushes_rx.wait_for(|&count| count >= 1),
+        )
+        .await??;
+        assert_eq!(
+            state
+                .register_attempts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "bootstrap should retry in-process after initial failures"
+        );
+        assert_eq!(
+            read_device_token(&device_token_file)?.as_deref(),
+            Some("rtk_minted_secret")
+        );
+
+        runtime.shutdown().await;
+        server.abort();
+        receiver.close().await;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn startup_helper_binds_seeded_loopback_and_serves_control_plus_data() -> TestResult {
         let receiver = EndpointBuilder::test([43; 32]).bind().await?;
@@ -662,6 +942,7 @@ mod tests {
 
         let runtime = start_forwarder_p2p(
             &p2p_config(receiver.endpoint_id().to_string()),
+            &journal_path,
             Arc::clone(&journal),
             &[stream_key.to_owned()],
             None,
@@ -743,8 +1024,133 @@ mod tests {
             "statically configured receiver must be allowed alongside the cached set"
         );
 
+        // Regression guard: the first server sync (an empty snapshot here) must
+        // never revoke the statically configured receiver.
+        let revoked = allow_list.apply_update([])?;
+        assert!(
+            allow_list.contains(&static_receiver.endpoint_id()),
+            "statically configured receiver must survive a server allow-list sync"
+        );
+        assert!(
+            !revoked.contains(&static_receiver.endpoint_id()),
+            "statically configured receiver must never be revoked by a server sync"
+        );
+
         cached.close().await;
         static_receiver.close().await;
+        Ok(())
+    }
+
+    /// Connects, performs the control-plane Hello handshake, and returns the
+    /// negotiated `HelloOk.catalog_generation` together with the served
+    /// `StreamCatalog` frame, then drops the connection.
+    async fn hello_and_catalog(
+        receiver: &rt_iroh::Endpoint,
+        forwarder_addr: &EndpointAddr,
+    ) -> Result<(u64, StreamCatalog), BoxError> {
+        let connection = receiver.connect(forwarder_addr.clone()).await?;
+        let (mut control_send, mut control_recv) = connection.open_bi().await?;
+        control::write_frame(
+            &mut control_send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::Hello(control::forwarder_hello())),
+            },
+        )
+        .await?;
+        let hello_generation = match control::read_frame::<ControlF2C>(&mut control_recv)
+            .await?
+            .msg
+        {
+            Some(control_f2c::Msg::HelloOk(hello_ok)) => hello_ok.catalog_generation,
+            other => return Err(format!("expected HelloOk, got {other:?}").into()),
+        };
+        let catalog = match control::read_frame::<ControlF2C>(&mut control_recv)
+            .await?
+            .msg
+        {
+            Some(control_f2c::Msg::StreamCatalog(catalog)) => catalog,
+            other => return Err(format!("expected StreamCatalog, got {other:?}").into()),
+        };
+        connection.close(0u32.into(), b"test done");
+        Ok((hello_generation, catalog))
+    }
+
+    #[tokio::test]
+    async fn reconnect_serves_current_reader_connectivity_and_bumped_generation() -> TestResult {
+        let receiver = EndpointBuilder::test([63; 32]).bind().await?;
+        let dir = tempfile::tempdir()?;
+        let journal_path = dir.path().join("journal.sqlite3");
+        let journal = Arc::new(Mutex::new(Journal::open(&journal_path)?));
+        let stream_key = "10.0.0.5:10000";
+
+        // Reader is already Connected before P2P starts (main.rs initializes
+        // reader status before start_forwarder_p2p), so the initial catalog
+        // must be seeded from the status snapshot, not hardcoded.
+        let store = crate::status_store::StatusStore::new(SubsystemStatus::ready());
+        store.init_readers(&[(stream_key.to_owned(), 10001)]).await;
+        store
+            .update_reader_state(
+                stream_key,
+                crate::status_store::ReaderConnectionState::Connected,
+            )
+            .await;
+
+        let runtime = start_forwarder_p2p(
+            &p2p_config(receiver.endpoint_id().to_string()),
+            &journal_path,
+            Arc::clone(&journal),
+            &[stream_key.to_owned()],
+            None,
+            store.status_feed(),
+            Arc::new(NoopRemoteConfigHandler),
+            Arc::new(NoopReaderControlHandler),
+        )
+        .await?
+        .expect("p2p enabled");
+        let forwarder_addr = runtime.endpoint_addr().await;
+
+        let (g1, catalog) = hello_and_catalog(&receiver, &forwarder_addr).await?;
+        assert_eq!(
+            g1, catalog.generation,
+            "HelloOk.catalog_generation must match the served StreamCatalog generation"
+        );
+        assert!(
+            catalog.entries[0].reader_connected,
+            "initial catalog must reflect the reader's Connected state at p2p start"
+        );
+
+        store
+            .update_reader_state(
+                stream_key,
+                crate::status_store::ReaderConnectionState::Disconnected,
+            )
+            .await;
+
+        // The catalog task observes the status feed asynchronously: poll with
+        // fresh connections until the disconnect is visible at connect time.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let (g2, catalog) = hello_and_catalog(&receiver, &forwarder_addr).await?;
+            assert_eq!(
+                g2, catalog.generation,
+                "HelloOk.catalog_generation must match the served StreamCatalog generation"
+            );
+            if g2 > g1 && !catalog.entries[0].reader_connected {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "catalog never reflected reader disconnect: generation {g2} (initial {g1}), \
+                     reader_connected {}",
+                    catalog.entries[0].reader_connected
+                )
+                .into());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        runtime.shutdown().await;
+        receiver.close().await;
         Ok(())
     }
 
@@ -761,6 +1167,7 @@ mod tests {
 
         let runtime = start_forwarder_p2p(
             &p2p_config(receiver.endpoint_id().to_string()),
+            &journal_path,
             Arc::clone(&journal),
             &[stream_key.to_owned()],
             None,

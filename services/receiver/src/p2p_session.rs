@@ -33,8 +33,8 @@ use prost::Message;
 use rt_iroh::{Connection, Endpoint, EndpointAddr, RecvStream, SendStream};
 use rt_p2p_protocol::{
     Ack, ControlC2F, ControlF2C, DataC2F, DataF2C, DataSubscribe, EventBatch, GapNotice, Hello,
-    HelloOk, MAX_FRAME_BYTES, StreamCatalog, SubscribeMode, control_c2f, control_f2c, data_c2f,
-    data_f2c, encode_frame,
+    HelloOk, ProtocolError, StreamCatalog, SubscribeMode, control_c2f, control_f2c, data_c2f,
+    data_f2c, decode_frame_len, decode_frame_payload, encode_frame,
 };
 use tokio::sync::broadcast;
 
@@ -343,15 +343,20 @@ where
     recv.read_exact(&mut len_buf)
         .await
         .map_err(|e| P2pSessionError::Read(e.to_string()))?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    if len > MAX_FRAME_BYTES {
-        return Err(P2pSessionError::FrameTooLarge(len));
-    }
+    let len = decode_frame_len(len_buf).map_err(map_frame_decode_error)?;
     let mut payload = vec![0u8; len];
     recv.read_exact(&mut payload)
         .await
         .map_err(|e| P2pSessionError::Read(e.to_string()))?;
-    M::decode(payload.as_slice()).map_err(|e| P2pSessionError::Decode(e.to_string()))
+    decode_frame_payload(len_buf, payload.as_slice()).map_err(map_frame_decode_error)
+}
+
+fn map_frame_decode_error(error: ProtocolError) -> P2pSessionError {
+    match error {
+        ProtocolError::FrameTooLarge { length, .. } => P2pSessionError::FrameTooLarge(length),
+        ProtocolError::DecodeError { source, .. } => P2pSessionError::Decode(source.to_string()),
+        other => P2pSessionError::Decode(other.to_string()),
+    }
 }
 
 /// Dials `forwarder_addr`, opens the control stream, sends `client_hello`, and
@@ -642,7 +647,7 @@ mod tests {
     use super::*;
     use crate::control_api::ConnectionState;
     use rt_iroh::EndpointBuilder;
-    use rt_p2p_protocol::{ReadRecord, StreamCatalog, StreamEntry, SubscribeOk};
+    use rt_p2p_protocol::{MAX_FRAME_BYTES, ReadRecord, StreamCatalog, StreamEntry, SubscribeOk};
     use rt_test_utils::p2p::{ConnectivityFault, ForwarderScript, MockForwarderPeer};
     use rt_test_utils::poll_until;
 

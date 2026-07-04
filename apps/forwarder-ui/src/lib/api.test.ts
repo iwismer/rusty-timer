@@ -34,6 +34,8 @@ describe("forwarder api client", () => {
           approval_state: "pending",
           waiting_for_approval: true,
           message: "Waiting for server admin approval",
+          cached: true,
+          checked_unix_ms: 1700000000000,
         },
         readers: [],
       }),

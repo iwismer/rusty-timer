@@ -6,7 +6,7 @@
 
 use crate::storage::migrations;
 use crate::storage::wake::WakeRegistry;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -115,6 +115,74 @@ impl From<rusqlite::Error> for JournalError {
     }
 }
 
+/// Read-only journal API used by replay subscribers.
+pub trait ReplayJournal {
+    fn retention_state(&self, stream_key: &str) -> Result<RetentionState, JournalError>;
+
+    fn latest_committed_seq(&self, stream_key: &str) -> Result<i64, JournalError>;
+
+    fn read_events_after(
+        &self,
+        stream_key: &str,
+        after_seq: i64,
+        max: usize,
+    ) -> Result<Vec<JournalEvent>, JournalError>;
+}
+
+/// A read-only SQLite journal connection for replay queries.
+pub struct ReadJournal {
+    conn: Connection,
+}
+
+impl ReadJournal {
+    pub fn open(path: &Path) -> Result<Self, JournalError> {
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        apply_read_pragmas(&conn)?;
+        Ok(Self { conn })
+    }
+
+    #[cfg(test)]
+    pub fn connection_for_test(&self) -> &Connection {
+        &self.conn
+    }
+
+    pub fn retention_state(&self, stream_key: &str) -> Result<RetentionState, JournalError> {
+        retention_state(&self.conn, stream_key)
+    }
+
+    pub fn latest_committed_seq(&self, stream_key: &str) -> Result<i64, JournalError> {
+        latest_committed_seq(&self.conn, stream_key)
+    }
+
+    pub fn read_events_after(
+        &self,
+        stream_key: &str,
+        after_seq: i64,
+        max: usize,
+    ) -> Result<Vec<JournalEvent>, JournalError> {
+        read_events_after(&self.conn, stream_key, after_seq, max)
+    }
+}
+
+impl ReplayJournal for ReadJournal {
+    fn retention_state(&self, stream_key: &str) -> Result<RetentionState, JournalError> {
+        self.retention_state(stream_key)
+    }
+
+    fn latest_committed_seq(&self, stream_key: &str) -> Result<i64, JournalError> {
+        self.latest_committed_seq(stream_key)
+    }
+
+    fn read_events_after(
+        &self,
+        stream_key: &str,
+        after_seq: i64,
+        max: usize,
+    ) -> Result<Vec<JournalEvent>, JournalError> {
+        self.read_events_after(stream_key, after_seq, max)
+    }
+}
+
 /// The durable SQLite journal for a single forwarder instance.
 pub struct Journal {
     conn: Connection,
@@ -130,6 +198,20 @@ impl Journal {
             conn,
             wake: Arc::new(WakeRegistry::new()),
         })
+    }
+
+    pub fn open_read_only(path: &Path) -> Result<ReadJournal, JournalError> {
+        ReadJournal::open(path)
+    }
+
+    #[cfg(test)]
+    pub fn set_query_only(&self, on: bool) -> Result<(), JournalError> {
+        self.conn.execute_batch(if on {
+            "PRAGMA query_only = ON"
+        } else {
+            "PRAGMA query_only = OFF"
+        })?;
+        Ok(())
     }
 
     /// Return a shareable handle to this journal's per-stream wake registry.
@@ -475,7 +557,7 @@ impl Journal {
     }
 
     pub fn latest_committed_seq(&self, stream_key: &str) -> Result<i64, JournalError> {
-        Ok(next_seq(&self.conn, stream_key)?.saturating_sub(1))
+        latest_committed_seq(&self.conn, stream_key)
     }
 
     pub fn read_events_after(
@@ -484,17 +566,7 @@ impl Journal {
         after_seq: i64,
         max: usize,
     ) -> Result<Vec<JournalEvent>, JournalError> {
-        let limit = i64::try_from(max).unwrap_or(i64::MAX);
-        let mut stmt = self.conn.prepare(
-            "SELECT rowid, stream_id, epoch, seq, reader_timestamp, raw_frame, read_kind,
-                    CAST(received_unix_ms AS TEXT)
-             FROM events
-             WHERE stream_id = ?1 AND seq > ?2
-             ORDER BY seq ASC
-             LIMIT ?3",
-        )?;
-        let rows = stmt.query_map(params![stream_key, after_seq, limit], map_event)?;
-        collect_events(rows)
+        read_events_after(&self.conn, stream_key, after_seq, max)
     }
 
     /// Return all unacked events for a stream epoch after `after_seq`.
@@ -546,23 +618,6 @@ impl Journal {
         self.conn
             .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
             .map_err(Into::into)
-    }
-
-    /// Return all events for stream key with epoch strictly greater than `after_epoch`.
-    pub fn unacked_events_across_epochs(
-        &self,
-        stream_key: &str,
-        after_epoch: i64,
-    ) -> Result<Vec<JournalEvent>, JournalError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT rowid, stream_id, epoch, seq, reader_timestamp, raw_frame, read_kind,
-                    CAST(received_unix_ms AS TEXT)
-             FROM events
-             WHERE stream_id = ?1 AND epoch > ?2
-             ORDER BY epoch ASC, seq ASC",
-        )?;
-        let rows = stmt.query_map(params![stream_key, after_epoch], map_event)?;
-        collect_events(rows)
     }
 
     /// Delete up to `limit` acked events for `stream_key`.
@@ -654,20 +709,7 @@ impl Journal {
     }
 
     pub fn retention_state(&self, stream_key: &str) -> Result<RetentionState, JournalError> {
-        self.conn
-            .query_row(
-                "SELECT earliest_available_seq, forced_gap_count
-                 FROM stream_retention
-                 WHERE stream_id = ?1",
-                params![stream_key],
-                |row| {
-                    Ok(RetentionState {
-                        earliest_available_seq: row.get(0)?,
-                        forced_gap_count: row.get(1)?,
-                    })
-                },
-            )
-            .map_err(Into::into)
+        retention_state(&self.conn, stream_key)
     }
 
     pub fn clear_stream(&mut self, stream_key: &str) -> Result<(), JournalError> {
@@ -708,7 +750,11 @@ impl Journal {
         current_epoch(&self.conn, stream_key)
     }
 
-    fn stream_exists(&self, stream_id: &str) -> Result<bool, JournalError> {
+    /// Whether the journal has any stream state for `stream_id`.
+    ///
+    /// Startup restore uses this to detect journal loss for configured reader
+    /// stream keys before reader tasks or the P2P catalog seed them.
+    pub fn stream_exists(&self, stream_id: &str) -> Result<bool, JournalError> {
         self.conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM streams WHERE stream_id = ?1)",
@@ -725,6 +771,25 @@ impl Journal {
             params![COMPAT_RECEIVER_ID, unix_ms()],
         )?;
         Ok(())
+    }
+}
+
+impl ReplayJournal for Journal {
+    fn retention_state(&self, stream_key: &str) -> Result<RetentionState, JournalError> {
+        self.retention_state(stream_key)
+    }
+
+    fn latest_committed_seq(&self, stream_key: &str) -> Result<i64, JournalError> {
+        self.latest_committed_seq(stream_key)
+    }
+
+    fn read_events_after(
+        &self,
+        stream_key: &str,
+        after_seq: i64,
+        max: usize,
+    ) -> Result<Vec<JournalEvent>, JournalError> {
+        self.read_events_after(stream_key, after_seq, max)
     }
 }
 
@@ -903,6 +968,57 @@ fn delete_candidates(
     Ok((deleted, forced))
 }
 
+fn apply_read_pragmas(conn: &Connection) -> Result<(), JournalError> {
+    // No journal_mode here: the writer sets WAL, and a read-only connection
+    // cannot change it. wal_autocheckpoint is also omitted: read-only
+    // connections never commit, so they never trigger autocheckpoints.
+    conn.execute_batch(
+        "PRAGMA query_only=ON;
+         PRAGMA busy_timeout=5000;
+         PRAGMA foreign_keys=ON;",
+    )?;
+    Ok(())
+}
+
+fn retention_state(conn: &Connection, stream_key: &str) -> Result<RetentionState, JournalError> {
+    conn.query_row(
+        "SELECT earliest_available_seq, forced_gap_count
+         FROM stream_retention
+         WHERE stream_id = ?1",
+        params![stream_key],
+        |row| {
+            Ok(RetentionState {
+                earliest_available_seq: row.get(0)?,
+                forced_gap_count: row.get(1)?,
+            })
+        },
+    )
+    .map_err(Into::into)
+}
+
+fn latest_committed_seq(conn: &Connection, stream_key: &str) -> Result<i64, JournalError> {
+    Ok(next_seq(conn, stream_key)?.saturating_sub(1))
+}
+
+fn read_events_after(
+    conn: &Connection,
+    stream_key: &str,
+    after_seq: i64,
+    max: usize,
+) -> Result<Vec<JournalEvent>, JournalError> {
+    let limit = i64::try_from(max).unwrap_or(i64::MAX);
+    let mut stmt = conn.prepare(
+        "SELECT rowid, stream_id, epoch, seq, reader_timestamp, raw_frame, read_kind,
+                CAST(received_unix_ms AS TEXT)
+         FROM events
+         WHERE stream_id = ?1 AND seq > ?2
+         ORDER BY seq ASC
+         LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![stream_key, after_seq, limit], map_event)?;
+    collect_events(rows)
+}
+
 /// Return the next stream-wide sequence number.
 ///
 /// The seq is stream-wide and never resets across epochs. It is derived from
@@ -977,4 +1093,97 @@ fn unix_ms() -> i64 {
         .as_millis()
         .try_into()
         .unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Journal, TransactionBehavior, params};
+
+    #[test]
+    fn read_only_journal_sees_committed_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("journal.db");
+        let mut journal = Journal::open(&path).expect("open write journal");
+        journal
+            .ensure_stream_state("stream-a", 7)
+            .expect("ensure stream");
+        journal
+            .append_read("stream-a", Some("1234"), b"one", "RAW")
+            .expect("append read");
+
+        let read = Journal::open_read_only(&path).expect("open read journal");
+
+        let retention = read.retention_state("stream-a").expect("retention");
+        assert_eq!(retention.earliest_available_seq, 1);
+        assert_eq!(read.latest_committed_seq("stream-a").expect("latest"), 1);
+        let events = read
+            .read_events_after("stream-a", 0, 10)
+            .expect("read events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].seq, 1);
+        assert_eq!(events[0].raw_frame, b"one");
+    }
+
+    #[test]
+    fn read_only_journal_rejects_raw_sql_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("journal.db");
+        let _journal = Journal::open(&path).expect("open write journal");
+        let read = Journal::open_read_only(&path).expect("open read journal");
+
+        let result = read.connection_for_test().execute(
+            "INSERT INTO receivers (endpoint_id, display_name, approved_unix_ms)
+             VALUES ('receiver-a', 'receiver-a', 0)",
+            [],
+        );
+
+        assert!(result.is_err(), "read-only connection accepted a write");
+    }
+
+    #[test]
+    fn read_only_batch_read_succeeds_during_in_flight_write_transaction() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("journal.db");
+        let mut journal = Journal::open(&path).expect("open write journal");
+        journal
+            .ensure_stream_state("stream-a", 1)
+            .expect("ensure stream");
+        journal
+            .append_read("stream-a", None, b"committed", "RAW")
+            .expect("append committed read");
+        let read = Journal::open_read_only(&path).expect("open read journal");
+        let busy_timeout: i64 = read
+            .connection_for_test()
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("busy timeout");
+        assert_eq!(busy_timeout, 5000);
+
+        let tx = journal
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("begin write tx");
+        tx.execute(
+            "INSERT INTO events
+                 (stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                "stream-a",
+                2,
+                1,
+                b"uncommitted",
+                "RAW",
+                Option::<&str>::None,
+                0
+            ],
+        )
+        .expect("insert uncommitted read");
+
+        let events = read
+            .read_events_after("stream-a", 0, 10)
+            .expect("batch read during write tx");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].raw_frame, b"committed");
+
+        tx.rollback().expect("rollback write tx");
+    }
 }

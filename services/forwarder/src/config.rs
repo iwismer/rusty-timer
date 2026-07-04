@@ -76,6 +76,9 @@ pub struct ControlConfig {
     /// Defaults to `true` per the product decision to allow remote config by
     /// default.
     pub allow_remote_config: bool,
+    /// Gates reader status/control verbs over P2P. Defaults to `true` to match
+    /// the remote-config product default.
+    pub allow_reader_control: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -167,6 +170,7 @@ pub struct RawStatusHttpConfig {
 pub struct RawControlConfig {
     pub allow_power_actions: Option<bool>,
     pub allow_remote_config: Option<bool>,
+    pub allow_reader_control: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -312,10 +316,12 @@ pub fn load_config_from_str(
         Some(c) => ControlConfig {
             allow_power_actions: c.allow_power_actions.unwrap_or(false),
             allow_remote_config: c.allow_remote_config.unwrap_or(true),
+            allow_reader_control: c.allow_reader_control.unwrap_or(true),
         },
         None => ControlConfig {
             allow_power_actions: false,
             allow_remote_config: true,
+            allow_reader_control: true,
         },
     };
 
@@ -950,6 +956,7 @@ max_concurrent_bidi_streams = 2
         let (toml, _dir) = minimal_toml("");
         let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
         assert!(cfg.control.allow_remote_config);
+        assert!(cfg.control.allow_reader_control);
         // Existing default for power actions is unchanged.
         assert!(!cfg.control.allow_power_actions);
     }
@@ -959,6 +966,7 @@ max_concurrent_bidi_streams = 2
         let (toml, _dir) = minimal_toml("[control]\nallow_power_actions = true");
         let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
         assert!(cfg.control.allow_remote_config);
+        assert!(cfg.control.allow_reader_control);
         assert!(cfg.control.allow_power_actions);
     }
 
@@ -967,7 +975,17 @@ max_concurrent_bidi_streams = 2
         let (toml, _dir) = minimal_toml("[control]\nallow_remote_config = false");
         let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
         assert!(!cfg.control.allow_remote_config);
+        assert!(cfg.control.allow_reader_control);
         // Power actions still default to false when unspecified.
+        assert!(!cfg.control.allow_power_actions);
+    }
+
+    #[test]
+    fn control_section_honors_explicit_allow_reader_control_false() {
+        let (toml, _dir) = minimal_toml("[control]\nallow_reader_control = false");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert!(!cfg.control.allow_reader_control);
+        assert!(cfg.control.allow_remote_config);
         assert!(!cfg.control.allow_power_actions);
     }
 

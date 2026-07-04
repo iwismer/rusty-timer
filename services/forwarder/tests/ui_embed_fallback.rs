@@ -1,6 +1,7 @@
 #![cfg(feature = "embed-ui")]
 
-use forwarder::status_http::{StatusConfig, StatusServer, SubsystemStatus};
+use forwarder::status_http::{StatusConfig, StatusServer};
+use forwarder::status_store::SubsystemStatus;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;

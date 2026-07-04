@@ -45,7 +45,10 @@ pub mod proto {
 }
 
 pub use capabilities::{CAP_CONTROL_EVENTS, CAP_READER_CONTROL, CAP_REMOTE_CONFIG, has_capability};
-pub use codec::{Frame, MAX_FRAME_BYTES, decode_frame, decode_message_frame, encode_frame};
+pub use codec::{
+    Frame, MAX_FRAME_BYTES, decode_frame, decode_frame_len, decode_frame_payload,
+    decode_message_frame, encode_frame,
+};
 pub use error::{ProtocolError, ProtocolErrorCode};
 pub use generated::{
     Ack, CaughtUp, ConfigGetRequest, ConfigGetResponse, ConfigSetRequest, ConfigSetResponse,

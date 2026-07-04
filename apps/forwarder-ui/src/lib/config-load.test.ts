@@ -25,6 +25,8 @@ function makeStatus(restart_needed: boolean): ForwarderStatus {
       approval_state: null,
       waiting_for_approval: false,
       message: null,
+      cached: true,
+      checked_unix_ms: null,
     },
     readers: [],
   };

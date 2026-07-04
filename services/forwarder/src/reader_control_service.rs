@@ -1,7 +1,7 @@
 //! Shared reader-control operations used by HTTP and P2P control paths.
 
 use crate::reader_control::{ControlClient, DownloadTracker};
-use crate::status_http::{ForwarderStatusEvent, SubsystemStatus};
+use crate::status_store::{ForwarderStatusEvent, SubsystemStatus};
 use ipico_core::control;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -574,5 +574,60 @@ mod tests {
         assert_eq!(target.nanosecond(), 0);
         assert!(target > wall_now);
         assert_eq!(wait, std::time::Duration::from_millis(375));
+    }
+
+    #[test]
+    fn sync_timing_rollover_frac_above_half_rounds_up() {
+        let wall_now = chrono::Local
+            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
+            .unwrap()
+            .with_nanosecond(200_000_000)
+            .unwrap();
+        let one_way = std::time::Duration::from_millis(50);
+        let (target, wait) = compute_sync_timing(wall_now, one_way, 500);
+        assert_eq!(target.second(), 1);
+        assert_eq!(target.nanosecond(), 0);
+        assert!(wait < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn sync_timing_rollover_frac_below_half_stays_same_second() {
+        let wall_now = chrono::Local
+            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
+            .unwrap()
+            .with_nanosecond(800_000_000)
+            .unwrap();
+        let one_way = std::time::Duration::from_millis(50);
+        let (target, _wait) = compute_sync_timing(wall_now, one_way, 500);
+        assert_eq!(target.second(), 2);
+        assert_eq!(target.nanosecond(), 0);
+    }
+
+    #[test]
+    fn sync_timing_ideal_send_past_bumps_target() {
+        let wall_now = chrono::Local
+            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
+            .unwrap()
+            .with_nanosecond(500_000_000)
+            .unwrap();
+        let one_way = std::time::Duration::from_millis(1);
+        let (target, wait) = compute_sync_timing(wall_now, one_way, 500);
+        assert_eq!(target.second(), 2);
+        assert_eq!(target.nanosecond(), 0);
+        assert!(wait > std::time::Duration::from_millis(900));
+        assert!(wait < std::time::Duration::from_millis(1100));
+    }
+
+    #[test]
+    fn sync_timing_zero_latency() {
+        let wall_now = chrono::Local
+            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
+            .unwrap()
+            .with_nanosecond(300_000_000)
+            .unwrap();
+        let one_way = std::time::Duration::ZERO;
+        let (target, _wait) = compute_sync_timing(wall_now, one_way, 500);
+        assert_eq!(target.second(), 1);
+        assert_eq!(target.nanosecond(), 0);
     }
 }

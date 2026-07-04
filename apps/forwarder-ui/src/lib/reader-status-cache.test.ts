@@ -30,6 +30,8 @@ function makeStatus(readers: ForwarderStatus["readers"]): ForwarderStatus {
       approval_state: null,
       waiting_for_approval: false,
       message: null,
+      cached: true,
+      checked_unix_ms: null,
     },
     readers,
   };

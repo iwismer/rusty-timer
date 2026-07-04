@@ -3,19 +3,11 @@
 //! Used by the P2P session to determine which events need to be
 //! (re-)transmitted after a reconnect or on initial connect.
 
-use crate::storage::journal::{Journal, JournalError, JournalEvent};
+use crate::storage::journal::{JournalError, JournalEvent, ReplayJournal};
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
-
-/// A group of pending events for a single (stream_key, stream_epoch) pair.
-#[derive(Debug)]
-pub struct ReplayResult {
-    pub stream_key: String,
-    pub stream_epoch: i64,
-    pub events: Vec<JournalEvent>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GapNotice {
@@ -53,9 +45,9 @@ impl ReplayEngine {
     /// advancing the cursor and call this again after append wake-ups. If the
     /// cursor is older than the retained prefix, the batch carries a gap notice
     /// and no records so the caller can jump to `earliest - 1` explicitly.
-    pub fn read_after(
+    pub fn read_after<J: ReplayJournal + ?Sized>(
         &self,
-        journal: &Journal,
+        journal: &J,
         stream_id: &str,
         cursor: i64,
         max: usize,
@@ -82,57 +74,6 @@ impl ReplayEngine {
             latest,
             gap: None,
         })
-    }
-
-    /// Return all pending events for a stream, grouped by epoch.
-    ///
-    /// Each `ReplayResult` covers one epoch. If there are unacked events in
-    /// multiple epochs (e.g., old epoch + new epoch after bump), all are returned.
-    ///
-    /// Epochs are returned in ascending order (oldest first = acked drains first).
-    pub fn pending_events(
-        &self,
-        journal: &Journal,
-        stream_key: &str,
-    ) -> Result<Vec<ReplayResult>, JournalError> {
-        let (acked_epoch, acked_seq) = journal.ack_cursor(stream_key)?;
-        let mut results: Vec<ReplayResult> = Vec::new();
-
-        // 1. Replay old-epoch backlog (events in acked_epoch with seq > acked_seq)
-        if acked_epoch > 0 {
-            let events = journal.unacked_events(stream_key, acked_epoch, acked_seq)?;
-            if !events.is_empty() {
-                results.push(ReplayResult {
-                    stream_key: stream_key.to_owned(),
-                    stream_epoch: acked_epoch,
-                    events,
-                });
-            }
-        }
-
-        // 2. Replay events in epochs after acked_epoch (new epoch events, all from seq > 0)
-        // We query a range of possible epochs. Since we don't have a direct "list epochs"
-        // method, use a helper: get all journal entries for stream_key with epoch > acked_epoch.
-        let newer_events = journal.unacked_events_across_epochs(stream_key, acked_epoch)?;
-
-        // Group by epoch
-        let mut epoch_groups: std::collections::BTreeMap<i64, Vec<JournalEvent>> =
-            std::collections::BTreeMap::new();
-        for ev in newer_events {
-            epoch_groups.entry(ev.stream_epoch).or_default().push(ev);
-        }
-
-        for (epoch, events) in epoch_groups {
-            if !events.is_empty() {
-                results.push(ReplayResult {
-                    stream_key: stream_key.to_owned(),
-                    stream_epoch: epoch,
-                    events,
-                });
-            }
-        }
-
-        Ok(results)
     }
 }
 
@@ -292,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_events_groups_and_orders_epochs_when_ack_cursor_is_zero() {
+    fn read_after_spans_epoch_bump_in_seq_order() {
         let (mut journal, _file) = make_journal();
         journal.ensure_stream_state("10.0.0.10:10000", 1).unwrap();
 
@@ -311,22 +252,20 @@ mod tests {
             .insert_event("10.0.0.10:10000", 2, seq3, None, b"epoch2-seq1", "RAW")
             .unwrap();
 
-        let replay = ReplayEngine::new()
-            .pending_events(&journal, "10.0.0.10:10000")
+        let batch = ReplayEngine::new()
+            .read_after(&journal, "10.0.0.10:10000", 0, 10)
             .unwrap();
 
-        assert_eq!(replay.len(), 2);
-        assert_eq!(replay[0].stream_epoch, 1);
-        assert_eq!(replay[1].stream_epoch, 2);
-        assert_eq!(replay[0].events.len(), 2);
-        assert_eq!(replay[1].events.len(), 1);
-        assert_eq!(replay[0].events[0].seq, 1);
-        assert_eq!(replay[0].events[1].seq, 2);
-        assert_eq!(replay[1].events[0].seq, 3);
+        assert!(batch.gap.is_none());
+        assert_eq!(batch.records.len(), 3);
+        let seqs: Vec<i64> = batch.records.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, vec![1, 2, 3]);
+        let epochs: Vec<i64> = batch.records.iter().map(|e| e.stream_epoch).collect();
+        assert_eq!(epochs, vec![1, 1, 2]);
     }
 
     #[test]
-    fn pending_events_includes_old_epoch_backlog_and_newer_epochs() {
+    fn read_after_returns_old_epoch_backlog_and_newer_epochs() {
         let (mut journal, _file) = make_journal();
         journal.ensure_stream_state("10.0.0.20:10000", 1).unwrap();
 
@@ -346,30 +285,29 @@ mod tests {
                 .unwrap();
         }
 
-        let replay = ReplayEngine::new()
-            .pending_events(&journal, "10.0.0.20:10000")
+        let (_epoch, acked_seq) = journal.ack_cursor("10.0.0.20:10000").unwrap();
+        let batch = ReplayEngine::new()
+            .read_after(&journal, "10.0.0.20:10000", acked_seq, 10)
             .unwrap();
 
-        assert_eq!(replay.len(), 2);
-        assert_eq!(replay[0].stream_epoch, 1);
-        assert_eq!(replay[0].events.len(), 2);
-        assert_eq!(replay[0].events[0].seq, 2);
-        assert_eq!(replay[0].events[1].seq, 3);
-        assert_eq!(replay[1].stream_epoch, 2);
-        assert_eq!(replay[1].events.len(), 2);
-        assert_eq!(replay[1].events[0].seq, 4);
-        assert_eq!(replay[1].events[1].seq, 5);
+        assert!(batch.gap.is_none());
+        assert_eq!(batch.records.len(), 4);
+        let seqs: Vec<i64> = batch.records.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, vec![2, 3, 4, 5]);
+        let epochs: Vec<i64> = batch.records.iter().map(|e| e.stream_epoch).collect();
+        assert_eq!(epochs, vec![1, 1, 2, 2]);
     }
 
     #[test]
-    fn pending_events_is_empty_for_initialized_stream_without_events() {
+    fn read_after_is_empty_for_initialized_stream_without_events() {
         let (mut journal, _file) = make_journal();
         journal.ensure_stream_state("10.0.0.30:10000", 1).unwrap();
 
-        let replay = ReplayEngine::new()
-            .pending_events(&journal, "10.0.0.30:10000")
+        let batch = ReplayEngine::new()
+            .read_after(&journal, "10.0.0.30:10000", 0, 10)
             .unwrap();
 
-        assert!(replay.is_empty());
+        assert!(batch.gap.is_none());
+        assert!(batch.records.is_empty());
     }
 }

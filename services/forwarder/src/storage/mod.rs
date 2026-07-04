@@ -4,4 +4,5 @@
 
 pub mod journal;
 pub mod migrations;
+pub mod restore;
 pub mod wake;

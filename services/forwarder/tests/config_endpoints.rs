@@ -1,9 +1,23 @@
 //! Integration tests for forwarder config editing endpoints.
 
 use forwarder::status_http::{EpochResetError, JournalAccess};
-use forwarder::status_http::{StatusConfig, StatusServer, SubsystemStatus};
+use forwarder::status_http::{StatusConfig, StatusServer};
+use forwarder::status_store::SubsystemStatus;
 use std::net::SocketAddr;
 use std::time::Duration;
+
+fn create_token_fixture(filename: &str) -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().expect("create temp token dir");
+    let path = dir.path().join(filename);
+    std::fs::write(&path, "test-token\n")
+        .unwrap_or_else(|e| panic!("write token {}: {e}", path.display()));
+    let token_path = path.display().to_string().replace('\\', "/");
+    (dir, token_path)
+}
+
+fn create_fake_token_fixture() -> (tempfile::TempDir, String) {
+    create_token_fixture("fake-token")
+}
 
 async fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -130,11 +144,12 @@ async fn restart_needed_flag_defaults_to_false() {
 
 #[tokio::test]
 async fn get_config_returns_json() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
@@ -142,7 +157,7 @@ display_name = "Start Line"
 
 
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 
 [[readers]]
 target = "192.168.1.100:10000"
@@ -185,18 +200,19 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_general_updates_display_name() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 
 
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 
 [[readers]]
 target = "192.168.1.100:10000"
@@ -255,18 +271,19 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_general_updates_readonly_config_via_atomic_replace() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 
 
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 
 [[readers]]
 target = "192.168.1.100:10000"
@@ -325,19 +342,20 @@ target = "192.168.1.100:10000"
 #[cfg(unix)]
 #[tokio::test]
 async fn post_config_general_preserves_file_mode_on_atomic_replace() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 
 
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 
 [[readers]]
 target = "192.168.1.100:10000"
@@ -390,18 +408,19 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_general_accepts_fragmented_http_body() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 
 
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 
 [[readers]]
 target = "192.168.1.100:10000"
@@ -453,16 +472,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_optional_sections_reject_non_object_payloads() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -509,16 +529,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_auth_updates_token_file() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_old_token_dir, old_token_path) = create_token_fixture("old-token");
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/old-token"
+token_file = "{old_token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -544,13 +565,10 @@ target = "192.168.1.100:10000"
     .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
+    let (_new_token_dir, new_token_path) = create_token_fixture("new-token");
+    let body = format!(r#"{{"token_file":"{new_token_path}"}}"#);
 
-    let (status, response) = http_post(
-        addr,
-        "/api/v1/config/auth",
-        r#"{"token_file":"/tmp/new-token"}"#,
-    )
-    .await;
+    let (status, response) = http_post(addr, "/api/v1/config/auth", &body).await;
     assert_eq!(status, 200);
     let body = response_body(&response);
     let json: serde_json::Value = serde_json::from_str(body).expect("parse JSON");
@@ -566,16 +584,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_auth_requires_token_file() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -607,16 +626,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_auth_rejects_whitespace_token_file() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -648,16 +668,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_journal_updates_sqlite_path() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -710,16 +731,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_journal_rejects_out_of_range_prune_watermark() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -759,16 +781,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_journal_rejects_non_numeric_prune_watermark() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -809,17 +832,18 @@ target = "192.168.1.100:10000"
 /// Helper: start a config-editing server backed by a minimal temp config file.
 /// Returns the running server and the config file guard (kept to preserve the
 /// temp file for the duration of the test).
-async fn start_config_server() -> (StatusServer, tempfile::NamedTempFile) {
-    use forwarder::status_http::ConfigState;
+async fn start_config_server() -> (StatusServer, tempfile::NamedTempFile, tempfile::TempDir) {
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -843,12 +867,12 @@ target = "192.168.1.100:10000"
     .await
     .expect("start failed");
     tokio::time::sleep(Duration::from_millis(50)).await;
-    (server, config_file)
+    (server, config_file, _token_dir)
 }
 
 #[tokio::test]
 async fn post_config_p2p_updates_server_settings() {
-    let (server, config_file) = start_config_server().await;
+    let (server, config_file, _token_dir) = start_config_server().await;
     let addr = server.local_addr();
 
     let (status, response) = http_post(
@@ -883,7 +907,7 @@ async fn post_config_p2p_updates_server_settings() {
 
 #[tokio::test]
 async fn post_config_p2p_rejects_unsupported_server_url_scheme() {
-    let (server, _config_file) = start_config_server().await;
+    let (server, _config_file, _token_dir) = start_config_server().await;
     let addr = server.local_addr();
 
     let (status, _response) = http_post(
@@ -897,7 +921,7 @@ async fn post_config_p2p_rejects_unsupported_server_url_scheme() {
 
 #[tokio::test]
 async fn post_config_journal_rejects_invalid_retention_suffix() {
-    let (server, _config_file) = start_config_server().await;
+    let (server, _config_file, _token_dir) = start_config_server().await;
     let addr = server.local_addr();
 
     let (status, _) = http_post(addr, "/api/v1/config/journal", r#"{"min_retention":"7x"}"#).await;
@@ -909,7 +933,7 @@ async fn post_config_journal_rejects_invalid_retention_suffix() {
 
 #[tokio::test]
 async fn post_config_journal_rejects_min_max_inversion() {
-    let (server, _config_file) = start_config_server().await;
+    let (server, _config_file, _token_dir) = start_config_server().await;
     let addr = server.local_addr();
 
     let (status, _) = http_post(
@@ -923,7 +947,7 @@ async fn post_config_journal_rejects_min_max_inversion() {
 
 #[tokio::test]
 async fn post_config_journal_rejects_zero_emergency_rows() {
-    let (server, _config_file) = start_config_server().await;
+    let (server, _config_file, _token_dir) = start_config_server().await;
     let addr = server.local_addr();
 
     let (status, _) = http_post(
@@ -937,7 +961,7 @@ async fn post_config_journal_rejects_zero_emergency_rows() {
 
 #[tokio::test]
 async fn post_config_journal_accepts_valid_retention() {
-    let (server, config_file) = start_config_server().await;
+    let (server, config_file, _token_dir) = start_config_server().await;
     let addr = server.local_addr();
 
     let (status, response) = http_post(
@@ -964,16 +988,17 @@ async fn post_config_journal_accepts_valid_retention() {
 
 #[tokio::test]
 async fn post_config_status_http_updates_bind() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -1021,16 +1046,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_status_http_rejects_invalid_ipv4_and_port() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -1067,16 +1093,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_status_http_rejects_hostname_bind() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -1113,16 +1140,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_status_http_rejects_ipv6_bind() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -1159,16 +1187,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_readers_replaces_list() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -1227,16 +1256,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_readers_validates_target() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -1274,16 +1304,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_readers_rejects_out_of_range_local_fallback_port() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -1323,16 +1354,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_readers_requires_at_least_one() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -1364,16 +1396,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_control_updates_allow_power_actions() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -1430,16 +1463,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_control_rejects_non_boolean_allow_power_actions() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -1482,16 +1516,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn post_config_control_action_restart_device_requires_allow_power_actions_true() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [control]
 allow_power_actions = false
 [[readers]]
@@ -1536,16 +1571,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn restart_endpoint_returns_ok() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -1610,16 +1646,17 @@ async fn restart_endpoint_returns_404_without_config() {
 
 #[tokio::test]
 async fn control_restart_service_endpoint_returns_ok() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
 "#
@@ -1668,16 +1705,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn control_restart_device_requires_allow_power_actions_true() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [control]
 allow_power_actions = false
 [[readers]]
@@ -1717,16 +1755,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn control_shutdown_device_requires_allow_power_actions_true() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [control]
 allow_power_actions = false
 [[readers]]
@@ -1766,16 +1805,17 @@ target = "192.168.1.100:10000"
 
 #[tokio::test]
 async fn control_action_errors_are_written_to_ui_logs() {
-    use forwarder::status_http::ConfigState;
+    use forwarder::config_service::ConfigState;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     let mut config_file = NamedTempFile::new().expect("create temp file");
+    let (_token_dir, token_path) = create_fake_token_fixture();
     write!(
         config_file,
         r#"schema_version = 1
 [auth]
-token_file = "/tmp/fake-token"
+token_file = "{token_path}"
 [control]
 allow_power_actions = false
 [[readers]]

@@ -1,9 +1,9 @@
 // reader_task: IPICO reader TCP connect/read loop, journal append, local fanout.
 
-use forwarder::local_fanout::FanoutServer;
-use forwarder::status_http::{ReaderConnectionState, StatusServer};
-use forwarder::storage::journal::Journal;
-use forwarder::ui_events::ForwarderUiEvent;
+use crate::local_fanout::FanoutServer;
+use crate::status_store::{ReaderConnectionState, StatusStore};
+use crate::storage::journal::Journal;
+use crate::ui_events::ForwarderUiEvent;
 use ipico_core::read::ChipRead;
 use rt_ui_log::UiLogLevel;
 use std::convert::TryFrom;
@@ -19,13 +19,13 @@ use tracing::{debug, info, warn};
 // Helpers
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn mark_reader_disconnected(status: &StatusServer, reader_ip: &str) {
+pub(crate) async fn mark_reader_disconnected(status: &StatusStore, reader_ip: &str) {
     status
         .update_reader_state(reader_ip, ReaderConnectionState::Disconnected)
         .await;
 }
 
-async fn disconnect_and_notify(status: &StatusServer, stream_key: &str) {
+async fn disconnect_and_notify(status: &StatusStore, stream_key: &str) {
     mark_reader_disconnected(status, stream_key).await;
 }
 
@@ -44,6 +44,86 @@ pub(crate) fn append_read_to_journal(
     journal
         .append_read(stream_key, reader_timestamp, raw_frame, read_type)
         .map_err(|e| JournalAppendError::Append(e.to_string()))
+}
+
+fn append_retry_backoff(failed_attempts: u64) -> Duration {
+    match failed_attempts {
+        1 => Duration::from_millis(100),
+        2 => Duration::from_millis(500),
+        3 => Duration::from_secs(1),
+        4 => Duration::from_secs(2),
+        _ => Duration::from_secs(5),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn append_with_retry(
+    journal: &Arc<Mutex<Journal>>,
+    stream_key: &str,
+    reader_timestamp: Option<&str>,
+    raw_frame: &[u8],
+    read_type: &str,
+    shutdown_rx: &mut watch::Receiver<bool>,
+    logger: &Arc<rt_ui_log::UiLogger<ForwarderUiEvent>>,
+    reader_ip: &str,
+) -> Option<(i64, i64)> {
+    let mut failed_attempts = 0_u64;
+    let mut last_retry_log = tokio::time::Instant::now();
+
+    loop {
+        if *shutdown_rx.borrow() {
+            return None;
+        }
+
+        let append_result = {
+            let mut journal = journal.lock().await;
+            append_read_to_journal(
+                &mut journal,
+                stream_key,
+                reader_timestamp,
+                raw_frame,
+                read_type,
+            )
+        };
+
+        match append_result {
+            Ok(value) => {
+                if failed_attempts > 0 {
+                    logger.log(format!(
+                        "reader {reader_ip} journal append recovered after {failed_attempts} failed attempts"
+                    ));
+                }
+                return Some(value);
+            }
+            Err(JournalAppendError::Append(error)) => {
+                failed_attempts += 1;
+                if failed_attempts == 1 {
+                    logger.log_at(
+                        UiLogLevel::Error,
+                        format!("reader {reader_ip} journal append failed: {error}; retrying"),
+                    );
+                } else if last_retry_log.elapsed() >= Duration::from_secs(60) {
+                    logger.log_at(
+                        UiLogLevel::Warn,
+                        format!(
+                            "reader {reader_ip} still retrying journal append after {failed_attempts} failed attempts; last error: {error}"
+                        ),
+                    );
+                    last_retry_log = tokio::time::Instant::now();
+                }
+            }
+        }
+
+        let delay = append_retry_backoff(failed_attempts);
+        tokio::select! {
+            _ = sleep(delay) => {}
+            changed = shutdown_rx.changed() => {
+                if changed.is_ok() && *shutdown_rx.borrow() {
+                    return None;
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn download_progress_advanced_or_started(
@@ -90,7 +170,7 @@ pub(crate) fn stall_outcome_for_download(
 }
 
 pub(crate) async fn fail_active_download(
-    tracker: &tokio::sync::Mutex<forwarder::reader_control::DownloadTracker>,
+    tracker: &tokio::sync::Mutex<crate::reader_control::DownloadTracker>,
     message: String,
 ) {
     let mut dt = tracker.lock().await;
@@ -104,13 +184,13 @@ pub(crate) async fn fail_active_download(
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_reader(
+pub async fn run_reader(
     reader_ip: String,
     reader_port: u16,
     fanout_addr: SocketAddr,
     journal: Arc<Mutex<Journal>>,
     mut shutdown_rx: watch::Receiver<bool>,
-    status: StatusServer,
+    status: StatusStore,
     logger: Arc<rt_ui_log::UiLogger<ForwarderUiEvent>>,
 ) {
     let target_addr = format!("{}:{}", reader_ip, reader_port);
@@ -178,7 +258,11 @@ pub(crate) async fn run_reader(
             .update_reader_state(&target_addr, ReaderConnectionState::Connected)
             .await;
 
-        // Ensure journal has stream state for this reader (idempotent)
+        // Ensure journal has stream state for this reader (idempotent).
+        // Startup stream-identity restore (main.rs, before reader tasks spawn)
+        // already seeded every configured stream key — possibly from the server
+        // registry high-water — so this is only a cheap safety net for stream
+        // keys startup did not seed. Do not remove it.
         {
             let mut j = journal.lock().await;
             let epoch = 1_i64;
@@ -214,12 +298,12 @@ pub(crate) async fn run_reader(
 
         // Set up control channels
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
-        let (control_client, control_sink) = forwarder::reader_control::ControlClient::new(cmd_tx);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
         let control_client = Arc::new(control_client);
         status.register_control_client(&target_addr, control_client.clone());
 
         let download_tracker = Arc::new(tokio::sync::Mutex::new(
-            forwarder::reader_control::DownloadTracker::new(),
+            crate::reader_control::DownloadTracker::new(),
         ));
         status.register_download_tracker(&target_addr, download_tracker.clone());
 
@@ -248,7 +332,7 @@ pub(crate) async fn run_reader(
         let poll_download_tracker = download_tracker.clone();
         let poll_handle = tokio::spawn(async move {
             // Run initial connection sequence
-            let reader_info = forwarder::reader_control::run_connect_sequence(&poll_client).await;
+            let reader_info = crate::reader_control::run_connect_sequence(&poll_client).await;
             if reader_info.connect_failures == 6 {
                 poll_logger.log_at(
                     rt_ui_log::UiLogLevel::Error,
@@ -284,7 +368,7 @@ pub(crate) async fn run_reader(
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        forwarder::reader_control::run_status_poll(&poll_client, &mut info).await;
+                        crate::reader_control::run_status_poll(&poll_client, &mut info).await;
                         poll_status
                             .update_reader_info_unless_disconnected(&poll_target_addr, info.clone())
                             .await;
@@ -486,27 +570,23 @@ pub(crate) async fn run_reader(
             }
 
             // Write to journal. Keep status updates out of the DB lock scope.
-            let append_result = {
-                let mut j = journal.lock().await;
-                append_read_to_journal(
-                    &mut j,
-                    &target_addr,
-                    reader_timestamp.as_deref(),
-                    &frame_buf,
-                    &parsed_read_type,
-                )
-            };
-            let (epoch, seq) = match append_result {
-                Ok(v) => v,
-                Err(e) => {
-                    let JournalAppendError::Append(inner) = &e;
-                    logger.log_at(
-                        UiLogLevel::Error,
-                        format!("reader {} journal error (append): {}", reader_ip, inner),
-                    );
-                    disconnect_and_notify(&status, &target_addr).await;
-                    break;
-                }
+            let Some((epoch, seq)) = append_with_retry(
+                &journal,
+                &target_addr,
+                reader_timestamp.as_deref(),
+                &frame_buf,
+                &parsed_read_type,
+                &mut shutdown_rx,
+                &logger,
+                &reader_ip,
+            )
+            .await
+            else {
+                info!(reader_ip = %reader_ip, "reader task stopping (shutdown)");
+                status.deregister_control_client(&target_addr);
+                status.deregister_download_tracker(&target_addr);
+                status.deregister_reconnect_notify(&target_addr);
+                return;
             };
 
             debug!(
@@ -558,5 +638,160 @@ pub(crate) async fn run_reader(
             }
         }
         backoff_secs = (backoff_secs * 2).min(30);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use tokio::sync::broadcast;
+    use tokio::time::{Duration, advance};
+
+    const STREAM_KEY: &str = "192.0.2.10:10000";
+    const RAW_FRAME: &[u8] = b"aa000000000000000000000000000000000000000000\r\n";
+
+    fn test_logger() -> Arc<rt_ui_log::UiLogger<ForwarderUiEvent>> {
+        let (tx, _) = broadcast::channel(16);
+        Arc::new(rt_ui_log::UiLogger::with_buffer(
+            tx,
+            |entry| ForwarderUiEvent::LogEntry { entry },
+            64,
+        ))
+    }
+
+    fn test_journal() -> (TempDir, Arc<Mutex<Journal>>) {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let mut journal =
+            Journal::open(&tempdir.path().join("journal.sqlite")).expect("open journal");
+        journal
+            .ensure_stream_state(STREAM_KEY, 1)
+            .expect("ensure stream");
+        (tempdir, Arc::new(Mutex::new(journal)))
+    }
+
+    async fn set_query_only(journal: &Arc<Mutex<Journal>>, on: bool) {
+        let journal = journal.lock().await;
+        journal.set_query_only(on).expect("set query_only");
+    }
+
+    fn spawn_append_with_retry(
+        journal: Arc<Mutex<Journal>>,
+        mut shutdown_rx: watch::Receiver<bool>,
+        logger: Arc<rt_ui_log::UiLogger<ForwarderUiEvent>>,
+    ) -> tokio::task::JoinHandle<Option<(i64, i64)>> {
+        tokio::spawn(async move {
+            append_with_retry(
+                &journal,
+                STREAM_KEY,
+                Some("123456"),
+                RAW_FRAME,
+                "tag",
+                &mut shutdown_rx,
+                &logger,
+                "192.0.2.10",
+            )
+            .await
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn append_with_retry_keeps_retrying_until_shutdown() {
+        let (_tempdir, journal) = test_journal();
+        set_query_only(&journal, true).await;
+        let logger = test_logger();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let task = spawn_append_with_retry(journal, shutdown_rx, logger.clone());
+        tokio::task::yield_now().await;
+
+        advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+        advance(Duration::from_millis(500)).await;
+        tokio::task::yield_now().await;
+        advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+
+        assert!(!task.is_finished(), "append should still be retrying");
+        let entries = logger.entries();
+        assert!(
+            entries.iter().any(|entry| entry.contains("[ERROR]")
+                && entry.contains("journal append failed")
+                && entry.contains("retrying")),
+            "first append failure must be logged at error level: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|entry| entry.contains("[WARN]")
+                && entry.contains("still retrying journal append")
+                && entry.contains("attempt")),
+            "long-running retry must re-log a warn: {entries:?}"
+        );
+
+        shutdown_tx.send(true).expect("send shutdown");
+        assert_eq!(task.await.expect("task join"), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn append_with_retry_logs_recovery_after_failures() {
+        let (_tempdir, journal) = test_journal();
+        set_query_only(&journal, true).await;
+        let logger = test_logger();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let task = spawn_append_with_retry(journal.clone(), shutdown_rx, logger.clone());
+        tokio::task::yield_now().await;
+        advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+        advance(Duration::from_millis(500)).await;
+        tokio::task::yield_now().await;
+
+        set_query_only(&journal, false).await;
+        advance(Duration::from_secs(1)).await;
+        let result = task.await.expect("task join");
+        assert_eq!(result, Some((1, 1)));
+        drop(shutdown_tx);
+
+        let entries = logger.entries();
+        assert!(
+            entries.iter().any(|entry| entry.contains("[ERROR]")
+                && entry.contains("journal append failed")
+                && entry.contains("retrying")),
+            "first append failure must be logged at error level: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|entry| entry.contains("[INFO]")
+                && entry.contains("journal append recovered")
+                && entry.contains("attempt")),
+            "recovery must be logged: {entries:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn append_with_retry_returns_immediately_for_healthy_journal() {
+        let (_tempdir, journal) = test_journal();
+        let logger = test_logger();
+        let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+        let result = append_with_retry(
+            &journal,
+            STREAM_KEY,
+            Some("123456"),
+            RAW_FRAME,
+            "tag",
+            &mut shutdown_rx,
+            &logger,
+            "192.0.2.10",
+        )
+        .await;
+
+        assert_eq!(result, Some((1, 1)));
+        let entries = logger.entries();
+        assert!(
+            entries
+                .iter()
+                .all(|entry| !entry.contains("journal append failed")
+                    && !entry.contains("journal append recovered")),
+            "healthy append should not log retry/recovery: {entries:?}"
+        );
     }
 }
