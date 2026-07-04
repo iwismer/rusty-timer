@@ -77,9 +77,9 @@ pub struct ConnectionsResponse {
 
 pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
     let server = server_device_status(state).await;
-    let discovered = state.discovered_forwarders.read().await.clone();
+    let discovered = state.forwarders.discovered_forwarders.read().await.clone();
     let (subscriptions, intents) = {
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         let subscriptions = match db.load_stream_subscriptions() {
             Ok(subscriptions) => subscriptions,
             Err(error) => {
@@ -97,6 +97,7 @@ pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
             Err(error) => {
                 warn!(error = %error, "failed to load forwarder intents for connections response");
                 state
+                    .forwarders
                     .disconnected_intents
                     .lock()
                     .unwrap()
@@ -108,8 +109,13 @@ pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
         (subscriptions, intents)
     };
 
-    let runtime_statuses = state.forwarder_runtime.lock().unwrap().clone();
-    let live_statuses = state.forwarder_live_status.lock().unwrap().clone();
+    let runtime_statuses = state.forwarders.forwarder_runtime.lock().unwrap().clone();
+    let live_statuses = state
+        .forwarders
+        .forwarder_live_status
+        .lock()
+        .unwrap()
+        .clone();
     let config_endpoints = state.forwarder_config_endpoints();
     let reader_control_endpoints = state.forwarder_reader_control_endpoints();
     let mut endpoints: BTreeSet<String> = discovered.keys().cloned().collect();
@@ -192,7 +198,7 @@ pub async fn reconnect_server(state: &AppState) -> Result<(), ReceiverError> {
 
 pub async fn connect_forwarder(state: &AppState, endpoint_id: String) -> Result<(), ReceiverError> {
     {
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         db.set_forwarder_intent(&endpoint_id, true)
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     }
@@ -208,7 +214,7 @@ pub async fn disconnect_forwarder(
     endpoint_id: String,
 ) -> Result<(), ReceiverError> {
     {
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         db.set_forwarder_intent(&endpoint_id, false)
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     }
@@ -224,7 +230,7 @@ pub async fn reconnect_forwarder(
     endpoint_id: String,
 ) -> Result<(), ReceiverError> {
     {
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         db.set_forwarder_intent(&endpoint_id, true)
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     }

@@ -833,6 +833,7 @@ mod tests {
         );
 
         state
+            .storage
             .db
             .lock()
             .await
@@ -855,7 +856,7 @@ mod tests {
         let (state, reporter) = reporter_state();
         let guard = reporter.on_control_connected("fwd-1").await;
         assert_eq!(
-            state.connection_state.borrow().clone(),
+            state.signals.connection_state.borrow().clone(),
             ConnectionState::Connected
         );
 
@@ -869,7 +870,7 @@ mod tests {
         // single-threaded runtime the spawned async recompute has not run
         // yet, so this observes the sync fallback's result.
         assert_eq!(
-            state.connection_state.borrow().clone(),
+            state.signals.connection_state.borrow().clone(),
             ConnectionState::Disconnected
         );
     }
@@ -884,14 +885,14 @@ mod tests {
         let (state, reporter) = reporter_state();
         let guard = reporter.on_control_connected("fwd-1").await;
         assert_eq!(
-            state.connection_state.borrow().clone(),
+            state.signals.connection_state.borrow().clone(),
             ConnectionState::Connected
         );
 
         drop(guard); // simulates connection-task cancellation mid-session
 
         assert_eq!(
-            state.connection_state.borrow().clone(),
+            state.signals.connection_state.borrow().clone(),
             ConnectionState::Connecting
         );
     }
@@ -906,13 +907,13 @@ mod tests {
 
         drop(g1);
         assert_eq!(
-            state.connection_state.borrow().clone(),
+            state.signals.connection_state.borrow().clone(),
             ConnectionState::Connected
         );
 
         drop(g2);
         assert_eq!(
-            state.connection_state.borrow().clone(),
+            state.signals.connection_state.borrow().clone(),
             ConnectionState::Connecting
         );
     }

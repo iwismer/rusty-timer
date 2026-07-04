@@ -106,7 +106,7 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
         }
 
         let config = {
-            let db = state.db.lock().await;
+            let db = state.storage.db.lock().await;
             db.load_rd_import_config().ok()
         };
         let interval = config

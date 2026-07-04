@@ -755,7 +755,7 @@ async fn update_subscription_event_type(
 // ---------------------------------------------------------------------------
 
 fn spawn_event_bridge(app_handle: tauri::AppHandle, state: &Arc<AppState>) {
-    let rx = state.ui_tx.subscribe();
+    let rx = state.ui.ui_tx.subscribe();
     let handle = app_handle.clone();
     tauri::async_runtime::spawn(async move {
         let mut stream = BroadcastStream::new(rx);
@@ -1003,7 +1003,7 @@ fn main() {
                     }
                 };
             let profile = tauri::async_runtime::block_on(async {
-                state.db.lock().await.load_profile().ok().flatten()
+                state.storage.db.lock().await.load_profile().ok().flatten()
             });
             // `p2p_config_from_lookup` (via `p2p_config_from_env`) is the
             // single writer of `server_override`; read it here and apply the
@@ -1050,7 +1050,7 @@ fn main() {
     app.run(|app_handle, event| {
         if let RunEvent::Exit = event {
             if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
-                let _ = state.shutdown_tx.send(ShutdownSignal::Terminate);
+                let _ = state.signals.shutdown_tx.send(ShutdownSignal::Terminate);
             }
             // Shut down the optional P2P runtime first (cancel sessions,
             // proxies, and workers) before draining the housekeeping task.

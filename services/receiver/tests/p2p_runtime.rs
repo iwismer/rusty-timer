@@ -225,6 +225,7 @@ async fn colliding_wire_stream_ids_are_isolated_by_forwarder_endpoint() {
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
         state
+            .storage
             .db
             .lock()
             .await
@@ -234,7 +235,7 @@ async fn colliding_wire_stream_ids_are_isolated_by_forwarder_endpoint() {
             ])
             .unwrap();
         {
-            let mut discovered = state.discovered_forwarders.write().await;
+            let mut discovered = state.forwarders.discovered_forwarders.write().await;
             discovered.insert(
                 node_a.clone(),
                 DiscoveredForwarder {
@@ -286,7 +287,7 @@ async fn colliding_wire_stream_ids_are_isolated_by_forwarder_endpoint() {
                 let key_a = key_a.clone();
                 let key_b = key_b.clone();
                 async move {
-                    let db = state.db.lock().await;
+                    let db = state.storage.db.lock().await;
                     db.load_received_events(key_a.as_str())
                         .map(|events| {
                             events.len() == 2 && events.iter().all(|e| e.raw_frame == b"aaa")
@@ -306,7 +307,7 @@ async fn colliding_wire_stream_ids_are_isolated_by_forwarder_endpoint() {
         )
         .await;
 
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         assert!(db.load_received_events(STREAM_ID).unwrap().is_empty());
         assert_eq!(db.load_received_events(key_a.as_str()).unwrap().len(), 2);
         assert_eq!(db.load_received_events(key_b.as_str()).unwrap().len(), 2);
@@ -351,6 +352,7 @@ async fn runtime_projects_canonical_stream_address_events_to_ui_state() {
         sub.reader_ip = None;
         sub.forwarder_id = None;
         state
+            .storage
             .db
             .lock()
             .await
@@ -414,6 +416,7 @@ async fn reconnect_all_preserves_stream_metrics_and_continues_counting() {
         let state = init_state(dir.path()).await;
         let (config, sub) = base_config(endpoint_id.clone(), direct, 87, None);
         state
+            .storage
             .db
             .lock()
             .await
@@ -477,6 +480,7 @@ async fn runtime_persists_events_and_advances_cursor() {
         let (config, sub) = base_config(endpoint_id, direct, 71, None);
         let local_key = local_stream_key(&sub);
         state
+            .storage
             .db
             .lock()
             .await
@@ -492,7 +496,7 @@ async fn runtime_persists_events_and_advances_cursor() {
                 let state = Arc::clone(&state);
                 let local_key = local_key.clone();
                 async move {
-                    let db = state.db.lock().await;
+                    let db = state.storage.db.lock().await;
                     db.load_received_events(local_key.as_str())
                         .map(|e| e.len() >= 2)
                         .unwrap_or(false)
@@ -502,7 +506,7 @@ async fn runtime_persists_events_and_advances_cursor() {
         )
         .await;
 
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         let seqs: Vec<i64> = db
             .load_received_events(local_key.as_str())
             .unwrap()
@@ -554,6 +558,7 @@ async fn durable_local_proxy_replays_exact_frames() {
         let (config, sub) = base_config(endpoint_id, direct, 73, Some(port));
         let local_key = local_stream_key(&sub);
         state
+            .storage
             .db
             .lock()
             .await
@@ -570,7 +575,7 @@ async fn durable_local_proxy_replays_exact_frames() {
                 let state = Arc::clone(&state);
                 let local_key = local_key.clone();
                 async move {
-                    let db = state.db.lock().await;
+                    let db = state.storage.db.lock().await;
                     db.load_received_events(local_key.as_str())
                         .map(|e| e.len() >= 2)
                         .unwrap_or(false)
@@ -636,7 +641,7 @@ async fn dbf_feed_delivers_from_received_events_without_duplicates() {
         let dbf_path = dir.path().join("IPICO.DBF");
         let state = init_state(dir.path()).await;
         {
-            let mut db = state.db.lock().await;
+            let mut db = state.storage.db.lock().await;
             db.save_rd_import_config(&receiver::db::RdImportConfig {
                 enabled: false,
                 dir: dir.path().to_string_lossy().into_owned(),
@@ -664,7 +669,7 @@ async fn dbf_feed_delivers_from_received_events_without_duplicates() {
                 let state = Arc::clone(&state);
                 let local_key = local_key.clone();
                 async move {
-                    let db = state.db.lock().await;
+                    let db = state.storage.db.lock().await;
                     let e1 = db.load_received_event(local_key.as_str(), 1).ok().flatten();
                     let e2 = db.load_received_event(local_key.as_str(), 2).ok().flatten();
                     matches!((e1, e2), (Some(a), Some(b))
@@ -682,7 +687,7 @@ async fn dbf_feed_delivers_from_received_events_without_duplicates() {
         // for that row to be marked delivered. That positive delivery proves a
         // later DBF pass ran; rows 1-2 must not be re-delivered by it.
         let markers_before: Vec<Option<i64>> = {
-            let db = state.db.lock().await;
+            let db = state.storage.db.lock().await;
             vec![
                 db.load_received_event(local_key.as_str(), 1)
                     .unwrap()
@@ -695,7 +700,7 @@ async fn dbf_feed_delivers_from_received_events_without_duplicates() {
             ]
         };
         {
-            let db = state.db.lock().await;
+            let db = state.storage.db.lock().await;
             db.insert_received_event(&ReceivedEventInsert {
                 stream_id: local_key.as_str(),
                 seq: 3,
@@ -714,7 +719,7 @@ async fn dbf_feed_delivers_from_received_events_without_duplicates() {
                 let state = Arc::clone(&state);
                 let local_key = local_key.clone();
                 async move {
-                    let db = state.db.lock().await;
+                    let db = state.storage.db.lock().await;
                     db.load_received_event(local_key.as_str(), 3)
                         .ok()
                         .flatten()
@@ -725,7 +730,7 @@ async fn dbf_feed_delivers_from_received_events_without_duplicates() {
         )
         .await;
         let markers_after: Vec<Option<i64>> = {
-            let db = state.db.lock().await;
+            let db = state.storage.db.lock().await;
             vec![
                 db.load_received_event(local_key.as_str(), 1)
                     .unwrap()
@@ -864,7 +869,7 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
         let sub = stream_subscription(&endpoint_id, None);
         let local_key = local_stream_key(&sub);
         {
-            let mut db = state.db.lock().await;
+            let mut db = state.storage.db.lock().await;
             db.replace_stream_subscriptions(&[sub]).unwrap();
             // Opt this stream in to announcer publishing (global + per-stream).
             db.set_announcer_enabled(true).unwrap();
@@ -923,6 +928,7 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
         // subscription to emit a subsequent durable hint. The hint should push
         // only the new row; seqs 1-2 must stay marked and must not be re-sent.
         state
+            .storage
             .writer
             .persist_batch(
                 local_key.as_str().to_owned(),
@@ -1003,7 +1009,7 @@ async fn announcer_does_not_push_when_stream_not_opted_in() {
         let local_key = local_stream_key(&sub);
         let sibling_key = local_stream_key(&sibling_sub);
         {
-            let mut db = state.db.lock().await;
+            let mut db = state.storage.db.lock().await;
             db.replace_stream_subscriptions(&[sub, sibling_sub])
                 .unwrap();
             // Global toggle on, but only the sibling stream is opted in.
@@ -1032,7 +1038,7 @@ async fn announcer_does_not_push_when_stream_not_opted_in() {
                 let sibling_key = sibling_key.clone();
                 async move {
                     let durable = {
-                        let db = state.db.lock().await;
+                        let db = state.storage.db.lock().await;
                         let main_durable = db
                             .load_received_events(local_key.as_str())
                             .map(|e| e.len() >= 2)
@@ -1162,6 +1168,7 @@ async fn changing_local_port_rebinds_proxy_to_new_port() {
         let state = init_state(dir.path()).await;
         let (config, sub) = base_config(endpoint_id.clone(), direct, 81, Some(old_port));
         state
+            .storage
             .db
             .lock()
             .await
@@ -1183,6 +1190,7 @@ async fn changing_local_port_rebinds_proxy_to_new_port() {
 
         // Repoint the canonical subscription to the new local port.
         state
+            .storage
             .db
             .lock()
             .await
@@ -1246,6 +1254,7 @@ async fn terminally_failed_stream_is_not_resubscribed_and_reports_failed() {
         let state = init_state(dir.path()).await;
         let (config, sub) = base_config(endpoint_id.clone(), direct, 83, None);
         state
+            .storage
             .db
             .lock()
             .await
@@ -1315,7 +1324,7 @@ async fn announcer_push_recovers_when_server_starts_late() {
         let sub = stream_subscription(&endpoint_id, None);
         let local_key = local_stream_key(&sub);
         {
-            let mut db = state.db.lock().await;
+            let mut db = state.storage.db.lock().await;
             db.replace_stream_subscriptions(&[sub]).unwrap();
             db.set_announcer_enabled(true).unwrap();
             db.set_stream_announcer_publish(local_key.as_str(), true)
@@ -1338,7 +1347,7 @@ async fn announcer_push_recovers_when_server_starts_late() {
                 let state = Arc::clone(&state);
                 let local_key = local_key.clone();
                 async move {
-                    let db = state.db.lock().await;
+                    let db = state.storage.db.lock().await;
                     db.load_received_events(local_key.as_str())
                         .map(|e| e.len() >= 2)
                         .unwrap_or(false)
@@ -1433,6 +1442,7 @@ async fn connection_state_reflects_p2p_session_lifecycle() {
         let state = init_state(dir.path()).await;
         let (config, sub) = base_config(endpoint_id, direct, 91, None);
         state
+            .storage
             .db
             .lock()
             .await
@@ -1443,7 +1453,7 @@ async fn connection_state_reflects_p2p_session_lifecycle() {
         // broadcast stream reliably surfaces the Connected transition even
         // though the scripted mock closes each connection right after its ack
         // (which makes the live state briefly flap Connected -> Connecting).
-        let mut ui_rx = state.ui_tx.subscribe();
+        let mut ui_rx = state.ui.ui_tx.subscribe();
         let runtime = start_receiver_p2p(Arc::clone(&state), config)
             .await
             .unwrap();
@@ -1491,7 +1501,7 @@ async fn discovered_streams_appear_as_unsubscribed_then_subscribed_dedup() {
     let dir = tempfile::tempdir().unwrap();
     let state = init_state(dir.path()).await;
 
-    state.discovered_forwarders.write().await.insert(
+    state.forwarders.discovered_forwarders.write().await.insert(
         "fwd-endpoint-1".to_owned(),
         DiscoveredForwarder {
             display_name: Some("Start Line".to_owned()),
@@ -1519,6 +1529,7 @@ async fn discovered_streams_appear_as_unsubscribed_then_subscribed_dedup() {
     // Subscribe to the same stream: the subscribed entry replaces the discovered
     // one (dedupe by (forwarder_endpoint_id, stream_id)).
     state
+        .storage
         .db
         .lock()
         .await
@@ -1556,7 +1567,7 @@ async fn discovered_forwarder_is_dialed_and_persists_events() {
         let state = init_state(dir.path()).await;
 
         // Populate discovery WITHOUT any explicit forwarder config.
-        state.discovered_forwarders.write().await.insert(
+        state.forwarders.discovered_forwarders.write().await.insert(
             endpoint_id.clone(),
             DiscoveredForwarder {
                 display_name: Some("Finish".to_owned()),
@@ -1572,6 +1583,7 @@ async fn discovered_forwarder_is_dialed_and_persists_events() {
         let sub = stream_subscription(&endpoint_id, None);
         let local_key = local_stream_key(&sub);
         state
+            .storage
             .db
             .lock()
             .await
@@ -1600,7 +1612,7 @@ async fn discovered_forwarder_is_dialed_and_persists_events() {
                 let state = Arc::clone(&state);
                 let local_key = local_key.clone();
                 async move {
-                    let db = state.db.lock().await;
+                    let db = state.storage.db.lock().await;
                     db.load_received_events(local_key.as_str())
                         .map(|e| e.len() >= 2)
                         .unwrap_or(false)
@@ -1610,7 +1622,7 @@ async fn discovered_forwarder_is_dialed_and_persists_events() {
         )
         .await;
 
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         let seqs: Vec<i64> = db
             .load_received_events(local_key.as_str())
             .unwrap()
@@ -1640,6 +1652,7 @@ async fn shutdown_cancels_runtime_promptly() {
         let sub = stream_subscription(&endpoint_id, None);
         let local_key = local_stream_key(&sub);
         state
+            .storage
             .db
             .lock()
             .await
@@ -1657,7 +1670,7 @@ async fn shutdown_cancels_runtime_promptly() {
                 let state = Arc::clone(&state);
                 let local_key = local_key.clone();
                 async move {
-                    let db = state.db.lock().await;
+                    let db = state.storage.db.lock().await;
                     db.load_received_events(local_key.as_str())
                         .map(|e| !e.is_empty())
                         .unwrap_or(false)
@@ -1724,6 +1737,7 @@ async fn one_connection_multiplexes_multiple_data_streams() {
         let local_key_a = local_stream_key(&sub_a);
         let local_key_b = local_stream_key(&sub_b);
         state
+            .storage
             .db
             .lock()
             .await
@@ -1741,7 +1755,7 @@ async fn one_connection_multiplexes_multiple_data_streams() {
                 let local_key_a = local_key_a.clone();
                 let local_key_b = local_key_b.clone();
                 async move {
-                    let db = state.db.lock().await;
+                    let db = state.storage.db.lock().await;
                     let a = db
                         .load_received_events(local_key_a.as_str())
                         .map(|e| e.len())
@@ -1772,6 +1786,7 @@ async fn one_connection_multiplexes_multiple_data_streams() {
         // Remove one subscription. The other stream's durable rows and the
         // single control connection must remain intact (no reconnect).
         state
+            .storage
             .db
             .lock()
             .await
@@ -1785,7 +1800,7 @@ async fn one_connection_multiplexes_multiple_data_streams() {
                 let state = Arc::clone(&state);
                 let local_key_a = local_key_a.clone();
                 async move {
-                    let db = state.db.lock().await;
+                    let db = state.storage.db.lock().await;
                     db.load_received_events(local_key_a.as_str())
                         .map(|e| e.len())
                         .unwrap_or(0)
@@ -1866,7 +1881,7 @@ async fn reconfigure_on_signal_rebinds_to_profile_server() {
 
         // Save a profile pointing at the mock server.
         {
-            let mut db = state.db.lock().await;
+            let mut db = state.storage.db.lock().await;
             db.save_profile(&server_url, "tok", "check-and-download", None)
                 .unwrap();
         }

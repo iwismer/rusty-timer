@@ -256,7 +256,7 @@ fn receiver_pending_approval(status: &crate::control_api::ServerDeviceStatus) ->
 fn schedule_approval_follow_up_reconnect(state: Arc<AppState>, delay: Duration) {
     tokio::spawn(async move {
         tokio::time::sleep(delay).await;
-        if *state.connection_state.borrow() != ConnectionState::Connected {
+        if *state.signals.connection_state.borrow() != ConnectionState::Connected {
             info!("server approval follow-up reconnect requested");
             state.request_connect().await;
             state.emit_resync();
@@ -332,7 +332,7 @@ pub async fn start_receiver_p2p(
             .endpoint_id
             .parse::<EndpointId>()
             .map_err(|e| format!("invalid forwarder endpoint id: {e}"))?;
-        let mut discovered = state.discovered_forwarders.write().await;
+        let mut discovered = state.forwarders.discovered_forwarders.write().await;
         discovered
             .entry(forwarder.endpoint_id.clone())
             .or_insert_with(|| DiscoveredForwarder {
@@ -374,7 +374,7 @@ async fn reseed_discovered_forwarders(
     state: &Arc<AppState>,
     forwarder: Option<&ForwarderPeerConfig>,
 ) {
-    let mut discovered = state.discovered_forwarders.write().await;
+    let mut discovered = state.forwarders.discovered_forwarders.write().await;
     discovered.clear();
     if let Some(forwarder) = forwarder
         && forwarder.endpoint_id.parse::<EndpointId>().is_ok()
@@ -596,7 +596,7 @@ async fn run_reconcile_loop(
             // old-generation announcer workers now stopped, reset the fences so
             // the new generation is accepted fresh.
             if let Err(e) = {
-                let db = state.db.lock().await;
+                let db = state.storage.db.lock().await;
                 db.reset_announcer_fences()
             } {
                 warn!(error = %e, "failed to reset announcer fences after stale generation");
@@ -702,7 +702,7 @@ async fn run_reconcile_loop(
                     // register/takeover, and rebuild stream workers so their
                     // announcer clients pick up the new server. This causes a
                     // brief session reconnect, which is acceptable and bounded.
-                    let profile = state.db.lock().await.load_profile().ok().flatten();
+                    let profile = state.storage.db.lock().await.load_profile().ok().flatten();
                     // Re-resolve using the override captured at construction
                     // (env vars for desktop, CLI flags for headless) so a
                     // headless CLI override survives a profile save instead of
@@ -753,7 +753,7 @@ async fn run_reconcile_loop(
                         // the fences so the new server's generation is accepted
                         // fresh without an old worker re-raising them.
                         if let Err(e) = {
-                            let db = state.db.lock().await;
+                            let db = state.storage.db.lock().await;
                             db.reset_announcer_fences()
                         } {
                             warn!(error = %e, "failed to reset announcer fences on server change");
@@ -762,7 +762,7 @@ async fn run_reconcile_loop(
                         // previous server; drop it and re-bootstrap against the
                         // new server from the voucher before respawning tasks.
                         if let Some(thin) = config.server.clone() {
-                            let _ = state.db.lock().await.clear_device_token();
+                            let _ = state.storage.db.lock().await.clear_device_token();
                             if let Some(minted) =
                                 resolve_receiver_device_token(&state, &thin, &endpoint_id).await
                             {
@@ -859,7 +859,7 @@ async fn resolve_receiver_device_token(
     thin: &ServerClientConfig,
     endpoint_id: &str,
 ) -> Option<String> {
-    match state.db.lock().await.load_device_token() {
+    match state.storage.db.lock().await.load_device_token() {
         Ok(Some(token)) => return Some(token),
         Ok(None) => {}
         Err(e) => warn!(error = %e, "failed to load persisted device token"),
@@ -876,7 +876,7 @@ async fn resolve_receiver_device_token(
 
     match minted {
         Ok(Ok(Some(token))) => {
-            if let Err(e) = state.db.lock().await.set_device_token(&token) {
+            if let Err(e) = state.storage.db.lock().await.set_device_token(&token) {
                 warn!(error = %e, "failed to persist minted device token; will re-bootstrap on next start");
             }
             Some(token)
@@ -919,7 +919,7 @@ async fn run_discovery_loop(
             Ok(entries) => {
                 let map = build_discovered_forwarders(entries, seed.as_ref());
                 let changed = {
-                    let mut current = state.discovered_forwarders.write().await;
+                    let mut current = state.forwarders.discovered_forwarders.write().await;
                     if *current == map {
                         false
                     } else {
@@ -1129,7 +1129,7 @@ async fn reconcile_once(
     stream_workers: &mut HashMap<String, StreamWorker>,
 ) {
     let (subs, intents, announcer_enabled, announcer_publish_streams) = {
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         let subs = match db.load_stream_subscriptions() {
             Ok(subs) => subs,
             Err(e) => {
@@ -1151,7 +1151,7 @@ async fn reconcile_once(
         (subs, intents, enabled, publish)
     };
 
-    let discovered = state.discovered_forwarders.read().await.clone();
+    let discovered = state.forwarders.discovered_forwarders.read().await.clone();
     let desired_forwarders = desired_forwarder_subscriptions(&discovered, &subs, &intents);
 
     let stale_forwarders = workers
@@ -1185,7 +1185,7 @@ async fn reconcile_once(
             endpoint_id.clone(),
             Arc::clone(endpoint),
             forwarder_addr,
-            state.writer.clone(),
+            state.storage.writer.clone(),
             client_hello(),
             Arc::clone(reporter),
             BackoffConfig::default(),
@@ -1324,7 +1324,7 @@ async fn start_stream_worker(
             match LocalProxy::bind_durable(
                 port,
                 stream_id.clone(),
-                state.read_source.clone(),
+                state.storage.read_source.clone(),
                 hint_tx.clone(),
                 Arc::clone(&state.proxy_consumer_cursors),
             )
@@ -1370,7 +1370,7 @@ async fn start_stream_worker(
     {
         let client: Arc<dyn AnnouncerPushClient + Send + Sync> =
             Arc::new(ServerAnnouncerClient::new(&thin.url, thin.token.clone()));
-        let db = Arc::clone(&state.db);
+        let db = Arc::clone(&state.storage.db);
         let chip_lookup = Arc::clone(&state.chip_lookup);
         let hint_rx = hint_tx.subscribe();
         let ann_shutdown = shutdown_rx.clone();
@@ -1498,7 +1498,7 @@ async fn run_ui_projection_worker(
                     continue;
                 }
                 for (epoch, seqs) in pending_counts.drain() {
-                    state.stream_counts.record_batch(&ui_key, epoch, seqs);
+                    state.ui.stream_counts.record_batch(&ui_key, epoch, seqs);
                 }
                 emit_stream_projection(&state, &local_stream_key, &ui_key, &proj).await;
                 dirty = false;
@@ -1518,6 +1518,7 @@ async fn rebuild_stream_projection(
 ) -> Option<StreamProjection> {
     let stream_id_owned = stream_id.to_owned();
     let rows = match state
+        .storage
         .read_source
         .run(move |db| db.load_stream_projection_summary(&stream_id_owned))
         .await
@@ -1540,6 +1541,7 @@ async fn rebuild_stream_projection(
     let mut last_chip_id = None;
     let stream_id_owned = stream_id.to_owned();
     match state
+        .storage
         .read_source
         .run(move |db| db.load_epoch_chip_ids(&stream_id_owned, live_epoch))
         .await
@@ -1555,7 +1557,7 @@ async fn rebuild_stream_projection(
         }
     }
 
-    state.stream_counts.seed_from_epoch_summaries(
+    state.ui.stream_counts.seed_from_epoch_summaries(
         ui_key,
         rows.iter().map(|row| (row.epoch, row.count, row.max_seq)),
     );
@@ -1580,6 +1582,7 @@ async fn emit_stream_projection(
     proj: &StreamProjection,
 ) {
     let (reads_total, reads_epoch) = state
+        .ui
         .stream_counts
         .get(ui_key)
         .map_or((proj.total, proj.epoch_count), |counts| {
@@ -1619,6 +1622,7 @@ async fn emit_stream_projection(
     state.cache_stream_metrics(&metrics).await;
 
     let mut buffer = state
+        .ui
         .stream_delta_buffer
         .lock()
         .expect("stream delta buffer poisoned");
@@ -1657,7 +1661,7 @@ async fn run_stream_delta_emitter(state: Arc<AppState>, mut shutdown_rx: watch::
             _ = tick.tick() => {
                 let updates: Vec<crate::ui_events::StreamDelta> = {
                     let mut buffer = state
-                        .stream_delta_buffer
+                        .ui.stream_delta_buffer
                         .lock()
                         .expect("stream delta buffer poisoned");
                     if buffer.is_empty() {
@@ -1666,7 +1670,7 @@ async fn run_stream_delta_emitter(state: Arc<AppState>, mut shutdown_rx: watch::
                     buffer.drain().map(|(_, delta)| delta).collect()
                 };
                 let _ = state
-                    .ui_tx
+                    .ui.ui_tx
                     .send(ReceiverUiEvent::StreamDeltas { updates });
             }
         }
@@ -1735,7 +1739,7 @@ async fn run_shared_dbf_pass(
 ) -> (bool, u64) {
     // Resolve config + subscriptions on the cold connection (tiny queries).
     let (enabled, interval_ms, dbf_path, specs) = {
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         let config = db.load_dbf_config().unwrap_or(crate::db::DbfConfig {
             enabled: false,
             flush_interval_ms: crate::db::DEFAULT_DBF_FLUSH_INTERVAL_MS,
@@ -1805,7 +1809,7 @@ async fn run_shared_dbf_pass(
 
     // DBF delivery does synchronous disk + flock I/O: run on a blocking
     // thread with the cold connection (blocking_lock), like the announcer.
-    let db = Arc::clone(&state.db);
+    let db = Arc::clone(&state.storage.db);
     let mut moved_state = std::mem::take(pass_state);
     let result = tokio::task::spawn_blocking(move || {
         let mut guard = db.blocking_lock();
@@ -2300,7 +2304,7 @@ mod tests {
         let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
         // Populate with forwarders learned from a previous server.
         {
-            let mut d = state.discovered_forwarders.write().await;
+            let mut d = state.forwarders.discovered_forwarders.write().await;
             for id in ["old-a", "old-b"] {
                 d.insert(
                     id.to_owned(),
@@ -2316,12 +2320,19 @@ mod tests {
         // Clearing with no explicit seed (server cleared) empties the map, so
         // no old-server forwarder can be re-dialed.
         reseed_discovered_forwarders(&state, None).await;
-        assert!(state.discovered_forwarders.read().await.is_empty());
+        assert!(
+            state
+                .forwarders
+                .discovered_forwarders
+                .read()
+                .await
+                .is_empty()
+        );
 
         // Re-populate, then reseed with a valid explicit (loopback/dev)
         // forwarder: only that entry survives.
         {
-            let mut d = state.discovered_forwarders.write().await;
+            let mut d = state.forwarders.discovered_forwarders.write().await;
             d.insert(
                 "old-a".to_owned(),
                 DiscoveredForwarder {
@@ -2337,7 +2348,7 @@ mod tests {
             direct_addr: "127.0.0.1:9000".parse().unwrap(),
         };
         reseed_discovered_forwarders(&state, Some(&seed)).await;
-        let map = state.discovered_forwarders.read().await;
+        let map = state.forwarders.discovered_forwarders.read().await;
         assert_eq!(map.len(), 1);
         assert!(map.contains_key(&seed_id));
         assert!(!map.contains_key("old-a"));
@@ -2367,6 +2378,7 @@ mod tests {
             .await
             .expect("runtime starts");
         let id = state
+            .forwarders
             .p2p_endpoint_id
             .read()
             .await
@@ -2760,7 +2772,7 @@ mod tests {
         let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
         let stream_id = "rebuild-stream";
         {
-            let db = state.db.lock().await;
+            let db = state.storage.db.lock().await;
             insert_chip_event_in_epoch(&db, stream_id, 1, 1, 1_700_000_000_100);
             insert_chip_event_in_epoch(&db, stream_id, 2, 1, 1_700_000_000_200);
             insert_chip_event_in_epoch(&db, stream_id, 3, 2, 1_700_000_000_300);
@@ -2783,7 +2795,7 @@ mod tests {
         assert_eq!(proj.max_received_unix_ms, 1_700_000_000_300);
 
         // The shared counts cache is seeded so status/UI totals survive restart.
-        let counts = state.stream_counts.get(&ui_key).expect("counts seeded");
+        let counts = state.ui.stream_counts.get(&ui_key).expect("counts seeded");
         assert_eq!(counts.total, 3);
         assert_eq!(counts.epoch, 1);
         assert_eq!(counts.current_epoch, 2);
@@ -2798,7 +2810,7 @@ mod tests {
             .expect("rebuild succeeds");
         assert_eq!(proj.total, 0);
         assert!(
-            state.stream_counts.get(&ui_key).is_none(),
+            state.ui.stream_counts.get(&ui_key).is_none(),
             "an empty stream must not fabricate a counts entry"
         );
     }
@@ -2838,7 +2850,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
             {
-                let buffer = state.stream_delta_buffer.lock().unwrap();
+                let buffer = state.ui.stream_delta_buffer.lock().unwrap();
                 if let Some(delta) = buffer.get(&key)
                     && let Some(read) = delta.last_read.clone()
                 {
@@ -3075,7 +3087,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let missing_dir = tmp.path().join("not-yet");
         {
-            let mut db = state.db.lock().await;
+            let mut db = state.storage.db.lock().await;
             db.save_profile("http://server", "tok", "check-and-download", None)
                 .unwrap();
             db.save_dbf_config(&crate::db::DbfConfig {
@@ -3109,7 +3121,7 @@ mod tests {
         // undelivered.
         tokio::time::sleep(Duration::from_millis(1500)).await;
         {
-            let guard = state.db.lock().await;
+            let guard = state.storage.db.lock().await;
             assert_eq!(
                 guard
                     .load_undelivered_received_events(local_stream_key.as_str())
@@ -3127,6 +3139,7 @@ mod tests {
             let local_stream_key = local_stream_key.clone();
             async move {
                 state
+                    .storage
                     .db
                     .lock()
                     .await
@@ -3141,7 +3154,7 @@ mod tests {
 
         // New rows are appended incrementally on later ticks.
         {
-            let guard = state.db.lock().await;
+            let guard = state.storage.db.lock().await;
             insert_chip_event(&guard, local_stream_key.as_str(), 3, 1_700_000_000_300);
         }
         let appended = poll_async(Duration::from_secs(10), || {
@@ -3149,6 +3162,7 @@ mod tests {
             let local_stream_key = local_stream_key.clone();
             async move {
                 state
+                    .storage
                     .db
                     .lock()
                     .await
@@ -3233,7 +3247,7 @@ mod tests {
         let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
         let tmp = tempfile::tempdir().unwrap();
         {
-            let mut db = state.db.lock().await;
+            let mut db = state.storage.db.lock().await;
             db.save_profile("http://server", "tok", "check-and-download", None)
                 .unwrap();
             db.save_dbf_config(&crate::db::DbfConfig {
@@ -3281,7 +3295,7 @@ mod tests {
 
         // Drop A, keep B, add C — then signal the subscription change.
         {
-            let mut db = state.db.lock().await;
+            let mut db = state.storage.db.lock().await;
             db.replace_stream_subscriptions(&[
                 test_sub("fwd-b", "127.0.0.1:11002"),
                 test_sub("fwd-c", "127.0.0.1:11003"),
@@ -3328,7 +3342,7 @@ mod tests {
         let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
         let tmp = tempfile::tempdir().unwrap();
         {
-            let mut db = state.db.lock().await;
+            let mut db = state.storage.db.lock().await;
             db.save_profile("http://server", "tok", "check-and-download", None)
                 .unwrap();
             db.save_dbf_config(&crate::db::DbfConfig {
@@ -3364,7 +3378,7 @@ mod tests {
         let (enabled, _interval) = run_shared_dbf_pass(&state, &mut pass_state, false).await;
         assert!(enabled);
 
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         assert!(
             db.load_undelivered_received_events(LocalStreamKey::new("ep-0", "s-0").as_str())
                 .unwrap()
@@ -3390,7 +3404,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let local_key = LocalStreamKey::new("ep-a", "s-a");
         {
-            let mut db = state.db.lock().await;
+            let mut db = state.storage.db.lock().await;
             db.save_profile("http://server", "tok", "check-and-download", None)
                 .unwrap();
             db.save_dbf_config(&crate::db::DbfConfig {
@@ -3416,7 +3430,7 @@ mod tests {
         // Change the event type between passes and persist a new row; the
         // next pass must pick the new type up from the DB immediately.
         {
-            let db = state.db.lock().await;
+            let db = state.storage.db.lock().await;
             assert!(
                 db.update_subscription_event_type("ep-a", "s-a", EventType::Start)
                     .unwrap()

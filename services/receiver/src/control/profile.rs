@@ -57,7 +57,7 @@ pub struct ProfileResponse {
 /// loop picks up the change on its next pass (within one reconcile interval).
 pub async fn set_announcer_enabled(state: &AppState, enabled: bool) -> Result<(), ReceiverError> {
     {
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         db.set_announcer_enabled(enabled)
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     }
@@ -75,7 +75,7 @@ pub async fn set_announcer_max_list_size(
 ) -> Result<(), ReceiverError> {
     let clamped = max_list_size.clamp(1, 500);
     {
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         db.set_announcer_max_list_size(clamped)
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     }
@@ -117,7 +117,7 @@ fn server_override_active(override_: &(Option<String>, Option<String>)) -> bool 
 pub async fn get_profile(state: &AppState) -> Result<ProfileResponse, ReceiverError> {
     let receiver_id = state.receiver_id.read().await.clone();
     let profile = {
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         db.load_profile()
             .map_err(|e| ReceiverError::Internal(e.to_string()))?
     };
@@ -138,7 +138,7 @@ pub async fn get_profile(state: &AppState) -> Result<ProfileResponse, ReceiverEr
     let (server_url, token) =
         resolved.map_or_else(|| (String::new(), String::new()), |s| (s.url, s.token));
     let (announcer_enabled, announcer_max_list_size) = {
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         (
             db.load_announcer_enabled().unwrap_or(false),
             db.load_announcer_max_list_size().unwrap_or(25),
@@ -155,7 +155,7 @@ pub async fn get_profile(state: &AppState) -> Result<ProfileResponse, ReceiverEr
 }
 
 pub async fn get_mode(state: &AppState) -> Result<ReceiverMode, ReceiverError> {
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     match db.load_receiver_mode() {
         Ok(Some(mode)) => Ok(mode),
         Ok(None) => Err(ReceiverError::NotFound("no mode configured".to_owned())),
@@ -181,7 +181,7 @@ pub async fn put_profile(state: &AppState, body: ProfileRequest) -> Result<(), R
         ));
     }
 
-    let mut db = state.db.lock().await;
+    let mut db = state.storage.db.lock().await;
     let existing = db.load_profile().ok().flatten();
     let persist_receiver_id = new_receiver_id
         .clone()
@@ -229,11 +229,12 @@ pub async fn put_mode(state: &AppState, mode: ReceiverMode) -> Result<(), Receiv
         }
     }
 
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     match db.save_receiver_mode(&mode) {
         Ok(()) => {
             drop(db);
             let _ = state
+                .ui
                 .ui_tx
                 .send(crate::ui_events::ReceiverUiEvent::ModeChanged { mode: mode.clone() });
             state.emit_streams_snapshot().await;
@@ -248,14 +249,14 @@ pub async fn put_mode(state: &AppState, mode: ReceiverMode) -> Result<(), Receiv
 }
 
 pub async fn admin_reset_profile(state: &AppState) -> Result<(), ReceiverError> {
-    let current = state.connection_state.borrow().clone();
+    let current = state.signals.connection_state.borrow().clone();
     if current != ConnectionState::Disconnected {
         state
             .set_connection_state(ConnectionState::Disconnecting)
             .await;
         state.request_disconnect_shutdown();
     }
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     match db.reset_profile() {
         Ok(()) => {
             drop(db);
@@ -272,14 +273,14 @@ pub async fn admin_reset_profile(state: &AppState) -> Result<(), ReceiverError> 
 }
 
 pub async fn admin_factory_reset(state: &AppState) -> Result<(), ReceiverError> {
-    let current = state.connection_state.borrow().clone();
+    let current = state.signals.connection_state.borrow().clone();
     if current != ConnectionState::Disconnected {
         state
             .set_connection_state(ConnectionState::Disconnecting)
             .await;
         state.request_disconnect_shutdown();
     }
-    let mut db = state.db.lock().await;
+    let mut db = state.storage.db.lock().await;
     match db.factory_reset() {
         Ok(()) => {
             drop(db);

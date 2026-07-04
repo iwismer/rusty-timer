@@ -1704,7 +1704,7 @@ mod tests {
             );
             let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
 
-            let mut ui_rx = state.ui_tx.subscribe();
+            let mut ui_rx = state.ui.ui_tx.subscribe();
             let connection = ForwarderConnection::start(
                 endpoint_id.clone(),
                 Arc::clone(&endpoint),

@@ -140,7 +140,7 @@ pub async fn init_with_data_dir(
 
     let (state, shutdown_rx) =
         AppState::with_integrity(db, receiver_id, db_integrity_ok, writer, Some(read_pool));
-    state.logger.log("Receiver started");
+    state.ui.logger.log("Receiver started");
 
     // Populate the chip->participant lookup from any previously imported
     // participant/chip data so the announcer can resolve bib/name immediately.
@@ -175,7 +175,7 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
     state
         .set_connection_state(ConnectionState::Disconnected)
         .await;
-    state.logger.log("Receiver stopped");
+    state.ui.logger.log("Receiver stopped");
 }
 
 #[cfg(test)]

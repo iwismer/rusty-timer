@@ -75,7 +75,7 @@ pub async fn import_participants(
         crate::participants::parse_ppl(&contents).map_err(ReceiverError::BadRequest)?;
     let imported = participants.len();
     {
-        let mut db = state.db.lock().await;
+        let mut db = state.storage.db.lock().await;
         db.replace_participants(&participants)
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     }
@@ -97,7 +97,7 @@ pub async fn import_participants_file(
 /// Return current participant/chip counts and how they overlap, so the UI can
 /// show data state without an import round-trip.
 pub async fn get_data_stats(state: &AppState) -> Result<crate::db::DataStats, ReceiverError> {
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     db.data_stats()
         .map_err(|e| ReceiverError::Internal(e.to_string()))
 }
@@ -111,7 +111,7 @@ pub async fn import_chips(
     let chips = crate::participants::parse_bibchip(&contents).map_err(ReceiverError::BadRequest)?;
     let imported = chips.len();
     {
-        let mut db = state.db.lock().await;
+        let mut db = state.storage.db.lock().await;
         db.replace_bib_chips(&chips)
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     }
@@ -159,7 +159,7 @@ pub(crate) async fn apply_rd_import(
     let imported = import.participants.len();
     let divisions: Vec<(i32, String)> = import.divisions.into_iter().collect();
     {
-        let mut db = state.db.lock().await;
+        let mut db = state.storage.db.lock().await;
         db.replace_rd_data(&import.participants, &import.chips, &divisions)
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     }
@@ -179,7 +179,7 @@ pub(crate) async fn apply_rd_import(
 /// outer maps.
 pub async fn reload_chip_lookup(state: &AppState) -> Result<usize, ReceiverError> {
     let map = {
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         db.load_chip_to_participant()
             .map_err(|e| ReceiverError::Internal(e.to_string()))?
     };
@@ -191,7 +191,7 @@ pub async fn reload_chip_lookup(state: &AppState) -> Result<usize, ReceiverError
 }
 
 pub async fn get_dbf_config(state: &AppState) -> Result<crate::db::DbfConfig, ReceiverError> {
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     match db.load_dbf_config() {
         Ok(config) => Ok(config),
         Err(e) => Err(ReceiverError::Internal(e.to_string())),
@@ -223,7 +223,7 @@ pub async fn put_dbf_config(
             crate::db::DBF_FLUSH_INTERVAL_MAX_MS,
         ),
     };
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     match db.save_dbf_config(&config) {
         Ok(()) => {
             drop(db);
@@ -237,7 +237,7 @@ pub async fn put_dbf_config(
 async fn shared_race_director_dbf_path(
     state: &AppState,
 ) -> Result<std::path::PathBuf, ReceiverError> {
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     let rd_config = db
         .load_rd_import_config()
         .map_err(|e| ReceiverError::Internal(e.to_string()))?;
@@ -262,7 +262,7 @@ pub async fn clear_dbf(state: &AppState) -> Result<(), ReceiverError> {
     // the reverse order could leave an emptied file that no pass repopulates
     // until restart.
     {
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         db.reset_dbf_delivered_all()
             .map_err(|e| ReceiverError::Internal(format!("Failed to reset DBF markers: {e}")))?;
     }
@@ -276,7 +276,7 @@ pub async fn clear_dbf(state: &AppState) -> Result<(), ReceiverError> {
 pub async fn get_rd_import_config(
     state: &AppState,
 ) -> Result<crate::db::RdImportConfig, ReceiverError> {
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     db.load_rd_import_config()
         .map_err(|e| ReceiverError::Internal(e.to_string()))
 }
@@ -305,7 +305,7 @@ pub async fn put_rd_import_config(
         }
     }
     {
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         db.save_rd_import_config(&config)
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     }
@@ -314,14 +314,14 @@ pub async fn put_rd_import_config(
 }
 
 pub async fn admin_clear_data(state: &AppState) -> Result<(), ReceiverError> {
-    let current = state.connection_state.borrow().clone();
+    let current = state.signals.connection_state.borrow().clone();
     if current != ConnectionState::Disconnected {
         state
             .set_connection_state(ConnectionState::Disconnecting)
             .await;
         state.request_disconnect_shutdown();
     }
-    let mut db = state.db.lock().await;
+    let mut db = state.storage.db.lock().await;
     match db.clear_data() {
         Ok(()) => {
             drop(db);

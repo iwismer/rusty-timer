@@ -46,8 +46,8 @@ pub async fn get_stream_metrics(state: &AppState) -> Vec<crate::ui_events::Strea
 
 pub async fn get_status(state: &AppState) -> StatusResponse {
     let receiver_id = state.receiver_id.read().await.clone();
-    let conn = state.connection_state.borrow().clone();
-    let db = state.db.lock().await;
+    let conn = state.signals.connection_state.borrow().clone();
+    let db = state.storage.db.lock().await;
     let streams_count = db.load_stream_subscriptions().map(|s| s.len()).unwrap_or(0);
     let local_ok = state.db_integrity_ok;
     drop(db);
@@ -76,7 +76,7 @@ struct ServerStatusDevice {
 pub(crate) async fn server_device_status(state: &AppState) -> ServerDeviceStatus {
     let server_url = {
         let profile = {
-            let db = state.db.lock().await;
+            let db = state.storage.db.lock().await;
             db.load_profile().ok().flatten()
         };
         // Mirror the P2P runtime's resolution (env/CLI override > profile) so
@@ -95,7 +95,7 @@ pub(crate) async fn server_device_status_for_url(
     state: &AppState,
     server_url: &str,
 ) -> ServerDeviceStatus {
-    let endpoint_id = state.p2p_endpoint_id.read().await.clone();
+    let endpoint_id = state.forwarders.p2p_endpoint_id.read().await.clone();
 
     let Some(endpoint_id) = endpoint_id else {
         return ServerDeviceStatus {
@@ -177,7 +177,7 @@ pub(crate) async fn server_device_status_for_url(
 }
 
 pub async fn get_logs(state: &AppState) -> LogsResponse {
-    let entries = state.logger.entries();
+    let entries = state.ui.logger.entries();
     LogsResponse { entries }
 }
 

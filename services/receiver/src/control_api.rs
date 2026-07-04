@@ -333,7 +333,14 @@ pub enum ShutdownSignal {
     Terminate,
 }
 
-pub struct AppState {
+/// Durable storage handles (SQLite database access).
+///
+/// Lock rules: `db` is a **tokio** `Mutex` (await-safe; guards may be held
+/// across `.await`). `writer` and `read_source` synchronize internally.
+/// Existing code takes std-mutex guards from other groups only *while* the
+/// `db` lock is already held (never awaits `db` with a std guard live).
+pub struct StorageHandles {
+    /// Cold control-plane SQLite connection.
     pub db: Arc<Mutex<Db>>,
     /// Handle to the dedicated SQLite writer thread. All hot-path persistence
     /// (P2P EventBatch/GapNotice) flows through it; the `db` mutex above is
@@ -343,29 +350,39 @@ pub struct AppState {
     /// read-only pool in production, or the cold mutex where no file-backed
     /// pool exists (in-memory test states).
     pub read_source: crate::read_pool::ReadSource,
+}
+
+/// UI-facing event fan-out and display caches.
+///
+/// Lock rules: `stream_delta_buffer` is a **std** mutex — its guard must
+/// NEVER be held across an `.await` (take, mutate, drop within one
+/// statement/block). `stream_metrics_cache` is a **tokio** `RwLock`
+/// (await-safe). `stream_counts`, `ui_tx` and `logger` synchronize
+/// internally and are safe from any context.
+pub struct UiState {
     /// Dirty per-stream UI deltas keyed by `(forwarder_endpoint_id, wire_stream_id)`,
     /// drained by the global coalescing emitter (see
     /// `p2p_runtime::run_stream_delta_emitter`) into single
     /// [`ReceiverUiEvent::StreamDeltas`] events.
     pub stream_delta_buffer:
         Arc<StdMutex<HashMap<(String, String), crate::ui_events::StreamDelta>>>,
-    /// Live durable-proxy consumer cursors (retention floor input; see
-    /// `crate::retention`).
-    pub proxy_consumer_cursors: crate::retention::ProxyConsumerCursors,
-    pub connection_state: watch::Sender<ConnectionState>,
-    // Keepalive receiver so that `connection_state.send()` never fails due
-    // to "no receivers" even when no external subscriber is active.
-    _conn_state_keepalive: watch::Receiver<ConnectionState>,
     pub logger: Arc<rt_ui_log::UiLogger<ReceiverUiEvent>>,
-    pub shutdown_tx: watch::Sender<ShutdownSignal>,
     pub ui_tx: broadcast::Sender<ReceiverUiEvent>,
     pub stream_counts: crate::cache::StreamCounts,
     pub stream_metrics_cache:
         Arc<RwLock<HashMap<(String, String), crate::ui_events::StreamMetricsPayload>>>,
-    pub receiver_id: Arc<RwLock<String>>,
-    pub db_integrity_ok: bool,
-    pub http_client: reqwest::Client,
-    pub chip_lookup: Arc<tokio::sync::RwLock<ChipLookup>>,
+}
+
+/// Per-forwarder connection state, discovery, and live control-channel
+/// registries.
+///
+/// Lock rules: `discovered_forwarders` and `p2p_endpoint_id` are **tokio**
+/// `RwLock`s (await-safe). Every other field is a **std** mutex whose guard
+/// must NEVER be held across an `.await`; existing code takes each guard
+/// briefly (lock, read/mutate/clone, drop) and never nests two of these std
+/// mutexes. Std guards may be taken while the (tokio) `StorageHandles::db`
+/// lock is held, but never the reverse-with-await.
+pub struct ForwarderControl {
     /// Approved forwarders discovered from the server (or seeded from an
     /// explicit local forwarder config), keyed by endpoint id. Drives both the
     /// available-but-unsubscribed entries in the streams response and the
@@ -375,11 +392,11 @@ pub struct AppState {
     pub(crate) forwarder_runtime: Arc<StdMutex<HashMap<String, ForwarderRuntimeStatus>>>,
     /// Endpoint ids whose persisted intent is explicit disconnect (a
     /// `forwarder_intent` row with `connect = 0`). This mirrors the table so
-    /// [`Self::recompute_aggregate_connection_state_sync_default_trying`],
+    /// [`AppState::recompute_aggregate_connection_state_sync_default_trying`],
     /// which cannot await the DB mutex, can still exclude intentionally
     /// disconnected forwarders from the trying-aggregation. Seeded from the DB
     /// during construction (before any worker can trigger the sync fallback)
-    /// and updated via [`Self::cache_forwarder_intent`] only after the
+    /// and updated via [`AppState::cache_forwarder_intent`] only after the
     /// corresponding DB write succeeds. Never held across an await.
     pub(crate) disconnected_intents: Arc<StdMutex<HashSet<String>>>,
     pub(crate) forwarder_live_status: Arc<StdMutex<HashMap<String, ForwarderLiveStatus>>>,
@@ -393,6 +410,20 @@ pub struct AppState {
     forwarder_config_tx: StdMutex<HashMap<String, mpsc::Sender<ConfigCommand>>>,
     forwarder_reader_control_tx: StdMutex<HashMap<String, mpsc::Sender<ReaderCommand>>>,
     last_connections_fingerprint: StdMutex<Option<ConnectionsFingerprint>>,
+}
+
+/// Watch channels and counters that coordinate the runtime workers.
+///
+/// Lock rules: everything here is lock-free (`watch` channels and atomics)
+/// and safe to use from any context, sync or async. The `_*_keepalive`
+/// receivers exist solely so a `send()` on the paired sender never fails
+/// for lack of subscribers; they are never read.
+pub struct Signals {
+    pub connection_state: watch::Sender<ConnectionState>,
+    // Keepalive receiver so that `connection_state.send()` never fails due
+    // to "no receivers" even when no external subscriber is active.
+    _conn_state_keepalive: watch::Receiver<ConnectionState>,
+    pub shutdown_tx: watch::Sender<ShutdownSignal>,
     connect_attempt: AtomicU64,
     connect_attempt_version: watch::Sender<ConnectAttempt>,
     /// Keepalive receiver to prevent the connect-attempt watch channel from being dropped
@@ -428,6 +459,25 @@ pub struct AppState {
     /// Keepalive receiver so the watch channel is not dropped when the P2P
     /// runtime (the only subscriber) is not yet started.
     _server_config_keepalive: watch::Receiver<u64>,
+}
+
+pub struct AppState {
+    /// Durable storage handles; see [`StorageHandles`] for lock rules.
+    pub storage: StorageHandles,
+    /// Per-forwarder connection/discovery state; see [`ForwarderControl`]
+    /// for lock rules.
+    pub forwarders: ForwarderControl,
+    /// UI event fan-out and caches; see [`UiState`] for lock rules.
+    pub ui: UiState,
+    /// Runtime coordination channels and counters; see [`Signals`].
+    pub signals: Signals,
+    /// Live durable-proxy consumer cursors (retention floor input; see
+    /// `crate::retention`).
+    pub proxy_consumer_cursors: crate::retention::ProxyConsumerCursors,
+    pub receiver_id: Arc<RwLock<String>>,
+    pub db_integrity_ok: bool,
+    pub http_client: reqwest::Client,
+    pub chip_lookup: Arc<tokio::sync::RwLock<ChipLookup>>,
     /// The raw server URL+token override, set once at startup: env vars for the
     /// desktop app, CLI flags for headless. Source of truth for "is an override
     /// active" and for resolving the effective server in control handlers, so
@@ -512,46 +562,56 @@ impl AppState {
             None => crate::read_pool::ReadSource::Mutex(Arc::clone(&db)),
         };
         let state = Arc::new(Self {
-            db,
-            writer,
-            read_source,
-            stream_delta_buffer: Arc::new(StdMutex::new(HashMap::new())),
+            storage: StorageHandles {
+                db,
+                writer,
+                read_source,
+            },
+            ui: UiState {
+                stream_delta_buffer: Arc::new(StdMutex::new(HashMap::new())),
+                logger: Arc::new(rt_ui_log::UiLogger::with_buffer(
+                    ui_tx.clone(),
+                    |entry| ReceiverUiEvent::LogEntry { entry },
+                    500,
+                )),
+                ui_tx,
+                stream_counts: crate::cache::StreamCounts::new(),
+                stream_metrics_cache: Arc::new(RwLock::new(HashMap::new())),
+            },
             proxy_consumer_cursors: Arc::default(),
-            connection_state: conn_tx,
-            _conn_state_keepalive: conn_keepalive_rx,
-            logger: Arc::new(rt_ui_log::UiLogger::with_buffer(
-                ui_tx.clone(),
-                |entry| ReceiverUiEvent::LogEntry { entry },
-                500,
-            )),
-            shutdown_tx,
-            ui_tx,
-            stream_counts: crate::cache::StreamCounts::new(),
-            stream_metrics_cache: Arc::new(RwLock::new(HashMap::new())),
+            signals: Signals {
+                connection_state: conn_tx,
+                _conn_state_keepalive: conn_keepalive_rx,
+                shutdown_tx,
+                connect_attempt: AtomicU64::new(0),
+                connect_attempt_version,
+                _connect_attempt_keepalive,
+                retry_streak: AtomicU64::new(0),
+                dbf_config_version,
+                _dbf_config_keepalive,
+                subscriptions_version,
+                _subscriptions_keepalive,
+                rd_import_config_version,
+                _rd_import_config_keepalive,
+                server_config_version,
+                _server_config_keepalive,
+            },
             receiver_id: Arc::new(RwLock::new(receiver_id)),
             db_integrity_ok,
             http_client,
             chip_lookup: Arc::new(tokio::sync::RwLock::new(ChipLookup::new())),
-            discovered_forwarders: Arc::new(tokio::sync::RwLock::new(DiscoveredForwarders::new())),
-            p2p_endpoint_id: Arc::new(RwLock::new(None)),
-            forwarder_runtime: Arc::new(StdMutex::new(HashMap::new())),
-            disconnected_intents: Arc::new(StdMutex::new(disconnected_intents)),
-            forwarder_live_status: Arc::new(StdMutex::new(HashMap::new())),
-            forwarder_config_tx: StdMutex::new(HashMap::new()),
-            forwarder_reader_control_tx: StdMutex::new(HashMap::new()),
-            last_connections_fingerprint: StdMutex::new(None),
-            connect_attempt: AtomicU64::new(0),
-            connect_attempt_version,
-            _connect_attempt_keepalive,
-            retry_streak: AtomicU64::new(0),
-            dbf_config_version,
-            _dbf_config_keepalive,
-            subscriptions_version,
-            _subscriptions_keepalive,
-            rd_import_config_version,
-            _rd_import_config_keepalive,
-            server_config_version,
-            _server_config_keepalive,
+            forwarders: ForwarderControl {
+                discovered_forwarders: Arc::new(tokio::sync::RwLock::new(
+                    DiscoveredForwarders::new(),
+                )),
+                p2p_endpoint_id: Arc::new(RwLock::new(None)),
+                forwarder_runtime: Arc::new(StdMutex::new(HashMap::new())),
+                disconnected_intents: Arc::new(StdMutex::new(disconnected_intents)),
+                forwarder_live_status: Arc::new(StdMutex::new(HashMap::new())),
+                forwarder_config_tx: StdMutex::new(HashMap::new()),
+                forwarder_reader_control_tx: StdMutex::new(HashMap::new()),
+                last_connections_fingerprint: StdMutex::new(None),
+            },
             server_override: tokio::sync::RwLock::new((None, None)),
         });
         (state, shutdown_rx)
@@ -570,52 +630,54 @@ impl AppState {
 
     /// Subscribe to connection state changes.
     pub fn conn_rx(&self) -> watch::Receiver<ConnectionState> {
-        self.connection_state.subscribe()
+        self.signals.connection_state.subscribe()
     }
 
     pub fn notify_dbf_config_changed(&self) {
-        self.dbf_config_version.send_modify(|v| *v += 1);
+        self.signals.dbf_config_version.send_modify(|v| *v += 1);
     }
 
     pub fn dbf_config_rx(&self) -> watch::Receiver<u64> {
-        self.dbf_config_version.subscribe()
+        self.signals.dbf_config_version.subscribe()
     }
 
     /// Signal that the subscription set changed so the shared DBF worker
     /// regenerates the file with the current per-subscription reader indices.
     pub fn notify_subscriptions_changed(&self) {
-        self.subscriptions_version.send_modify(|v| *v += 1);
+        self.signals.subscriptions_version.send_modify(|v| *v += 1);
     }
 
     pub fn subscriptions_rx(&self) -> watch::Receiver<u64> {
-        self.subscriptions_version.subscribe()
+        self.signals.subscriptions_version.subscribe()
     }
 
     pub fn notify_rd_import_config_changed(&self) {
-        self.rd_import_config_version.send_modify(|v| *v += 1);
+        self.signals
+            .rd_import_config_version
+            .send_modify(|v| *v += 1);
     }
 
     pub fn rd_import_config_rx(&self) -> watch::Receiver<u64> {
-        self.rd_import_config_version.subscribe()
+        self.signals.rd_import_config_version.subscribe()
     }
 
     /// Signal that the server URL+token configuration changed so the P2P
     /// reconcile loop rebinds its server-bound tasks.
     pub fn notify_server_config_changed(&self) {
-        self.server_config_version.send_modify(|v| *v += 1);
+        self.signals.server_config_version.send_modify(|v| *v += 1);
     }
 
     pub fn server_config_rx(&self) -> watch::Receiver<u64> {
-        self.server_config_version.subscribe()
+        self.signals.server_config_version.subscribe()
     }
 
     pub fn connect_attempt_rx(&self) -> watch::Receiver<ConnectAttempt> {
-        self.connect_attempt_version.subscribe()
+        self.signals.connect_attempt_version.subscribe()
     }
 
     fn bump_connect_attempt(&self, endpoint_id: Option<String>, restart: bool) -> u64 {
-        let next = self.connect_attempt.fetch_add(1, Ordering::SeqCst) + 1;
-        let _ = self.connect_attempt_version.send(ConnectAttempt {
+        let next = self.signals.connect_attempt.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = self.signals.connect_attempt_version.send(ConnectAttempt {
             version: next,
             endpoint_id,
             restart,
@@ -625,22 +687,24 @@ impl AppState {
 
     pub async fn cache_stream_metrics(&self, payload: &crate::ui_events::StreamMetricsPayload) {
         let key = (payload.forwarder_id.clone(), payload.reader_ip.clone());
-        self.stream_metrics_cache
+        self.ui
+            .stream_metrics_cache
             .write()
             .await
             .insert(key, payload.clone());
     }
 
     pub async fn clear_stream_metrics_cache(&self) {
-        self.stream_metrics_cache.write().await.clear();
+        self.ui.stream_metrics_cache.write().await.clear();
     }
 
     pub async fn set_p2p_endpoint_id(&self, endpoint_id: String) {
-        *self.p2p_endpoint_id.write().await = Some(endpoint_id);
+        *self.forwarders.p2p_endpoint_id.write().await = Some(endpoint_id);
     }
 
     pub async fn get_stream_metrics_snapshot(&self) -> Vec<crate::ui_events::StreamMetricsPayload> {
-        self.stream_metrics_cache
+        self.ui
+            .stream_metrics_cache
             .read()
             .await
             .values()
@@ -649,23 +713,23 @@ impl AppState {
     }
 
     pub fn request_disconnect_shutdown(&self) {
-        let _ = self.shutdown_tx.send(ShutdownSignal::Disconnect);
+        let _ = self.signals.shutdown_tx.send(ShutdownSignal::Disconnect);
     }
 
     pub fn request_process_shutdown(&self) {
-        let _ = self.shutdown_tx.send(ShutdownSignal::Terminate);
+        let _ = self.signals.shutdown_tx.send(ShutdownSignal::Terminate);
     }
 
     pub fn current_connect_attempt(&self) -> u64 {
-        self.connect_attempt.load(Ordering::SeqCst)
+        self.signals.connect_attempt.load(Ordering::SeqCst)
     }
 
     pub fn current_retry_streak(&self) -> u64 {
-        self.retry_streak.load(Ordering::SeqCst)
+        self.signals.retry_streak.load(Ordering::SeqCst)
     }
 
     pub fn reset_retry_streak(&self) {
-        self.retry_streak.store(0, Ordering::SeqCst);
+        self.signals.retry_streak.store(0, Ordering::SeqCst);
     }
 
     pub async fn request_connect(&self) {
@@ -689,7 +753,7 @@ impl AppState {
         endpoint_id: &str,
         update: impl FnOnce(&mut ForwarderRuntimeStatus),
     ) {
-        let mut statuses = self.forwarder_runtime.lock().unwrap();
+        let mut statuses = self.forwarders.forwarder_runtime.lock().unwrap();
         let status = statuses.entry(endpoint_id.to_owned()).or_default();
         update(status);
     }
@@ -698,7 +762,7 @@ impl AppState {
     /// after the corresponding `forwarder_intent` DB write succeeded, so the
     /// cache never runs ahead of the persisted truth.
     pub(crate) fn cache_forwarder_intent(&self, endpoint_id: &str, connect: bool) {
-        let mut disconnected = self.disconnected_intents.lock().unwrap();
+        let mut disconnected = self.forwarders.disconnected_intents.lock().unwrap();
         if connect {
             disconnected.remove(endpoint_id);
         } else {
@@ -709,7 +773,7 @@ impl AppState {
     /// Drop all cached disconnect intents. Call only after a DB operation
     /// that deleted every `forwarder_intent` row (factory reset).
     pub(crate) fn clear_forwarder_intent_cache(&self) {
-        self.disconnected_intents.lock().unwrap().clear();
+        self.forwarders.disconnected_intents.lock().unwrap().clear();
     }
 
     pub(crate) async fn mark_forwarder_runtime(
@@ -738,6 +802,7 @@ impl AppState {
 
     pub async fn forwarder_state(&self, endpoint_id: &str) -> ForwarderStateSnapshot {
         let runtime = self
+            .forwarders
             .forwarder_runtime
             .lock()
             .unwrap()
@@ -745,6 +810,7 @@ impl AppState {
             .copied()
             .unwrap_or_default();
         let intent = self
+            .storage
             .db
             .lock()
             .await
@@ -777,6 +843,7 @@ impl AppState {
         // `fingerprint_reader_statuses`), so push them to the UI as a targeted
         // patch event instead.
         let _ = self
+            .ui
             .ui_tx
             .send(ReceiverUiEvent::ForwarderReaderCountsUpdated(
                 crate::ui_events::ForwarderReaderCounts {
@@ -805,7 +872,7 @@ impl AppState {
             download_progress: None,
             local_port: None,
         };
-        let mut live_statuses = self.forwarder_live_status.lock().unwrap();
+        let mut live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
         let live_status = live_statuses.entry(endpoint_id.to_owned()).or_default();
         live_status
             .readers
@@ -849,7 +916,7 @@ impl AppState {
             .or_else(|| hardware.and_then(|h| h.fw_version.clone()));
         let model =
             optional_non_empty(info.model).or_else(|| hardware.and_then(|h| h.hw_code.clone()));
-        let mut live_statuses = self.forwarder_live_status.lock().unwrap();
+        let mut live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
         let live_status = live_statuses.entry(endpoint_id.to_owned()).or_default();
         live_status
             .readers
@@ -914,7 +981,7 @@ impl AppState {
             last_read_at: None,
             error: optional_non_empty(progress.error),
         };
-        let mut live_statuses = self.forwarder_live_status.lock().unwrap();
+        let mut live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
         let live_status = live_statuses.entry(endpoint_id.to_owned()).or_default();
         live_status
             .readers
@@ -949,7 +1016,7 @@ impl AppState {
     /// Quick, lock-only store of a forwarder's UPS status with NO aggregate
     /// recompute (see [`Self::store_forwarder_reader_status_sync`]).
     pub(crate) fn store_forwarder_ups_status_sync(&self, endpoint_id: &str, status: UpsStatus) {
-        let mut live_statuses = self.forwarder_live_status.lock().unwrap();
+        let mut live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
         live_statuses.entry(endpoint_id.to_owned()).or_default().ups = Some(UpsStatusPayload {
             on_battery: status.on_battery,
             battery_percent: status.battery_percent,
@@ -965,7 +1032,8 @@ impl AppState {
         endpoint_id: &str,
         tx: mpsc::Sender<ConfigCommand>,
     ) -> ForwarderConfigRegistrationGuard {
-        self.forwarder_config_tx
+        self.forwarders
+            .forwarder_config_tx
             .lock()
             .unwrap()
             .insert(endpoint_id.to_owned(), tx.clone());
@@ -980,7 +1048,7 @@ impl AppState {
     /// subsequent config commands fail fast instead of hanging on a dead
     /// session.
     fn deregister_forwarder_config_tx(&self, endpoint_id: &str, tx: &mpsc::Sender<ConfigCommand>) {
-        let mut registrations = self.forwarder_config_tx.lock().unwrap();
+        let mut registrations = self.forwarders.forwarder_config_tx.lock().unwrap();
         if registrations
             .get(endpoint_id)
             .is_some_and(|registered| registered.same_channel(tx))
@@ -993,7 +1061,8 @@ impl AppState {
         &self,
         endpoint_id: &str,
     ) -> Option<mpsc::Sender<ConfigCommand>> {
-        self.forwarder_config_tx
+        self.forwarders
+            .forwarder_config_tx
             .lock()
             .unwrap()
             .get(endpoint_id)
@@ -1006,7 +1075,8 @@ impl AppState {
     /// snapshot instead; this per-endpoint probe remains for tests.
     #[cfg(test)]
     pub(crate) fn forwarder_remote_config_available(&self, endpoint_id: &str) -> bool {
-        self.forwarder_config_tx
+        self.forwarders
+            .forwarder_config_tx
             .lock()
             .unwrap()
             .contains_key(endpoint_id)
@@ -1016,7 +1086,8 @@ impl AppState {
     /// [`get_connections`] can list a forwarder whose only notable state is
     /// remote-config availability.
     pub(crate) fn forwarder_config_endpoints(&self) -> Vec<String> {
-        self.forwarder_config_tx
+        self.forwarders
+            .forwarder_config_tx
             .lock()
             .unwrap()
             .keys()
@@ -1031,7 +1102,8 @@ impl AppState {
         endpoint_id: &str,
         tx: mpsc::Sender<ReaderCommand>,
     ) -> ForwarderReaderControlRegistrationGuard {
-        self.forwarder_reader_control_tx
+        self.forwarders
+            .forwarder_reader_control_tx
             .lock()
             .unwrap()
             .insert(endpoint_id.to_owned(), tx.clone());
@@ -1047,7 +1119,7 @@ impl AppState {
         endpoint_id: &str,
         tx: &mpsc::Sender<ReaderCommand>,
     ) {
-        let mut registrations = self.forwarder_reader_control_tx.lock().unwrap();
+        let mut registrations = self.forwarders.forwarder_reader_control_tx.lock().unwrap();
         if registrations
             .get(endpoint_id)
             .is_some_and(|registered| registered.same_channel(tx))
@@ -1060,7 +1132,8 @@ impl AppState {
         &self,
         endpoint_id: &str,
     ) -> Option<mpsc::Sender<ReaderCommand>> {
-        self.forwarder_reader_control_tx
+        self.forwarders
+            .forwarder_reader_control_tx
             .lock()
             .unwrap()
             .get(endpoint_id)
@@ -1068,7 +1141,8 @@ impl AppState {
     }
 
     pub(crate) fn forwarder_reader_control_endpoints(&self) -> Vec<String> {
-        self.forwarder_reader_control_tx
+        self.forwarders
+            .forwarder_reader_control_tx
             .lock()
             .unwrap()
             .keys()
@@ -1083,7 +1157,7 @@ impl AppState {
     /// the existing `ConnectionsChanged` event.
     pub(crate) async fn mark_forwarder_stream_failed(&self, endpoint_id: &str, stream_id: &str) {
         {
-            let mut live_statuses = self.forwarder_live_status.lock().unwrap();
+            let mut live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
             live_statuses
                 .entry(endpoint_id.to_owned())
                 .or_default()
@@ -1098,7 +1172,7 @@ impl AppState {
     /// [`Self::clear_forwarder_live_status`].
     pub(crate) async fn clear_forwarder_stream_failed(&self, endpoint_id: &str, stream_id: &str) {
         let removed = {
-            let mut live_statuses = self.forwarder_live_status.lock().unwrap();
+            let mut live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
             live_statuses
                 .get_mut(endpoint_id)
                 .is_some_and(|status| status.failed_streams.remove(stream_id))
@@ -1110,7 +1184,8 @@ impl AppState {
 
     pub(crate) async fn clear_forwarder_live_status(&self, endpoint_id: &str) {
         {
-            self.forwarder_live_status
+            self.forwarders
+                .forwarder_live_status
                 .lock()
                 .unwrap()
                 .remove(endpoint_id);
@@ -1119,12 +1194,12 @@ impl AppState {
     }
 
     pub(crate) fn recompute_aggregate_connection_state_sync_default_trying(&self) {
-        let statuses = self.forwarder_runtime.lock().unwrap().clone();
+        let statuses = self.forwarders.forwarder_runtime.lock().unwrap().clone();
         let any_connected = statuses
             .values()
             .any(|status| status.control_up || status.data_sessions > 0);
         let any_trying = {
-            let disconnected = self.disconnected_intents.lock().unwrap();
+            let disconnected = self.forwarders.disconnected_intents.lock().unwrap();
             statuses.iter().any(|(endpoint_id, status)| {
                 !status.control_up
                     && status.data_sessions == 0
@@ -1138,7 +1213,7 @@ impl AppState {
         } else {
             ConnectionState::Disconnected
         };
-        let _ = self.connection_state.send_if_modified(|state| {
+        let _ = self.signals.connection_state.send_if_modified(|state| {
             if *state == next {
                 false
             } else {
@@ -1149,9 +1224,9 @@ impl AppState {
     }
 
     pub(crate) async fn recompute_aggregate_connection_state(&self) {
-        let statuses = self.forwarder_runtime.lock().unwrap().clone();
+        let statuses = self.forwarders.forwarder_runtime.lock().unwrap().clone();
         let (intents, subscriptions) = {
-            let db = self.db.lock().await;
+            let db = self.storage.db.lock().await;
             let intents = match db.load_forwarder_intents() {
                 Ok(intents) => intents,
                 Err(error) => {
@@ -1159,7 +1234,8 @@ impl AppState {
                     // Match the sync fallback's error-time source of truth: the
                     // cache contains only explicit disconnect intents; missing
                     // endpoints still default to connect below.
-                    self.disconnected_intents
+                    self.forwarders
+                        .disconnected_intents
                         .lock()
                         .unwrap()
                         .iter()
@@ -1191,8 +1267,13 @@ impl AppState {
         } else {
             ConnectionState::Disconnected
         };
-        let discovered = self.discovered_forwarders.read().await.clone();
-        let live_statuses = self.forwarder_live_status.lock().unwrap().clone();
+        let discovered = self.forwarders.discovered_forwarders.read().await.clone();
+        let live_statuses = self
+            .forwarders
+            .forwarder_live_status
+            .lock()
+            .unwrap()
+            .clone();
         let config_endpoints = self.forwarder_config_endpoints();
         let reader_control_endpoints = self.forwarder_reader_control_endpoints();
         let fingerprint = Self::connections_fingerprint(
@@ -1206,7 +1287,7 @@ impl AppState {
             &reader_control_endpoints,
         );
         let connections_changed = {
-            let mut last = self.last_connections_fingerprint.lock().unwrap();
+            let mut last = self.forwarders.last_connections_fingerprint.lock().unwrap();
             if last.as_ref() == Some(&fingerprint) {
                 false
             } else {
@@ -1215,7 +1296,7 @@ impl AppState {
             }
         };
         if connections_changed {
-            let _ = self.ui_tx.send(ReceiverUiEvent::ConnectionsChanged);
+            let _ = self.ui.ui_tx.send(ReceiverUiEvent::ConnectionsChanged);
         }
         self.set_connection_state_if_changed(next).await;
     }
@@ -1286,7 +1367,7 @@ impl AppState {
     }
 
     async fn set_connection_state_if_changed(&self, new_state: ConnectionState) {
-        let changed = self.connection_state.send_if_modified(|state| {
+        let changed = self.signals.connection_state.send_if_modified(|state| {
             *state != new_state && {
                 *state = new_state.clone();
                 true
@@ -1298,13 +1379,13 @@ impl AppState {
     }
 
     pub async fn request_retry_connect(&self) {
-        self.retry_streak.fetch_add(1, Ordering::SeqCst);
+        self.signals.retry_streak.fetch_add(1, Ordering::SeqCst);
         self.bump_connect_attempt(None, true);
         self.set_connection_state(ConnectionState::Connecting).await;
     }
 
     pub async fn request_reconnect_if_connected(&self) -> bool {
-        let was_connected = self.connection_state.send_if_modified(|state| {
+        let was_connected = self.signals.connection_state.send_if_modified(|state| {
             if *state == ConnectionState::Connected {
                 *state = ConnectionState::Connecting;
                 true
@@ -1315,7 +1396,7 @@ impl AppState {
         if !was_connected {
             return false;
         }
-        self.retry_streak.fetch_add(1, Ordering::SeqCst);
+        self.signals.retry_streak.fetch_add(1, Ordering::SeqCst);
         self.bump_connect_attempt(None, true);
         self.emit_connection_state_side_effects(ConnectionState::Connecting)
             .await;
@@ -1324,7 +1405,7 @@ impl AppState {
 
     pub(crate) async fn emit_connection_state_side_effects(&self, new_state: ConnectionState) {
         let streams_count = {
-            let db = self.db.lock().await;
+            let db = self.storage.db.lock().await;
             match db.load_stream_subscriptions() {
                 Ok(s) => s.len(),
                 Err(e) => {
@@ -1334,7 +1415,7 @@ impl AppState {
             }
         };
         let receiver_id = self.receiver_id.read().await.clone();
-        let _ = self.ui_tx.send(ReceiverUiEvent::StatusChanged {
+        let _ = self.ui.ui_tx.send(ReceiverUiEvent::StatusChanged {
             connection_state: new_state.clone(),
             streams_count,
             receiver_id,
@@ -1345,19 +1426,19 @@ impl AppState {
             ConnectionState::Connected => "Connected",
             ConnectionState::Disconnecting => "Disconnecting",
         };
-        self.logger.log(label);
+        self.ui.logger.log(label);
     }
 
     /// Update connection state, broadcast status change, and emit a log entry.
     pub async fn set_connection_state(&self, new_state: ConnectionState) {
-        let _ = self.connection_state.send(new_state.clone());
+        let _ = self.signals.connection_state.send(new_state.clone());
         self.emit_connection_state_side_effects(new_state).await;
     }
 
     /// Build the streams response from durable local subscriptions and cursors.
     pub async fn build_streams_response(&self) -> StreamsResponse {
-        let counts_snapshot = self.stream_counts.snapshot();
-        let db = self.db.lock().await;
+        let counts_snapshot = self.ui.stream_counts.snapshot();
+        let db = self.storage.db.lock().await;
         let subs = match db.load_stream_subscriptions() {
             Ok(s) => s,
             Err(e) => {
@@ -1380,12 +1461,17 @@ impl AppState {
         let intents = db.load_forwarder_intents().unwrap_or_default();
         drop(db);
 
-        let runtime_statuses = self.forwarder_runtime.lock().unwrap().clone();
-        let live_statuses = self.forwarder_live_status.lock().unwrap().clone();
+        let runtime_statuses = self.forwarders.forwarder_runtime.lock().unwrap().clone();
+        let live_statuses = self
+            .forwarders
+            .forwarder_live_status
+            .lock()
+            .unwrap()
+            .clone();
 
         let cursor_map: HashMap<&str, &crate::db::StreamCursorRecord> =
             cursors.iter().map(|c| (c.stream_id.as_str(), c)).collect();
-        let discovered = self.discovered_forwarders.read().await;
+        let discovered = self.forwarders.discovered_forwarders.read().await;
         let discovered_streams: HashMap<(&str, &str), (&DiscoveredForwarder, &DiscoveredStream)> =
             discovered
                 .iter()
@@ -1530,7 +1616,7 @@ impl AppState {
     /// Build and broadcast a streams snapshot to UI clients.
     pub async fn emit_streams_snapshot(&self) {
         let response = self.build_streams_response().await;
-        let _ = self.ui_tx.send(ReceiverUiEvent::StreamsSnapshot {
+        let _ = self.ui.ui_tx.send(ReceiverUiEvent::StreamsSnapshot {
             streams: response.streams,
             degraded: response.degraded,
             upstream_error: response.upstream_error,
@@ -1539,7 +1625,7 @@ impl AppState {
 
     /// Ask UI clients to reload full state from the control API.
     pub fn emit_resync(&self) {
-        let _ = self.ui_tx.send(ReceiverUiEvent::Resync);
+        let _ = self.ui.ui_tx.send(ReceiverUiEvent::Resync);
     }
 }
 
@@ -2042,7 +2128,7 @@ mod tests {
     #[tokio::test]
     async fn rd_import_updates_stats_and_requests_ui_resync() {
         let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
-        let mut ui_rx = state.ui_tx.subscribe();
+        let mut ui_rx = state.ui.ui_tx.subscribe();
         let import = crate::rd_dbf::RdImport {
             participants: vec![crate::participants::Participant {
                 bib: 7,
@@ -2156,7 +2242,7 @@ mod tests {
     async fn reload_chip_lookup_populates_resolver() {
         let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
         {
-            let mut db = state.db.lock().await;
+            let mut db = state.storage.db.lock().await;
             db.replace_participants(&[crate::participants::Participant {
                 bib: 12,
                 last: "Runner".to_owned(),
@@ -2476,24 +2562,29 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         db.set_forwarder_intent("endpoint-a", false).unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
-        state.discovered_forwarders.write().await.extend([
-            (
-                "endpoint-a".to_owned(),
-                DiscoveredForwarder {
-                    display_name: None,
-                    direct_addrs: Vec::new(),
-                    streams: Vec::new(),
-                },
-            ),
-            (
-                "endpoint-b".to_owned(),
-                DiscoveredForwarder {
-                    display_name: None,
-                    direct_addrs: Vec::new(),
-                    streams: Vec::new(),
-                },
-            ),
-        ]);
+        state
+            .forwarders
+            .discovered_forwarders
+            .write()
+            .await
+            .extend([
+                (
+                    "endpoint-a".to_owned(),
+                    DiscoveredForwarder {
+                        display_name: None,
+                        direct_addrs: Vec::new(),
+                        streams: Vec::new(),
+                    },
+                ),
+                (
+                    "endpoint-b".to_owned(),
+                    DiscoveredForwarder {
+                        display_name: None,
+                        direct_addrs: Vec::new(),
+                        streams: Vec::new(),
+                    },
+                ),
+            ]);
 
         let response = get_connections(&state).await;
 
@@ -2521,7 +2612,7 @@ mod tests {
         }])
         .unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
-        state.discovered_forwarders.write().await.insert(
+        state.forwarders.discovered_forwarders.write().await.insert(
             "endpoint-a".to_owned(),
             DiscoveredForwarder {
                 display_name: Some("Finish Line".to_owned()),
@@ -2702,7 +2793,7 @@ mod tests {
     async fn clearing_forwarder_live_status_removes_stale_reader_status() {
         let db = Db::open_in_memory().unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
-        state.discovered_forwarders.write().await.insert(
+        state.forwarders.discovered_forwarders.write().await.insert(
             "endpoint-a".to_owned(),
             DiscoveredForwarder {
                 display_name: Some("Finish Line".to_owned()),
@@ -2742,7 +2833,7 @@ mod tests {
     async fn live_status_updates_emit_connections_changed_only_on_actual_change() {
         let db = Db::open_in_memory().unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
-        state.discovered_forwarders.write().await.insert(
+        state.forwarders.discovered_forwarders.write().await.insert(
             "endpoint-a".to_owned(),
             DiscoveredForwarder {
                 display_name: Some("Finish Line".to_owned()),
@@ -2751,7 +2842,7 @@ mod tests {
             },
         );
         state.recompute_aggregate_connection_state().await;
-        let mut ui_rx = state.ui_tx.subscribe();
+        let mut ui_rx = state.ui.ui_tx.subscribe();
 
         state
             .record_forwarder_ups_status(
@@ -2794,35 +2885,40 @@ mod tests {
         }])
         .unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
-        state.discovered_forwarders.write().await.extend([
-            (
-                "endpoint-b".to_owned(),
-                DiscoveredForwarder {
-                    display_name: Some("Finish Line".to_owned()),
-                    direct_addrs: Vec::new(),
-                    streams: Vec::new(),
-                },
-            ),
-            (
-                "endpoint-a".to_owned(),
-                DiscoveredForwarder {
-                    display_name: Some("Start Line".to_owned()),
-                    direct_addrs: Vec::new(),
-                    streams: vec![
-                        DiscoveredStream {
-                            stream_id: "stream-a".to_owned(),
-                            epoch: 1,
-                            next_seq: 10,
-                        },
-                        DiscoveredStream {
-                            stream_id: "stream-b".to_owned(),
-                            epoch: 2,
-                            next_seq: 20,
-                        },
-                    ],
-                },
-            ),
-        ]);
+        state
+            .forwarders
+            .discovered_forwarders
+            .write()
+            .await
+            .extend([
+                (
+                    "endpoint-b".to_owned(),
+                    DiscoveredForwarder {
+                        display_name: Some("Finish Line".to_owned()),
+                        direct_addrs: Vec::new(),
+                        streams: Vec::new(),
+                    },
+                ),
+                (
+                    "endpoint-a".to_owned(),
+                    DiscoveredForwarder {
+                        display_name: Some("Start Line".to_owned()),
+                        direct_addrs: Vec::new(),
+                        streams: vec![
+                            DiscoveredStream {
+                                stream_id: "stream-a".to_owned(),
+                                epoch: 1,
+                                next_seq: 10,
+                            },
+                            DiscoveredStream {
+                                stream_id: "stream-b".to_owned(),
+                                epoch: 2,
+                                next_seq: 20,
+                            },
+                        ],
+                    },
+                ),
+            ]);
         state
             .mark_forwarder_runtime("endpoint-a", |status| status.data_sessions = 1)
             .await;
@@ -2861,7 +2957,7 @@ mod tests {
     async fn recompute_emits_connections_changed_when_forwarder_state_changes() {
         let db = Db::open_in_memory().unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
-        let mut ui_rx = state.ui_tx.subscribe();
+        let mut ui_rx = state.ui.ui_tx.subscribe();
 
         state
             .mark_forwarder_runtime("endpoint-a", |status| status.control_up = true)
@@ -2906,7 +3002,7 @@ mod tests {
             .record_forwarder_reader_status("endpoint-a", status(1, 10, true))
             .await;
 
-        let mut ui_rx = state.ui_tx.subscribe();
+        let mut ui_rx = state.ui.ui_tx.subscribe();
 
         // Count-only update: counters advance, everything structural is equal.
         state
@@ -2956,7 +3052,7 @@ mod tests {
     async fn recompute_emits_connections_changed_at_most_once_when_view_is_unchanged() {
         let db = Db::open_in_memory().unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
-        state.discovered_forwarders.write().await.insert(
+        state.forwarders.discovered_forwarders.write().await.insert(
             "endpoint-a".to_owned(),
             DiscoveredForwarder {
                 display_name: Some("Finish Line".to_owned()),
@@ -2968,7 +3064,7 @@ mod tests {
                 }],
             },
         );
-        let mut ui_rx = state.ui_tx.subscribe();
+        let mut ui_rx = state.ui.ui_tx.subscribe();
 
         state.recompute_aggregate_connection_state().await;
         state.recompute_aggregate_connection_state().await;
@@ -2987,7 +3083,7 @@ mod tests {
         state
             .mark_forwarder_runtime("endpoint-a", |status| status.control_up = true)
             .await;
-        let mut ui_rx = state.ui_tx.subscribe();
+        let mut ui_rx = state.ui.ui_tx.subscribe();
         let _ = count_connections_changed_events(&mut ui_rx).await;
 
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
@@ -3132,7 +3228,7 @@ mod tests {
     async fn recompute_emits_connections_changed_again_when_view_changes() {
         let db = Db::open_in_memory().unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
-        state.discovered_forwarders.write().await.insert(
+        state.forwarders.discovered_forwarders.write().await.insert(
             "endpoint-a".to_owned(),
             DiscoveredForwarder {
                 display_name: Some("Finish Line".to_owned()),
@@ -3140,7 +3236,7 @@ mod tests {
                 streams: Vec::new(),
             },
         );
-        let mut ui_rx = state.ui_tx.subscribe();
+        let mut ui_rx = state.ui.ui_tx.subscribe();
 
         state.recompute_aggregate_connection_state().await;
         let _ = count_connections_changed_events(&mut ui_rx).await;
@@ -3168,7 +3264,7 @@ mod tests {
         }])
         .unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
-        state.discovered_forwarders.write().await.insert(
+        state.forwarders.discovered_forwarders.write().await.insert(
             "endpoint-1".to_owned(),
             DiscoveredForwarder {
                 display_name: Some("Start Line".to_owned()),
@@ -3205,7 +3301,7 @@ mod tests {
         }])
         .unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
-        state.discovered_forwarders.write().await.insert(
+        state.forwarders.discovered_forwarders.write().await.insert(
             "endpoint-1".to_owned(),
             DiscoveredForwarder {
                 display_name: Some("Start Line".to_owned()),
@@ -3260,7 +3356,7 @@ mod tests {
         assert!(connect_rx.borrow().restart);
         assert_eq!(state.current_connect_attempt(), 1);
         assert_eq!(
-            state.connection_state.borrow().clone(),
+            state.signals.connection_state.borrow().clone(),
             ConnectionState::Connecting
         );
     }
@@ -3293,14 +3389,14 @@ mod tests {
         }])
         .unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
-        let mut ui_rx = state.ui_tx.subscribe();
+        let mut ui_rx = state.ui.ui_tx.subscribe();
 
         disconnect_forwarder(&state, "endpoint-1".to_owned())
             .await
             .unwrap();
 
         {
-            let db = state.db.lock().await;
+            let db = state.storage.db.lock().await;
             assert!(!db.forwarder_should_connect("endpoint-1").unwrap());
             assert_eq!(
                 db.load_stream_subscriptions().unwrap(),
@@ -3344,7 +3440,7 @@ mod tests {
             .unwrap();
 
         {
-            let db = state.db.lock().await;
+            let db = state.storage.db.lock().await;
             assert!(db.forwarder_should_connect("endpoint-1").unwrap());
         }
         connect_rx.changed().await.unwrap();
@@ -3365,7 +3461,7 @@ mod tests {
             .unwrap();
 
         {
-            let db = state.db.lock().await;
+            let db = state.storage.db.lock().await;
             assert!(db.forwarder_should_connect("endpoint-1").unwrap());
         }
         connect_rx.changed().await.unwrap();
@@ -3397,7 +3493,7 @@ mod tests {
         state.recompute_aggregate_connection_state_sync_default_trying();
 
         assert_eq!(
-            *state.connection_state.borrow(),
+            *state.signals.connection_state.borrow(),
             ConnectionState::Disconnected
         );
     }
@@ -3409,7 +3505,7 @@ mod tests {
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
         state.update_forwarder_runtime_sync("endpoint-1", |_status| {});
         {
-            let db = state.db.lock().await;
+            let db = state.storage.db.lock().await;
             db.raw_execute_for_test("DROP TABLE forwarder_intent", rusqlite::params![])
                 .unwrap();
         }
@@ -3417,7 +3513,7 @@ mod tests {
         state.recompute_aggregate_connection_state().await;
 
         assert_eq!(
-            *state.connection_state.borrow(),
+            *state.signals.connection_state.borrow(),
             ConnectionState::Disconnected
         );
     }
@@ -3437,7 +3533,7 @@ mod tests {
         state.recompute_aggregate_connection_state_sync_default_trying();
 
         assert_eq!(
-            *state.connection_state.borrow(),
+            *state.signals.connection_state.borrow(),
             ConnectionState::Connecting
         );
     }
@@ -3455,7 +3551,7 @@ mod tests {
         state.recompute_aggregate_connection_state_sync_default_trying();
 
         assert_eq!(
-            *state.connection_state.borrow(),
+            *state.signals.connection_state.borrow(),
             ConnectionState::Connecting
         );
     }
@@ -3481,7 +3577,7 @@ mod tests {
         .await
         .unwrap();
 
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         let subs = db.load_stream_subscriptions().unwrap();
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].forwarder_endpoint_id, "endpoint-1");
@@ -3549,7 +3645,7 @@ mod tests {
             );
         }
 
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         assert!(db.load_stream_subscriptions().unwrap().is_empty());
     }
 
@@ -3575,7 +3671,7 @@ mod tests {
             .await,
         );
 
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         assert!(db.load_stream_subscriptions().unwrap().is_empty());
     }
 
@@ -3654,7 +3750,7 @@ mod tests {
         .await
         .unwrap();
 
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         assert_eq!(db.load_stream_cursor(local_stream_key.as_str()).unwrap(), 0);
     }
 
@@ -3675,7 +3771,7 @@ mod tests {
         .unwrap();
 
         {
-            let db = state.db.lock().await;
+            let db = state.storage.db.lock().await;
             // Canonical row is keyed by stream_id with the forwarder endpoint id.
             assert_eq!(
                 db.load_stream_earliest_epochs().unwrap(),
@@ -3702,7 +3798,7 @@ mod tests {
         .await
         .unwrap();
 
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         assert!(db.load_stream_earliest_epochs().unwrap().is_empty());
     }
 
@@ -3731,7 +3827,7 @@ mod tests {
         .await
         .unwrap();
 
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         let subs = db.load_stream_subscriptions().unwrap();
         assert_eq!(subs[0].local_port_override, Some(9200));
     }
@@ -3761,7 +3857,7 @@ mod tests {
         .await
         .unwrap();
 
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         let subs = db.load_stream_subscriptions().unwrap();
         assert_eq!(subs[0].event_type, crate::db::EventType::Start);
     }
@@ -3802,7 +3898,7 @@ mod tests {
 
         let (state, _shutdown_rx) = AppState::new(db, "recv-1".to_owned());
         let mut dbf_config_rx = state.dbf_config_rx();
-        let mut ui_rx = state.ui_tx.subscribe();
+        let mut ui_rx = state.ui.ui_tx.subscribe();
 
         admin_clear_data(&state).await.unwrap();
 

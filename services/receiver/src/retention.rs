@@ -176,7 +176,7 @@ async fn run_retention_pass(
     // worker never delivers must not carry a DBF floor, or its floor pins
     // near 0 and the stream is silently never pruned.
     let (streams, announcer_enabled, announcer_streams) = {
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         let subs = db.load_stream_subscriptions()?;
         let dbf_enabled = db.load_dbf_config().map(|c| c.enabled).unwrap_or(false);
         let announcer_enabled = db.load_announcer_enabled().unwrap_or(false);
@@ -218,6 +218,7 @@ async fn run_retention_pass(
         let age_cutoff_ms = now_ms - config.retain_min_age_ms;
         let retain_min_rows = config.retain_min_rows;
         let bounds = state
+            .storage
             .read_source
             .run(move |db| {
                 let ack_cursor = db.load_stream_cursor(&sid)?;
@@ -269,7 +270,12 @@ async fn run_retention_pass(
         // Bound the transaction size: prune at most max_rows_per_pass seqs per
         // pass; later passes catch up.
         let bounded_target = target.min(pruned_through + config.max_rows_per_pass);
-        match state.writer.prune(stream_id.clone(), bounded_target).await {
+        match state
+            .storage
+            .writer
+            .prune(stream_id.clone(), bounded_target)
+            .await
+        {
             Ok(deleted) => {
                 info!(
                     stream_id = %local_stream_key,
@@ -278,7 +284,7 @@ async fn run_retention_pass(
                     "pruned received_events behind the delivery low-water mark"
                 );
                 // Reclaim the freed WAL/db pages opportunistically.
-                let _ = state.writer.checkpoint().await;
+                let _ = state.storage.writer.checkpoint().await;
             }
             Err(e) => warn!(error = %e, stream_id = %local_stream_key, "prune command failed"),
         }
@@ -396,7 +402,7 @@ mod tests {
         let wire_stream_id = "127.0.0.1:10900";
         let local_stream_key = crate::stream_key::LocalStreamKey::new(endpoint_id, wire_stream_id);
         {
-            let mut db = state.db.lock().await;
+            let mut db = state.storage.db.lock().await;
             db.save_profile("http://server", "tok", "check-and-download", None)
                 .unwrap();
             db.replace_stream_subscriptions(&[crate::db::StreamSubscription {
@@ -463,7 +469,7 @@ mod tests {
         };
         run_retention_pass(&state, &config).await.unwrap();
 
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         let remaining: Vec<i64> = db
             .load_received_events(local_stream_key.as_str())
             .unwrap()

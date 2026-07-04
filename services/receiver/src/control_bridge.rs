@@ -158,7 +158,7 @@ async fn local_streams_snapshot(state: &AppState) -> control_api::StreamsRespons
 async fn events(
     State(state): State<Arc<AppState>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let tx = state.ui_tx.clone();
+    let tx = state.ui.ui_tx.clone();
     let rx = tx.subscribe();
     let stream = futures_util::stream::unfold((tx, rx), |(tx, mut rx)| async move {
         match rx.recv().await {
@@ -482,7 +482,7 @@ mod tests {
             "update_subscription_event_type dispatch should accept stream identity args"
         );
 
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         let subs = db.load_stream_subscriptions().unwrap();
         assert_eq!(subs[0].event_type, crate::db::EventType::Start);
     }
@@ -504,7 +504,7 @@ mod tests {
     async fn state_snapshot_uses_canonical_stream_port_resolution() {
         let (addr, state) = spawn_bridge().await;
         {
-            let mut db = state.db.lock().await;
+            let mut db = state.storage.db.lock().await;
             db.replace_stream_subscriptions(&[crate::db::StreamSubscription {
                 forwarder_endpoint_id: "endpoint-default".to_owned(),
                 stream_id: "10.0.0.5:10000".to_owned(),
@@ -592,7 +592,7 @@ mod tests {
         let mut stream = open_sse(addr).await;
 
         // Subscription is now live; emit a deterministic event.
-        let _ = state.ui_tx.send(ReceiverUiEvent::LogEntry {
+        let _ = state.ui.ui_tx.send(ReceiverUiEvent::LogEntry {
             entry: "bridge-hello".to_owned(),
         });
 
@@ -641,7 +641,7 @@ mod tests {
         let mut response = events(State(Arc::clone(&state))).await.into_response();
 
         for i in 0..257 {
-            let _ = state.ui_tx.send(ReceiverUiEvent::LogEntry {
+            let _ = state.ui.ui_tx.send(ReceiverUiEvent::LogEntry {
                 entry: format!("old-retained-{i}"),
             });
         }
@@ -656,7 +656,7 @@ mod tests {
         };
         assert!(stale.is_none(), "stale frame after resync: {stale:?}");
 
-        let _ = state.ui_tx.send(ReceiverUiEvent::LogEntry {
+        let _ = state.ui.ui_tx.send(ReceiverUiEvent::LogEntry {
             entry: "live-after-resync".to_owned(),
         });
 

@@ -164,7 +164,7 @@ async fn put_earliest_epoch_persists_to_db() {
     .await
     .unwrap();
 
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     // Canonical view is keyed by the encoded local stream key with the
     // forwarder endpoint id.
     assert_eq!(
@@ -193,14 +193,20 @@ async fn put_earliest_epoch_rejects_negative_values() {
     .await;
     assert!(result.is_err());
 
-    let rows = state.db.lock().await.load_stream_earliest_epochs().unwrap();
+    let rows = state
+        .storage
+        .db
+        .lock()
+        .await
+        .load_stream_earliest_epochs()
+        .unwrap();
     assert!(rows.is_empty());
 }
 
 #[tokio::test]
 async fn put_mode_emits_mode_changed_event() {
     let state = setup();
-    let mut ui_rx = state.ui_tx.subscribe();
+    let mut ui_rx = state.ui.ui_tx.subscribe();
 
     control_api::put_profile(
         &state,
@@ -266,7 +272,7 @@ async fn put_profile_without_receiver_id_preserves_db_value() {
     .await
     .unwrap();
 
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     let profile = db.load_profile().unwrap().unwrap();
     assert_eq!(profile.receiver_id, Some("recv-original".to_owned()));
 }
@@ -321,7 +327,7 @@ async fn put_profile_accepts_valid_receiver_id() {
 async fn admin_reset_all_cursors_deletes_all() {
     let state = setup();
     {
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         db.jump_stream_cursor(
             LocalStreamKey::new("endpoint-1", "10.0.0.1:10000").as_str(),
             10,
@@ -335,7 +341,7 @@ async fn admin_reset_all_cursors_deletes_all() {
     }
     let result = control_api::admin_reset_all_cursors(&state).await.unwrap();
     assert_eq!(result["deleted"], 2);
-    let remaining = state.db.lock().await.load_stream_cursors().unwrap();
+    let remaining = state.storage.db.lock().await.load_stream_cursors().unwrap();
     assert!(remaining.is_empty(), "all stream cursors must be deleted");
 }
 
@@ -343,7 +349,7 @@ async fn admin_reset_all_cursors_deletes_all() {
 async fn admin_reset_all_earliest_epochs_deletes_all() {
     let state = setup();
     {
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         db.save_stream_earliest_epoch("endpoint-1", "10.0.0.1", 7)
             .unwrap();
     }
@@ -351,7 +357,13 @@ async fn admin_reset_all_earliest_epochs_deletes_all() {
         .await
         .unwrap();
     assert_eq!(result["deleted"], 1);
-    let remaining = state.db.lock().await.load_stream_earliest_epochs().unwrap();
+    let remaining = state
+        .storage
+        .db
+        .lock()
+        .await
+        .load_stream_earliest_epochs()
+        .unwrap();
     assert!(
         remaining.is_empty(),
         "all stream earliest epochs must be deleted"
@@ -362,7 +374,7 @@ async fn admin_reset_all_earliest_epochs_deletes_all() {
 async fn admin_reset_earliest_epoch_per_stream() {
     let state = setup();
     {
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         db.save_stream_earliest_epoch("endpoint-1", "11111111-1111-1111-1111-111111111111", 7)
             .unwrap();
         db.save_stream_earliest_epoch("endpoint-2", "22222222-2222-2222-2222-222222222222", 3)
@@ -378,7 +390,13 @@ async fn admin_reset_earliest_epoch_per_stream() {
     .await
     .unwrap();
 
-    let remaining = state.db.lock().await.load_stream_earliest_epochs().unwrap();
+    let remaining = state
+        .storage
+        .db
+        .lock()
+        .await
+        .load_stream_earliest_epochs()
+        .unwrap();
     assert_eq!(remaining.len(), 1);
     assert_eq!(
         remaining[0].stream_id,
@@ -391,7 +409,7 @@ async fn admin_reset_earliest_epoch_per_stream() {
 async fn admin_purge_subscriptions_deletes_all() {
     let state = setup();
     {
-        let mut db = state.db.lock().await;
+        let mut db = state.storage.db.lock().await;
         db.replace_stream_subscriptions(&[StreamSubscription {
             forwarder_endpoint_id: "endpoint-1".to_owned(),
             stream_id: "10.0.0.1".to_owned(),
@@ -406,7 +424,13 @@ async fn admin_purge_subscriptions_deletes_all() {
         .await
         .unwrap();
     assert_eq!(result["deleted"], 1);
-    let remaining = state.db.lock().await.load_stream_subscriptions().unwrap();
+    let remaining = state
+        .storage
+        .db
+        .lock()
+        .await
+        .load_stream_subscriptions()
+        .unwrap();
     assert!(remaining.is_empty(), "all subscriptions must be deleted");
 }
 
@@ -414,7 +438,7 @@ async fn admin_purge_subscriptions_deletes_all() {
 async fn admin_purge_subscriptions_requests_reconnect_when_connected() {
     let state = setup();
     {
-        let mut db = state.db.lock().await;
+        let mut db = state.storage.db.lock().await;
         db.replace_stream_subscriptions(&[StreamSubscription {
             forwarder_endpoint_id: "endpoint-1".to_owned(),
             stream_id: "10.0.0.1".to_owned(),
@@ -439,7 +463,7 @@ async fn admin_purge_subscriptions_requests_reconnect_when_connected() {
 async fn admin_reset_profile_clears_credentials() {
     let state = setup();
     {
-        let mut db = state.db.lock().await;
+        let mut db = state.storage.db.lock().await;
         db.save_profile("https://thin.test", "tok", "check-only", Some("recv-1"))
             .unwrap();
     }
@@ -455,7 +479,7 @@ async fn admin_reset_profile_clears_credentials() {
 async fn admin_reset_profile_disconnects_when_connected() {
     let state = setup();
     {
-        let mut db = state.db.lock().await;
+        let mut db = state.storage.db.lock().await;
         db.save_profile("https://thin.test", "tok", "check-only", Some("recv-1"))
             .unwrap();
     }
@@ -471,7 +495,7 @@ async fn admin_reset_profile_disconnects_when_connected() {
 async fn admin_factory_reset_clears_everything() {
     let state = setup();
     {
-        let mut db = state.db.lock().await;
+        let mut db = state.storage.db.lock().await;
         db.save_profile("https://thin.test", "tok", "check-only", Some("recv-1"))
             .unwrap();
         db.replace_stream_subscriptions(&[StreamSubscription {
@@ -497,7 +521,7 @@ async fn admin_factory_reset_clears_everything() {
     assert_eq!(profile.server_url, "");
     assert_eq!(profile.token, "");
 
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     assert!(
         db.load_stream_subscriptions().unwrap().is_empty(),
         "factory reset must delete subscriptions"
@@ -516,7 +540,7 @@ async fn admin_factory_reset_clears_everything() {
 async fn admin_update_port_sets_override() {
     let state = setup();
     {
-        let mut db = state.db.lock().await;
+        let mut db = state.storage.db.lock().await;
         db.replace_stream_subscriptions(&[StreamSubscription {
             forwarder_endpoint_id: "endpoint-1".to_owned(),
             stream_id: "11111111-1111-1111-1111-111111111111".to_owned(),
@@ -538,7 +562,13 @@ async fn admin_update_port_sets_override() {
     .await
     .unwrap();
 
-    let subs = state.db.lock().await.load_stream_subscriptions().unwrap();
+    let subs = state
+        .storage
+        .db
+        .lock()
+        .await
+        .load_stream_subscriptions()
+        .unwrap();
     assert_eq!(subs[0].local_port_override, Some(9000));
 }
 
@@ -561,7 +591,7 @@ async fn admin_update_port_returns_not_found_for_missing_subscription() {
 async fn admin_update_port_clears_override() {
     let state = setup();
     {
-        let mut db = state.db.lock().await;
+        let mut db = state.storage.db.lock().await;
         db.replace_stream_subscriptions(&[StreamSubscription {
             forwarder_endpoint_id: "endpoint-1".to_owned(),
             stream_id: "11111111-1111-1111-1111-111111111111".to_owned(),
@@ -583,7 +613,13 @@ async fn admin_update_port_clears_override() {
     .await
     .unwrap();
 
-    let subs = state.db.lock().await.load_stream_subscriptions().unwrap();
+    let subs = state
+        .storage
+        .db
+        .lock()
+        .await
+        .load_stream_subscriptions()
+        .unwrap();
     assert_eq!(subs[0].local_port_override, None);
 }
 
@@ -591,7 +627,7 @@ async fn admin_update_port_clears_override() {
 async fn streams_response_includes_stored_port_override_separate_from_resolved_port() {
     let state = setup();
     {
-        let mut db = state.db.lock().await;
+        let mut db = state.storage.db.lock().await;
         db.replace_stream_subscriptions(&[
             StreamSubscription {
                 forwarder_endpoint_id: "endpoint-default".to_owned(),
@@ -649,7 +685,7 @@ async fn streams_response_includes_cursor_data() {
     let stream_1 = "127.0.0.1:10000";
     let stream_2 = "127.0.0.1:10001";
     {
-        let mut db = state.db.lock().await;
+        let mut db = state.storage.db.lock().await;
         db.replace_stream_subscriptions(&[
             StreamSubscription {
                 forwarder_endpoint_id: "endpoint-1".to_owned(),
@@ -697,7 +733,7 @@ async fn put_dbf_config_updates_enabled_flag_only() {
     let state = setup();
     let dir = tempfile::tempdir().unwrap();
     {
-        let mut db = state.db.lock().await;
+        let mut db = state.storage.db.lock().await;
         db.save_profile("https://thin.test", "tok", "check-only", Some("recv-1"))
             .unwrap();
         db.save_rd_import_config(&receiver::db::RdImportConfig {

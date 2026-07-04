@@ -68,7 +68,7 @@ pub async fn set_stream_announcer_publish(
     validate_stream_identity(forwarder_endpoint_id, stream_id)?;
     let local_stream_key = LocalStreamKey::new(forwarder_endpoint_id, stream_id);
     {
-        let db = state.db.lock().await;
+        let db = state.storage.db.lock().await;
         db.set_stream_announcer_publish(local_stream_key.as_str(), publish)
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     }
@@ -89,7 +89,7 @@ pub async fn put_earliest_epoch(
     }
     validate_stream_identity(&body.forwarder_endpoint_id, &body.stream_id)?;
 
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     match db.save_stream_earliest_epoch(
         &body.forwarder_endpoint_id,
         &body.stream_id,
@@ -115,7 +115,7 @@ pub async fn get_replay_target_epochs(
 ) -> Result<ReplayTargetEpochsResponse, ReceiverError> {
     validate_stream_identity(&forwarder_endpoint_id, &stream_id)?;
     let local_stream_key = LocalStreamKey::new(&forwarder_endpoint_id, &stream_id);
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     let rows = db
         .load_replay_target_epochs(local_stream_key.as_str())
         .map_err(|e| ReceiverError::Internal(e.to_string()))?;
@@ -158,23 +158,23 @@ pub async fn put_subscriptions(
             reader_ip: s.reader_ip,
         })
         .collect();
-    let mut db = state.db.lock().await;
+    let mut db = state.storage.db.lock().await;
     match db.replace_stream_subscriptions(&subs) {
         Ok(()) => {
             drop(db);
             state.notify_subscriptions_changed();
-            let conn_for_status = state.connection_state.borrow().clone();
-            let db = state.db.lock().await;
+            let conn_for_status = state.signals.connection_state.borrow().clone();
+            let db = state.storage.db.lock().await;
             let streams_count = db.load_stream_subscriptions().map(|s| s.len()).unwrap_or(0);
             let receiver_id = state.receiver_id.read().await.clone();
-            let _ = state.ui_tx.send(ReceiverUiEvent::StatusChanged {
+            let _ = state.ui.ui_tx.send(ReceiverUiEvent::StatusChanged {
                 connection_state: conn_for_status,
                 streams_count,
                 receiver_id,
             });
             drop(db);
             state.emit_streams_snapshot().await;
-            let conn_for_reconnect = state.connection_state.borrow().clone();
+            let conn_for_reconnect = state.signals.connection_state.borrow().clone();
             if matches!(
                 conn_for_reconnect,
                 ConnectionState::Connected
@@ -190,7 +190,7 @@ pub async fn put_subscriptions(
 }
 
 pub async fn get_subscriptions(state: &AppState) -> Result<SubscriptionsBody, ReceiverError> {
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     match db.load_stream_subscriptions() {
         Ok(subscriptions) => Ok(SubscriptionsBody {
             subscriptions: subscriptions
@@ -215,7 +215,7 @@ pub async fn update_subscription_event_type(
     stream_id: &str,
     body: EventTypeRequest,
 ) -> Result<(), ReceiverError> {
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     match db.update_stream_subscription_event_type(
         forwarder_endpoint_id,
         stream_id,
@@ -232,7 +232,7 @@ pub async fn update_subscription_event_type(
 pub async fn admin_reset_cursor(state: &AppState, body: StreamRef) -> Result<(), ReceiverError> {
     validate_stream_identity(&body.forwarder_endpoint_id, &body.stream_id)?;
     let local_stream_key = LocalStreamKey::new(&body.forwarder_endpoint_id, &body.stream_id);
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     match db.delete_stream_cursor(local_stream_key.as_str()) {
         Ok(()) => Ok(()),
         Err(e) => Err(ReceiverError::Internal(e.to_string())),
@@ -240,7 +240,7 @@ pub async fn admin_reset_cursor(state: &AppState, body: StreamRef) -> Result<(),
 }
 
 pub async fn admin_reset_all_cursors(state: &AppState) -> Result<serde_json::Value, ReceiverError> {
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     match db.delete_all_cursors() {
         Ok(count) => Ok(serde_json::json!({ "deleted": count })),
         Err(e) => Err(ReceiverError::Internal(e.to_string())),
@@ -250,7 +250,7 @@ pub async fn admin_reset_all_cursors(state: &AppState) -> Result<serde_json::Val
 pub async fn admin_reset_all_earliest_epochs(
     state: &AppState,
 ) -> Result<serde_json::Value, ReceiverError> {
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     match db.delete_all_earliest_epochs() {
         Ok(count) => Ok(serde_json::json!({ "deleted": count })),
         Err(e) => Err(ReceiverError::Internal(e.to_string())),
@@ -263,7 +263,7 @@ pub async fn admin_reset_earliest_epoch(
 ) -> Result<(), ReceiverError> {
     validate_stream_identity(&body.forwarder_endpoint_id, &body.stream_id)?;
     let local_stream_key = LocalStreamKey::new(&body.forwarder_endpoint_id, &body.stream_id);
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     match db.delete_stream_earliest_epoch(local_stream_key.as_str()) {
         Ok(()) => Ok(()),
         Err(e) => Err(ReceiverError::Internal(e.to_string())),
@@ -273,23 +273,23 @@ pub async fn admin_reset_earliest_epoch(
 pub async fn admin_purge_subscriptions(
     state: &AppState,
 ) -> Result<serde_json::Value, ReceiverError> {
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     match db.delete_all_subscriptions() {
         Ok(count) => {
             drop(db);
             state.notify_subscriptions_changed();
-            let conn_for_status = state.connection_state.borrow().clone();
-            let db = state.db.lock().await;
+            let conn_for_status = state.signals.connection_state.borrow().clone();
+            let db = state.storage.db.lock().await;
             let streams_count = db.load_stream_subscriptions().map(|s| s.len()).unwrap_or(0);
             let receiver_id = state.receiver_id.read().await.clone();
-            let _ = state.ui_tx.send(ReceiverUiEvent::StatusChanged {
+            let _ = state.ui.ui_tx.send(ReceiverUiEvent::StatusChanged {
                 connection_state: conn_for_status,
                 streams_count,
                 receiver_id,
             });
             drop(db);
             state.emit_streams_snapshot().await;
-            let conn_for_reconnect = state.connection_state.borrow().clone();
+            let conn_for_reconnect = state.signals.connection_state.borrow().clone();
             if matches!(
                 conn_for_reconnect,
                 ConnectionState::Connected
@@ -311,7 +311,7 @@ pub async fn admin_update_port(
     if let Some(0) = body.local_port_override {
         return Err(ReceiverError::BadRequest("port must be 1-65535".to_owned()));
     }
-    let db = state.db.lock().await;
+    let db = state.storage.db.lock().await;
     match db.update_stream_subscription_port(
         &body.forwarder_endpoint_id,
         &body.stream_id,

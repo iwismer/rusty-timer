@@ -62,7 +62,7 @@ impl HeadlessHost {
                 // precedence. This block only *applies* that precedence
                 // against the profile — it never re-derives the override.
                 let server_override = p2p_config.server_override.clone();
-                let profile = state.db.lock().await.load_profile().ok().flatten();
+                let profile = state.storage.db.lock().await.load_profile().ok().flatten();
                 p2p_config.server = crate::runtime::resolve_server_config(
                     profile.as_ref(),
                     server_override.clone(),
