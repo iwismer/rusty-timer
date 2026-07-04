@@ -177,9 +177,6 @@ async fn put_earliest_epoch_persists_to_db() {
             earliest_epoch: 7,
         }]
     );
-    // The legacy (forwarder_id, reader_ip) view must not surface the canonical
-    // row: stream_id is never persisted as reader_ip.
-    assert!(db.load_earliest_epochs().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -196,7 +193,7 @@ async fn put_earliest_epoch_rejects_negative_values() {
     .await;
     assert!(result.is_err());
 
-    let rows = state.db.lock().await.load_earliest_epochs().unwrap();
+    let rows = state.db.lock().await.load_stream_earliest_epochs().unwrap();
     assert!(rows.is_empty());
 }
 

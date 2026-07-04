@@ -103,14 +103,6 @@ pub struct Profile {
     pub receiver_id: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Subscription {
-    pub forwarder_id: String,
-    pub reader_ip: String,
-    pub local_port_override: Option<u16>,
-    pub event_type: EventType,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamSubscription {
     pub forwarder_endpoint_id: String,
     pub stream_id: String,
@@ -133,8 +125,6 @@ pub struct StreamCursorRecord {
     pub stream_id: String,
     pub stream_epoch: Option<i64>,
     pub last_seq: i64,
-    pub forwarder_id: Option<String>,
-    pub reader_ip: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -428,9 +418,8 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Canonical writer for earliest-epoch overrides. Compatibility
-    /// `forwarder_id`/`reader_ip` columns are left NULL so no caller reads a
-    /// canonical row as if `stream_id` were a `reader_ip`.
+    /// Canonical writer for earliest-epoch overrides, keyed by the encoded
+    /// local stream key.
     pub fn save_stream_earliest_epoch(
         &self,
         forwarder_endpoint_id: &str,
@@ -440,8 +429,8 @@ impl Db {
         let local_stream_key = LocalStreamKey::new(forwarder_endpoint_id, stream_id);
         self.conn.execute(
             "INSERT OR REPLACE INTO earliest_epochs
-             (stream_id, forwarder_endpoint_id, earliest_epoch, forwarder_id, reader_ip)
-             VALUES (?1, ?2, ?3, NULL, NULL)",
+             (stream_id, forwarder_endpoint_id, earliest_epoch)
+             VALUES (?1, ?2, ?3)",
             rusqlite::params![local_stream_key.as_str(), forwarder_endpoint_id, epoch],
         )?;
         Ok(())
@@ -456,26 +445,14 @@ impl Db {
         Ok(())
     }
 
-    /// Compatibility loader returning `(forwarder_id, reader_ip, earliest_epoch)`.
-    /// Only rows that carry real display metadata are returned;
-    /// canonical-only rows (`forwarder_id`/`reader_ip` NULL) are skipped rather
-    /// than fabricating keys from `stream_id`.
-    pub fn load_earliest_epochs(&self) -> DbResult<Vec<(String, String, i64)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT forwarder_id, reader_ip, earliest_epoch FROM earliest_epochs
-             WHERE forwarder_id IS NOT NULL AND reader_ip IS NOT NULL
-             ORDER BY forwarder_id, reader_ip",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-            ))
-        })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-
+    /// Load all subscriptions, skipping (with a warning) rows whose identity
+    /// would not survive [`LocalStreamKey::new`]: blank `forwarder_endpoint_id`
+    /// or `stream_id`, or an endpoint id carrying the U+001F key separator.
+    /// The write paths reject such identities, so an invalid row can only come
+    /// from external DB edits or corruption — but every consumer of this
+    /// loader builds a `LocalStreamKey` from the returned rows, so filtering
+    /// here (the single choke point) keeps a bad row from panicking the P2P
+    /// reconcile loop, retention, or the control API.
     pub fn load_stream_subscriptions(&self) -> DbResult<Vec<StreamSubscription>> {
         let mut s = self.conn.prepare(
             "SELECT forwarder_endpoint_id,
@@ -497,7 +474,23 @@ impl Db {
                 reader_ip: r.get(5)?,
             })
         })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        let mut subs = Vec::new();
+        for row in rows {
+            let sub = row?;
+            if sub.forwarder_endpoint_id.trim().is_empty()
+                || sub.forwarder_endpoint_id.contains('\u{1f}')
+                || sub.stream_id.trim().is_empty()
+            {
+                tracing::warn!(
+                    forwarder_endpoint_id = %sub.forwarder_endpoint_id,
+                    stream_id = %sub.stream_id,
+                    "skipping subscription row with invalid stream identity"
+                );
+                continue;
+            }
+            subs.push(sub);
+        }
+        Ok(subs)
     }
     /// Replace the whole subscription set (delete-all-and-reinsert), keeping
     /// each surviving subscription's persisted DBF reader index stable: rows
@@ -702,7 +695,7 @@ impl Db {
 
     pub fn load_stream_cursors(&self) -> DbResult<Vec<StreamCursorRecord>> {
         let mut s = self.conn.prepare(
-            "SELECT stream_id, stream_epoch, last_seq, forwarder_id, reader_ip
+            "SELECT stream_id, stream_epoch, last_seq
              FROM cursors
              ORDER BY stream_id",
         )?;
@@ -711,8 +704,6 @@ impl Db {
                 stream_id: r.get(0)?,
                 stream_epoch: r.get(1)?,
                 last_seq: r.get(2)?,
-                forwarder_id: r.get(3)?,
-                reader_ip: r.get(4)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1404,22 +1395,6 @@ impl Db {
     pub fn delete_all_earliest_epochs(&self) -> DbResult<usize> {
         let count = self.conn.execute("DELETE FROM earliest_epochs", [])?;
         Ok(count)
-    }
-
-    pub fn update_subscription_port(
-        &self,
-        fwd: &str,
-        ip: &str,
-        port: Option<u16>,
-    ) -> DbResult<bool> {
-        let count = self.conn.execute(
-            "UPDATE subscriptions
-             SET local_port_override = ?1
-             WHERE (forwarder_endpoint_id = ?2 AND stream_id = ?3)
-                OR (forwarder_id = ?2 AND reader_ip = ?3)",
-            rusqlite::params![port.map(|p| p as i64), fwd, ip],
-        )?;
-        Ok(count > 0)
     }
 
     pub fn update_stream_subscription_port(
@@ -2209,7 +2184,7 @@ mod tests {
     }
 
     #[test]
-    fn save_stream_earliest_epoch_does_not_fabricate_legacy_reader_ip() {
+    fn save_stream_earliest_epoch_round_trips_canonical_row() {
         let db = Db::open_in_memory().unwrap();
         db.save_stream_earliest_epoch("endpoint-1", "22222222-2222-2222-2222-222222222222", 7)
             .unwrap();
@@ -2229,19 +2204,13 @@ mod tests {
             }]
         );
 
-        // The raw row must NOT store stream_id in reader_ip or
-        // forwarder_endpoint_id in forwarder_id.
-        let (stream_id, fwd_endpoint, forwarder_id, reader_ip): (
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-        ) = db
+        // The raw row stores the encoded local stream key plus the endpoint id.
+        let (stream_id, fwd_endpoint): (String, String) = db
             .conn
             .query_row(
-                "SELECT stream_id, forwarder_endpoint_id, forwarder_id, reader_ip FROM earliest_epochs",
+                "SELECT stream_id, forwarder_endpoint_id FROM earliest_epochs",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
         assert_eq!(
@@ -2249,11 +2218,6 @@ mod tests {
             LocalStreamKey::new("endpoint-1", "22222222-2222-2222-2222-222222222222").as_str()
         );
         assert_eq!(fwd_endpoint, "endpoint-1");
-        assert_eq!(forwarder_id, None);
-        assert_eq!(reader_ip, None);
-
-        // Legacy view must skip canonical-only rows (no fabricated keys).
-        assert!(db.load_earliest_epochs().unwrap().is_empty());
     }
 
     #[test]
@@ -2551,6 +2515,45 @@ mod tests {
     }
 
     #[test]
+    fn load_stream_subscriptions_skips_rows_with_invalid_identity() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[StreamSubscription {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: "stream-1".to_owned(),
+            local_port_override: None,
+            event_type: EventType::Finish,
+            forwarder_id: None,
+            reader_ip: None,
+        }])
+        .unwrap();
+        // Seed invalid rows directly: the write paths validate identity, so
+        // rows like these can only appear via external DB edits/corruption.
+        for (endpoint_id, stream_id) in [
+            ("", "stream-blank-endpoint"),
+            ("   ", "stream-ws-endpoint"),
+            ("endpoint-blank-stream", ""),
+            ("endpoint-ws-stream", "   "),
+            ("endpoint\u{1f}sep", "stream-sep-endpoint"),
+        ] {
+            db.conn
+                .execute(
+                    "INSERT INTO subscriptions (forwarder_endpoint_id, stream_id) VALUES (?1, ?2)",
+                    rusqlite::params![endpoint_id, stream_id],
+                )
+                .unwrap();
+        }
+
+        let subs = db.load_stream_subscriptions().unwrap();
+        assert_eq!(
+            subs.iter()
+                .map(|s| (s.forwarder_endpoint_id.as_str(), s.stream_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("endpoint-1", "stream-1")],
+            "invalid rows must be skipped and valid rows kept"
+        );
+    }
+
+    #[test]
     fn replace_stream_subscriptions_persists_canonical_identity_without_fake_legacy_keys() {
         let mut db = Db::open_in_memory().unwrap();
         db.replace_stream_subscriptions(&[StreamSubscription {
@@ -2615,48 +2618,30 @@ mod tests {
     }
 
     #[test]
-    fn update_subscription_port_changes_existing() {
-        let mut db = Db::open_in_memory().unwrap();
-        db.replace_stream_subscriptions(&[StreamSubscription {
-            forwarder_endpoint_id: "endpoint-1".to_owned(),
-            stream_id: "stream-1".to_owned(),
-            local_port_override: None,
-            event_type: EventType::Finish,
-            forwarder_id: Some("f1".to_owned()),
-            reader_ip: Some("10.0.0.1".to_owned()),
-        }])
-        .unwrap();
-        let updated = db
-            .update_subscription_port("f1", "10.0.0.1", Some(9000))
-            .unwrap();
-        assert!(updated);
-        let subs = db.load_stream_subscriptions().unwrap();
-        assert_eq!(subs[0].local_port_override, Some(9000));
-    }
-
-    #[test]
-    fn update_subscription_port_clears_override() {
+    fn update_stream_subscription_port_clears_override() {
         let mut db = Db::open_in_memory().unwrap();
         db.replace_stream_subscriptions(&[StreamSubscription {
             forwarder_endpoint_id: "endpoint-1".to_owned(),
             stream_id: "stream-1".to_owned(),
             local_port_override: Some(9000),
             event_type: EventType::Finish,
-            forwarder_id: Some("f1".to_owned()),
-            reader_ip: Some("10.0.0.1".to_owned()),
+            forwarder_id: None,
+            reader_ip: None,
         }])
         .unwrap();
-        let updated = db.update_subscription_port("f1", "10.0.0.1", None).unwrap();
+        let updated = db
+            .update_stream_subscription_port("endpoint-1", "stream-1", None)
+            .unwrap();
         assert!(updated);
         let subs = db.load_stream_subscriptions().unwrap();
         assert_eq!(subs[0].local_port_override, None);
     }
 
     #[test]
-    fn update_subscription_port_returns_false_for_missing() {
+    fn update_stream_subscription_port_returns_false_for_missing() {
         let db = Db::open_in_memory().unwrap();
         let updated = db
-            .update_subscription_port("f1", "10.0.0.1", Some(9000))
+            .update_stream_subscription_port("endpoint-1", "stream-1", Some(9000))
             .unwrap();
         assert!(!updated);
     }

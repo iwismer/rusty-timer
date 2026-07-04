@@ -155,7 +155,11 @@ fn subscriptions_stored_and_loaded() {
 fn cursor_stored_and_loaded() {
     let d = tempfile::tempdir().unwrap();
     let c = open_db(&d.path().join("r.db"));
-    c.execute("INSERT INTO cursors (stream_id, forwarder_id, reader_ip, stream_epoch, last_seq) VALUES (?1, ?2, ?3, ?4, ?5)", rusqlite::params!["stream-1", "f", "i", 3i64, 17i64]).unwrap();
+    c.execute(
+        "INSERT INTO cursors (stream_id, stream_epoch, last_seq) VALUES (?1, ?2, ?3)",
+        rusqlite::params!["stream-1", 3i64, 17i64],
+    )
+    .unwrap();
     let (e, s): (i64, i64) = c
         .query_row(
             "SELECT stream_epoch, last_seq FROM cursors WHERE stream_id='stream-1'",

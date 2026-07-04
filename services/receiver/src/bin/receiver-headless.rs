@@ -161,6 +161,11 @@ fn parse_args(
                 let value = args
                     .next()
                     .ok_or_else(|| "--p2p-secret-key-path requires a path".to_owned())?;
+                // Known limitation: the path round-trips through
+                // `to_string_lossy` here and `trim` in `p2p_config_from_lookup`,
+                // so non-UTF-8 paths are lossily converted and
+                // whitespace-padded paths are altered. Shared with the
+                // RT_P2P_SECRET_KEY_PATH env path, which is a string anyway.
                 cli.insert(
                     ENV_P2P_SECRET_KEY_PATH,
                     value.to_string_lossy().into_owned(),

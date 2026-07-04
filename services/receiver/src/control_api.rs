@@ -5301,6 +5301,17 @@ mod tests {
                 )
                 .await,
             );
+            assert_bad_request(
+                put_earliest_epoch(
+                    &state,
+                    EarliestEpochRequest {
+                        forwarder_endpoint_id: forwarder_endpoint_id.to_owned(),
+                        stream_id: stream_id.to_owned(),
+                        earliest_epoch: 7,
+                    },
+                )
+                .await,
+            );
         }
     }
 
@@ -5359,10 +5370,6 @@ mod tests {
                     earliest_epoch: 7,
                 }]
             );
-            // The legacy (forwarder_id, reader_ip) view must NOT surface the
-            // canonical row: stream_id must never be persisted as reader_ip,
-            // nor forwarder_endpoint_id as forwarder_id.
-            assert!(db.load_earliest_epochs().unwrap().is_empty());
         }
 
         admin_reset_earliest_epoch(
@@ -5377,7 +5384,6 @@ mod tests {
 
         let db = state.db.lock().await;
         assert!(db.load_stream_earliest_epochs().unwrap().is_empty());
-        assert!(db.load_earliest_epochs().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -45,6 +45,12 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     stream_id             TEXT NOT NULL,
     local_port_override   INTEGER,
     event_type            TEXT NOT NULL DEFAULT 'finish',
+    -- Optional display metadata supplied by the subscribing client. These are
+    -- FUNCTIONAL, not legacy residue: `reader_ip` drives default local-port
+    -- mapping (ports.rs `default_port`) and UI reader display; `forwarder_id`
+    -- feeds the UI display name and the in-memory stream-count key
+    -- (StreamEntry/StreamDelta `forwarder_id`). When NULL, readers fall back
+    -- to deriving them from `stream_id` / `forwarder_endpoint_id`.
     forwarder_id          TEXT,
     reader_ip             TEXT,
     -- Persisted DBF READER digit (0..=9; the DBF READER field is one
@@ -99,8 +105,6 @@ CREATE TABLE IF NOT EXISTS announcer_source_fence (
 CREATE TABLE IF NOT EXISTS cursors (
     stream_id    TEXT PRIMARY KEY,
     last_seq     BIGINT NOT NULL,
-    forwarder_id TEXT,
-    reader_ip    TEXT,
     stream_epoch BIGINT
 );
 
@@ -117,16 +121,11 @@ CREATE TABLE IF NOT EXISTS gap_markers (
 CREATE INDEX IF NOT EXISTS idx_gap_markers_stream_created
     ON gap_markers (stream_id, created_unix_ms);
 
--- Earliest-epoch overrides keyed by canonical P2P stream_id. The optional
--- forwarder_id/reader_ip columns hold optional display metadata only when a
--- compatibility caller supplied it; canonical P2P callers leave them NULL so
--- no runtime fabricates a (forwarder_id, reader_ip) key from a stream_id.
+-- Earliest-epoch overrides keyed by canonical P2P stream_id.
 CREATE TABLE IF NOT EXISTS earliest_epochs (
     stream_id             TEXT PRIMARY KEY,
     forwarder_endpoint_id TEXT NOT NULL,
-    earliest_epoch        BIGINT NOT NULL,
-    forwarder_id          TEXT,
-    reader_ip             TEXT
+    earliest_epoch        BIGINT NOT NULL
 );
 
 -- Per-forwarder connect intent. Absence of a row means the default contract
