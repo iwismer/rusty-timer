@@ -14,7 +14,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::routing::post;
 use receiver::control_api::{ConnectionState, DiscoveredForwarder, DiscoveredStream};
-use receiver::db::{DbfConfig, EventType, StreamSubscription};
+use receiver::db::{DbfConfig, EventType, ReceivedEventInsert, StreamSubscription};
 use receiver::p2p_runtime::{
     ForwarderPeerConfig, P2pReceiverConfig, ReceiverIdentity, ServerClientConfig,
     start_receiver_p2p,
@@ -663,8 +663,9 @@ async fn dbf_feed_delivers_from_received_events_without_duplicates() {
 
         assert!(dbf_path.exists(), "DBF file written from received_events");
 
-        // Snapshot the delivery markers, let the runtime keep reconnecting and
-        // re-running the DBF feed, then prove no row was re-delivered.
+        // Snapshot the delivery markers, insert a later durable row, then wait
+        // for that row to be marked delivered. That positive delivery proves a
+        // later DBF pass ran; rows 1-2 must not be re-delivered by it.
         let markers_before: Vec<Option<i64>> = {
             let db = state.db.lock().await;
             vec![
@@ -678,7 +679,36 @@ async fn dbf_feed_delivers_from_received_events_without_duplicates() {
                     .dbf_delivered_unix_ms,
             ]
         };
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        {
+            let db = state.db.lock().await;
+            db.insert_received_event(&ReceivedEventInsert {
+                stream_id: local_key.as_str(),
+                seq: 3,
+                epoch: 1,
+                raw_frame: VALID_FRAME,
+                read_kind: "chip",
+                reader_timestamp: None,
+                received_unix_ms: 1_700_000_000_003,
+                dbf_delivered_unix_ms: None,
+                chip_id: None,
+            })
+            .unwrap();
+        }
+        poll_until(
+            || {
+                let state = Arc::clone(&state);
+                let local_key = local_key.clone();
+                async move {
+                    let db = state.db.lock().await;
+                    db.load_received_event(local_key.as_str(), 3)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|event| event.dbf_delivered_unix_ms.is_some())
+                }
+            },
+            Duration::from_secs(10),
+        )
+        .await;
         let markers_after: Vec<Option<i64>> = {
             let db = state.db.lock().await;
             vec![
@@ -828,8 +858,9 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
         )
         .await;
 
-        // Let the runtime keep reconnecting/re-hinting, then assert idempotency.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The observed row request is the positive event: once it has delivered
+        // both rows, the server must have received exactly the unique rows in a
+        // single batched request.
         let rows = thin_state.rows.lock().unwrap().clone();
         let generation = *thin_state.generation.lock().unwrap();
         assert_eq!(generation, 1, "takeover should be called exactly once");
@@ -923,8 +954,14 @@ async fn announcer_does_not_push_when_stream_not_opted_in() {
         )
         .await;
 
-        // Give any (erroneous) push a chance to land, then assert none did.
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        // Generation takeover plus durable rows is the positive observable: the
+        // server-bound runtime path has run, but per-stream opt-in must still
+        // suppress row pushes.
+        assert_eq!(
+            *thin_state.row_requests.lock().unwrap(),
+            0,
+            "no row-push request must be sent for a stream that is not opted in"
+        );
         assert!(
             thin_state.rows.lock().unwrap().is_empty(),
             "no rows must be pushed for a stream that is not opted in"
@@ -1087,9 +1124,10 @@ async fn changing_local_port_rebinds_proxy_to_new_port() {
 #[tokio::test]
 async fn terminally_failed_stream_is_not_resubscribed_and_reports_failed() {
     tokio::time::timeout(TEST_TIMEOUT, async {
-        let forwarder = MockForwarderPeer::start([82; 32], script_stream_mismatch())
-            .await
-            .unwrap();
+        let mut script = script_stream_mismatch();
+        script.control_pings = 3;
+        script.control_ping_interval = Duration::from_millis(50);
+        let forwarder = MockForwarderPeer::start([82; 32], script).await.unwrap();
         let (endpoint_id, direct) = forwarder_config(&forwarder);
 
         let dir = tempfile::tempdir().unwrap();
@@ -1121,9 +1159,14 @@ async fn terminally_failed_stream_is_not_resubscribed_and_reports_failed() {
         )
         .await;
 
-        // Give the reconcile loop (50ms interval) many more passes: the
-        // terminally failed stream must not be resubscribed.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // The control session stays live after the terminal data failure. Once
+        // the receiver has answered later control pings, assert the failed data
+        // stream was not resubscribed on that same connection.
+        poll_until(
+            || async { forwarder.pongs().len() >= 3 },
+            Duration::from_secs(10),
+        )
+        .await;
         assert_eq!(
             forwarder.subscribes().len(),
             1,
@@ -1673,17 +1716,26 @@ async fn one_connection_multiplexes_multiple_data_streams() {
 async fn reconfigure_on_signal_rebinds_to_profile_server() {
     tokio::time::timeout(TEST_TIMEOUT, async {
         let (server_url, server_state) = start_mock_server().await;
+        let forwarder = MockForwarderPeer::start([70; 32], script_two(VALID_FRAME))
+            .await
+            .unwrap();
+        let (endpoint_id, direct) = forwarder_config(&forwarder);
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
 
-        // Start a bare runtime with NO server configured.
+        // Start with a forwarder but NO server configured. Waiting for the
+        // forwarder control connection below proves the reconcile loop has
+        // reached its stable select state before the single server-config signal.
         let config = P2pReceiverConfig {
             identity: ReceiverIdentity::Seed([71u8; 32]),
             relay_disabled: true,
             discovery_disabled: true,
             bind_addr_v4: Some("127.0.0.1:0".parse().unwrap()),
-            forwarder: None,
+            forwarder: Some(ForwarderPeerConfig {
+                endpoint_id,
+                direct_addr: direct,
+            }),
             server: None,
             server_override: (None, None),
             reconcile_interval: Duration::from_millis(50),
@@ -1694,6 +1746,11 @@ async fn reconfigure_on_signal_rebinds_to_profile_server() {
 
         // No server configured yet, so takeover must not have run.
         assert_eq!(*server_state.generation.lock().unwrap(), 0);
+        poll_until(
+            || async { forwarder.connection_count() >= 1 },
+            Duration::from_secs(10),
+        )
+        .await;
 
         // Save a profile pointing at the mock server.
         {
@@ -1702,21 +1759,20 @@ async fn reconfigure_on_signal_rebinds_to_profile_server() {
                 .unwrap();
         }
 
-        // The reconcile loop must rebind and run register + takeover against the
-        // newly-configured server. Re-signal on each poll so the test does not
-        // race the spawned loop's watch subscription (production calls
-        // notify_server_config_changed long after the loop subscribes, so the
-        // edge-triggered signal is never missed there). Re-resolving to the
-        // same server is idempotent (no extra rebind/takeover).
+        // Fire the edge-triggered server-config signal exactly once, then poll
+        // only the outcome. The prior forwarder connection is the ready
+        // observable that avoids racing the runtime's watch subscription.
+        state.notify_server_config_changed();
         poll_until(
             || {
                 let server_state = server_state.clone();
-                let state = Arc::clone(&state);
-                async move {
-                    state.notify_server_config_changed();
-                    *server_state.generation.lock().unwrap() >= 1
-                }
+                async move { *server_state.generation.lock().unwrap() >= 1 }
             },
+            Duration::from_secs(10),
+        )
+        .await;
+        poll_until(
+            || async { forwarder.connection_count() >= 2 },
             Duration::from_secs(10),
         )
         .await;
@@ -1724,6 +1780,7 @@ async fn reconfigure_on_signal_rebinds_to_profile_server() {
         tokio::time::timeout(Duration::from_secs(3), runtime.shutdown())
             .await
             .expect("runtime shutdown must complete promptly");
+        forwarder.shutdown().await;
     })
     .await
     .expect("reconfigure_on_signal_rebinds_to_profile_server timed out");

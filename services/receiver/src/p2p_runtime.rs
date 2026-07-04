@@ -2197,8 +2197,10 @@ mod tests {
     use crate::db::{EventType, ReceivedEventInsert};
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// A valid IPICO chip-read frame (chip id `000000012345`).
+    /// Valid IPICO chip-read frames with distinct chip ids.
     const SAMPLE_FRAME: &[u8] = b"aa400000000123450a2a01123018455927a7";
+    const SAMPLE_FRAME_B: &[u8] = b"aa400000000123460a2a01123018455927a8";
+    const SAMPLE_FRAME_C: &[u8] = b"aa400000000123470a2a01123018455927a9";
 
     /// A [`StreamWorker`] whose only task ignores the shutdown signal, so
     /// `stop` must ride out its full 2s abort timeout.
@@ -2718,7 +2720,7 @@ mod tests {
     }
 
     fn insert_chip_event(db: &Db, stream_id: &str, seq: i64, received_unix_ms: i64) {
-        insert_chip_event_in_epoch(db, stream_id, seq, 1, received_unix_ms);
+        insert_chip_event_with_frame(db, stream_id, seq, 1, received_unix_ms, SAMPLE_FRAME);
     }
 
     fn insert_chip_event_in_epoch(
@@ -2728,11 +2730,22 @@ mod tests {
         epoch: i64,
         received_unix_ms: i64,
     ) {
+        insert_chip_event_with_frame(db, stream_id, seq, epoch, received_unix_ms, SAMPLE_FRAME);
+    }
+
+    fn insert_chip_event_with_frame(
+        db: &Db,
+        stream_id: &str,
+        seq: i64,
+        epoch: i64,
+        received_unix_ms: i64,
+        raw_frame: &[u8],
+    ) {
         db.insert_received_event(&ReceivedEventInsert {
             stream_id,
             seq,
             epoch,
-            raw_frame: SAMPLE_FRAME,
+            raw_frame,
             read_kind: "chip",
             reader_timestamp: None,
             received_unix_ms,
@@ -3182,6 +3195,31 @@ mod tests {
         digits
     }
 
+    fn dbf_reader_chip_pairs(path: &std::path::Path) -> Vec<(String, String)> {
+        let Ok(mut reader) = dbase::Reader::from_path(path) else {
+            return Vec::new();
+        };
+        let Ok(records) = reader.read() else {
+            return Vec::new();
+        };
+        let mut pairs: Vec<(String, String)> = records
+            .iter()
+            .filter_map(|r| {
+                let reader = match r.get("READER") {
+                    Some(dbase::FieldValue::Character(Some(s))) => s.trim().to_owned(),
+                    _ => return None,
+                };
+                let chip = match r.get("CHIP") {
+                    Some(dbase::FieldValue::Character(Some(s))) => s.trim().to_owned(),
+                    _ => return None,
+                };
+                Some((reader, chip))
+            })
+            .collect();
+        pairs.sort();
+        pairs
+    }
+
     /// Removing stream A frees its reader index for a new stream C. The
     /// subscription-change signal must force a cross-stream regenerate so A's
     /// stale rows (carrying the freed digit) are dropped, while B keeps its
@@ -3216,7 +3254,14 @@ mod tests {
             .unwrap();
             insert_chip_event(&db, key_a.as_str(), 1, 1_700_000_000_100);
             insert_chip_event(&db, key_a.as_str(), 2, 1_700_000_000_200);
-            insert_chip_event(&db, key_b.as_str(), 1, 1_700_000_000_300);
+            insert_chip_event_with_frame(
+                &db,
+                key_b.as_str(),
+                1,
+                1,
+                1_700_000_000_300,
+                SAMPLE_FRAME_B,
+            );
         }
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -3242,21 +3287,33 @@ mod tests {
                 test_sub("fwd-c", "127.0.0.1:11003"),
             ])
             .unwrap();
-            insert_chip_event(&db, key_c.as_str(), 1, 1_700_000_000_400);
+            insert_chip_event_with_frame(
+                &db,
+                key_c.as_str(),
+                1,
+                1,
+                1_700_000_000_400,
+                SAMPLE_FRAME_C,
+            );
         }
         state.notify_subscriptions_changed();
 
         // The regenerate drops A's two stale rows; B keeps digit 1 and C
         // reuses the freed digit 0.
+        let expected_pairs = vec![
+            ("0".to_owned(), "000000012347".to_owned()),
+            ("1".to_owned(), "000000012346".to_owned()),
+        ];
         let regenerated = poll_async(Duration::from_secs(10), || {
             let dbf_path = dbf_path.clone();
-            async move { dbf_reader_digits(&dbf_path) == ["0", "1"] }
+            let expected_pairs = expected_pairs.clone();
+            async move { dbf_reader_chip_pairs(&dbf_path) == expected_pairs }
         })
         .await;
         assert!(
             regenerated,
-            "subscription change must regenerate with stable indices, got {:?}",
-            dbf_reader_digits(&dbf_path)
+            "subscription change must regenerate with stable indices and stream membership, got {:?}",
+            dbf_reader_chip_pairs(&dbf_path)
         );
 
         let _ = shutdown_tx.send(true);

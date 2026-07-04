@@ -779,8 +779,10 @@ async fn reap_finished_data_task(
             }
         }
         // Cancelled outside `stop_data_task` (should not happen): treat as
-        // transient, matching the previous blind-respawn behavior.
+        // transient, matching the previous blind-respawn behavior. Cancellation
+        // is still a non-panic exit, so reset the consecutive panic counter.
         Err(join_error) => {
+            panic_exits.remove(stream_key);
             warn!(%endpoint_id, stream_id = %task.stream.stream_id, %join_error, "forwarder data subscription task ended abnormally");
         }
     }
@@ -921,7 +923,9 @@ mod tests {
         AppState, ConfigCommand, ForwarderConnState, ReaderCommand, get_connections,
         get_forwarder_config, restart_forwarder, set_forwarder_config,
     };
-    use crate::p2p_session::{BackoffConfig, SessionOutcome, SessionStatusReporter};
+    use crate::p2p_session::{
+        BackoffConfig, P2pSessionError, SessionOutcome, SessionStatusReporter,
+    };
     use crate::stream_key::LocalStreamKey;
 
     use super::{
@@ -1437,6 +1441,30 @@ mod tests {
         assert!(
             panic_exits.is_empty(),
             "a normal exit must reset the consecutive panic counter"
+        );
+
+        // A non-panic JoinError (cancellation) is also non-panic termination,
+        // so it must reset the consecutive panic counter before respawning.
+        panic_exits.insert(stream_key.clone(), MAX_CONSECUTIVE_PANIC_EXITS - 1);
+        let cancelled_handle = tokio::spawn(async {
+            std::future::pending::<Result<SessionOutcome, P2pSessionError>>().await
+        });
+        cancelled_handle.abort();
+        reap_finished_data_task(
+            endpoint_id,
+            &reporter,
+            &stream_key,
+            DataTask {
+                stream: stream.clone(),
+                handle: cancelled_handle,
+            },
+            &mut failed,
+            &mut panic_exits,
+        )
+        .await;
+        assert!(
+            panic_exits.is_empty(),
+            "a cancelled data task must reset the consecutive panic counter"
         );
 
         // Only CONSECUTIVE panics trip the cap: a full run of panics is needed
