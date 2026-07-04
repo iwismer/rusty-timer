@@ -6,6 +6,7 @@
 //! local proxy, durable DBF feed, and server announcer push off post-commit
 //! durable hints.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,6 +22,7 @@ use receiver::p2p_runtime::{
 };
 use receiver::stream_key::LocalStreamKey;
 use receiver::ui_events::ReceiverUiEvent;
+use receiver::writer::PreparedRecord;
 use rt_p2p_protocol::{
     EventBatch, Hello, MAX_FRAME_BYTES, ReadRecord, StreamCatalog, StreamEntry, SubscribeOk,
 };
@@ -71,6 +73,19 @@ fn record(seq: u64, raw: &[u8]) -> ReadRecord {
         read_kind: "chip".to_owned(),
         reader_timestamp: 0,
         received_unix_ms: 1_700_000_000_000 + i64::try_from(seq).unwrap(),
+    }
+}
+
+fn prepared_record(seq: i64, raw: &[u8]) -> PreparedRecord {
+    PreparedRecord {
+        seq,
+        epoch: 1,
+        raw_frame: raw.to_vec(),
+        read_kind: "chip".to_owned(),
+        reader_timestamp: None,
+        received_unix_ms: 1_700_000_000_000 + seq,
+        received_unix_ms_explicit: true,
+        chip_id: "000000012345".to_owned(),
     }
 }
 
@@ -744,7 +759,20 @@ struct ServerState {
     rows: Arc<Mutex<Vec<PushedRowKey>>>,
     /// Number of `POST /announcer/rows` requests received.
     row_requests: Arc<Mutex<u64>>,
+    /// Number of `POST /announcer/rows` requests received for each wire stream id.
+    row_requests_by_stream: Arc<Mutex<HashMap<String, u64>>>,
     generation: Arc<Mutex<u64>>,
+}
+
+impl ServerState {
+    fn row_requests_for_stream(&self, stream_id: &str) -> u64 {
+        self.row_requests_by_stream
+            .lock()
+            .unwrap()
+            .get(stream_id)
+            .copied()
+            .unwrap_or_default()
+    }
 }
 
 async fn register_handler() -> Json<serde_json::Value> {
@@ -771,6 +799,12 @@ async fn rows_handler(
         .unwrap_or_default()
         .to_owned();
     let stream_id = body["stream_id"].as_str().unwrap_or_default().to_owned();
+    *state
+        .row_requests_by_stream
+        .lock()
+        .unwrap()
+        .entry(stream_id.clone())
+        .or_default() += 1;
     let generation = body["announcer_source_generation"]
         .as_u64()
         .unwrap_or_default();
@@ -848,7 +882,7 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
             .await
             .unwrap();
 
-        // Wait until both rows have been pushed.
+        // Wait until both initial rows have been pushed.
         poll_until(
             || {
                 let rows = Arc::clone(&thin_state.rows);
@@ -876,8 +910,55 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
                 (endpoint_id.clone(), STREAM_ID.to_owned(), 1),
                 (endpoint_id.clone(), STREAM_ID.to_owned(), 2)
             ],
-            "each composite (endpoint, stream_id, seq) pushed exactly once, decoded \
+            "each initial composite (endpoint, stream_id, seq) pushed exactly once, decoded \
              from the local key (no U+001F separator on the wire)"
+        );
+        assert_eq!(
+            *thin_state.row_requests.lock().unwrap(),
+            1,
+            "a two-row backlog must drain in one batched request"
+        );
+
+        // Insert a later durable row through the writer, then force a replaying
+        // subscription to emit a subsequent durable hint. The hint should push
+        // only the new row; seqs 1-2 must stay marked and must not be re-sent.
+        state
+            .writer
+            .persist_batch(
+                local_key.as_str().to_owned(),
+                vec![prepared_record(3, VALID_FRAME)],
+            )
+            .await
+            .unwrap();
+        state.request_forwarder_reconnect(endpoint_id.clone()).await;
+        poll_until(
+            || {
+                let rows = Arc::clone(&thin_state.rows);
+                async move {
+                    rows.lock()
+                        .unwrap()
+                        .iter()
+                        .any(|(_, stream_id, seq, _)| stream_id.as_str() == STREAM_ID && *seq == 3)
+                }
+            },
+            Duration::from_secs(10),
+        )
+        .await;
+
+        let rows = thin_state.rows.lock().unwrap().clone();
+        let mut keys: Vec<(String, String, u64)> = rows
+            .iter()
+            .map(|(endpoint, s, seq, _)| (endpoint.clone(), s.clone(), *seq))
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                (endpoint_id.clone(), STREAM_ID.to_owned(), 1),
+                (endpoint_id.clone(), STREAM_ID.to_owned(), 2),
+                (endpoint_id.clone(), STREAM_ID.to_owned(), 3)
+            ],
+            "subsequent durable hints must push only newly pending rows"
         );
         for (endpoint, wire_id, _, row_gen) in &rows {
             assert_eq!(*row_gen, 1, "rows fenced to the taken-over generation");
@@ -886,12 +967,10 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
                 "encoded LocalStreamKey must not cross HTTP"
             );
         }
-        // Both rows were durable before the push worker drained them, so the
-        // backlog must arrive as a single batched request.
         assert_eq!(
             *thin_state.row_requests.lock().unwrap(),
-            1,
-            "a two-row backlog must drain in one batched request"
+            2,
+            "expected exactly the initial backlog request plus the later single-row request"
         );
 
         runtime.shutdown().await;
@@ -907,24 +986,33 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
 #[tokio::test]
 async fn announcer_does_not_push_when_stream_not_opted_in() {
     tokio::time::timeout(TEST_TIMEOUT, async {
-        let forwarder = MockForwarderPeer::start([88; 32], script_two(VALID_FRAME))
-            .await
-            .unwrap();
+        let mut script = script_two(VALID_FRAME);
+        script.echo_subscribed_stream_id = true;
+        let forwarder = MockForwarderPeer::start([88; 32], script).await.unwrap();
         let (endpoint_id, direct) = forwarder_config(&forwarder);
         let (thin_url, thin_state) = start_mock_server().await;
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
         let sub = stream_subscription(&endpoint_id, None);
+        let sibling_sub = StreamSubscription {
+            stream_id: STREAM_ID_2.to_owned(),
+            reader_ip: Some(STREAM_ID_2.to_owned()),
+            ..stream_subscription(&endpoint_id, None)
+        };
         let local_key = local_stream_key(&sub);
+        let sibling_key = local_stream_key(&sibling_sub);
         {
             let mut db = state.db.lock().await;
-            db.replace_stream_subscriptions(&[sub]).unwrap();
-            // Global toggle on, but the stream is NOT opted in.
+            db.replace_stream_subscriptions(&[sub, sibling_sub])
+                .unwrap();
+            // Global toggle on, but only the sibling stream is opted in.
             db.set_announcer_enabled(true).unwrap();
+            db.set_stream_announcer_publish(sibling_key.as_str(), true)
+                .unwrap();
         }
 
-        let (mut config, _sub) = base_config(endpoint_id, direct, 89, None);
+        let (mut config, _sub) = base_config(endpoint_id.clone(), direct, 89, None);
         config.server = Some(ServerClientConfig {
             url: thin_url,
             token: "secret-token".to_owned(),
@@ -933,37 +1021,61 @@ async fn announcer_does_not_push_when_stream_not_opted_in() {
             .await
             .unwrap();
 
-        // Wait until events are durable and the generation has been taken over,
-        // proving the server path ran end-to-end.
+        // Wait until both streams are durable, generation has been taken over,
+        // and the opted-in sibling has pushed rows. That proves the server push
+        // pipeline was live end-to-end before asserting absence for this stream.
         poll_until(
             || {
                 let state = Arc::clone(&state);
                 let thin_state = thin_state.clone();
                 let local_key = local_key.clone();
+                let sibling_key = sibling_key.clone();
                 async move {
                     let durable = {
                         let db = state.db.lock().await;
-                        db.load_received_events(local_key.as_str())
+                        let main_durable = db
+                            .load_received_events(local_key.as_str())
                             .map(|e| e.len() >= 2)
-                            .unwrap_or(false)
+                            .unwrap_or(false);
+                        let sibling_durable = db
+                            .load_received_events(sibling_key.as_str())
+                            .map(|e| e.len() >= 2)
+                            .unwrap_or(false);
+                        main_durable && sibling_durable
                     };
-                    durable && *thin_state.generation.lock().unwrap() >= 1
+                    let sibling_pushed = thin_state
+                        .rows
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|(_, stream_id, _, _)| stream_id.as_str() == STREAM_ID_2)
+                        .count()
+                        >= 2;
+                    durable
+                        && *thin_state.generation.lock().unwrap() >= 1
+                        && sibling_pushed
+                        && thin_state.row_requests_for_stream(STREAM_ID_2) >= 1
                 }
             },
             Duration::from_secs(10),
         )
         .await;
 
-        // Generation takeover plus durable rows is the positive observable: the
-        // server-bound runtime path has run, but per-stream opt-in must still
-        // suppress row pushes.
+        // The sibling stream's successful push is the positive observable: the
+        // server-bound push pipeline was live, but per-stream opt-in must still
+        // suppress row pushes for this stream.
         assert_eq!(
-            *thin_state.row_requests.lock().unwrap(),
+            thin_state.row_requests_for_stream(STREAM_ID),
             0,
             "no row-push request must be sent for a stream that is not opted in"
         );
         assert!(
-            thin_state.rows.lock().unwrap().is_empty(),
+            thin_state
+                .rows
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(_, stream_id, _, _)| stream_id.as_str() != STREAM_ID),
             "no rows must be pushed for a stream that is not opted in"
         );
 
