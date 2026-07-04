@@ -335,6 +335,8 @@ async fn admin_reset_all_cursors_deletes_all() {
     }
     let result = control_api::admin_reset_all_cursors(&state).await.unwrap();
     assert_eq!(result["deleted"], 2);
+    let remaining = state.db.lock().await.load_stream_cursors().unwrap();
+    assert!(remaining.is_empty(), "all stream cursors must be deleted");
 }
 
 #[tokio::test]
@@ -349,6 +351,11 @@ async fn admin_reset_all_earliest_epochs_deletes_all() {
         .await
         .unwrap();
     assert_eq!(result["deleted"], 1);
+    let remaining = state.db.lock().await.load_stream_earliest_epochs().unwrap();
+    assert!(
+        remaining.is_empty(),
+        "all stream earliest epochs must be deleted"
+    );
 }
 
 #[tokio::test]
@@ -399,6 +406,8 @@ async fn admin_purge_subscriptions_deletes_all() {
         .await
         .unwrap();
     assert_eq!(result["deleted"], 1);
+    let remaining = state.db.lock().await.load_stream_subscriptions().unwrap();
+    assert!(remaining.is_empty(), "all subscriptions must be deleted");
 }
 
 #[tokio::test]
@@ -487,6 +496,20 @@ async fn admin_factory_reset_clears_everything() {
     let profile = control_api::get_profile(&state).await.unwrap();
     assert_eq!(profile.server_url, "");
     assert_eq!(profile.token, "");
+
+    let db = state.db.lock().await;
+    assert!(
+        db.load_stream_subscriptions().unwrap().is_empty(),
+        "factory reset must delete subscriptions"
+    );
+    assert!(
+        db.load_stream_cursors().unwrap().is_empty(),
+        "factory reset must delete stream cursors"
+    );
+    assert!(
+        db.load_stream_earliest_epochs().unwrap().is_empty(),
+        "factory reset must delete earliest epochs"
+    );
 }
 
 #[tokio::test]
