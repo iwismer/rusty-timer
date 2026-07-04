@@ -292,7 +292,7 @@ The manual action (D) takes `dir` as an argument and works regardless of the
 | Bib in participant table with no chip | Fine; no chip lookup entry. |
 | Chip read matches nothing (truly unknown chip) | Resolver returns `None`; the read is displayed with its raw `chip_id` and no bib/name. This is what satisfies "show the unknown chip with its ID" — no synthetic participant is created. |
 | Encoding / accented names | Decode latin1/codepage explicitly. |
-| Manual import (D) racing the poll (B) | Both call `replace_* → reload_chip_lookup` under `state.db.lock()`, so writes serialize; last-writer-wins is benign. Copy-then-parse of the 3 files is **not** atomic w.r.t. RD's writes, hence the cross-file-skew handling above. |
+| Manual import (D) racing the poll (B) | Both call `replace_* → reload_chip_lookup` under `state.storage.db.lock()`, so writes serialize; last-writer-wins is benign. Copy-then-parse of the 3 files is **not** atomic w.r.t. RD's writes, hence the cross-file-skew handling above. |
 | Stale files from a prior event | Out of scope to auto-detect; operator points `dir` at the live event. Optionally cross-check `EVENTNM.DBF`/`DIVISION.DIVEVENT` and surface it in the UI. |
 
 ## 9. Testing (deterministic, per repo norms)

@@ -1447,7 +1447,7 @@ async fn run_ui_projection_worker(
     let mut dirty = proj.total > 0;
     let mut needs_rebuild = false;
     // (epoch → seqs) folded since the last tick, mirrored into the shared
-    // `state.stream_counts` cache on emit.
+    // `state.ui.stream_counts` cache on emit.
     let mut pending_counts: HashMap<i64, Vec<i64>> = HashMap::new();
     let mut tick = tokio::time::interval(UI_PROJECTION_EMIT_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1508,8 +1508,8 @@ async fn run_ui_projection_worker(
 }
 
 /// One-time projection rebuild from the durable store: seeds the in-memory
-/// [`StreamProjection`] and replaces the shared `state.stream_counts` entry so
-/// status/UI totals survive a restart. Returns `None` on a DB error (the
+/// [`StreamProjection`] and replaces the shared `state.ui.stream_counts`
+/// entry so status/UI totals survive a restart. Returns `None` on a DB error (the
 /// worker keeps its current state and retries on the next overflow).
 async fn rebuild_stream_projection(
     state: &Arc<AppState>,

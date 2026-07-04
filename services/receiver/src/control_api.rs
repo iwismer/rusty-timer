@@ -337,8 +337,8 @@ pub enum ShutdownSignal {
 ///
 /// Lock rules: `db` is a **tokio** `Mutex` (await-safe; guards may be held
 /// across `.await`). `writer` and `read_source` synchronize internally.
-/// Existing code takes std-mutex guards from other groups only *while* the
-/// `db` lock is already held (never awaits `db` with a std guard live).
+/// When a std-mutex guard and the `db` guard are held together, `db` is
+/// acquired first; code never awaits `db` while a std guard is live.
 pub struct StorageHandles {
     /// Cold control-plane SQLite connection.
     pub db: Arc<Mutex<Db>>,
@@ -414,8 +414,8 @@ pub struct ForwarderControl {
 
 /// Watch channels and counters that coordinate the runtime workers.
 ///
-/// Lock rules: everything here is lock-free (`watch` channels and atomics)
-/// and safe to use from any context, sync or async. The `_*_keepalive`
+/// Lock rules: no caller-held guards (`watch` channels and atomics); safe
+/// to use from any context, sync or async. The `_*_keepalive`
 /// receivers exist solely so a `send()` on the paired sender never fails
 /// for lack of subscribers; they are never read.
 pub struct Signals {
@@ -488,9 +488,9 @@ pub struct AppState {
 
 impl AppState {
     /// Test-only convenience constructor: the state carries a *disconnected*
-    /// writer (every `state.writer` call fails). Tests that persist through
-    /// the writer must use [`AppState::new_for_test`], which shares one
-    /// temp-file DB between `state.db` and a live writer thread.
+    /// writer (every `state.storage.writer` call fails). Tests that persist
+    /// through the writer must use [`AppState::new_for_test`], which shares
+    /// one temp-file DB between `state.storage.db` and a live writer thread.
     pub fn new(db: Db, receiver_id: String) -> (Arc<Self>, watch::Receiver<ShutdownSignal>) {
         Self::with_integrity(
             db,
@@ -501,9 +501,9 @@ impl AppState {
         )
     }
 
-    /// Test constructor with a *live* writer: creates a temp-file DB opened by
-    /// both `state.db` and the writer thread. Keep the returned `TempDir`
-    /// alive for the duration of the test.
+    /// Test constructor with a *live* writer: creates a temp-file DB opened
+    /// by both `state.storage.db` and the writer thread. Keep the returned
+    /// `TempDir` alive for the duration of the test.
     #[doc(hidden)]
     pub fn new_for_test() -> (
         Arc<Self>,

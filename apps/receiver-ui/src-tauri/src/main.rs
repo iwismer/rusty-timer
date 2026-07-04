@@ -1132,9 +1132,10 @@ mod tests {
         use receiver::ui_events::{ForwarderReaderCounts, StreamDelta, StreamMetricsPayload};
         use std::collections::BTreeSet;
 
-        // One sample of every ReceiverUiEvent variant. Adding a variant forces a
-        // new `ui_event_name` arm to compile; including it here keeps the
-        // canonical EVENT_NAMES list honest.
+        // One sample of every ReceiverUiEvent variant. `ui_event_name`
+        // delegates to `control_api::event_name`, whose exhaustive parity
+        // test forces every new variant to be classified; including each
+        // variant here keeps the canonical EVENT_NAMES list honest.
         let samples = vec![
             ReceiverUiEvent::Resync,
             ReceiverUiEvent::StatusChanged {

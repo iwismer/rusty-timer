@@ -126,7 +126,7 @@ pub async fn init_with_data_dir(
 
     // Dedicated writer thread for hot-path persistence (group commit, one
     // fsync per commit window). It owns its own connection to the same DB
-    // file; `state.db` remains the cold control-plane connection. The thread
+    // file; `state.storage.db` remains the cold control-plane connection. The thread
     // exits when the last WriterHandle drops (process shutdown).
     let (writer, _writer_thread) =
         crate::writer::spawn_writer(&db_path, crate::writer::WriterConfig::from_env())
