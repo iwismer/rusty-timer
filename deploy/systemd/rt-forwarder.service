@@ -17,8 +17,12 @@
 [Unit]
 Description=Remote Timing Forwarder (rt-forwarder)
 Documentation=https://github.com/iwismer/rusty-timer
-After=network-online.target
-Wants=network-online.target
+# Start as soon as the network stack is configured instead of waiting for
+# network-online.target: on a Pi with no/slow network that wait can block for
+# minutes, keeping the status screen dark. Everything in the forwarder's
+# startup path binds wildcard sockets and retries outbound connections in the
+# background, so full connectivity is not required at start.
+After=network.target
 
 [Service]
 Type=simple
