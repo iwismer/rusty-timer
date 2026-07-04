@@ -1046,7 +1046,7 @@ mod tests {
     /// `StreamCatalog` frame, then drops the connection.
     async fn hello_and_catalog(
         receiver: &rt_iroh::Endpoint,
-        forwarder_addr: &NodeAddr,
+        forwarder_addr: &EndpointAddr,
     ) -> Result<(u64, StreamCatalog), BoxError> {
         let connection = receiver.connect(forwarder_addr.clone()).await?;
         let (mut control_send, mut control_recv) = connection.open_bi().await?;
@@ -1096,7 +1096,7 @@ mod tests {
             .await;
 
         let runtime = start_forwarder_p2p(
-            &p2p_config(receiver.node_id().to_string()),
+            &p2p_config(receiver.endpoint_id().to_string()),
             &journal_path,
             Arc::clone(&journal),
             &[stream_key.to_owned()],
@@ -1107,8 +1107,7 @@ mod tests {
         )
         .await?
         .expect("p2p enabled");
-        let forwarder_addr = runtime.node_addr().await;
-        receiver.add_node_addr(forwarder_addr.clone())?;
+        let forwarder_addr = runtime.endpoint_addr().await;
 
         let (g1, catalog) = hello_and_catalog(&receiver, &forwarder_addr).await?;
         assert_eq!(
