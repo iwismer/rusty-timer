@@ -2007,7 +2007,7 @@ pub fn endpoint_id_for_seed(seed: [u8; 32]) -> String {
 // ---------------------------------------------------------------------------
 
 /// Env var naming the forwarder's iroh endpoint (string endpoint id) to dial.
-pub const ENV_P2P_FORWARDER_NODE_ID: &str = "RT_P2P_FORWARDER_NODE_ID";
+pub const ENV_P2P_FORWARDER_ENDPOINT_ID: &str = "RT_P2P_FORWARDER_ENDPOINT_ID";
 /// Env var giving a direct `ip:port` socket address for the forwarder peer.
 pub const ENV_P2P_FORWARDER_DIRECT_ADDR: &str = "RT_P2P_FORWARDER_DIRECT_ADDR";
 /// Env var holding the receiver's 64-hex-character secret-key seed.
@@ -2066,7 +2066,7 @@ pub fn p2p_config_from_lookup(
             .filter(|v| !v.is_empty())
     };
 
-    let forwarder_endpoint_id = trimmed(ENV_P2P_FORWARDER_NODE_ID);
+    let forwarder_endpoint_id = trimmed(ENV_P2P_FORWARDER_ENDPOINT_ID);
     let forwarder_direct_addr = trimmed(ENV_P2P_FORWARDER_DIRECT_ADDR);
     let secret_key_seed_hex = trimmed(ENV_P2P_SECRET_KEY_SEED_HEX);
     let secret_key_path = trimmed(ENV_P2P_SECRET_KEY_PATH);
@@ -2102,12 +2102,12 @@ pub fn p2p_config_from_lookup(
         (None, None) => None,
         (Some(_), None) => {
             return Err(format!(
-                "{ENV_P2P_FORWARDER_DIRECT_ADDR} is required when {ENV_P2P_FORWARDER_NODE_ID} is set"
+                "{ENV_P2P_FORWARDER_DIRECT_ADDR} is required when {ENV_P2P_FORWARDER_ENDPOINT_ID} is set"
             ));
         }
         (None, Some(_)) => {
             return Err(format!(
-                "{ENV_P2P_FORWARDER_NODE_ID} is required when {ENV_P2P_FORWARDER_DIRECT_ADDR} is set"
+                "{ENV_P2P_FORWARDER_ENDPOINT_ID} is required when {ENV_P2P_FORWARDER_DIRECT_ADDR} is set"
             ));
         }
     };
@@ -2617,7 +2617,7 @@ mod tests {
     #[test]
     fn p2p_config_from_lookup_builds_minimal_config() {
         let cfg = cfg_from(&[
-            (ENV_P2P_FORWARDER_NODE_ID, "endpoint-x"),
+            (ENV_P2P_FORWARDER_ENDPOINT_ID, "endpoint-x"),
             (ENV_P2P_FORWARDER_DIRECT_ADDR, "127.0.0.1:5000"),
             (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
         ])
@@ -2685,14 +2685,14 @@ mod tests {
 
     #[test]
     fn p2p_config_from_lookup_errors_on_partial_required_keys() {
-        let err = cfg_from(&[(ENV_P2P_FORWARDER_NODE_ID, "endpoint-x")]).unwrap_err();
+        let err = cfg_from(&[(ENV_P2P_FORWARDER_ENDPOINT_ID, "endpoint-x")]).unwrap_err();
         assert!(err.contains(ENV_P2P_FORWARDER_DIRECT_ADDR), "got: {err}");
     }
 
     #[test]
     fn p2p_config_from_lookup_server_requires_both() {
         let err = cfg_from(&[
-            (ENV_P2P_FORWARDER_NODE_ID, "endpoint-x"),
+            (ENV_P2P_FORWARDER_ENDPOINT_ID, "endpoint-x"),
             (ENV_P2P_FORWARDER_DIRECT_ADDR, "127.0.0.1:5000"),
             (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
             (ENV_P2P_SERVER_URL, "http://127.0.0.1:8080"),
@@ -2704,7 +2704,7 @@ mod tests {
     #[test]
     fn p2p_config_from_lookup_accepts_server_pair_and_reconcile_override() {
         let cfg = cfg_from(&[
-            (ENV_P2P_FORWARDER_NODE_ID, "endpoint-x"),
+            (ENV_P2P_FORWARDER_ENDPOINT_ID, "endpoint-x"),
             (ENV_P2P_FORWARDER_DIRECT_ADDR, "127.0.0.1:5000"),
             (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
             (ENV_P2P_SERVER_URL, "http://127.0.0.1:8080"),
@@ -2722,7 +2722,7 @@ mod tests {
     #[test]
     fn p2p_config_from_lookup_rejects_below_min_reconcile() {
         let err = cfg_from(&[
-            (ENV_P2P_FORWARDER_NODE_ID, "endpoint-x"),
+            (ENV_P2P_FORWARDER_ENDPOINT_ID, "endpoint-x"),
             (ENV_P2P_FORWARDER_DIRECT_ADDR, "127.0.0.1:5000"),
             (ENV_P2P_SECRET_KEY_SEED_HEX, TEST_SEED_HEX),
             (ENV_P2P_RECONCILE_MS, "10"),

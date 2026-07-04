@@ -1,6 +1,6 @@
 use receiver::headless::{HeadlessConfig, HeadlessHost};
 use receiver::p2p_runtime::{
-    ENV_P2P_DISCOVERY_DISABLED, ENV_P2P_FORWARDER_DIRECT_ADDR, ENV_P2P_FORWARDER_NODE_ID,
+    ENV_P2P_DISCOVERY_DISABLED, ENV_P2P_FORWARDER_DIRECT_ADDR, ENV_P2P_FORWARDER_ENDPOINT_ID,
     ENV_P2P_RECONCILE_MS, ENV_P2P_RELAY_DISABLED, ENV_P2P_SECRET_KEY_PATH,
     ENV_P2P_SECRET_KEY_SEED_HEX, ENV_P2P_SERVER_TOKEN, ENV_P2P_SERVER_URL, endpoint_id_for_seed,
     p2p_config_from_lookup, parse_secret_key_seed_hex,
@@ -135,7 +135,7 @@ fn parse_args(
                     .next()
                     .ok_or_else(|| "--p2p-forwarder-endpoint-id requires a value".to_owned())?;
                 cli.insert(
-                    ENV_P2P_FORWARDER_NODE_ID,
+                    ENV_P2P_FORWARDER_ENDPOINT_ID,
                     value.to_string_lossy().into_owned(),
                 );
             }
@@ -221,7 +221,7 @@ fn parse_args(
 /// binary's own flag language.
 fn decorate_p2p_error(err: &str) -> String {
     const KEY_TO_FLAG: &[(&str, &str)] = &[
-        (ENV_P2P_FORWARDER_NODE_ID, "--p2p-forwarder-endpoint-id"),
+        (ENV_P2P_FORWARDER_ENDPOINT_ID, "--p2p-forwarder-endpoint-id"),
         (ENV_P2P_FORWARDER_DIRECT_ADDR, "--p2p-forwarder-direct-addr"),
         (ENV_P2P_SECRET_KEY_SEED_HEX, "--p2p-secret-key-seed-hex"),
         (ENV_P2P_SECRET_KEY_PATH, "--p2p-secret-key-path"),
