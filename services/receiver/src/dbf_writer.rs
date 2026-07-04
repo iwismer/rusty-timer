@@ -1,6 +1,6 @@
 //! Maps parsed IPICO chip reads to Race Director-compatible DBF records,
-//! manages low-level DBF file I/O (create, append, clear), and provides an
-//! async writer task that bridges the broadcast channel to disk.
+//! manages low-level DBF file I/O (create, append, clear), and provides the
+//! durable delivery pass that bridges `received_events` to disk.
 //!
 //! New files are created from an embedded Visual FoxPro template
 //! (`IPICO-sample.DBF`) to preserve the correct version byte and schema.
@@ -10,22 +10,18 @@
 use std::convert::TryFrom;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use fs2::FileExt;
 
 use dbase::{FieldIOError, TableWriterBuilder, WritableRecord};
 use ipico_core::read::ChipRead;
-use rt_domain::ReadEvent;
-use tokio::sync::{Mutex, broadcast, watch};
 
 use crate::db::{Db, DbError, EventType, ReceivedEvent};
 
 /// Reasons why a raw frame cannot be mapped to a [`DbfRecord`].
 #[derive(Debug)]
 pub enum DbfMappingError {
-    /// The subscription index exceeds the single-digit READER field limit (0-9).
+    /// The persisted DBF reader digit exceeds the single-digit READER field limit (0-9).
     ReaderIndexTooLarge(u8),
     /// The raw frame bytes are not valid UTF-8.
     InvalidUtf8(std::str::Utf8Error),
@@ -41,7 +37,7 @@ impl std::fmt::Display for DbfMappingError {
             Self::ReaderIndexTooLarge(idx) => {
                 write!(
                     f,
-                    "subscription index {idx} exceeds DBF READER field limit (max 9)"
+                    "DBF reader digit {idx} exceeds READER field limit (max 9)"
                 )
             }
             Self::InvalidUtf8(e) => write!(f, "raw frame is not valid UTF-8: {e}"),
@@ -124,8 +120,8 @@ impl WritableRecord for DbfRecord {
 ///
 /// * `raw_frame` – the IPICO frame as UTF-8 encoded ASCII hex (e.g., `b"aa4000..."`)
 /// * `event_type` – start or finish
-/// * `reader_index` – the subscription index (0-based position in the subscription
-///   list, used as the READER field value)
+/// * `reader_index` – the stream's persisted DBF reader digit (0-9), used as
+///   the READER field value
 pub fn map_to_dbf_fields(
     raw_frame: &[u8],
     event_type: EventType,
@@ -214,13 +210,6 @@ fn serialize_record(record: &DbfRecord) -> [u8; RECORD_DATA_LEN] {
     buf
 }
 
-#[cfg(test)]
-fn template_writer_with_dest<W: Write + Seek>(dest: W) -> std::io::Result<dbase::TableWriter<W>> {
-    let reader = dbase::Reader::new(Cursor::new(DBF_TEMPLATE_BYTES))
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    Ok(TableWriterBuilder::from_reader(reader).build_with_dest(dest))
-}
-
 fn template_writer(
     path: &Path,
 ) -> std::io::Result<dbase::TableWriter<std::io::BufWriter<std::fs::File>>> {
@@ -265,85 +254,12 @@ fn write_empty_header(file: &mut std::fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Append a [`DbfRecord`] to the DBF file at `path` using in-place append.
+/// Append a single [`DbfRecord`] to the DBF file at `path`.
 ///
-/// If the file does not exist it is created first. An exclusive file lock
-/// is held for the duration of the write to prevent concurrent readers
-/// (e.g. Race Director) from seeing a partially-written record.
+/// If the file does not exist it is created first. See [`append_records`]
+/// for the locking and write-ordering semantics.
 pub fn append_record(path: &Path, record: &DbfRecord) -> std::io::Result<()> {
-    append_record_if_active(path, record, None).map(|_| ())
-}
-
-fn append_record_if_active(
-    path: &Path,
-    record: &DbfRecord,
-    cancel_flag: Option<&AtomicBool>,
-) -> std::io::Result<bool> {
-    let is_cancelled = || cancel_flag.is_some_and(|flag| flag.load(Ordering::SeqCst));
-    if is_cancelled() {
-        return Ok(false);
-    }
-
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)?;
-
-    file.lock_exclusive()?;
-    if is_cancelled() {
-        file.unlock()?;
-        return Ok(false);
-    }
-
-    // If the file was just created (empty), write the DBF header under the lock
-    if file.metadata()?.len() == 0 {
-        write_empty_header(&mut file)?;
-    }
-
-    // Read header fields: record_count (bytes 4-7), header_size (bytes 8-9),
-    // record_size (bytes 10-11), all little-endian.
-    let mut header_buf = [0u8; 12];
-    file.read_exact(&mut header_buf)?;
-    let record_count =
-        u32::from_le_bytes([header_buf[4], header_buf[5], header_buf[6], header_buf[7]]);
-    let header_size = u16::from_le_bytes([header_buf[8], header_buf[9]]) as u64;
-    let record_size = u16::from_le_bytes([header_buf[10], header_buf[11]]) as u64;
-
-    // Sanity check: record_size should be 1 (deletion flag) + RECORD_DATA_LEN
-    if record_size != (1 + RECORD_DATA_LEN as u64) {
-        return Err(std::io::Error::other(format!(
-            "unexpected DBF record size: expected {}, got {record_size}",
-            1 + RECORD_DATA_LEN
-        )));
-    }
-    if is_cancelled() {
-        file.unlock()?;
-        return Ok(false);
-    }
-
-    // Seek to where the new record should go: after all existing records
-    let write_pos = header_size + (record_count as u64) * record_size;
-    file.seek(SeekFrom::Start(write_pos))?;
-
-    // Write: deletion flag + record data + EOF marker
-    let record_bytes = serialize_record(record);
-    file.write_all(&[DBF_RECORD_NOT_DELETED])?;
-    file.write_all(&record_bytes)?;
-    file.write_all(&[DBF_EOF_MARKER])?;
-
-    // Update record count in header (bytes 4-7)
-    let new_count = record_count
-        .checked_add(1)
-        .ok_or_else(|| std::io::Error::other("DBF record count overflow"))?;
-    file.seek(SeekFrom::Start(4))?;
-    file.write_all(&new_count.to_le_bytes())?;
-
-    file.flush()?;
-    file.sync_data()?;
-    file.unlock()?;
-    Ok(true)
+    append_records(path, std::slice::from_ref(record))
 }
 
 /// Append many records in one pass: **record bytes first, header count
@@ -502,64 +418,6 @@ fn validate_reader_index_for_rebuild(reader_index: u8) -> Result<(), DbError> {
     Ok(())
 }
 
-#[cfg(test)]
-fn collect_dbf_records(
-    events: &[ReceivedEvent],
-    event_type: EventType,
-    reader_index: u8,
-) -> (Vec<DbfRecord>, Vec<i64>) {
-    let mut records = Vec::new();
-    let mut delivered_seqs = Vec::new();
-    for event in events {
-        match map_to_dbf_fields(&event.raw_frame, event_type, reader_index) {
-            Ok(record) => {
-                records.push(record);
-                delivered_seqs.push(event.seq);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    stream_id = %event.stream_id,
-                    seq = event.seq,
-                    read_kind = %event.read_kind,
-                    error = %e,
-                    "skipping undeliverable durable frame for DBF write"
-                );
-            }
-        }
-    }
-    (records, delivered_seqs)
-}
-
-#[cfg(test)]
-fn write_replacement_dbf(path: &Path, records: &[DbfRecord]) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut temp = tempfile::Builder::new()
-        .prefix(".dbf-")
-        .suffix(".tmp")
-        .tempfile_in(parent)?;
-
-    {
-        let mut writer = template_writer_with_dest(temp.as_file_mut())?;
-        for record in records {
-            writer
-                .write_record(record)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-        }
-        writer
-            .finalize()
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-    }
-
-    temp.as_file_mut().sync_all()?;
-    let persisted = temp.persist(path).map_err(|e| e.error)?;
-    persisted.sync_all()?;
-    sync_parent_dir(path)?;
-    Ok(())
-}
-
 #[cfg(unix)]
 fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path
@@ -574,127 +432,6 @@ fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn sync_parent_dir(_path: &Path) -> std::io::Result<()> {
     Ok(())
-}
-
-#[cfg(test)]
-fn mark_dbf_delivered_or_confirm(
-    db: &Db,
-    stream_id: &str,
-    seq: i64,
-    delivered_unix_ms: i64,
-) -> Result<bool, DbError> {
-    if db.mark_dbf_delivered(stream_id, seq, delivered_unix_ms)? {
-        return Ok(true);
-    }
-
-    match db.load_received_event(stream_id, seq)? {
-        Some(event) if event.dbf_delivered_unix_ms.is_some() => Ok(false),
-        Some(_) => Err(std::io::Error::other(format!(
-            "DBF delivery marker update affected 0 rows for stream_id={stream_id} seq={seq} while marker is still NULL"
-        ))
-        .into()),
-        None => Err(std::io::Error::other(format!(
-            "DBF delivery marker update affected 0 rows for missing stream_id={stream_id} seq={seq}"
-        ))
-        .into()),
-    }
-}
-
-/// Deliver not-yet-marked durable events for `stream_id` to the DBF file at
-/// `path`, marking each event's `dbf_delivered_unix_ms` only after the DBF file
-/// has been durably replaced. Returns the number of newly-marked records.
-///
-/// This is the P2P durable DBF feed. It differs from the legacy broadcast writer
-/// ([`run_dbf_writer`]) in three ways that match the durable-store contract:
-///
-/// * **Idempotent / regenerable.** When any event is pending, the DBF file is
-///   rebuilt from durable `received_events` and atomically replaced. If a prior
-///   run crashed after writing the DBF but before marking SQLite, the next run
-///   writes the same DBF contents instead of appending duplicate rows.
-/// * **No sentinel filtering.** Unlike the legacy path, `__`-prefixed types are
-///   not skipped here; each frame's own parsed content (and the subscription's
-///   `event_type`) determines the DBF output. Frames that are not valid chip
-///   reads are logged and skipped without being marked delivered.
-/// * **Reader timestamp is authoritative.** The DBF TIME/DAYCODE fields are
-///   derived from the reader timestamp embedded in the frame, never from the
-///   receiver receipt time (`received_unix_ms`).
-///
-/// Test-only since the single cross-stream worker (`run_dbf_delivery_pass`)
-/// replaced per-stream delivery: this rebuilds one stream's rows into the
-/// whole file (clobbering other streams') with an O(n²) pending filter. Kept
-/// for characterization tests of the legacy semantics; do not reuse.
-#[cfg(test)]
-pub fn deliver_durable_events_to_dbf(
-    db: &Db,
-    stream_id: &str,
-    path: &Path,
-    event_type: EventType,
-    reader_index: u8,
-    delivered_unix_ms: i64,
-) -> Result<usize, DbError> {
-    validate_reader_index_for_rebuild(reader_index)?;
-    with_durable_dbf_lock(path, || {
-        let pending_events = db.load_undelivered_received_events(stream_id)?;
-        if pending_events.is_empty() {
-            return Ok(0);
-        }
-        let pending_seqs = pending_events
-            .iter()
-            .map(|event| event.seq)
-            .collect::<Vec<_>>();
-        let all_events = db.load_received_events(stream_id)?;
-        let (records, deliverable_seqs) =
-            collect_dbf_records(&all_events, event_type, reader_index);
-        let pending_deliverable_seqs = deliverable_seqs
-            .into_iter()
-            .filter(|seq| pending_seqs.contains(seq))
-            .collect::<Vec<_>>();
-
-        write_replacement_dbf(path, &records)?;
-
-        let mut marked = 0usize;
-        for seq in pending_deliverable_seqs {
-            if mark_dbf_delivered_or_confirm(db, stream_id, seq, delivered_unix_ms)? {
-                marked += 1;
-            }
-        }
-        Ok(marked)
-    })
-}
-
-/// Rebuild the DBF file at `path` entirely from durable `received_events`.
-///
-/// The replacement DBF is written to a temporary file, synced, and atomically
-/// moved into place before delivery markers are reset and re-marked. The
-/// durable store is the source of truth, so this can recover a lost or corrupt
-/// DBF file without first clearing the live DBF. Returns the number of records
-/// written.
-/// Test-only single-stream regenerate (see `deliver_durable_events_to_dbf`);
-/// production regeneration is the cross-stream `regenerate_dbf_cross_stream`.
-#[cfg(test)]
-pub fn regenerate_dbf_from_received_events(
-    db: &Db,
-    stream_id: &str,
-    path: &Path,
-    event_type: EventType,
-    reader_index: u8,
-    delivered_unix_ms: i64,
-) -> Result<usize, DbError> {
-    validate_reader_index_for_rebuild(reader_index)?;
-    with_durable_dbf_lock(path, || {
-        let all_events = db.load_received_events(stream_id)?;
-        let (records, deliverable_seqs) =
-            collect_dbf_records(&all_events, event_type, reader_index);
-        let written = records.len();
-
-        write_replacement_dbf(path, &records)?;
-        db.reset_dbf_delivered(stream_id)?;
-        for seq in deliverable_seqs {
-            mark_dbf_delivered_or_confirm(db, stream_id, seq, delivered_unix_ms)?;
-        }
-
-        Ok(written)
-    })
 }
 
 /// One stream's DBF delivery parameters, resolved from its subscription.
@@ -1002,166 +739,11 @@ fn write_replacement_dbf_bytes<'a>(
     Ok(())
 }
 
-/// Maximum consecutive I/O failures before the writer gives up and stops.
-const MAX_CONSECUTIVE_WRITE_FAILURES: u32 = 10;
-
-/// Receives ReadEvents from the global broadcast channel, filters out sentinel
-/// types and unsubscribed/overflow readers, maps each event to a DBF record
-/// using the subscription's event type, and appends the record to the DBF file.
-pub async fn run_dbf_writer(
-    mut event_rx: broadcast::Receiver<ReadEvent>,
-    db: Arc<Mutex<Db>>,
-    mut shutdown_rx: watch::Receiver<bool>,
-    cancel_flag: Arc<AtomicBool>,
-    dbf_path: String,
-    ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ReceiverUiEvent>,
-) {
-    let path = std::path::PathBuf::from(&dbf_path);
-    tracing::debug!(path = %path.display(), "DBF writer started");
-
-    let mut consecutive_failures: u32 = 0;
-
-    loop {
-        tokio::select! {
-            biased;
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
-                    tracing::debug!("DBF writer shutting down");
-                    break;
-                }
-            }
-            result = event_rx.recv() => {
-                match result {
-                    Ok(event) => {
-                        // Skip sentinel read types (e.g., __checkpoint)
-                        if event.read_type.starts_with("__") {
-                            continue;
-                        }
-
-                        let sub_details = {
-                            let db = db.lock().await;
-                            db.load_subscription_dbf_details(&event.forwarder_id, &event.reader_ip)
-                        };
-
-                        let Some((idx_opt, event_type)) = (match sub_details {
-                            Ok(details) => details,
-                            Err(e) => {
-                                tracing::warn!(
-                                    forwarder_id = %event.forwarder_id,
-                                    reader_ip = %event.reader_ip,
-                                    error = %e,
-                                    "failed to load subscription details for DBF write, skipping"
-                                );
-                                continue;
-                            }
-                        }) else {
-                            tracing::debug!(fwd = %event.forwarder_id, ip = %event.reader_ip, "no subscription for event, skipping DBF write");
-                            continue;
-                        };
-
-                        // A subscription without a persisted reader index
-                        // (all ten digits were taken at assignment) cannot be
-                        // represented in the single-character READER field.
-                        let Some(reader_index) = idx_opt else {
-                            tracing::warn!(
-                                forwarder_id = %event.forwarder_id,
-                                reader_ip = %event.reader_ip,
-                                "subscription has no DBF reader index (all ten digits in use), skipping DBF write for this stream"
-                            );
-                            continue;
-                        };
-
-                        match map_to_dbf_fields(&event.raw_frame, event_type, reader_index) {
-                            Ok(record) => {
-                                let p = path.clone();
-                                let cancel_flag = Arc::clone(&cancel_flag);
-                                match tokio::task::spawn_blocking(move || {
-                                    append_record_if_active(&p, &record, Some(cancel_flag.as_ref()))
-                                }).await {
-                                    Ok(Ok(true)) => {
-                                        consecutive_failures = 0;
-                                    }
-                                    Ok(Ok(false)) => {
-                                        tracing::debug!(path = %path.display(), "DBF write cancelled before commit");
-                                        break;
-                                    }
-                                    Ok(Err(e)) => {
-                                        consecutive_failures += 1;
-                                        tracing::error!(
-                                            error = %e,
-                                            path = %path.display(),
-                                            consecutive_failures,
-                                            "DBF write failed, skipping record"
-                                        );
-                                        if consecutive_failures >= MAX_CONSECUTIVE_WRITE_FAILURES {
-                                            let msg = format!(
-                                                "DBF writer stopped: {consecutive_failures} consecutive write failures (last: {e})"
-                                            );
-                                            tracing::error!("{msg}");
-                                            let _ = ui_tx.send(
-                                                crate::ui_events::ReceiverUiEvent::LogEntry { entry: msg },
-                                            );
-                                            break;
-                                        }
-                                        if consecutive_failures == 1 {
-                                            let _ = ui_tx.send(
-                                                crate::ui_events::ReceiverUiEvent::LogEntry {
-                                                    entry: format!("DBF write error: {e}"),
-                                                },
-                                            );
-                                        }
-                                    }
-                                    Err(join_err) => {
-                                        tracing::error!(error = %join_err, path = %path.display(), "DBF write task panicked or was cancelled");
-                                        let _ = ui_tx.send(
-                                            crate::ui_events::ReceiverUiEvent::LogEntry {
-                                                entry: format!("DBF writer crashed: {join_err}"),
-                                            },
-                                        );
-                                        break;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    forwarder_id = %event.forwarder_id,
-                                    reader_ip = %event.reader_ip,
-                                    error = %e,
-                                    "failed to map raw frame to DBF record, skipping"
-                                );
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(n, "DBF writer lagged, {n} events dropped");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        tracing::debug!("DBF writer channel closed");
-                        break;
-                    }
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{Db, ReceivedEventInsert, StreamSubscription};
+    use crate::db::{Db, ReceivedEventInsert};
     use dbase::FieldValue;
-
-    fn seed_subscription(db: &mut Db, forwarder_id: &str, reader_ip: &str, event_type: EventType) {
-        db.replace_stream_subscriptions(&[StreamSubscription {
-            forwarder_endpoint_id: format!("endpoint-{forwarder_id}"),
-            stream_id: format!("stream-{reader_ip}"),
-            local_port_override: None,
-            event_type,
-            forwarder_id: Some(forwarder_id.to_owned()),
-            reader_ip: Some(reader_ip.to_owned()),
-        }])
-        .unwrap();
-    }
 
     fn sample_raw_frame() -> Vec<u8> {
         b"aa400000000123450a2a01123018455927a7".to_vec()
@@ -1420,6 +1002,134 @@ mod tests {
         );
     }
 
+    /// Durable analog of the legacy sentinel-type skip: frames that are not
+    /// valid chip reads produce no DBF row, but are still marked processed so
+    /// they cannot wedge the min-undelivered probe into regenerating forever.
+    #[test]
+    fn delivery_pass_skips_invalid_frames_without_dbf_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let dbf_path = dir.path().join("out.dbf");
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_id = "s-invalid-frame";
+        insert_durable_event(&db, stream_id, 1, b"not a chip read", 1_700_000_000_000);
+        insert_durable_event(&db, stream_id, 2, &sample_raw_frame(), 1_700_000_000_001);
+
+        let specs = vec![spec(stream_id, 0)];
+        let mut state = DbfPassState::default();
+        run_dbf_delivery_pass(&mut db, &specs, &dbf_path, &mut state, 1_700_000_010_000).unwrap();
+
+        assert_eq!(
+            dbf_records(&dbf_path).len(),
+            1,
+            "only the valid chip read produces a DBF row"
+        );
+        assert!(
+            db.load_undelivered_received_events(stream_id)
+                .unwrap()
+                .is_empty(),
+            "the invalid frame must be marked processed (nothing to write)"
+        );
+
+        // Same contract on the incremental append path (second pass).
+        insert_durable_event(
+            &db,
+            stream_id,
+            3,
+            b"also not a chip read",
+            1_700_000_000_002,
+        );
+        insert_durable_event(&db, stream_id, 4, &sample_raw_frame(), 1_700_000_000_003);
+        run_dbf_delivery_pass(&mut db, &specs, &dbf_path, &mut state, 1_700_000_020_000).unwrap();
+        assert_eq!(
+            dbf_records(&dbf_path).len(),
+            2,
+            "the appended invalid frame produces no DBF row"
+        );
+        assert!(
+            db.load_undelivered_received_events(stream_id)
+                .unwrap()
+                .is_empty(),
+            "the appended invalid frame must also be marked processed"
+        );
+    }
+
+    /// Durable analog of the legacy unsubscribed-event skip: a pass only
+    /// delivers streams present in `streams`; rows for other streams stay
+    /// out of the file and unmarked.
+    #[test]
+    fn delivery_pass_ignores_streams_without_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        let dbf_path = dir.path().join("out.dbf");
+        let mut db = Db::open_in_memory().unwrap();
+        let raw = sample_raw_frame();
+        insert_durable_event(&db, "s-subscribed", 1, &raw, 1_700_000_000_000);
+        insert_durable_event(&db, "s-unsubscribed", 1, &raw, 1_700_000_000_001);
+
+        let specs = vec![spec("s-subscribed", 0)];
+        let mut state = DbfPassState::default();
+        run_dbf_delivery_pass(&mut db, &specs, &dbf_path, &mut state, 1_700_000_010_000).unwrap();
+
+        assert_eq!(
+            dbf_records(&dbf_path).len(),
+            1,
+            "only the subscribed stream's rows reach the file"
+        );
+        assert_eq!(
+            db.load_undelivered_received_events("s-unsubscribed")
+                .unwrap()
+                .len(),
+            1,
+            "unsubscribed rows must stay undelivered"
+        );
+    }
+
+    /// An invalid reader digit aborts the pass before any file I/O: the
+    /// existing DBF contents and delivery markers are preserved.
+    #[test]
+    fn delivery_pass_invalid_reader_index_fails_without_touching_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let dbf_path = dir.path().join("out.dbf");
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_id = "s-bad-digit";
+        let raw = sample_raw_frame();
+        insert_durable_event(&db, stream_id, 1, &raw, 1_700_000_000_000);
+
+        let mut state = DbfPassState::default();
+        run_dbf_delivery_pass(
+            &mut db,
+            &[spec(stream_id, 0)],
+            &dbf_path,
+            &mut state,
+            1_700_000_010_000,
+        )
+        .unwrap();
+        assert_eq!(dbf_records(&dbf_path).len(), 1);
+
+        insert_durable_event(&db, stream_id, 2, &raw, 1_700_000_000_001);
+        let mut fresh_state = DbfPassState::default();
+        let result = run_dbf_delivery_pass(
+            &mut db,
+            &[spec(stream_id, 10)],
+            &dbf_path,
+            &mut fresh_state,
+            1_700_000_020_000,
+        );
+        assert!(result.is_err(), "reader digit 10 must abort the pass");
+        assert_eq!(
+            dbf_records(&dbf_path).len(),
+            1,
+            "a failed pass must not clobber the live DBF"
+        );
+        assert_eq!(
+            db.load_received_event(stream_id, 1)
+                .unwrap()
+                .unwrap()
+                .dbf_delivered_unix_ms,
+            Some(1_700_000_010_000),
+            "a failed pass must not reset existing delivery markers"
+        );
+    }
+
     #[test]
     fn mark_dbf_delivered_batch_marks_all_rows_in_one_call() {
         let mut db = Db::open_in_memory().unwrap();
@@ -1482,231 +1192,6 @@ mod tests {
         let bytes = std::fs::read(&dbf_path).unwrap();
         let final_count = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
         assert_eq!(final_count, 1);
-    }
-
-    #[test]
-    fn dbf_idempotent_on_replay() {
-        let dir = tempfile::tempdir().unwrap();
-        let dbf_path = dir.path().join("out.dbf");
-        let db = Db::open_in_memory().unwrap();
-        let stream_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-        let raw = sample_raw_frame();
-        insert_durable_event(&db, stream_id, 1, &raw, 1_700_000_000_000);
-        insert_durable_event(&db, stream_id, 2, &raw, 1_700_000_000_001);
-
-        let first = deliver_durable_events_to_dbf(
-            &db,
-            stream_id,
-            &dbf_path,
-            EventType::Finish,
-            0,
-            1_700_000_010_000,
-        )
-        .unwrap();
-        assert_eq!(first, 2, "first run should write both pending events");
-
-        // Replay/re-run: every event is already marked delivered, so nothing new.
-        let second = deliver_durable_events_to_dbf(
-            &db,
-            stream_id,
-            &dbf_path,
-            EventType::Finish,
-            0,
-            1_700_000_020_000,
-        )
-        .unwrap();
-        assert_eq!(
-            second, 0,
-            "replay must not re-deliver already-delivered events"
-        );
-
-        let records = dbf_records(&dbf_path);
-        assert_eq!(
-            records.len(),
-            2,
-            "replay must not duplicate DBF rows for already-delivered (stream_id, seq)"
-        );
-
-        // Both events carry a delivery marker after a successful write.
-        for seq in [1, 2] {
-            let stored = db.load_received_event(stream_id, seq).unwrap().unwrap();
-            assert_eq!(stored.dbf_delivered_unix_ms, Some(1_700_000_010_000));
-        }
-    }
-
-    #[test]
-    fn dbf_marker_null_with_existing_row_rebuilds_without_duplicate() {
-        let dir = tempfile::tempdir().unwrap();
-        let dbf_path = dir.path().join("out.dbf");
-        let db = Db::open_in_memory().unwrap();
-        let stream_id = "127.0.0.1:10000";
-        let raw = sample_raw_frame();
-        insert_durable_event(&db, stream_id, 1, &raw, 1_700_000_000_000);
-
-        let record = map_to_dbf_fields(&raw, EventType::Finish, 0).unwrap();
-        append_record(&dbf_path, &record).unwrap();
-        assert_eq!(dbf_records(&dbf_path).len(), 1);
-        assert_eq!(
-            db.load_received_event(stream_id, 1)
-                .unwrap()
-                .unwrap()
-                .dbf_delivered_unix_ms,
-            None,
-            "test setup simulates a crash after DBF write but before marker update"
-        );
-
-        let written = deliver_durable_events_to_dbf(
-            &db,
-            stream_id,
-            &dbf_path,
-            EventType::Finish,
-            0,
-            1_700_000_010_000,
-        )
-        .unwrap();
-        assert_eq!(written, 1);
-
-        let records = dbf_records(&dbf_path);
-        assert_eq!(
-            records.len(),
-            1,
-            "recovery must rebuild the DBF from received_events instead of appending a duplicate row"
-        );
-        assert_eq!(
-            db.load_received_event(stream_id, 1)
-                .unwrap()
-                .unwrap()
-                .dbf_delivered_unix_ms,
-            Some(1_700_000_010_000)
-        );
-    }
-
-    #[test]
-    fn dbf_regeneration_failure_preserves_existing_file_and_markers() {
-        let dir = tempfile::tempdir().unwrap();
-        let dbf_path = dir.path().join("out.dbf");
-        let db = Db::open_in_memory().unwrap();
-        let stream_id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
-        let raw = sample_raw_frame();
-        insert_durable_event(&db, stream_id, 1, &raw, 1_700_000_000_000);
-        let written = deliver_durable_events_to_dbf(
-            &db,
-            stream_id,
-            &dbf_path,
-            EventType::Finish,
-            0,
-            1_700_000_010_000,
-        )
-        .unwrap();
-        assert_eq!(written, 1);
-
-        let result = regenerate_dbf_from_received_events(
-            &db,
-            stream_id,
-            &dbf_path,
-            EventType::Finish,
-            10,
-            1_700_000_030_000,
-        );
-        assert!(
-            result.is_err(),
-            "invalid reader index should abort regeneration"
-        );
-
-        assert_eq!(
-            dbf_records(&dbf_path).len(),
-            1,
-            "failed regeneration must not clear the live DBF before it can replace it"
-        );
-        assert_eq!(
-            db.load_received_event(stream_id, 1)
-                .unwrap()
-                .unwrap()
-                .dbf_delivered_unix_ms,
-            Some(1_700_000_010_000),
-            "failed regeneration must not reset stale delivery markers"
-        );
-    }
-
-    #[test]
-    fn dbf_uses_reader_timestamp() {
-        let dir = tempfile::tempdir().unwrap();
-        let dbf_path = dir.path().join("out.dbf");
-        let db = Db::open_in_memory().unwrap();
-        let stream_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
-        // received_unix_ms is the receiver receipt time; it must NOT influence the
-        // DBF TIME/DAYCODE fields. Those come from the reader timestamp carried in
-        // the frame (18:45:59.39 on day 01/12/30).
-        insert_durable_event(&db, stream_id, 1, &sample_raw_frame(), 0);
-
-        let written = deliver_durable_events_to_dbf(
-            &db,
-            stream_id,
-            &dbf_path,
-            EventType::Finish,
-            0,
-            1_700_000_000_000,
-        )
-        .unwrap();
-        assert_eq!(written, 1);
-
-        let records = dbf_records(&dbf_path);
-        assert_eq!(records.len(), 1);
-        assert_eq!(char_field(&records[0], "TIME"), Some("18455939".to_owned()));
-        assert_eq!(
-            char_field(&records[0], "DAYCODE"),
-            Some("011230".to_owned())
-        );
-    }
-
-    #[test]
-    fn dbf_regenerates_from_received_events() {
-        let dir = tempfile::tempdir().unwrap();
-        let dbf_path = dir.path().join("out.dbf");
-        let db = Db::open_in_memory().unwrap();
-        let stream_id = "cccccccc-cccc-cccc-cccc-cccccccccccc";
-        let raw = sample_raw_frame();
-        insert_durable_event(&db, stream_id, 1, &raw, 1_700_000_000_000);
-        insert_durable_event(&db, stream_id, 2, &raw, 1_700_000_000_001);
-
-        let written = deliver_durable_events_to_dbf(
-            &db,
-            stream_id,
-            &dbf_path,
-            EventType::Finish,
-            0,
-            1_700_000_010_000,
-        )
-        .unwrap();
-        assert_eq!(written, 2);
-        assert_eq!(dbf_records(&dbf_path).len(), 2);
-
-        // Simulate a lost/corrupt DBF file; the durable store is the source of truth.
-        std::fs::remove_file(&dbf_path).unwrap();
-
-        let regenerated = regenerate_dbf_from_received_events(
-            &db,
-            stream_id,
-            &dbf_path,
-            EventType::Finish,
-            0,
-            1_700_000_030_000,
-        )
-        .unwrap();
-        assert_eq!(
-            regenerated, 2,
-            "regeneration should re-emit every stored event"
-        );
-
-        let records = dbf_records(&dbf_path);
-        assert_eq!(
-            records.len(),
-            2,
-            "DBF must be fully rebuilt from received_events"
-        );
-        for record in &records {
-            assert_eq!(char_field(record, "CHIP"), Some("000000012345".to_owned()));
-        }
     }
 
     #[test]
@@ -1934,173 +1419,6 @@ mod tests {
         assert_eq!(&bytes[3..15], b"000000012345");
     }
 
-    #[tokio::test]
-    async fn dbf_writer_skips_sentinel_read_types() {
-        use std::sync::Arc;
-        use tokio::sync::{Mutex, broadcast, watch};
-
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-        let dbf_path = dir.path().join("test.dbf");
-        let mut db = crate::db::Db::open(&db_path).unwrap();
-        seed_subscription(&mut db, "f1", "10.0.0.1", EventType::Finish);
-
-        let db = Arc::new(Mutex::new(db));
-        let (tx, _) = broadcast::channel::<rt_domain::ReadEvent>(16);
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let rx = tx.subscribe();
-        let (ui_tx, _) = broadcast::channel(16);
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-
-        let path = dbf_path.to_str().unwrap().to_owned();
-        let db_clone = Arc::clone(&db);
-        let handle = tokio::spawn(async move {
-            run_dbf_writer(rx, db_clone, shutdown_rx, cancel_flag, path, ui_tx).await;
-        });
-
-        tx.send(rt_domain::ReadEvent {
-            forwarder_id: "f1".to_owned(),
-            reader_ip: "10.0.0.1".to_owned(),
-            stream_epoch: 1,
-            seq: 1,
-            reader_timestamp: "T".to_owned(),
-            raw_frame: sample_raw_frame(),
-            read_type: "__checkpoint".to_owned(),
-        })
-        .unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let _ = shutdown_tx.send(true);
-        let _ = handle.await;
-
-        assert!(
-            !dbf_path.exists(),
-            "DBF file should not be created for sentinel events"
-        );
-    }
-
-    #[tokio::test]
-    async fn dbf_writer_writes_valid_event() {
-        use std::sync::Arc;
-        use tokio::sync::{Mutex, broadcast, watch};
-
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-        let dbf_path = dir.path().join("test.dbf");
-        let mut db = crate::db::Db::open(&db_path).unwrap();
-        seed_subscription(&mut db, "f1", "10.0.0.1", EventType::Finish);
-
-        let db = Arc::new(Mutex::new(db));
-        let (tx, _) = broadcast::channel::<rt_domain::ReadEvent>(16);
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let rx = tx.subscribe();
-        let (ui_tx, _) = broadcast::channel(16);
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-
-        let path = dbf_path.to_str().unwrap().to_owned();
-        let db_clone = Arc::clone(&db);
-        let handle = tokio::spawn(async move {
-            run_dbf_writer(rx, db_clone, shutdown_rx, cancel_flag, path, ui_tx).await;
-        });
-
-        tx.send(rt_domain::ReadEvent {
-            forwarder_id: "f1".to_owned(),
-            reader_ip: "10.0.0.1".to_owned(),
-            stream_epoch: 1,
-            seq: 1,
-            reader_timestamp: "T".to_owned(),
-            raw_frame: sample_raw_frame(),
-            read_type: "RAW".to_owned(),
-        })
-        .unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let _ = shutdown_tx.send(true);
-        let _ = handle.await;
-
-        assert!(
-            dbf_path.exists(),
-            "DBF file should be created for valid events"
-        );
-        let mut reader = dbase::Reader::from_path(&dbf_path).unwrap();
-        let records: Vec<dbase::Record> = reader.read().unwrap();
-        assert_eq!(records.len(), 1, "should have exactly one record");
-        let r = &records[0];
-        assert_eq!(
-            r.get("CHIP").and_then(|v| match v {
-                FieldValue::Character(Some(s)) => Some(s.trim().to_owned()),
-                _ => None,
-            }),
-            Some("000000012345".to_owned())
-        );
-    }
-
-    #[tokio::test]
-    async fn dbf_writer_uses_updated_event_type_without_waiting_for_cache_refresh() {
-        use std::sync::Arc;
-        use tokio::sync::{Mutex, broadcast, watch};
-
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-        let dbf_path = dir.path().join("test.dbf");
-        let mut db = crate::db::Db::open(&db_path).unwrap();
-        seed_subscription(&mut db, "f1", "10.0.0.1", EventType::Finish);
-
-        let db = Arc::new(Mutex::new(db));
-        let (tx, _) = broadcast::channel::<rt_domain::ReadEvent>(16);
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let rx = tx.subscribe();
-        let (ui_tx, _) = broadcast::channel(16);
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-
-        let path = dbf_path.to_str().unwrap().to_owned();
-        let db_clone = Arc::clone(&db);
-        let handle = tokio::spawn(async move {
-            run_dbf_writer(rx, db_clone, shutdown_rx, cancel_flag, path, ui_tx).await;
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        {
-            let db = db.lock().await;
-            db.update_subscription_event_type("f1", "10.0.0.1", EventType::Start)
-                .unwrap();
-        }
-
-        tx.send(rt_domain::ReadEvent {
-            forwarder_id: "f1".to_owned(),
-            reader_ip: "10.0.0.1".to_owned(),
-            stream_epoch: 1,
-            seq: 1,
-            reader_timestamp: "T".to_owned(),
-            raw_frame: sample_raw_frame(),
-            read_type: "RAW".to_owned(),
-        })
-        .unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let _ = shutdown_tx.send(true);
-        let _ = handle.await;
-
-        let mut reader = dbase::Reader::from_path(&dbf_path).unwrap();
-        let records: Vec<dbase::Record> = reader.read().unwrap();
-        assert_eq!(records.len(), 1, "should have exactly one record");
-        let r = &records[0];
-        assert_eq!(
-            r.get("EVENT").and_then(|v| match v {
-                FieldValue::Character(Some(s)) => Some(s.trim().to_owned()),
-                _ => None,
-            }),
-            Some("S".to_owned())
-        );
-        assert_eq!(
-            r.get("TPOINT").and_then(|v| match v {
-                FieldValue::Character(Some(s)) => Some(s.trim().to_owned()),
-                _ => None,
-            }),
-            Some("S".to_owned())
-        );
-    }
-
     #[test]
     fn append_record_concurrent_writers_produce_valid_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -2198,51 +1516,5 @@ mod tests {
         let mut reader = dbase::Reader::from_path(&path).unwrap();
         let records: Vec<dbase::Record> = reader.read().unwrap();
         assert_eq!(records.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn dbf_writer_skips_unsubscribed_event() {
-        use std::sync::Arc;
-        use tokio::sync::{Mutex, broadcast, watch};
-
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-        let dbf_path = dir.path().join("test.dbf");
-        let mut db = crate::db::Db::open(&db_path).unwrap();
-        seed_subscription(&mut db, "f1", "10.0.0.1", EventType::Finish);
-
-        let db = Arc::new(Mutex::new(db));
-        let (tx, _) = broadcast::channel::<rt_domain::ReadEvent>(16);
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let rx = tx.subscribe();
-        let (ui_tx, _) = broadcast::channel(16);
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-
-        let path = dbf_path.to_str().unwrap().to_owned();
-        let db_clone = Arc::clone(&db);
-        let handle = tokio::spawn(async move {
-            run_dbf_writer(rx, db_clone, shutdown_rx, cancel_flag, path, ui_tx).await;
-        });
-
-        // Send event for a forwarder/reader that is NOT subscribed
-        tx.send(rt_domain::ReadEvent {
-            forwarder_id: "f-unknown".to_owned(),
-            reader_ip: "10.0.0.99".to_owned(),
-            stream_epoch: 1,
-            seq: 1,
-            reader_timestamp: "T".to_owned(),
-            raw_frame: sample_raw_frame(),
-            read_type: "RAW".to_owned(),
-        })
-        .unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let _ = shutdown_tx.send(true);
-        let _ = handle.await;
-
-        assert!(
-            !dbf_path.exists(),
-            "DBF file should not be created for unsubscribed events"
-        );
     }
 }

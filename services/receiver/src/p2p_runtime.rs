@@ -3323,6 +3323,70 @@ mod tests {
         );
     }
 
+    /// A saved event-type change takes effect on the very next delivery pass
+    /// (each pass re-resolves specs from SQLite) — no restart or cache
+    /// refresh in between. Ported from the legacy broadcast DBF writer's
+    /// `dbf_writer_uses_updated_event_type_without_waiting_for_cache_refresh`.
+    #[tokio::test]
+    async fn shared_dbf_pass_uses_updated_event_type_without_restart() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let tmp = tempfile::tempdir().unwrap();
+        let local_key = LocalStreamKey::new("ep-a", "s-a");
+        {
+            let mut db = state.db.lock().await;
+            db.save_profile("http://server", "tok", "check-and-download", None)
+                .unwrap();
+            db.save_dbf_config(&crate::db::DbfConfig {
+                enabled: true,
+                flush_interval_ms: crate::db::DBF_FLUSH_INTERVAL_MIN_MS,
+            })
+            .unwrap();
+            db.save_rd_import_config(&crate::db::RdImportConfig {
+                enabled: false,
+                dir: tmp.path().to_string_lossy().into_owned(),
+                interval_secs: 15,
+            })
+            .unwrap();
+            db.replace_stream_subscriptions(&[test_sub("ep-a", "s-a")])
+                .unwrap();
+            insert_chip_event(&db, local_key.as_str(), 1, 1_700_000_000_100);
+        }
+
+        let mut pass_state = crate::dbf_writer::DbfPassState::default();
+        let (enabled, _interval) = run_shared_dbf_pass(&state, &mut pass_state, false).await;
+        assert!(enabled);
+
+        // Change the event type between passes and persist a new row; the
+        // next pass must pick the new type up from the DB immediately.
+        {
+            let db = state.db.lock().await;
+            assert!(
+                db.update_subscription_event_type("ep-a", "s-a", EventType::Start)
+                    .unwrap()
+            );
+            insert_chip_event(&db, local_key.as_str(), 2, 1_700_000_000_200);
+        }
+        let (enabled, _interval) = run_shared_dbf_pass(&state, &mut pass_state, true).await;
+        assert!(enabled);
+
+        let dbf_path = tmp.path().join("IPICO.DBF");
+        let mut reader = dbase::Reader::from_path(&dbf_path).unwrap();
+        let events: Vec<String> = reader
+            .read()
+            .unwrap()
+            .iter()
+            .filter_map(|record| match record.get("EVENT") {
+                Some(dbase::FieldValue::Character(Some(s))) => Some(s.trim().to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            events,
+            vec!["F", "S"],
+            "the row appended after the update must use the new event type"
+        );
+    }
+
     /// An announcer push that fails (simulated transport outage) must be retried
     /// by the worker's retry timer once the sink recovers, even though no new
     /// durable hint arrives after the failure.

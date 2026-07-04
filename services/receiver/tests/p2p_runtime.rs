@@ -393,11 +393,11 @@ async fn reconnect_all_preserves_stream_metrics_and_continues_counting() {
             MockForwarderPeer::start([86; 32], script_four_in_two_delayed_batches(VALID_FRAME))
                 .await
                 .unwrap();
-        let (node_id, direct) = forwarder_config(&forwarder);
+        let (endpoint_id, direct) = forwarder_config(&forwarder);
 
         let dir = tempfile::tempdir().unwrap();
         let state = init_state(dir.path()).await;
-        let (config, sub) = base_config(node_id.clone(), direct, 87, None);
+        let (config, sub) = base_config(endpoint_id.clone(), direct, 87, None);
         state
             .db
             .lock()
@@ -412,8 +412,8 @@ async fn reconnect_all_preserves_stream_metrics_and_continues_counting() {
         poll_until(
             || {
                 let state = Arc::clone(&state);
-                let node_id = node_id.clone();
-                async move { stream_raw_count(&state, &node_id, STREAM_ID).await == Some(2) }
+                let endpoint_id = endpoint_id.clone();
+                async move { stream_raw_count(&state, &endpoint_id, STREAM_ID).await == Some(2) }
             },
             Duration::from_secs(10),
         )
@@ -427,7 +427,7 @@ async fn reconnect_all_preserves_stream_metrics_and_continues_counting() {
         )
         .await;
         assert_eq!(
-            stream_raw_count(&state, &node_id, STREAM_ID).await,
+            stream_raw_count(&state, &endpoint_id, STREAM_ID).await,
             Some(2),
             "forced reconnect-all must not clear the user-visible metrics cache"
         );
@@ -435,8 +435,8 @@ async fn reconnect_all_preserves_stream_metrics_and_continues_counting() {
         poll_until(
             || {
                 let state = Arc::clone(&state);
-                let node_id = node_id.clone();
-                async move { stream_raw_count(&state, &node_id, STREAM_ID).await == Some(4) }
+                let endpoint_id = endpoint_id.clone();
+                async move { stream_raw_count(&state, &endpoint_id, STREAM_ID).await == Some(4) }
             },
             Duration::from_secs(10),
         )
@@ -842,8 +842,8 @@ async fn announcer_push_pushes_rows_with_generation_and_no_duplicates() {
         assert_eq!(
             keys,
             vec![
-                (node_id.clone(), STREAM_ID.to_owned(), 1),
-                (node_id.clone(), STREAM_ID.to_owned(), 2)
+                (endpoint_id.clone(), STREAM_ID.to_owned(), 1),
+                (endpoint_id.clone(), STREAM_ID.to_owned(), 2)
             ],
             "each composite (endpoint, stream_id, seq) pushed exactly once, decoded \
              from the local key (no U+001F separator on the wire)"
@@ -1224,8 +1224,8 @@ async fn announcer_push_recovers_when_server_starts_late() {
         assert_eq!(
             keys,
             vec![
-                (node_id.clone(), STREAM_ID.to_owned(), 1),
-                (node_id.clone(), STREAM_ID.to_owned(), 2)
+                (endpoint_id.clone(), STREAM_ID.to_owned(), 1),
+                (endpoint_id.clone(), STREAM_ID.to_owned(), 2)
             ],
             "both pending rows pushed after server recovery"
         );
