@@ -1413,23 +1413,6 @@ export async function confirmUpdateInstall(): Promise<void> {
 
 // --------------- SSE + Init ---------------
 
-function applyForwarderMetricsUpdate(update: api.ForwarderMetricsUpdate): void {
-  if (!store.forwarders) return;
-  const idx = store.forwarders.findIndex(
-    (f) => f.forwarder_id === update.forwarder_id,
-  );
-  if (idx === -1) return;
-
-  const next = [...store.forwarders];
-  next[idx] = {
-    ...next[idx],
-    unique_chips: update.unique_chips,
-    total_reads: update.total_reads,
-    last_read_at: update.last_read_at,
-  };
-  store.forwarders = next;
-}
-
 /// Patch a reader's volatile counters (session/total reads, last seen) into
 /// the cached connections payload in place. Count refreshes arrive as targeted
 /// events so they don't trigger a full connections reload; unknown
@@ -1609,31 +1592,11 @@ export function initStore(): void {
       void loadConnections();
     },
     onConnectionChange: () => {},
-    onStreamCountsUpdated: (updates) => {
-      const needsResync = applyStreamCountUpdates(updates);
-      if (needsResync) void loadAll();
-    },
-    onForwarderMetricsUpdated: (update) => {
-      applyForwarderMetricsUpdate(update);
-    },
     onForwarderReaderCountsUpdated: (update) => {
       applyForwarderReaderCountsUpdate(update);
     },
     onModeChanged: (mode) => {
       applyHydratedMode(mode);
-    },
-    onLastRead: (read) => {
-      if (store.streams) clearSubscriptionPending(store.streams.streams);
-      const key = streamKey(read.forwarder_id, read.reader_ip);
-      const next = new Map(store.lastReads);
-      next.set(key, read);
-      store.lastReads = next;
-    },
-    onStreamMetricsUpdated: (metrics) => {
-      const key = streamKey(metrics.forwarder_id, metrics.reader_ip);
-      const next = new Map(store.streamMetrics);
-      next.set(key, metrics);
-      store.streamMetrics = next;
     },
     onStreamDeltas: (updates) => {
       if (updates.length === 0) return;

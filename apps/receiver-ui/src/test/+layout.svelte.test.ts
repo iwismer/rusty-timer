@@ -137,7 +137,7 @@ describe("receiver layout SSE updates", () => {
     });
   });
 
-  it("updates visible read totals when stream_counts_updated arrives", async () => {
+  it("updates visible read totals when stream_deltas arrives", async () => {
     render(Layout);
 
     expect(document.documentElement.style.scrollbarGutter).toBe("auto");
@@ -150,36 +150,35 @@ describe("receiver layout SSE updates", () => {
 
     const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
     expect(callbacks).toBeTruthy();
-    callbacks.onStreamCountsUpdated([
+    callbacks.onStreamDeltas([
       {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "10.0.0.1:10000",
         forwarder_id: "fwd-1",
         reader_ip: "10.0.0.1:10000",
         reads_total: 15,
         reads_epoch: 3,
+        metrics: {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          raw_count: 15,
+          dedup_count: 15,
+          retransmit_count: 0,
+          lag_ms: null,
+          epoch_raw_count: 3,
+          epoch_dedup_count: 3,
+          epoch_retransmit_count: 0,
+          unique_chips: 2,
+          epoch_last_received_at: null,
+          epoch_lag_ms: null,
+        },
+        last_read: null,
       },
     ]);
 
     await waitFor(() => {
       expect(screen.getByText("15 reads")).toBeInTheDocument();
     });
-  });
-
-  it("does not revive the removed aggregate forwarder list from metrics events", async () => {
-    render(Layout);
-
-    await screen.findByText("10.0.0.1:10000");
-
-    const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
-    expect(callbacks).toBeTruthy();
-
-    callbacks.onForwarderMetricsUpdated({
-      forwarder_id: "fwd-1",
-      unique_chips: 4,
-      total_reads: 15,
-      last_read_at: "2026-03-21T12:34:56.000Z",
-    });
-
-    expect(store.forwarders).toBeNull();
   });
 
   it("resync refreshes local stream data without loading aggregate forwarders", async () => {

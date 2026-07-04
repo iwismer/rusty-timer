@@ -1,14 +1,6 @@
 use crate::control_api::{ConnectionState, StreamEntry};
 use serde::Serialize;
 
-#[derive(Clone, Debug, Serialize)]
-pub struct StreamCountUpdate {
-    pub forwarder_id: String,
-    pub reader_ip: String,
-    pub reads_total: u64,
-    pub reads_epoch: u64,
-}
-
 /// Volatile per-reader counters from a forwarder `ReaderStatus` frame.
 ///
 /// Delivered as a targeted UI event so read-count refreshes patch the
@@ -71,13 +63,6 @@ impl StreamMetricsPayload {
     }
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize)]
-pub struct ForwarderMetricsUpdate {
-    pub forwarder_id: String,
-    pub unique_chips: i64,
-    pub total_reads: i64,
-    pub last_read_at: Option<String>,
-}
 /// Format a unix-millisecond timestamp as RFC 3339, or `None` when out of
 /// range.
 pub fn unix_ms_to_rfc3339(unix_ms: i64) -> Option<String> {
@@ -123,22 +108,13 @@ pub enum ReceiverUiEvent {
     LogEntry {
         entry: String,
     },
-    StreamCountsUpdated {
-        updates: Vec<StreamCountUpdate>,
-    },
-    ForwarderMetricsUpdated(ForwarderMetricsUpdate),
     ForwarderReaderCountsUpdated(ForwarderReaderCounts),
     ModeChanged {
         mode: rt_domain::ReceiverMode,
     },
-    LastRead(LastRead),
-    StreamMetricsUpdated(StreamMetricsPayload),
     /// Coalesced per-stream UI updates: one event carries every stream that
-    /// changed since the last emitter tick (4–10 Hz), replacing the
-    /// per-stream/per-tick StreamCountsUpdated + LastRead +
-    /// StreamMetricsUpdated + full StreamsSnapshot fan-out on the hot path.
-    /// Full snapshots are sent only on UI (re)connect/resync and
-    /// control-plane changes.
+    /// changed since the last emitter tick (4–10 Hz). Full snapshots are
+    /// sent only on UI (re)connect/resync and control-plane changes.
     StreamDeltas {
         updates: Vec<StreamDelta>,
     },
@@ -218,24 +194,6 @@ mod tests {
     }
 
     #[test]
-    fn stream_counts_updated_serializes_with_type_tag() {
-        let event = ReceiverUiEvent::StreamCountsUpdated {
-            updates: vec![StreamCountUpdate {
-                forwarder_id: "f1".to_owned(),
-                reader_ip: "10.0.0.1".to_owned(),
-                reads_total: 42,
-                reads_epoch: 7,
-            }],
-        };
-        let json: serde_json::Value = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "stream_counts_updated");
-        assert_eq!(json["updates"][0]["forwarder_id"], "f1");
-        assert_eq!(json["updates"][0]["reader_ip"], "10.0.0.1");
-        assert_eq!(json["updates"][0]["reads_total"], 42);
-        assert_eq!(json["updates"][0]["reads_epoch"], 7);
-    }
-
-    #[test]
     fn mode_changed_serializes_with_type_tag() {
         let event = ReceiverUiEvent::ModeChanged {
             mode: rt_domain::ReceiverMode::Race {
@@ -246,22 +204,6 @@ mod tests {
         assert_eq!(json["type"], "mode_changed");
         assert_eq!(json["mode"]["mode"], "race");
         assert_eq!(json["mode"]["race_id"], "race-1");
-    }
-
-    #[test]
-    fn forwarder_metrics_updated_serializes_with_type_tag() {
-        let event = ReceiverUiEvent::ForwarderMetricsUpdated(ForwarderMetricsUpdate {
-            forwarder_id: "fwd-01".to_owned(),
-            unique_chips: 4,
-            total_reads: 15,
-            last_read_at: Some("2026-03-21T12:34:56.000Z".to_owned()),
-        });
-        let json: serde_json::Value = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "forwarder_metrics_updated");
-        assert_eq!(json["forwarder_id"], "fwd-01");
-        assert_eq!(json["unique_chips"], 4);
-        assert_eq!(json["total_reads"], 15);
-        assert_eq!(json["last_read_at"], "2026-03-21T12:34:56.000Z");
     }
 
     #[test]
@@ -285,8 +227,8 @@ mod tests {
     }
 
     #[test]
-    fn last_read_serializes_with_type_tag() {
-        let event = ReceiverUiEvent::LastRead(LastRead {
+    fn stream_delta_last_read_omits_division_when_absent() {
+        let last_read = LastRead {
             forwarder_id: "fwd-01".to_owned(),
             reader_ip: "192.168.1.10".to_owned(),
             chip_id: "000000012345".to_owned(),
@@ -294,9 +236,8 @@ mod tests {
             bib: None,
             name: None,
             division: None,
-        });
-        let json: serde_json::Value = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "last_read");
+        };
+        let json: serde_json::Value = serde_json::to_value(&last_read).unwrap();
         assert_eq!(json["forwarder_id"], "fwd-01");
         assert_eq!(json["reader_ip"], "192.168.1.10");
         assert_eq!(json["timestamp"], "14:23:05.123");
@@ -307,8 +248,8 @@ mod tests {
     }
 
     #[test]
-    fn last_read_carries_division_when_present() {
-        let event = ReceiverUiEvent::LastRead(LastRead {
+    fn stream_delta_last_read_carries_division_when_present() {
+        let last_read = LastRead {
             forwarder_id: "fwd-01".to_owned(),
             reader_ip: "192.168.1.10".to_owned(),
             chip_id: "000000012345".to_owned(),
@@ -316,58 +257,11 @@ mod tests {
             bib: Some("42".to_owned()),
             name: Some("Ada Lovelace".to_owned()),
             division: Some("5k".to_owned()),
-        });
-        let json: serde_json::Value = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "last_read");
+        };
+        let json: serde_json::Value = serde_json::to_value(&last_read).unwrap();
         assert_eq!(json["bib"], "42");
         assert_eq!(json["name"], "Ada Lovelace");
         assert_eq!(json["division"], "5k");
-    }
-
-    #[test]
-    fn stream_metrics_updated_serializes_with_correct_type_tag() {
-        let event = ReceiverUiEvent::StreamMetricsUpdated(StreamMetricsPayload {
-            forwarder_id: "fwd-1".to_owned(),
-            reader_ip: "10.0.0.1:10000".to_owned(),
-            raw_count: 100,
-            dedup_count: 80,
-            retransmit_count: 20,
-            lag_ms: Some(1500),
-            epoch_raw_count: 50,
-            epoch_dedup_count: 40,
-            epoch_retransmit_count: 10,
-            unique_chips: 30,
-            epoch_last_received_at: Some("2026-03-21T12:00:00Z".to_owned()),
-            epoch_lag_ms: Some(500),
-        });
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "stream_metrics_updated");
-        assert_eq!(json["forwarder_id"], "fwd-1");
-        assert_eq!(json["raw_count"], 100);
-        assert_eq!(json["lag_ms"], 1500);
-        assert_eq!(json["unique_chips"], 30);
-    }
-
-    #[test]
-    fn stream_metrics_updated_serializes_null_lag() {
-        let event = ReceiverUiEvent::StreamMetricsUpdated(StreamMetricsPayload {
-            forwarder_id: "fwd-1".to_owned(),
-            reader_ip: "10.0.0.1:10000".to_owned(),
-            raw_count: 0,
-            dedup_count: 0,
-            retransmit_count: 0,
-            lag_ms: None,
-            epoch_raw_count: 0,
-            epoch_dedup_count: 0,
-            epoch_retransmit_count: 0,
-            unique_chips: 0,
-            epoch_last_received_at: None,
-            epoch_lag_ms: None,
-        });
-        let json = serde_json::to_value(&event).unwrap();
-        assert!(json["lag_ms"].is_null());
-        assert!(json["epoch_last_received_at"].is_null());
-        assert!(json["epoch_lag_ms"].is_null());
     }
 
     #[test]

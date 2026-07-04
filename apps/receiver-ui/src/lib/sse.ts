@@ -1,11 +1,8 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
-  ForwarderMetricsUpdate,
   ForwarderReaderCountsUpdate,
-  LastRead,
   ReceiverMode,
   StatusResponse,
-  StreamCountUpdate,
   StreamMetrics,
   StreamsResponse,
   UpsStatus,
@@ -26,8 +23,6 @@ type StreamsSnapshotPayload = {
   upstream_error?: string | null;
 };
 type LogEntryPayload = { entry: string };
-type StreamCountsUpdatedPayload = { updates?: StreamCountUpdate[] };
-type ForwarderMetricsUpdatedPayload = ForwarderMetricsUpdate;
 type ForwarderReaderCountsUpdatedPayload = ForwarderReaderCountsUpdate;
 type ModeChangedPayload = { mode: ReceiverMode };
 type LastReadPayload = {
@@ -65,12 +60,8 @@ export type SseCallbacks = {
   onResync: () => void;
   onConnectionsChanged: () => void;
   onConnectionChange: (connected: boolean) => void;
-  onStreamCountsUpdated: (updates: StreamCountUpdate[]) => void;
-  onForwarderMetricsUpdated: (update: ForwarderMetricsUpdate) => void;
   onForwarderReaderCountsUpdated: (update: ForwarderReaderCountsUpdate) => void;
   onModeChanged: (mode: ReceiverMode) => void;
-  onLastRead: (read: LastRead) => void;
-  onStreamMetricsUpdated: (metrics: StreamMetrics) => void;
   onStreamDeltas: (updates: StreamDeltaPayload[]) => void;
   onForwarderUpsUpdated?: (payload: ForwarderUpsUpdatedPayload) => void;
 };
@@ -108,15 +99,6 @@ export async function initSSE(callbacks: SseCallbacks): Promise<void> {
     listen("connections_changed", () => {
       callbacks.onConnectionsChanged();
     }),
-    listen<StreamCountsUpdatedPayload>("stream_counts_updated", (event) => {
-      callbacks.onStreamCountsUpdated(event.payload.updates ?? []);
-    }),
-    listen<ForwarderMetricsUpdatedPayload>(
-      "forwarder_metrics_updated",
-      (event) => {
-        callbacks.onForwarderMetricsUpdated(event.payload);
-      },
-    ),
     listen<ForwarderReaderCountsUpdatedPayload>(
       "forwarder_reader_counts_updated",
       (event) => {
@@ -132,32 +114,6 @@ export async function initSSE(callbacks: SseCallbacks): Promise<void> {
     ),
     listen<ModeChangedPayload>("mode_changed", (event) => {
       callbacks.onModeChanged(event.payload.mode);
-    }),
-    listen<LastReadPayload>("last_read", (event) => {
-      callbacks.onLastRead({
-        forwarder_id: event.payload.forwarder_id,
-        reader_ip: event.payload.reader_ip,
-        chip_id: event.payload.chip_id,
-        timestamp: event.payload.timestamp,
-        bib: event.payload.bib ?? null,
-        name: event.payload.name ?? null,
-      });
-    }),
-    listen<StreamMetrics>("stream_metrics_updated", (event) => {
-      callbacks.onStreamMetricsUpdated({
-        forwarder_id: event.payload.forwarder_id,
-        reader_ip: event.payload.reader_ip,
-        raw_count: event.payload.raw_count,
-        dedup_count: event.payload.dedup_count,
-        retransmit_count: event.payload.retransmit_count,
-        lag_ms: event.payload.lag_ms ?? null,
-        epoch_raw_count: event.payload.epoch_raw_count,
-        epoch_dedup_count: event.payload.epoch_dedup_count,
-        epoch_retransmit_count: event.payload.epoch_retransmit_count,
-        unique_chips: event.payload.unique_chips,
-        epoch_last_received_at: event.payload.epoch_last_received_at ?? null,
-        epoch_lag_ms: event.payload.epoch_lag_ms ?? null,
-      });
     }),
     listen<StreamDeltasPayload>("stream_deltas", (event) => {
       callbacks.onStreamDeltas(event.payload.updates ?? []);

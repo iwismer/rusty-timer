@@ -292,13 +292,6 @@ export interface ForwarderEntry {
   last_read_at: string | null;
 }
 
-export interface ForwarderMetricsUpdate {
-  forwarder_id: string;
-  unique_chips: number;
-  total_reads: number;
-  last_read_at: string | null;
-}
-
 /// Targeted patch for a reader's volatile counters on the Connections tab,
 /// pushed by the receiver instead of a full connections reload.
 export interface ForwarderReaderCountsUpdate {

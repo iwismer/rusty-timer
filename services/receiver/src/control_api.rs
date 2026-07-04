@@ -3565,12 +3565,8 @@ pub const EVENT_NAMES: &[&str] = &[
     "connections_changed",
     "streams_snapshot",
     "log_entry",
-    "stream_counts_updated",
-    "forwarder_metrics_updated",
     "forwarder_reader_counts_updated",
     "mode_changed",
-    "last_read",
-    "stream_metrics_updated",
     "stream_deltas",
     "forwarder_ups_updated",
 ];
@@ -3587,12 +3583,8 @@ pub fn event_name(event: &ReceiverUiEvent) -> &'static str {
         ReceiverUiEvent::ConnectionsChanged => "connections_changed",
         ReceiverUiEvent::StreamsSnapshot { .. } => "streams_snapshot",
         ReceiverUiEvent::LogEntry { .. } => "log_entry",
-        ReceiverUiEvent::StreamCountsUpdated { .. } => "stream_counts_updated",
-        ReceiverUiEvent::ForwarderMetricsUpdated(_) => "forwarder_metrics_updated",
         ReceiverUiEvent::ForwarderReaderCountsUpdated(_) => "forwarder_reader_counts_updated",
         ReceiverUiEvent::ModeChanged { .. } => "mode_changed",
-        ReceiverUiEvent::LastRead(_) => "last_read",
-        ReceiverUiEvent::StreamMetricsUpdated(_) => "stream_metrics_updated",
         ReceiverUiEvent::StreamDeltas { .. } => "stream_deltas",
         ReceiverUiEvent::ForwarderUpsUpdated { .. } => "forwarder_ups_updated",
     }
@@ -3974,8 +3966,7 @@ mod tests {
     #[test]
     fn event_name_parity_covers_every_variant_bidirectionally() {
         use crate::ui_events::{
-            ForwarderMetricsUpdate, ForwarderReaderCounts, LastRead, StreamCountUpdate,
-            StreamDelta, StreamMetricsPayload,
+            ForwarderReaderCounts, LastRead, StreamDelta, StreamMetricsPayload,
         };
 
         let metrics = StreamMetricsPayload {
@@ -4018,20 +4009,6 @@ mod tests {
             ReceiverUiEvent::LogEntry {
                 entry: "x".to_owned(),
             },
-            ReceiverUiEvent::StreamCountsUpdated {
-                updates: vec![StreamCountUpdate {
-                    forwarder_id: "f".to_owned(),
-                    reader_ip: "ip".to_owned(),
-                    reads_total: 0,
-                    reads_epoch: 0,
-                }],
-            },
-            ReceiverUiEvent::ForwarderMetricsUpdated(ForwarderMetricsUpdate {
-                forwarder_id: "f".to_owned(),
-                unique_chips: 0,
-                total_reads: 0,
-                last_read_at: None,
-            }),
             ReceiverUiEvent::ForwarderReaderCountsUpdated(ForwarderReaderCounts {
                 forwarder_id: "f".to_owned(),
                 stream_id: "ip".to_owned(),
@@ -4045,8 +4022,6 @@ mod tests {
                     race_id: "r".to_owned(),
                 },
             },
-            ReceiverUiEvent::LastRead(last_read.clone()),
-            ReceiverUiEvent::StreamMetricsUpdated(metrics.clone()),
             ReceiverUiEvent::StreamDeltas {
                 updates: vec![StreamDelta {
                     forwarder_endpoint_id: "e".to_owned(),
@@ -4077,12 +4052,8 @@ mod tests {
                 | ReceiverUiEvent::ConnectionsChanged
                 | ReceiverUiEvent::StreamsSnapshot { .. }
                 | ReceiverUiEvent::LogEntry { .. }
-                | ReceiverUiEvent::StreamCountsUpdated { .. }
-                | ReceiverUiEvent::ForwarderMetricsUpdated(_)
                 | ReceiverUiEvent::ForwarderReaderCountsUpdated(_)
                 | ReceiverUiEvent::ModeChanged { .. }
-                | ReceiverUiEvent::LastRead(_)
-                | ReceiverUiEvent::StreamMetricsUpdated(_)
                 | ReceiverUiEvent::StreamDeltas { .. }
                 | ReceiverUiEvent::ForwarderUpsUpdated { .. } => {}
             }

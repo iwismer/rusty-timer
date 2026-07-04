@@ -1132,10 +1132,7 @@ mod tests {
 
     #[test]
     fn event_names_match() {
-        use receiver::ui_events::{
-            ForwarderMetricsUpdate, ForwarderReaderCounts, LastRead, StreamCountUpdate,
-            StreamDelta, StreamMetricsPayload,
-        };
+        use receiver::ui_events::{ForwarderReaderCounts, StreamDelta, StreamMetricsPayload};
         use std::collections::BTreeSet;
 
         // One sample of every ReceiverUiEvent variant. Adding a variant forces a
@@ -1157,20 +1154,6 @@ mod tests {
             ReceiverUiEvent::LogEntry {
                 entry: "x".to_owned(),
             },
-            ReceiverUiEvent::StreamCountsUpdated {
-                updates: vec![StreamCountUpdate {
-                    forwarder_id: "f".to_owned(),
-                    reader_ip: "ip".to_owned(),
-                    reads_total: 0,
-                    reads_epoch: 0,
-                }],
-            },
-            ReceiverUiEvent::ForwarderMetricsUpdated(ForwarderMetricsUpdate {
-                forwarder_id: "f".to_owned(),
-                unique_chips: 0,
-                total_reads: 0,
-                last_read_at: None,
-            }),
             ReceiverUiEvent::ForwarderReaderCountsUpdated(ForwarderReaderCounts {
                 forwarder_id: "f".to_owned(),
                 stream_id: "ip".to_owned(),
@@ -1184,29 +1167,6 @@ mod tests {
                     race_id: "r".to_owned(),
                 },
             },
-            ReceiverUiEvent::LastRead(LastRead {
-                forwarder_id: "f".to_owned(),
-                reader_ip: "ip".to_owned(),
-                chip_id: "c".to_owned(),
-                timestamp: "t".to_owned(),
-                bib: None,
-                name: None,
-                division: None,
-            }),
-            ReceiverUiEvent::StreamMetricsUpdated(StreamMetricsPayload {
-                forwarder_id: "f".to_owned(),
-                reader_ip: "ip".to_owned(),
-                raw_count: 0,
-                dedup_count: 0,
-                retransmit_count: 0,
-                lag_ms: None,
-                epoch_raw_count: 0,
-                epoch_dedup_count: 0,
-                epoch_retransmit_count: 0,
-                unique_chips: 0,
-                epoch_last_received_at: None,
-                epoch_lag_ms: None,
-            }),
             ReceiverUiEvent::StreamDeltas {
                 updates: vec![StreamDelta {
                     forwarder_endpoint_id: "e".to_owned(),
