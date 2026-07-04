@@ -1391,7 +1391,7 @@ static_allowed_receivers = ["{receiver_endpoint_id}"]
     row_identities = {(row.get("forwarder_endpoint_id"), row.get("stream_id"))
                       for row in announcer_rows}
     results.expect_eq("server announcer rows carry composite stream identity",
-                      row_identities, {(forwarder_node_id, stream_id)})
+                      row_identities, {(forwarder_endpoint_id, stream_id)})
     # Every announcer row must carry a resolved bib and display name (seeded
     # participant + chip data resolved locally on the receiver).
     rows_missing_identity = [
