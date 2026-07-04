@@ -110,7 +110,7 @@ async fn durable_proxy_multiple_consumers_all_receive() {
     }
 
     insert_durable_event(&db, stream_id, 2, b"beta").await;
-    let _ = durable_tx.send(hint(2));
+    durable_tx.send(hint(2)).unwrap();
 
     for (i, client) in consumers.iter_mut().enumerate() {
         read_exact_bytes(client, b"beta", &format!("consumer {i} live event")).await;
