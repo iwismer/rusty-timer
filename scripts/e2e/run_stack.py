@@ -53,6 +53,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -61,6 +62,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -1045,14 +1047,25 @@ allowlist_request_timeout_secs = 2
     # Gate remote config the supported way: a local (trusted) config edit.
     # Remote writes to [control] are rejected above, so the gating scenario
     # flips the flag directly in the forwarder's TOML before the restart.
+    # Line-anchored so it tolerates formatting drift, and parse-verified below
+    # so a silent non-edit can never produce a confusing downstream failure.
     config_text = forwarder_config.read_text()
-    if "allow_remote_config = true" not in config_text:
-        raise AssertionError(
-            f"expected 'allow_remote_config = true' in forwarder config, got:\n{config_text}"
-        )
-    forwarder_config.write_text(
-        config_text.replace("allow_remote_config = true", "allow_remote_config = false")
+    new_text, n_subs = re.subn(
+        r"(?m)^(\s*allow_remote_config\s*=\s*)true\s*$",
+        r"\g<1>false",
+        config_text,
     )
+    if n_subs != 1:
+        raise AssertionError(
+            f"expected exactly one 'allow_remote_config = true' line in forwarder "
+            f"config, found {n_subs}:\n{config_text}"
+        )
+    forwarder_config.write_text(new_text)
+    parsed = tomllib.loads(new_text)
+    if parsed.get("control", {}).get("allow_remote_config") is not False:
+        raise AssertionError(
+            f"config edit did not disable remote config:\n{new_text}"
+        )
     forwarder2 = stack.add(make_forwarder("2"))
     forwarder2.start()
     wait_for_log(forwarder2.log_path, "p2p iroh server started", timeout=30,

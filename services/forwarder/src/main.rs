@@ -394,7 +394,20 @@ async fn main() {
                             }
                         }
                         Ok(_) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            // A burst may have evicted the only reader-state
+                            // transition; re-detect rather than risk serving a
+                            // stale IP until the next transition.
+                            let detected = detect_local_ip(&target);
+                            if detected != last_ip {
+                                info!(
+                                    local_ip = detected.as_deref().unwrap_or("none"),
+                                    "local IP changed (feed lagged), updating status"
+                                );
+                                last_ip = detected.clone();
+                                status.set_local_ip(detected).await;
+                            }
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                     }
                 }

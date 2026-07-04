@@ -470,7 +470,7 @@ fn parse_update(update: ReceiverAllowListUpdate) -> Vec<EndpointId> {
         .receiver_endpoint_ids
         .into_iter()
         .filter_map(|endpoint_id| match EndpointId::from_str(&endpoint_id) {
-            Ok(node_id) => Some(node_id),
+            Ok(endpoint_id) => Some(endpoint_id),
             Err(error) => {
                 tracing::warn!(
                     endpoint_id = %endpoint_id,

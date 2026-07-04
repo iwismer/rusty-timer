@@ -62,7 +62,7 @@ impl ForwarderRemoteConfigHandler {
     /// Builds a handler. `allow_remote_config` mirrors
     /// `control.allow_remote_config` and gates both capability advertisement
     /// and every verb. `ui_logger` is the forwarder's shared UI logger; config
-    /// writes are logged there attributed to the requesting peer's node id.
+    /// writes are logged there attributed to the requesting peer's endpoint id.
     #[must_use]
     pub fn new(
         allow_remote_config: bool,
@@ -253,7 +253,7 @@ mod tests {
         (h, logger)
     }
 
-    /// A deterministic peer node id for attributing test config writes.
+    /// A deterministic peer endpoint id for attributing test config writes.
     fn test_peer() -> EndpointId {
         rt_iroh::SecretKey::from_bytes(&[42u8; 32]).public()
     }
@@ -657,7 +657,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_success_ui_log_mentions_peer_node_id() {
+    async fn set_success_ui_log_mentions_peer_endpoint_id() {
         let (config_path, _dir) = temp_config("");
         let (h, logger) = handler_with_logger(true, config_path, Arc::new(Notify::new()));
         let mut value: serde_json::Value = serde_json::from_str(
@@ -690,7 +690,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_rejected_ui_log_mentions_peer_node_id() {
+    async fn set_rejected_ui_log_mentions_peer_endpoint_id() {
         let (config_path, _dir) = temp_config("[p2p]\nenabled = false\n");
         let (h, logger) = handler_with_logger(true, config_path, Arc::new(Notify::new()));
         let mut value: serde_json::Value = serde_json::from_str(

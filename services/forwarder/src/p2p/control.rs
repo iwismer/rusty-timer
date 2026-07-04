@@ -220,7 +220,7 @@ pub trait RemoteConfigHandler: std::fmt::Debug + Send + Sync + 'static {
     /// config file and marks a restart as needed. On validation or IO failure
     /// returns `ok = false` with a descriptive error and never panics.
     ///
-    /// `peer` is the authenticated node id of the receiver that sent the
+    /// `peer` is the authenticated endpoint id of the receiver that sent the
     /// request; implementations use it to attribute the config write in
     /// UI-visible logs.
     fn set_config(&self, request: ConfigSetRequest, peer: EndpointId) -> ConfigSetFuture<'_>;
@@ -431,7 +431,7 @@ pub(crate) async fn negotiate_control_stream(
 /// control stream until the peer disconnects cleanly (`Ok`) or is declared dead
 /// (`Err`). Dispatches reader-control and remote-config requests to the
 /// supplied handlers and forwards status updates from the optional
-/// `outbound_events` channel to the peer. `peer` is the authenticated node id
+/// `outbound_events` channel to the peer. `peer` is the authenticated endpoint id
 /// of the connected receiver; every verb dispatch is attributed to it in logs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_control_stream_loop(
@@ -609,7 +609,7 @@ async fn negotiate_and_serve_catalog_stream(
 /// pongs (returns `Err`) or disconnects cleanly (returns `Ok`).
 ///
 /// Every reader-control and remote-config verb dispatch emits a `tracing`
-/// event attributed to `peer` (the authenticated remote node id), including
+/// event attributed to `peer` (the authenticated remote endpoint id), including
 /// capability-gate denials, so control-plane operations are auditable.
 #[allow(clippy::too_many_arguments)]
 async fn run_control_loop(

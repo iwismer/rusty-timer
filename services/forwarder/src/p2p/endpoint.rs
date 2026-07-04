@@ -812,9 +812,9 @@ mod tests {
     }
 
     /// A remote config write over P2P must surface a UI log entry that
-    /// attributes the write to the requesting receiver's node id.
+    /// attributes the write to the requesting receiver's endpoint id.
     #[tokio::test]
-    async fn remote_config_set_over_p2p_emits_ui_log_with_peer_node_id() -> TestResult {
+    async fn remote_config_set_over_p2p_emits_ui_log_with_peer_endpoint_id() -> TestResult {
         use rt_p2p_protocol::{CAP_REMOTE_CONFIG, ConfigGetRequest, ConfigSetRequest, Pong};
 
         let receiver = EndpointBuilder::test([84; 32]).bind().await?;
@@ -932,7 +932,7 @@ mod tests {
         );
 
         // The UI event stream must carry a log entry attributing the write to
-        // the receiver's node id.
+        // the receiver's endpoint id.
         let peer_id = receiver.endpoint_id().to_string();
         let attributed = tokio::time::timeout(Duration::from_secs(5), async {
             loop {

@@ -164,3 +164,13 @@ enabled = true
 
 See [Forwarder operations](../../docs/runbooks/forwarder-operations.md) for
 startup, recovery, retention, and epoch procedures.
+
+### Startup pause after journal loss
+
+When the journal is missing for a configured reader and a coordination server
+is configured, startup fetches the server's stored stream high-water to avoid
+reusing sequence numbers (which would make receivers silently discard reads).
+If the server is unreachable, this retries up to 3 times, 5 seconds apart, so
+a boot can pause roughly 15–20 seconds before local capture starts. The
+fallback is loud: an error-level log and UI log entry note that receiver dedup
+may discard reads if this host previously forwarded the stream.
