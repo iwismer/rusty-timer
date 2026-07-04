@@ -1260,7 +1260,7 @@ mod tests {
             let forwarder = MockForwarderPeer::start([46; 32], mismatched_subscribe_ok_script())
                 .await
                 .unwrap();
-            let endpoint_id = forwarder.node_addr().node_id.to_string();
+            let endpoint_id = forwarder.endpoint_addr().id.to_string();
             let endpoint = Arc::new(test_endpoint(47).await);
             let store = test_store();
             let (state, _shutdown_rx) = AppState::new(
@@ -1272,7 +1272,7 @@ mod tests {
             let connection = ForwarderConnection::start(
                 endpoint_id.clone(),
                 Arc::clone(&endpoint),
-                forwarder.node_addr(),
+                forwarder.endpoint_addr(),
                 store.writer.clone(),
                 test_hello(),
                 Arc::clone(&reporter),
