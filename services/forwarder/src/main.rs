@@ -364,7 +364,7 @@ async fn main() {
                 }
             };
             status_server
-                .set_reader_epoch_metadata(reader_addr, metadata)
+                .apply_epoch_metadata(reader_addr, metadata)
                 .await;
             status_server
                 .set_reader_epoch_reads(reader_addr, epoch_reads)

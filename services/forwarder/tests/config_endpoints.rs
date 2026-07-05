@@ -134,6 +134,13 @@ impl JournalAccess for NoopJournal {
     ) -> Result<forwarder::storage::journal::CurrentEpochMetadata, EpochResetError> {
         Err(EpochResetError::NotFound)
     }
+    fn set_epoch_name(
+        &mut self,
+        _stream_key: &str,
+        _name: Option<&str>,
+    ) -> Result<forwarder::storage::journal::CurrentEpochMetadata, EpochResetError> {
+        Err(EpochResetError::NotFound)
+    }
     fn current_epoch_metadata(
         &self,
         _stream_key: &str,

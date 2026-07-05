@@ -359,19 +359,13 @@ impl StatusServer {
         self.store.set_reader_epoch_reads(reader_ip, count).await;
     }
 
-    pub async fn set_reader_epoch_metadata(
+    /// Apply journal-authoritative epoch metadata to a reader's status.
+    pub async fn apply_epoch_metadata(
         &self,
         reader_ip: &str,
         metadata: crate::storage::journal::CurrentEpochMetadata,
-    ) {
-        self.store
-            .set_reader_epoch_metadata(reader_ip, metadata)
-            .await;
-    }
-
-    /// Set the current epoch name for a reader and broadcast a ReaderUpdated SSE event.
-    pub async fn set_reader_epoch_name(&self, reader_ip: &str, name: Option<String>) {
-        self.store.set_reader_epoch_name(reader_ip, name).await;
+    ) -> bool {
+        self.store.apply_epoch_metadata(reader_ip, metadata).await
     }
 
     /// Update a reader's connection state.
@@ -479,6 +473,13 @@ pub trait JournalAccess {
         stream_key: &str,
     ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochResetError>;
 
+    /// Set (or clear) the name of the currently open epoch for `stream_key`.
+    fn set_epoch_name(
+        &mut self,
+        stream_key: &str,
+        name: Option<&str>,
+    ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochResetError>;
+
     /// Return the current epoch metadata for a stream_key, or `None` if stream unknown.
     fn current_epoch_metadata(
         &self,
@@ -518,6 +519,17 @@ impl JournalAccess for Journal {
             .ok_or(EpochResetError::NotFound)
     }
 
+    fn set_epoch_name(
+        &mut self,
+        stream_key: &str,
+        name: Option<&str>,
+    ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochResetError> {
+        Journal::set_epoch_name(self, stream_key, name).map_err(|e| match e {
+            crate::storage::journal::JournalError::InvalidData(_) => EpochResetError::NotFound,
+            other => EpochResetError::Storage(other.to_string()),
+        })
+    }
+
     fn current_epoch_metadata(
         &self,
         stream_key: &str,
@@ -537,6 +549,14 @@ impl JournalAccess for NoJournal {
     fn reset_epoch(
         &mut self,
         _stream_key: &str,
+    ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochResetError> {
+        Err(EpochResetError::NotFound)
+    }
+
+    fn set_epoch_name(
+        &mut self,
+        _stream_key: &str,
+        _name: Option<&str>,
     ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochResetError> {
         Err(EpochResetError::NotFound)
     }
@@ -1520,36 +1540,13 @@ async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
     let result = state.journal.lock().await.reset_epoch(&reader_ip);
     match result {
         Ok(metadata) => {
-            if let Some(reader) = state.subsystem.lock().await.readers.get_mut(&reader_ip) {
-                if reader.current_epoch.is_some_and(|e| e != metadata.epoch) {
-                    // Epoch changed: the new epoch starts with zero reads.
-                    reader.reads_epoch = 0;
-                }
-                reader.current_epoch = Some(metadata.epoch);
-                reader.current_epoch_created_unix_ms = metadata.created_unix_ms;
-                reader.current_epoch_name = None;
-                let _ = state
-                    .ui_tx
-                    .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
-                        ip: reader_ip.clone(),
-                        state: (&reader.state).into(),
-                        reads_session: reader.reads_since_restart,
-                        reads_total: reader.reads_total,
-                        reads_epoch: reader.reads_epoch,
-                        last_seen_secs: reader.last_seen.map(|t| t.elapsed().as_secs()),
-                        local_port: reader.local_port,
-                        current_epoch_name: None,
-                    });
-                let _ = state
-                    .status_event_tx
-                    .send(ForwarderStatusEvent::ReaderStatus {
-                        stream_id: reader_ip.clone(),
-                        status: reader.clone(),
-                    });
-            }
+            state
+                .store
+                .apply_epoch_metadata(&reader_ip, metadata.clone())
+                .await;
             state
                 .logger
-                .log(format!("epoch reset for {} via API", reader_ip));
+                .log(format!("epoch advanced for {} via API", reader_ip));
             let body = serde_json::json!({
                 "new_epoch": metadata.epoch,
                 "created_unix_ms": metadata.created_unix_ms,
@@ -1589,31 +1586,25 @@ async fn set_current_epoch_name_handler<J: JournalAccess + Send + 'static>(
         None => return text_response(StatusCode::BAD_REQUEST, "name is required"),
     };
 
-    let mut ss = state.subsystem.lock().await;
-    let Some(reader) = ss.readers.get_mut(&reader_ip) else {
-        return text_response(StatusCode::NOT_FOUND, "reader not found");
-    };
-
-    reader.current_epoch_name = normalized_name;
-    let _ = state
-        .ui_tx
-        .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
-            ip: reader_ip.to_owned(),
-            state: (&reader.state).into(),
-            reads_session: reader.reads_since_restart,
-            reads_total: reader.reads_total,
-            reads_epoch: reader.reads_epoch,
-            last_seen_secs: reader.last_seen.map(|t| t.elapsed().as_secs()),
-            local_port: reader.local_port,
-            current_epoch_name: reader.current_epoch_name.clone(),
-        });
-    state.logger.log(format!(
-        "set current epoch name for {} via local API",
-        reader_ip
-    ));
-    drop(ss);
-
-    json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string())
+    // Persist to the journal first; the returned metadata is the
+    // authoritative state applied to the in-memory status.
+    let result = state
+        .journal
+        .lock()
+        .await
+        .set_epoch_name(&reader_ip, normalized_name.as_deref());
+    match result {
+        Ok(metadata) => {
+            state.store.apply_epoch_metadata(&reader_ip, metadata).await;
+            state.logger.log(format!(
+                "set current epoch name for {} via local API",
+                reader_ip
+            ));
+            json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string())
+        }
+        Err(EpochResetError::NotFound) => text_response(StatusCode::NOT_FOUND, "stream not found"),
+        Err(EpochResetError::Storage(e)) => text_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
 }
 
 fn status_from_u16_or_internal(status: u16) -> StatusCode {
@@ -4213,7 +4204,15 @@ target = "192.168.1.100:10000"
 
         // Set epoch name
         server
-            .set_reader_epoch_name("192.168.1.10", Some("Race Day".to_owned()))
+            .apply_epoch_metadata(
+                "192.168.1.10",
+                crate::storage::journal::CurrentEpochMetadata {
+                    epoch: 1,
+                    created_unix_ms: None,
+                    start_seq: 1,
+                    name: Some("Race Day".to_owned()),
+                },
+            )
             .await;
 
         let evt = tokio::time::timeout(Duration::from_millis(250), rx.recv())
@@ -4249,13 +4248,31 @@ target = "192.168.1.100:10000"
             .init_readers(&[("192.168.1.10".to_owned(), 10010)])
             .await;
         server
-            .set_reader_epoch_name("192.168.1.10", Some("Race Day".to_owned()))
+            .apply_epoch_metadata(
+                "192.168.1.10",
+                crate::storage::journal::CurrentEpochMetadata {
+                    epoch: 1,
+                    created_unix_ms: None,
+                    start_seq: 1,
+                    name: Some("Race Day".to_owned()),
+                },
+            )
             .await;
 
         let mut rx = server.ui_sender().subscribe();
 
         // Clear epoch name
-        server.set_reader_epoch_name("192.168.1.10", None).await;
+        server
+            .apply_epoch_metadata(
+                "192.168.1.10",
+                crate::storage::journal::CurrentEpochMetadata {
+                    epoch: 1,
+                    created_unix_ms: None,
+                    start_seq: 1,
+                    name: None,
+                },
+            )
+            .await;
 
         let evt = tokio::time::timeout(Duration::from_millis(250), rx.recv())
             .await
@@ -4326,7 +4343,15 @@ target = "192.168.1.100:10000"
             .init_readers(&[("192.168.1.10".to_owned(), 10010)])
             .await;
         server
-            .set_reader_epoch_name("192.168.1.10", Some("Race Day".to_owned()))
+            .apply_epoch_metadata(
+                "192.168.1.10",
+                crate::storage::journal::CurrentEpochMetadata {
+                    epoch: 1,
+                    created_unix_ms: None,
+                    start_seq: 1,
+                    name: Some("Race Day".to_owned()),
+                },
+            )
             .await;
 
         let addr = server.local_addr();

@@ -67,75 +67,24 @@ impl ReaderControlService {
         Ok(info)
     }
 
-    pub async fn set_epoch_name(
-        &self,
-        reader_ip: &str,
-        name: Option<String>,
-    ) -> Result<crate::reader_control::ReaderInfo, String> {
-        let status = {
-            let mut ss = self.subsystem.lock().await;
-            let reader = ss
-                .readers
-                .get_mut(reader_ip)
-                .ok_or_else(|| "reader not found".to_owned())?;
-            reader.current_epoch_name = name;
-            let status = reader.clone();
-            let _ = self
-                .ui_tx
-                .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
-                    ip: reader_ip.to_owned(),
-                    state: (&reader.state).into(),
-                    reads_session: reader.reads_since_restart,
-                    reads_total: reader.reads_total,
-                    reads_epoch: reader.reads_epoch,
-                    last_seen_secs: reader.last_seen.map(|t| t.elapsed().as_secs()),
-                    local_port: reader.local_port,
-                    current_epoch_name: reader.current_epoch_name.clone(),
-                });
-            let _ = self
-                .status_event_tx
-                .send(ForwarderStatusEvent::ReaderStatus {
-                    stream_id: reader_ip.to_owned(),
-                    status: status.clone(),
-                });
-            status
-        };
-        Ok(status.reader_info.unwrap_or_default())
-    }
-
-    pub async fn set_current_epoch_metadata(
+    /// Apply journal-authoritative epoch metadata to the reader's status.
+    ///
+    /// Adapters (P2P reader control) persist the epoch change to the journal
+    /// first, then apply the returned metadata here; this method never touches
+    /// the journal itself. Returns `false` when the reader is unknown.
+    pub async fn apply_epoch_metadata(
         &self,
         reader_ip: &str,
         metadata: crate::storage::journal::CurrentEpochMetadata,
-    ) {
-        let mut ss = self.subsystem.lock().await;
-        if let Some(status) = ss.readers.get_mut(reader_ip) {
-            if status.current_epoch.is_some_and(|e| e != metadata.epoch) {
-                // Epoch changed: the new epoch starts with zero reads.
-                status.reads_epoch = 0;
-            }
-            status.current_epoch = Some(metadata.epoch);
-            status.current_epoch_created_unix_ms = metadata.created_unix_ms;
-            status.current_epoch_name = None;
-            let _ = self
-                .ui_tx
-                .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
-                    ip: reader_ip.to_owned(),
-                    state: (&status.state).into(),
-                    reads_session: status.reads_since_restart,
-                    reads_total: status.reads_total,
-                    reads_epoch: status.reads_epoch,
-                    last_seen_secs: status.last_seen.map(|t| t.elapsed().as_secs()),
-                    local_port: status.local_port,
-                    current_epoch_name: None,
-                });
-            let _ = self
-                .status_event_tx
-                .send(ForwarderStatusEvent::ReaderStatus {
-                    stream_id: reader_ip.to_owned(),
-                    status: status.clone(),
-                });
-        }
+    ) -> bool {
+        crate::status_store::apply_epoch_metadata_to_subsystem(
+            &self.subsystem,
+            &self.ui_tx,
+            &self.status_event_tx,
+            reader_ip,
+            metadata,
+        )
+        .await
     }
 
     pub async fn emit_status_refresh(&self, reader_ip: &str) {
@@ -594,7 +543,7 @@ mod tests {
     use chrono::{TimeZone, Timelike};
 
     #[tokio::test]
-    async fn set_current_epoch_metadata_updates_status_and_broadcasts_reader_status() {
+    async fn apply_epoch_metadata_updates_status_and_broadcasts_reader_status() {
         let subsystem = Arc::new(Mutex::new(crate::status_store::SubsystemStatus::ready()));
         {
             let mut ss = subsystem.lock().await;
@@ -635,7 +584,7 @@ mod tests {
         );
 
         service
-            .set_current_epoch_metadata(
+            .apply_epoch_metadata(
                 "reader-a",
                 crate::storage::journal::CurrentEpochMetadata {
                     epoch: 3,

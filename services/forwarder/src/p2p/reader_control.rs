@@ -2,7 +2,6 @@
 
 use super::{ReaderControlFuture, ReaderControlHandler};
 use crate::reader_control_service::{ReaderControlService, domain_read_mode_to_native};
-use crate::status_http::{EpochResetError, JournalAccess};
 use rt_p2p_protocol::{ReaderControlRequest, ReaderControlResponse};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -147,30 +146,37 @@ async fn dispatch_action(
             .reconnect(reader_key)
             .await
             .map(|()| DispatchOutcome::default()),
-        rt_domain::ReaderControlAction::SetEpochName { name } => service
-            .set_epoch_name(reader_key, name.clone())
-            .await
-            .map(|info| DispatchOutcome {
-                reader_info: Some(crate::reader_control_service::native_info_to_domain(&info)),
-                current_epoch_name: Some(name.unwrap_or_default()),
-                ..DispatchOutcome::default()
-            }),
-        rt_domain::ReaderControlAction::AdvanceEpoch => {
+        rt_domain::ReaderControlAction::SetEpochName { name } => {
+            // Persist to the journal first; the returned metadata is the
+            // authoritative state applied to the in-memory status.
             let metadata = journal
                 .lock()
                 .await
-                .reset_epoch(reader_key)
-                .map_err(|e| match e {
-                    EpochResetError::NotFound => "stream not found".to_owned(),
-                    EpochResetError::Storage(message) => message,
-                })?;
+                .set_epoch_name(reader_key, name.as_deref())
+                .map_err(|e| e.to_string())?;
             service
-                .set_current_epoch_metadata(reader_key, metadata.clone())
+                .apply_epoch_metadata(reader_key, metadata.clone())
                 .await;
             Ok(DispatchOutcome {
                 current_epoch: Some(metadata.epoch),
                 current_epoch_created_unix_ms: metadata.created_unix_ms,
-                current_epoch_name: Some(String::new()),
+                current_epoch_name: Some(metadata.name.unwrap_or_default()),
+                ..DispatchOutcome::default()
+            })
+        }
+        rt_domain::ReaderControlAction::AdvanceEpoch => {
+            let metadata = journal
+                .lock()
+                .await
+                .advance_epoch(reader_key, None)
+                .map_err(|e| e.to_string())?;
+            service
+                .apply_epoch_metadata(reader_key, metadata.clone())
+                .await;
+            Ok(DispatchOutcome {
+                current_epoch: Some(metadata.epoch),
+                current_epoch_created_unix_ms: metadata.created_unix_ms,
+                current_epoch_name: Some(metadata.name.clone().unwrap_or_default()),
                 ..DispatchOutcome::default()
             })
         }

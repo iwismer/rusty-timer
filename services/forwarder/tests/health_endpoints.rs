@@ -334,13 +334,23 @@ async fn epoch_reset_unknown_stream_returns_404() {
 
 #[tokio::test]
 async fn set_current_epoch_name_updates_local_reader_state() {
+    let dir = tempfile::tempdir().expect("tempdir failed");
+    let mut journal = forwarder::storage::journal::Journal::open(&dir.path().join("t.sqlite3"))
+        .expect("journal open failed");
+    journal
+        .ensure_stream_state("192.168.1.5", 1)
+        .expect("ensure stream failed");
     let cfg = StatusConfig {
         bind: "127.0.0.1:0".to_owned(),
         forwarder_version: "0.1.0-test".to_owned(),
     };
-    let server = StatusServer::start(cfg, SubsystemStatus::ready())
-        .await
-        .expect("start failed");
+    let server = StatusServer::start_with_journal(
+        cfg,
+        SubsystemStatus::ready(),
+        std::sync::Arc::new(tokio::sync::Mutex::new(journal)),
+    )
+    .await
+    .expect("start failed");
     server
         .init_readers(&[("192.168.1.5".to_owned(), 10005)])
         .await;
@@ -367,13 +377,23 @@ async fn set_current_epoch_name_updates_local_reader_state() {
 
 #[tokio::test]
 async fn clear_current_epoch_name_sends_null_name() {
+    let dir = tempfile::tempdir().expect("tempdir failed");
+    let mut journal = forwarder::storage::journal::Journal::open(&dir.path().join("t.sqlite3"))
+        .expect("journal open failed");
+    journal
+        .ensure_stream_state("10.0.0.8", 1)
+        .expect("ensure stream failed");
     let cfg = StatusConfig {
         bind: "127.0.0.1:0".to_owned(),
         forwarder_version: "0.1.0-test".to_owned(),
     };
-    let server = StatusServer::start(cfg, SubsystemStatus::ready())
-        .await
-        .expect("start failed");
+    let server = StatusServer::start_with_journal(
+        cfg,
+        SubsystemStatus::ready(),
+        std::sync::Arc::new(tokio::sync::Mutex::new(journal)),
+    )
+    .await
+    .expect("start failed");
     server.init_readers(&[("10.0.0.8".to_owned(), 10008)]).await;
     let addr = server.local_addr();
 
@@ -405,13 +425,23 @@ async fn clear_current_epoch_name_sends_null_name() {
 /// correctly by Axum and reaches the local reader map — not rejected with 400.
 #[tokio::test]
 async fn set_current_epoch_name_accepts_percent_encoded_reader_ip() {
+    let dir = tempfile::tempdir().expect("tempdir failed");
+    let mut journal = forwarder::storage::journal::Journal::open(&dir.path().join("t.sqlite3"))
+        .expect("journal open failed");
+    journal
+        .ensure_stream_state("192.168.1.7:10000", 1)
+        .expect("ensure stream failed");
     let cfg = StatusConfig {
         bind: "127.0.0.1:0".to_owned(),
         forwarder_version: "0.1.0-test".to_owned(),
     };
-    let server = StatusServer::start(cfg, SubsystemStatus::ready())
-        .await
-        .expect("start failed");
+    let server = StatusServer::start_with_journal(
+        cfg,
+        SubsystemStatus::ready(),
+        std::sync::Arc::new(tokio::sync::Mutex::new(journal)),
+    )
+    .await
+    .expect("start failed");
     server
         .init_readers(&[("192.168.1.7:10000".to_owned(), 10007)])
         .await;
@@ -567,6 +597,17 @@ impl forwarder::status_http::JournalAccess for NoJournalForNameApi {
     fn reset_epoch(
         &mut self,
         _stream_key: &str,
+    ) -> Result<
+        forwarder::storage::journal::CurrentEpochMetadata,
+        forwarder::status_http::EpochResetError,
+    > {
+        Err(forwarder::status_http::EpochResetError::NotFound)
+    }
+
+    fn set_epoch_name(
+        &mut self,
+        _stream_key: &str,
+        _name: Option<&str>,
     ) -> Result<
         forwarder::storage::journal::CurrentEpochMetadata,
         forwarder::status_http::EpochResetError,
@@ -764,6 +805,14 @@ async fn status_page_does_not_query_journal_for_totals() {
                 start_seq: 1,
                 name: None,
             })
+        }
+
+        fn set_epoch_name(
+            &mut self,
+            _stream_key: &str,
+            _name: Option<&str>,
+        ) -> Result<forwarder::storage::journal::CurrentEpochMetadata, EpochResetError> {
+            Err(EpochResetError::NotFound)
         }
 
         fn current_epoch_metadata(
