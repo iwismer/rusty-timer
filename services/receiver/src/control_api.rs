@@ -2273,6 +2273,7 @@ macro_rules! receiver_command_list {
             admin_reset_cursor(body: "StreamRef") -> "()",
             admin_reset_all_cursors() -> "serde_json::Value",
             admin_reset_earliest_epoch(body: "StreamRef") -> "()",
+            admin_reset_stream_data(body: "StreamRef") -> "()",
             admin_reset_all_earliest_epochs() -> "serde_json::Value",
             admin_purge_subscriptions() -> "serde_json::Value",
             admin_update_port(body: "UpdatePortRequest") -> "()",

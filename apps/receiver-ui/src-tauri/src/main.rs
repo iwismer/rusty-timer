@@ -660,6 +660,16 @@ async fn admin_reset_earliest_epoch(
 }
 
 #[tauri::command]
+async fn admin_reset_stream_data(
+    state: State<'_, Arc<AppState>>,
+    body: control_api::StreamRef,
+) -> CmdResult<()> {
+    control_api::admin_reset_stream_data(&state, body)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn admin_reset_all_earliest_epochs(
     state: State<'_, Arc<AppState>>,
 ) -> CmdResult<serde_json::Value> {

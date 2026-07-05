@@ -291,6 +291,25 @@ pub async fn admin_reset_all_cursors(state: &AppState) -> Result<serde_json::Val
     }
 }
 
+/// Reset one stream's locally received data (events, gap markers, cursor,
+/// retention, announcer fence), preserving its subscription and earliest-epoch
+/// override, then reconnect so the subscription re-fetches from scratch.
+pub async fn admin_reset_stream_data(
+    state: &AppState,
+    body: StreamRef,
+) -> Result<(), ReceiverError> {
+    validate_stream_identity(&body.forwarder_endpoint_id, &body.stream_id)?;
+    let local_stream_key = LocalStreamKey::new(&body.forwarder_endpoint_id, &body.stream_id);
+    {
+        let mut db = state.storage.db.lock().await;
+        db.reset_stream_data(local_stream_key.as_str())
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    }
+    let _ = state.request_reconnect_if_connected().await;
+    state.emit_streams_snapshot().await;
+    Ok(())
+}
+
 pub async fn admin_reset_all_earliest_epochs(
     state: &AppState,
 ) -> Result<serde_json::Value, ReceiverError> {

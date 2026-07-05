@@ -24,6 +24,13 @@ export const RECEIVER_ADMIN_HELP = {
         detailHtml:
           'Use this when your timing software needs a full re-delivery from every subscribed stream. All streams replay from their beginning on the next connection, so duplicates may appear in downstream software.',
       },
+      reset_stream_data: {
+        label: 'Reset Stream Data',
+        summary:
+          "Delete one stream's locally stored reads so it re-fetches from scratch.",
+        detailHtml:
+          "Deletes the stream's locally received reads, gap markers, and cursor, then reconnects so the stream re-fetches from the forwarder. The subscription and any <strong>From epoch</strong> override are preserved.<br><br>Combined with a From-epoch override, this is the epoch-replay recovery recipe: set the override to the race's epoch, reset the stream's local data, and reconnect your timing software to the local port — it receives only the chosen epoch onward.<br><br>Local consumers connected to this stream's port will see the data replayed as it re-arrives.",
+      },
     },
     tips: [
       'Reset a cursor when you need to replay all historical data for a specific stream.',

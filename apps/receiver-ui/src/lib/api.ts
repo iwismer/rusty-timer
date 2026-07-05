@@ -649,6 +649,18 @@ export async function resetStreamCursor(stream: {
   });
 }
 
+export async function resetStreamData(stream: {
+  forwarder_endpoint_id: string;
+  stream_id: string;
+}): Promise<void> {
+  await invoke("admin_reset_stream_data", {
+    body: {
+      forwarder_endpoint_id: stream.forwarder_endpoint_id,
+      stream_id: stream.stream_id,
+    },
+  });
+}
+
 export async function resetAllCursors(): Promise<{ deleted: number }> {
   return invoke("admin_reset_all_cursors");
 }
