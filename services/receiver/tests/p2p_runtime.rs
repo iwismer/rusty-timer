@@ -558,6 +558,227 @@ async fn runtime_persists_events_and_advances_cursor() {
     .expect("runtime_persists_events_and_advances_cursor timed out");
 }
 
+/// A script whose catalog advertises two epochs (1 starting at seq 1, 2
+/// starting at seq 3) and serves seqs 3-4 for an override-floored subscribe.
+fn script_with_epochs(raw: &[u8]) -> ForwarderScript {
+    let mut script = script_two(raw);
+    script.catalog.entries[0].epoch_summaries = vec![
+        rt_p2p_protocol::StreamEpochSummary {
+            epoch: 2,
+            created_unix_ms: Some(2_000),
+            start_seq: 3,
+            end_seq: None,
+            name: Some("Race 2".to_owned()),
+        },
+        rt_p2p_protocol::StreamEpochSummary {
+            epoch: 1,
+            created_unix_ms: Some(1_000),
+            start_seq: 1,
+            end_seq: Some(2),
+            name: None,
+        },
+    ];
+    script.subscribe_ok.latest_seq_at_open = 4;
+    script.batches = vec![EventBatch {
+        records: vec![record(3, raw), record(4, raw)],
+        replay: false,
+    }];
+    script.caught_up_through = Some(4);
+    script
+}
+
+#[tokio::test]
+async fn earliest_epoch_override_skips_old_epochs_and_clearing_does_not_backfill() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let forwarder = MockForwarderPeer::start([90; 32], script_with_epochs(VALID_FRAME))
+            .await
+            .unwrap();
+        let (endpoint_id, direct) = forwarder_config(&forwarder);
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_state(dir.path()).await;
+        let (config, sub) = base_config(endpoint_id.clone(), direct, 91, None);
+        let local_key = local_stream_key(&sub);
+        {
+            let mut db = state.storage.db.lock().await;
+            db.replace_stream_subscriptions(&[sub]).unwrap();
+            // Override: only epoch 2 (start_seq 3) onward.
+            db.save_stream_earliest_epoch(&endpoint_id, STREAM_ID, 2)
+                .unwrap();
+        }
+
+        let runtime = start_receiver_p2p(Arc::clone(&state), config)
+            .await
+            .unwrap();
+
+        poll_until(
+            || {
+                let state = Arc::clone(&state);
+                let local_key = local_key.clone();
+                async move {
+                    let db = state.storage.db.lock().await;
+                    db.load_received_events(local_key.as_str())
+                        .map(|e| e.len() >= 2)
+                        .unwrap_or(false)
+                }
+            },
+            Duration::from_secs(10),
+        )
+        .await;
+
+        // The subscribe carried the epoch-2 floor (start_seq 3 - 1 = 2).
+        let subscribes = forwarder.subscribes();
+        assert!(!subscribes.is_empty());
+        assert_eq!(
+            subscribes[0].after_seq, 2,
+            "override must translate to the epoch's start_seq floor"
+        );
+
+        {
+            let db = state.storage.db.lock().await;
+            let seqs: Vec<i64> = db
+                .load_received_events(local_key.as_str())
+                .unwrap()
+                .iter()
+                .map(|e| e.seq)
+                .collect();
+            assert_eq!(seqs, vec![3, 4], "nothing below the override floor");
+            let markers = db.load_gap_markers(local_key.as_str()).unwrap();
+            assert_eq!(markers.len(), 1);
+            assert_eq!(markers[0].reason, "earliest_epoch_override");
+            assert_eq!(db.load_stream_cursor(local_key.as_str()).unwrap(), 4);
+        }
+
+        // Clearing the override must NOT backfill the skipped seqs: the
+        // cursor jump is durable, so a reconnect resumes from 4.
+        {
+            let db = state.storage.db.lock().await;
+            db.delete_stream_earliest_epoch(local_key.as_str()).unwrap();
+        }
+        let _ = state.request_reconnect_if_connected().await;
+        poll_until(
+            || async { forwarder.subscribes().len() >= 2 },
+            Duration::from_secs(10),
+        )
+        .await;
+        let subscribes = forwarder.subscribes();
+        assert_eq!(
+            subscribes.last().unwrap().after_seq,
+            4,
+            "clearing the override resumes from the durable cursor, not from 0"
+        );
+        {
+            let db = state.storage.db.lock().await;
+            let seqs: Vec<i64> = db
+                .load_received_events(local_key.as_str())
+                .unwrap()
+                .iter()
+                .map(|e| e.seq)
+                .collect();
+            assert_eq!(seqs, vec![3, 4], "no backfill after clearing the override");
+        }
+
+        runtime.shutdown().await;
+        forwarder.shutdown().await;
+    })
+    .await
+    .expect("earliest_epoch_override_skips_old_epochs timed out");
+}
+
+#[tokio::test]
+async fn unresolvable_override_holds_stream_fail_closed_until_cleared() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        // Catalog only advertises epoch 1; the override targets epoch 5.
+        let forwarder = MockForwarderPeer::start([92; 32], script_two(VALID_FRAME))
+            .await
+            .unwrap();
+        let (endpoint_id, direct) = forwarder_config(&forwarder);
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = init_state(dir.path()).await;
+        let (config, sub) = base_config(endpoint_id.clone(), direct, 93, None);
+        let local_key = local_stream_key(&sub);
+        {
+            let mut db = state.storage.db.lock().await;
+            db.replace_stream_subscriptions(&[sub]).unwrap();
+            db.save_stream_earliest_epoch(&endpoint_id, STREAM_ID, 5)
+                .unwrap();
+        }
+
+        let runtime = start_receiver_p2p(Arc::clone(&state), config)
+            .await
+            .unwrap();
+
+        // The stream must be surfaced as held (fail closed).
+        poll_until(
+            || {
+                let state = Arc::clone(&state);
+                async move {
+                    state
+                        .build_streams_response()
+                        .await
+                        .streams
+                        .iter()
+                        .any(|stream| stream.stream_id == STREAM_ID && stream.override_held)
+                }
+            },
+            Duration::from_secs(10),
+        )
+        .await;
+
+        // Fail closed: no data subscription, no rows — give the runtime a
+        // moment to prove it is holding rather than merely slow.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            forwarder.subscribes().is_empty(),
+            "held stream must never open a data subscription"
+        );
+        {
+            let db = state.storage.db.lock().await;
+            assert!(
+                db.load_received_events(local_key.as_str())
+                    .unwrap()
+                    .is_empty(),
+                "held stream must not deliver pre-override data"
+            );
+        }
+
+        // Clearing the override releases the hold; data flows from the cursor.
+        {
+            let db = state.storage.db.lock().await;
+            db.delete_stream_earliest_epoch(local_key.as_str()).unwrap();
+        }
+        poll_until(
+            || {
+                let state = Arc::clone(&state);
+                let local_key = local_key.clone();
+                async move {
+                    let db = state.storage.db.lock().await;
+                    db.load_received_events(local_key.as_str())
+                        .map(|e| e.len() >= 2)
+                        .unwrap_or(false)
+                }
+            },
+            Duration::from_secs(10),
+        )
+        .await;
+        assert!(
+            state
+                .build_streams_response()
+                .await
+                .streams
+                .iter()
+                .all(|stream| !stream.override_held),
+            "held marker must clear once the override is removed"
+        );
+
+        runtime.shutdown().await;
+        forwarder.shutdown().await;
+    })
+    .await
+    .expect("unresolvable_override_holds_stream timed out");
+}
+
 #[tokio::test]
 async fn durable_local_proxy_replays_exact_frames() {
     tokio::time::timeout(TEST_TIMEOUT, async {

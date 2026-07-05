@@ -1142,7 +1142,7 @@ async fn reconcile_once(
     workers: &mut HashMap<String, ForwarderConnection>,
     stream_workers: &mut HashMap<String, StreamWorker>,
 ) {
-    let (subs, intents, announcer_enabled, announcer_publish_streams) = {
+    let (subs, intents, announcer_enabled, announcer_publish_streams, earliest_epochs) = {
         let db = state.storage.db.lock().await;
         let subs = match db.load_stream_subscriptions() {
             Ok(subs) => subs,
@@ -1162,7 +1162,21 @@ async fn reconcile_once(
         // are treated as "disabled" so a transient DB error never publishes.
         let enabled = db.load_announcer_enabled().unwrap_or(false);
         let publish = db.load_announcer_publish_streams().unwrap_or_default();
-        (subs, intents, enabled, publish)
+        // Earliest-epoch overrides, keyed by local stream key. Carried raw on
+        // the desired-stream config; the connection worker resolves them to a
+        // subscribe-time floor against its own catalog (fail closed).
+        let overrides = db
+            .load_stream_earliest_epochs()
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| (row.stream_id.as_str().to_owned(), row.earliest_epoch))
+                    .collect::<HashMap<String, i64>>()
+            })
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "failed to load earliest-epoch overrides; treating as none");
+                HashMap::new()
+            });
+        (subs, intents, enabled, publish, overrides)
     };
 
     let discovered = state.forwarders.discovered_forwarders.read().await.clone();
@@ -1300,6 +1314,7 @@ async fn reconcile_once(
                     .get(local_stream_key.as_str())
                     .map(|stream_worker| stream_worker.hint_tx.clone())?;
                 Some(ForwarderDataStream {
+                    earliest_epoch: earliest_epochs.get(local_stream_key.as_str()).copied(),
                     stream_id: sub.stream_id.clone(),
                     local_stream_key,
                     mode: SubscribeMode::Replay,

@@ -189,6 +189,11 @@ pub(crate) struct ForwarderLiveStatus {
     /// disconnect (the whole live status is dropped) or on a subscription
     /// config change ([`AppState::clear_forwarder_stream_failed`]).
     pub(crate) failed_streams: BTreeSet<String>,
+    /// Wire stream ids whose data task is held fail-closed because their
+    /// earliest-epoch override cannot be resolved against the connection's
+    /// catalog. Cleared when the override resolves, is removed, or the
+    /// control connection drops (whole live status dropped).
+    pub(crate) override_held_streams: BTreeSet<String>,
 }
 
 const FORWARDER_PENDING_GRACE: Duration = Duration::from_secs(5);
@@ -1405,6 +1410,58 @@ impl AppState {
         }
     }
 
+    /// Mark a stream's data task as held by an unresolvable earliest-epoch
+    /// override (fail closed). Returns `true` when the stream was not already
+    /// marked, so the caller can log the transition exactly once.
+    pub(crate) async fn mark_forwarder_stream_override_held(
+        &self,
+        endpoint_id: &str,
+        stream_id: &str,
+    ) -> bool {
+        let inserted = {
+            let mut live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
+            live_statuses
+                .entry(endpoint_id.to_owned())
+                .or_default()
+                .override_held_streams
+                .insert(stream_id.to_owned())
+        };
+        if inserted {
+            self.emit_streams_snapshot().await;
+        }
+        inserted
+    }
+
+    /// Clear a stream's held-override marker (override resolved or removed).
+    pub(crate) async fn clear_forwarder_stream_override_held(
+        &self,
+        endpoint_id: &str,
+        stream_id: &str,
+    ) {
+        let removed = {
+            let mut live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
+            live_statuses
+                .get_mut(endpoint_id)
+                .is_some_and(|status| status.override_held_streams.remove(stream_id))
+        };
+        if removed {
+            self.emit_streams_snapshot().await;
+        }
+    }
+
+    /// The live reader's `(current_epoch, current_epoch_start_seq)` pair, used
+    /// as the fallback source when resolving an earliest-epoch override that
+    /// targets the stream's current epoch.
+    pub(crate) fn forwarder_reader_epoch_hint(
+        &self,
+        endpoint_id: &str,
+        stream_id: &str,
+    ) -> Option<(i64, Option<i64>)> {
+        let live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
+        let reader = live_statuses.get(endpoint_id)?.readers.get(stream_id)?;
+        Some((reader.current_epoch?, reader.current_epoch_start_seq))
+    }
+
     pub(crate) async fn clear_forwarder_live_status(&self, endpoint_id: &str) {
         {
             self.forwarders
@@ -1782,8 +1839,12 @@ impl AppState {
             let current_epoch = live_reader.and_then(|reader| reader.current_epoch);
             let current_epoch_created_unix_ms =
                 live_reader.and_then(|reader| reader.current_epoch_created_unix_ms);
+            let override_held = live_statuses
+                .get(&sub.forwarder_endpoint_id)
+                .is_some_and(|status| status.override_held_streams.contains(&sub.stream_id));
             let discovered_stream = discovered_pair.map(|(_, stream)| stream);
             streams.push(StreamEntry {
+                override_held,
                 forwarder_endpoint_id: sub.forwarder_endpoint_id.clone(),
                 stream_id: sub.stream_id.clone(),
                 forwarder_id: display_forwarder_id,
@@ -1843,7 +1904,11 @@ impl AppState {
                 let current_epoch = live_reader.and_then(|reader| reader.current_epoch);
                 let current_epoch_created_unix_ms =
                     live_reader.and_then(|reader| reader.current_epoch_created_unix_ms);
+                let override_held = live_statuses
+                    .get(endpoint_id)
+                    .is_some_and(|status| status.override_held_streams.contains(&stream.stream_id));
                 streams.push(StreamEntry {
+                    override_held,
                     forwarder_endpoint_id: endpoint_id.clone(),
                     stream_id: stream.stream_id.clone(),
                     forwarder_id: None,
@@ -1994,6 +2059,12 @@ pub struct StreamEntry {
     pub cursor_epoch: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor_seq: Option<i64>,
+    /// True while the stream's data task is held fail-closed because its
+    /// earliest-epoch override cannot be resolved against the forwarder's
+    /// advertised epochs. No data flows until the override resolves or is
+    /// cleared.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub override_held: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

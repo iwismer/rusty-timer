@@ -83,9 +83,9 @@ pub async fn put_earliest_epoch(
     state: &AppState,
     body: EarliestEpochRequest,
 ) -> Result<(), ReceiverError> {
-    if body.earliest_epoch < 0 {
+    if body.earliest_epoch < 1 {
         return Err(ReceiverError::BadRequest(
-            "earliest_epoch must be a non-negative integer".to_owned(),
+            "earliest_epoch must be a positive integer (epochs start at 1)".to_owned(),
         ));
     }
     validate_stream_identity(&body.forwarder_endpoint_id, &body.stream_id)?;
