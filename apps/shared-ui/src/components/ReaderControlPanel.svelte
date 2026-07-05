@@ -357,58 +357,60 @@
 
   <!-- Always-visible summary row -->
   {#if showSummaryRow}
-    <div class="mb-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-      {#if readsSession != null}
-        <div class="inline-flex items-baseline gap-1">
-          <span class="text-text-muted">Reads (session):</span>
-          <span class="font-mono text-text-primary">{readsSession.toLocaleString()}</span>
-          {#if onOpenHelpModal}<HelpTip
-              fieldKey="reads_session"
-              sectionKey="reader_live"
-              context={helpContext}
-              onOpenModal={openHelp}
-            />{/if}
-        </div>
-      {/if}
-      {#if readsTotal != null}
-        <div class="inline-flex items-baseline gap-1">
-          <span class="text-text-muted">Reads (total):</span>
-          <span class="font-mono text-text-primary">{readsTotal.toLocaleString()}</span>
-          {#if onOpenHelpModal}<HelpTip
-              fieldKey="reads_total"
-              sectionKey="reader_live"
-              context={helpContext}
-              onOpenModal={openHelp}
-            />{/if}
-        </div>
-      {/if}
-      {#if localPortValue !== undefined}
-        <div class="inline-flex items-baseline gap-1">
-          <span class="text-text-muted">{localPortLabel}:</span>
-          <span class="font-mono text-text-primary">{localPortValue}</span>
-          {#if onOpenHelpModal}<HelpTip
-              fieldKey="local_port"
-              sectionKey="reader_live"
-              context={helpContext}
-              onOpenModal={openHelp}
-            />{/if}
-        </div>
-      {/if}
-      {#if lastSeenDisplay !== undefined}
-        <div class="inline-flex items-baseline gap-1">
-          <span class="text-text-muted">Last seen:</span>
-          <span class="text-text-secondary">{lastSeenDisplay}</span>
-          {#if onOpenHelpModal}<HelpTip
-              fieldKey="last_seen"
-              sectionKey="reader_live"
-              context={helpContext}
-              onOpenModal={openHelp}
-            />{/if}
-        </div>
-      {/if}
+    <div class="mb-3 flex items-start justify-between gap-4">
+      <div class="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+        {#if readsSession != null}
+          <div class="inline-flex items-baseline gap-1">
+            <span class="text-text-muted">Reads (session):</span>
+            <span class="font-mono text-text-primary">{readsSession.toLocaleString()}</span>
+            {#if onOpenHelpModal}<HelpTip
+                fieldKey="reads_session"
+                sectionKey="reader_live"
+                context={helpContext}
+                onOpenModal={openHelp}
+              />{/if}
+          </div>
+        {/if}
+        {#if readsTotal != null}
+          <div class="inline-flex items-baseline gap-1">
+            <span class="text-text-muted">Reads (total):</span>
+            <span class="font-mono text-text-primary">{readsTotal.toLocaleString()}</span>
+            {#if onOpenHelpModal}<HelpTip
+                fieldKey="reads_total"
+                sectionKey="reader_live"
+                context={helpContext}
+                onOpenModal={openHelp}
+              />{/if}
+          </div>
+        {/if}
+        {#if localPortValue !== undefined}
+          <div class="inline-flex items-baseline gap-1">
+            <span class="text-text-muted">{localPortLabel}:</span>
+            <span class="font-mono text-text-primary">{localPortValue}</span>
+            {#if onOpenHelpModal}<HelpTip
+                fieldKey="local_port"
+                sectionKey="reader_live"
+                context={helpContext}
+                onOpenModal={openHelp}
+              />{/if}
+          </div>
+        {/if}
+        {#if lastSeenDisplay !== undefined}
+          <div class="inline-flex items-baseline gap-1">
+            <span class="text-text-muted">Last seen:</span>
+            <span class="text-text-secondary">{lastSeenDisplay}</span>
+            {#if onOpenHelpModal}<HelpTip
+                fieldKey="last_seen"
+                sectionKey="reader_live"
+                context={helpContext}
+                onOpenModal={openHelp}
+              />{/if}
+          </div>
+        {/if}
+      </div>
       {#if detailsCollapsible}
         <button
-          class="ml-auto inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
+          class="shrink-0 inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
           onclick={() => {
             detailsOpen = !detailsOpen;
           }}
