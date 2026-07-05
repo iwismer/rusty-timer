@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { HelpTip } from "@rusty-timer/shared-ui";
+  import { HelpTip, buttonClass } from "@rusty-timer/shared-ui";
   import { streamKey, type AdminActions } from "$lib/admin-actions.svelte";
-  import { btnNeutral } from "./button-classes";
+
+  const btnNeutral = buttonClass("secondary", "xs");
 
   let {
     actions,

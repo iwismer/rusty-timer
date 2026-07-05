@@ -75,7 +75,8 @@ vi.mock("$lib/store.svelte", () => ({
   setEditToken: mockState.setEditToken,
 }));
 
-vi.mock("@rusty-timer/shared-ui", () => ({
+vi.mock("@rusty-timer/shared-ui", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@rusty-timer/shared-ui")>()),
   HelpTip: () => null,
 }));
 

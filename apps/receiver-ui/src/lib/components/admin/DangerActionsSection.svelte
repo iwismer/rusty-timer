@@ -1,13 +1,12 @@
 <script lang="ts">
-  import { Card, HelpTip } from "@rusty-timer/shared-ui";
+  import { Card, HelpTip, buttonClass } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
   import { type AdminActions } from "$lib/admin-actions.svelte";
-  import {
-    btnDanger,
-    btnDangerConfirm,
-    btnNeutral,
-    btnWarn,
-  } from "./button-classes";
+
+  const btnWarn = buttonClass("warn", "xs");
+  const btnDanger = buttonClass("danger", "sm");
+  const btnDangerConfirm = buttonClass("danger-solid", "sm");
+  const btnNeutral = buttonClass("secondary", "xs");
 
   let {
     actions,

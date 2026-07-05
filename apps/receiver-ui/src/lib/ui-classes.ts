@@ -1,11 +1,13 @@
-export const inputClass =
-  "w-full px-3 py-1.5 text-sm rounded-md bg-surface-0 border border-border text-text-primary font-mono focus:outline-none focus:ring-1 focus:ring-accent";
+import { buttonClass, inputMonoClass } from "@rusty-timer/shared-ui";
 
-export const btnPrimary =
-  "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
+// Receiver inputs are monospaced (host:port, node IDs, ticket strings).
+export const inputClass = inputMonoClass;
 
-export const btnSecondary =
-  "px-3 py-1.5 text-sm font-medium rounded-md bg-surface-2 text-text-primary border border-border cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed";
+export const btnPrimary = buttonClass("primary");
 
+export const btnSecondary = buttonClass("secondary");
+
+// Deliberately different from the shared "danger" variant: uses the softer
+// status-err-border/status-err-bg treatment for the disconnect affordance.
 export const btnDisconnect =
   "px-3 py-1.5 text-sm font-medium rounded-md text-status-err border border-status-err-border bg-status-err-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed";

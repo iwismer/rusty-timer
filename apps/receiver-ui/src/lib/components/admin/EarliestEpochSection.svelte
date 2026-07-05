@@ -1,12 +1,13 @@
 <script lang="ts">
-  import { HelpTip } from "@rusty-timer/shared-ui";
+  import { HelpTip, buttonClass } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
   import {
     streamKey,
     streamLabel,
     type AdminActions,
   } from "$lib/admin-actions.svelte";
-  import { btnWarn } from "./button-classes";
+
+  const btnWarn = buttonClass("warn", "xs");
 
   let {
     actions,
