@@ -24,6 +24,7 @@ export type {
 export * from '../lib/reader-view-model';
 export * from '../lib/read-mode-form';
 export * from '../lib/ui-classes';
+export * from '../lib/server-approval';
 export type {
   ReaderInfoData,
   ReaderConnectionState as ReaderConnectionStateType,

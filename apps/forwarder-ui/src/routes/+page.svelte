@@ -12,6 +12,7 @@
     HelpDialog,
     BatteryIndicator,
     ReaderControlPanel,
+    serverApprovalTextClass,
   } from "@rusty-timer/shared-ui";
   import type { ForwarderStatus } from "$lib/api";
   import {
@@ -631,11 +632,7 @@
             <dd>
               <span
                 data-testid="server-approval-state"
-                class="text-xs {status.server.waiting_for_approval
-                  ? 'text-status-warn'
-                  : status.server.reachable === false
-                    ? 'text-status-err'
-                    : 'text-text-muted'}"
+                class="text-xs {serverApprovalTextClass(status.server)}"
               >
                 {serverApprovalLabel()}
               </span>

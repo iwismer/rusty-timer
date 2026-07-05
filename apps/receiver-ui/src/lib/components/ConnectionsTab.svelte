@@ -10,6 +10,7 @@
     computeTickingClock,
     formatLastSeen,
     parseWallClock,
+    serverApprovalTextClass,
   } from "@rusty-timer/shared-ui";
   import {
     loadConnections,
@@ -129,12 +130,6 @@
       return server.message ?? "Server unreachable";
     if (server.approval_state === "active") return "Server approved";
     return server.message;
-  }
-
-  function approvalClass(server: ServerDeviceStatus): string {
-    if (server.waiting_for_approval) return "text-status-warn";
-    if (server.reachable === false) return "text-status-err";
-    return "text-text-muted";
   }
 
   function reachableLabel(server: ServerDeviceStatus): string {
@@ -374,7 +369,9 @@
           {#if approvalLabel(store.connections.server)}
             <p
               data-testid="server-approval-state"
-              class="mt-2 text-xs {approvalClass(store.connections.server)}"
+              class="mt-2 text-xs {serverApprovalTextClass(
+                store.connections.server,
+              )}"
             >
               {approvalLabel(store.connections.server)}
             </p>

@@ -5,14 +5,10 @@
     Card,
     StatCard,
     StatusBadge,
+    approvalBadgeState,
   } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
-  import type {
-    ApprovalState,
-    DeviceKind,
-    DeviceRecord,
-    StatusResponse,
-  } from "$lib/api";
+  import type { DeviceKind, DeviceRecord, StatusResponse } from "$lib/api";
 
   let status = $state<StatusResponse | null>(null);
   let error = $state<string | null>(null);
@@ -44,10 +40,6 @@
       (forwarder) => !streamEndpoints.has(forwarder.endpoint_id),
     );
   });
-
-  function badgeState(state: ApprovalState): "ok" | "warn" {
-    return state === "active" ? "ok" : "warn";
-  }
 
   function kindLabel(kind: DeviceKind) {
     return kind === "forwarder" ? "Forwarder" : "Receiver";
@@ -155,7 +147,7 @@
                   {#if streamDevices[stream.endpoint_id]}
                     <StatusBadge
                       label={streamDevices[stream.endpoint_id].approval_state}
-                      state={badgeState(
+                      state={approvalBadgeState(
                         streamDevices[stream.endpoint_id].approval_state,
                       )}
                     />
@@ -179,7 +171,7 @@
                 <td class="py-2 pr-4">
                   <StatusBadge
                     label={forwarder.approval_state}
-                    state={badgeState(forwarder.approval_state)}
+                    state={approvalBadgeState(forwarder.approval_state)}
                   />
                 </td>
               </tr>
@@ -217,7 +209,7 @@
                 <td class="py-2 pr-4">
                   <StatusBadge
                     label={device.approval_state}
-                    state={badgeState(device.approval_state)}
+                    state={approvalBadgeState(device.approval_state)}
                   />
                 </td>
               </tr>
