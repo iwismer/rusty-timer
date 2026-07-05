@@ -11,8 +11,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const COMPAT_RECEIVER_ID: &str = "__forwarder_server__";
-
 /// Maximum number of candidate rows collected (and deleted) in a single
 /// `prune_retention` transaction, per prune category.
 ///
@@ -413,39 +411,6 @@ impl Journal {
         Ok((epoch, seq))
     }
 
-    /// Bump the stream epoch without deleting prior events.
-    ///
-    /// Closes the current open epoch and opens `new_epoch`. The new epoch must
-    /// be strictly greater than the current epoch; otherwise an error is
-    /// returned rather than silently ignoring the conflict. Both the close and
-    /// open run in a single transaction.
-    pub fn bump_epoch(&mut self, stream_key: &str, new_epoch: i64) -> Result<(), JournalError> {
-        let current = self.current_epoch(stream_key)?;
-        if new_epoch <= current {
-            return Err(JournalError::InvalidData(format!(
-                "new epoch {new_epoch} must be greater than current epoch {current}"
-            )));
-        }
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let start_seq = next_seq(&tx, stream_key)?;
-        tx.execute(
-            "UPDATE stream_epochs
-             SET end_seq = COALESCE(end_seq, ?2 - 1)
-             WHERE stream_id = ?1 AND end_seq IS NULL",
-            params![stream_key, start_seq],
-        )?;
-        tx.execute(
-            "INSERT INTO stream_epochs
-                 (stream_id, epoch, start_seq, end_seq, reason, created_unix_ms)
-             VALUES (?1, ?2, ?3, NULL, 'reset', ?4)",
-            params![stream_key, new_epoch, start_seq, unix_ms()],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
     /// Advance the stream to the next epoch, optionally naming it, in one
     /// transaction.
     ///
@@ -523,17 +488,6 @@ impl Journal {
         Ok(())
     }
 
-    /// Update the compatibility ack cursor for the default server receiver.
-    pub fn update_ack_cursor(
-        &mut self,
-        stream_key: &str,
-        _acked_epoch: i64,
-        acked_through_seq: i64,
-    ) -> Result<(), JournalError> {
-        self.ensure_compat_receiver()?;
-        self.update_receiver_stream_cursor(COMPAT_RECEIVER_ID, stream_key, acked_through_seq)
-    }
-
     /// Update a receiver's cumulative ack cursor for a stream.
     pub fn update_receiver_stream_cursor(
         &mut self,
@@ -572,39 +526,19 @@ impl Journal {
         Ok(())
     }
 
-    /// Return the compatibility `(acked_epoch, acked_through_seq)` cursor.
-    pub fn ack_cursor(&self, stream_key: &str) -> Result<(i64, i64), JournalError> {
-        let acked_seq = self
-            .conn
+    /// Return the lowest cumulative ack cursor across all receivers for a
+    /// stream (`0` when no receiver has acked anything). Events at or below
+    /// this seq have been acked by every known receiver.
+    pub fn min_acked_through_seq(&self, stream_key: &str) -> Result<i64, JournalError> {
+        self.conn
             .query_row(
-                "SELECT acked_through_seq
+                "SELECT COALESCE(MIN(acked_through_seq), 0)
                  FROM receiver_stream_cursors
-                 WHERE endpoint_id = ?1 AND stream_id = ?2",
-                params![COMPAT_RECEIVER_ID, stream_key],
-                |row| row.get::<_, i64>(0),
+                 WHERE stream_id = ?1",
+                params![stream_key],
+                |row| row.get(0),
             )
-            .optional()?
-            .unwrap_or(0);
-
-        if acked_seq == 0 {
-            return Ok((0, 0));
-        }
-
-        let acked_epoch = self
-            .conn
-            .query_row(
-                "SELECT epoch
-                 FROM events
-                 WHERE stream_id = ?1 AND seq <= ?2
-                 ORDER BY seq DESC
-                 LIMIT 1",
-                params![stream_key, acked_seq],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-
-        Ok((acked_epoch, acked_seq))
+            .map_err(Into::into)
     }
 
     pub fn latest_committed_seq(&self, stream_key: &str) -> Result<i64, JournalError> {
@@ -618,24 +552,6 @@ impl Journal {
         max: usize,
     ) -> Result<Vec<JournalEvent>, JournalError> {
         read_events_after(&self.conn, stream_key, after_seq, max)
-    }
-
-    /// Return all unacked events for a stream epoch after `after_seq`.
-    pub fn unacked_events(
-        &self,
-        stream_key: &str,
-        stream_epoch: i64,
-        after_seq: i64,
-    ) -> Result<Vec<JournalEvent>, JournalError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT rowid, stream_id, epoch, seq, reader_timestamp, raw_frame, read_kind,
-                    CAST(received_unix_ms AS TEXT)
-             FROM events
-             WHERE stream_id = ?1 AND epoch = ?2 AND seq > ?3
-             ORDER BY seq ASC",
-        )?;
-        let rows = stmt.query_map(params![stream_key, stream_epoch, after_seq], map_event)?;
-        collect_events(rows)
     }
 
     /// Count events for a `(stream_key, stream_epoch)` pair.
@@ -671,9 +587,10 @@ impl Journal {
             .map_err(Into::into)
     }
 
-    /// Delete up to `limit` acked events for `stream_key`.
+    /// Delete up to `limit` events for `stream_key` that every known receiver
+    /// has acked.
     pub fn prune_acked(&mut self, stream_key: &str, limit: i64) -> Result<i64, JournalError> {
-        let (_, acked_seq) = self.ack_cursor(stream_key)?;
+        let acked_seq = self.min_acked_through_seq(stream_key)?;
         let deleted = self.conn.execute(
             "DELETE FROM events
              WHERE rowid IN (
@@ -849,15 +766,6 @@ impl Journal {
                 |row| row.get(0),
             )
             .map_err(Into::into)
-    }
-
-    fn ensure_compat_receiver(&mut self) -> Result<(), JournalError> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO receivers (endpoint_id, display_name, approved_unix_ms)
-             VALUES (?1, 'Forwarder server', ?2)",
-            params![COMPAT_RECEIVER_ID, unix_ms()],
-        )?;
-        Ok(())
     }
 }
 
@@ -1276,7 +1184,9 @@ mod tests {
             "initial epoch should record when it was created"
         );
 
-        journal.bump_epoch("stream-a", 8).expect("bump epoch");
+        journal
+            .advance_epoch("stream-a", None)
+            .expect("advance epoch");
         let reset = journal
             .current_epoch_metadata("stream-a")
             .expect("current epoch metadata")
@@ -1355,7 +1265,9 @@ mod tests {
         journal
             .append_read("stream-a", None, b"two", "RAW")
             .expect("append read 2");
-        journal.bump_epoch("stream-a", 2).expect("bump epoch");
+        journal
+            .advance_epoch("stream-a", None)
+            .expect("advance epoch");
 
         let summaries = journal.epoch_summaries("stream-a").expect("summaries");
         assert_eq!(summaries.len(), 2);

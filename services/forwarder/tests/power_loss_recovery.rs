@@ -58,7 +58,7 @@ fn events_survive_close_and_reopen() {
 
     {
         let j = Journal::open(&path).unwrap();
-        let unacked = j.unacked_events("10.0.0.5", 1, 0).unwrap();
+        let unacked = j.read_events_after("10.0.0.5", 0, usize::MAX).unwrap();
         assert_eq!(unacked.len(), 1, "event must survive reopen");
         assert_eq!(unacked[0].raw_frame, b"test-line".to_vec());
     }
@@ -77,17 +77,17 @@ fn ack_cursor_survives_close_and_reopen() {
             j.insert_event("10.0.0.6", 1, seq, None, b"line", "RAW")
                 .unwrap();
         }
-        j.update_ack_cursor("10.0.0.6", 1, 2).unwrap(); // ack through seq 2
+        j.update_receiver_stream_cursor("test-receiver", "10.0.0.6", 2)
+            .unwrap(); // ack through seq 2
     }
 
     {
         let j = Journal::open(&path).unwrap();
-        let (acked_epoch, acked_seq) = j.ack_cursor("10.0.0.6").unwrap();
-        assert_eq!(acked_epoch, 1);
+        let acked_seq = j.min_acked_through_seq("10.0.0.6").unwrap();
         assert_eq!(acked_seq, 2, "ack cursor must survive reopen");
 
         // Only seq 3 should be unacked
-        let unacked = j.unacked_events("10.0.0.6", 1, 2).unwrap();
+        let unacked = j.read_events_after("10.0.0.6", 2, usize::MAX).unwrap();
         assert_eq!(unacked.len(), 1);
         assert_eq!(unacked[0].seq, 3);
     }
@@ -131,14 +131,15 @@ fn prune_acked_events_first() {
     }
 
     // Ack through seq 3
-    j.update_ack_cursor("10.0.0.8", 1, 3).unwrap();
+    j.update_receiver_stream_cursor("test-receiver", "10.0.0.8", 3)
+        .unwrap();
 
     // Prune up to 3 records (should remove the 3 acked ones)
     let pruned = j.prune_acked("10.0.0.8", 3).unwrap();
     assert_eq!(pruned, 3, "should prune exactly 3 acked records");
 
     // Seq 4 and 5 must still be present
-    let unacked = j.unacked_events("10.0.0.8", 1, 0).unwrap();
+    let unacked = j.read_events_after("10.0.0.8", 0, usize::MAX).unwrap();
     assert_eq!(unacked.len(), 2);
     assert!(unacked.iter().any(|e| e.seq == 4));
     assert!(unacked.iter().any(|e| e.seq == 5));

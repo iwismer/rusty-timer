@@ -74,7 +74,7 @@ fn seq_continues_across_epoch_bump() {
     assert_eq!((s1, s2), (1, 2));
 
     // Bump epoch to 2
-    j.bump_epoch(stream_key, 2).expect("bump epoch");
+    j.advance_epoch(stream_key, None).expect("bump epoch");
 
     // First seq in epoch 2 must continue from the stream-wide high-water (3),
     // NOT reset to 1.
@@ -104,7 +104,7 @@ fn epoch_bump_does_not_delete_old_epoch_events() {
     .expect("insert event epoch 1");
 
     // Bump to epoch 2
-    j.bump_epoch(stream_key, 2).expect("bump epoch");
+    j.advance_epoch(stream_key, None).expect("bump epoch");
 
     // Old epoch 1 event must still be in journal
     let count = j
@@ -159,7 +159,7 @@ fn epoch_resumes_from_persisted_state_after_reopen() {
         let s1 = j.next_seq("10.0.0.1").unwrap();
         j.insert_event("10.0.0.1", 1, s1, None, b"line", "RAW")
             .unwrap();
-        j.bump_epoch("10.0.0.1", 2).unwrap();
+        j.advance_epoch("10.0.0.1", None).unwrap();
         let s2 = j.next_seq("10.0.0.1").unwrap(); // seq=2 (stream-wide) in epoch 2
         j.insert_event("10.0.0.1", 2, s2, None, b"line", "RAW")
             .unwrap();
@@ -194,7 +194,9 @@ fn insert_event_persists_all_fields() {
     )
     .expect("insert");
 
-    let events = j.unacked_events("192.168.2.10", 1, 0).expect("unacked");
+    let events = j
+        .read_events_after("192.168.2.10", 0, usize::MAX)
+        .expect("unacked");
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].stream_key, "192.168.2.10");
     assert_eq!(events[0].stream_epoch, 1);
@@ -237,15 +239,15 @@ fn update_ack_cursor_advances_acked_seq() {
     }
 
     // Ack through seq 3
-    j.update_ack_cursor("192.168.2.20", 1, 3).expect("ack");
+    j.update_receiver_stream_cursor("test-receiver", "192.168.2.20", 3)
+        .expect("ack");
 
     // Replay starts from after the ack cursor (seq 3), so seq 4 and 5 are unacked
-    let (acked_epoch, acked_seq) = j.ack_cursor("192.168.2.20").expect("ack cursor");
-    assert_eq!(acked_epoch, 1);
+    let acked_seq = j.min_acked_through_seq("192.168.2.20").expect("ack cursor");
     assert_eq!(acked_seq, 3);
 
     let unacked = j
-        .unacked_events("192.168.2.20", 1, acked_seq)
+        .read_events_after("192.168.2.20", acked_seq, usize::MAX)
         .expect("unacked");
     assert_eq!(unacked.len(), 2, "events 4 and 5 should be unacked");
     assert_eq!(unacked[0].seq, 4);

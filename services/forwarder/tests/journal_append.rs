@@ -55,7 +55,7 @@ fn seq_continues_across_epoch_bump() {
     assert_eq!((e1, s1), (1, 1));
     assert_eq!((e2, s2), (1, 2));
 
-    journal.bump_epoch(stream_key, 2).expect("bump epoch");
+    journal.advance_epoch(stream_key, None).expect("bump epoch");
 
     let (e3, s3) = journal
         .append_read(stream_key, None, b"c", "RAW")

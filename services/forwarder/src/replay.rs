@@ -126,7 +126,9 @@ mod tests {
                 .append_read("stream-gap", None, frame, "RAW")
                 .unwrap();
         }
-        journal.update_ack_cursor("stream-gap", 1, 2).unwrap();
+        journal
+            .update_receiver_stream_cursor("test-receiver", "stream-gap", 2)
+            .unwrap();
         journal.prune_acked("stream-gap", 10).unwrap();
 
         let batch = ReplayEngine::new()
@@ -246,7 +248,7 @@ mod tests {
             .insert_event("10.0.0.10:10000", 1, seq2, None, b"epoch1-seq2", "RAW")
             .unwrap();
 
-        journal.bump_epoch("10.0.0.10:10000", 2).unwrap();
+        journal.advance_epoch("10.0.0.10:10000", None).unwrap();
         let seq3 = journal.next_seq("10.0.0.10:10000").unwrap();
         journal
             .insert_event("10.0.0.10:10000", 2, seq3, None, b"epoch2-seq1", "RAW")
@@ -275,9 +277,11 @@ mod tests {
                 .insert_event("10.0.0.20:10000", 1, seq, None, b"epoch1", "RAW")
                 .unwrap();
         }
-        journal.update_ack_cursor("10.0.0.20:10000", 1, 1).unwrap();
+        journal
+            .update_receiver_stream_cursor("test-receiver", "10.0.0.20:10000", 1)
+            .unwrap();
 
-        journal.bump_epoch("10.0.0.20:10000", 2).unwrap();
+        journal.advance_epoch("10.0.0.20:10000", None).unwrap();
         for _ in 0..2 {
             let seq = journal.next_seq("10.0.0.20:10000").unwrap();
             journal
@@ -285,7 +289,7 @@ mod tests {
                 .unwrap();
         }
 
-        let (_epoch, acked_seq) = journal.ack_cursor("10.0.0.20:10000").unwrap();
+        let acked_seq = journal.min_acked_through_seq("10.0.0.20:10000").unwrap();
         let batch = ReplayEngine::new()
             .read_after(&journal, "10.0.0.20:10000", acked_seq, 10)
             .unwrap();

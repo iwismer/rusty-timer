@@ -789,7 +789,7 @@ mod tests {
             let mut journal = harness.journal.lock().await;
             journal.ensure_stream_state(&stream_key(), 1)?;
             journal.append_read(&stream_key(), None, b"epoch-1", "chip")?;
-            journal.bump_epoch(&stream_key(), 2)?;
+            journal.advance_epoch(&stream_key(), None)?;
             journal.append_read(&stream_key(), None, b"epoch-2", "chip")?;
         }
 

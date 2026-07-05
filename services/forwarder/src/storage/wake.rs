@@ -23,7 +23,7 @@
 //!     //    querying, so a commit racing the query still triggers `changed()`.
 //!     rx.mark_unchanged();
 //!     // 2. Recheck: read everything after the local cursor.
-//!     let events = journal.unacked_events(stream_key, epoch, cursor)?;
+//!     let events = journal.read_events_after(stream_key, cursor, max)?;
 //!     if !events.is_empty() { /* send + advance cursor */ continue; }
 //!     // 3. Wait, with a periodic poll fallback as a safety net.
 //!     tokio::select! {
@@ -199,7 +199,7 @@ mod tests {
         // Reading from the start still yields every event in the burst, so the
         // coalesced ticks dropped no data.
         let events = journal
-            .unacked_events(stream_key, 1, 0)
+            .read_events_after(stream_key, 0, usize::MAX)
             .expect("read events");
         assert_eq!(events.len(), 3, "all burst events remain readable");
         assert_eq!(events.last().unwrap().seq, last_seq);
