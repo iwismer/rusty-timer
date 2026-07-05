@@ -13,6 +13,7 @@
     BatteryIndicator,
     ReaderControlPanel,
     serverApprovalTextClass,
+    buttonClass,
   } from "@rusty-timer/shared-ui";
   import type { ForwarderStatus } from "$lib/api";
   import {
@@ -64,8 +65,7 @@
   let lastSeenBase = $state<Record<string, number | null>>({});
   let lastSeenReceivedAt = $state<Record<string, number>>({});
 
-  const btnPrimary =
-    "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
+  const btnPrimary = buttonClass("primary");
 
   let readersSummary = $derived(
     status
@@ -697,7 +697,7 @@
                 {#if reader.state !== "connected"}
                   <div class="ml-auto flex gap-2">
                     <button
-                      class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      class={buttonClass("secondary", "xs")}
                       onclick={() => {
                         handleReconnect(reader.ip).catch((e) => {
                           error = String(e);
