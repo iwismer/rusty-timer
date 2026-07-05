@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { HelpTip } from "@rusty-timer/shared-ui";
   import {
     getOverallHealth,
+    openHelp,
     openUpdateModal,
     store,
     type OverallHealth,
@@ -44,9 +46,21 @@
       title={healthLabel(overallHealth)}
       aria-label={healthLabel(overallHealth)}
     ></span>
+    <HelpTip
+      fieldKey="overall_health"
+      sectionKey="status_bar"
+      context="receiver"
+      onOpenModal={openHelp}
+    />
     <span class="font-mono text-text-primary"
       >{c.totalReads.toLocaleString()} reads</span
     >
+    <HelpTip
+      fieldKey="total_reads"
+      sectionKey="status_bar"
+      context="receiver"
+      onOpenModal={openHelp}
+    />
   </div>
 
   <div class="flex items-center gap-2 text-text-muted">
@@ -55,6 +69,12 @@
     {/if}
     {#if store.appVersion}
       <span>v{store.appVersion}</span>
+      <HelpTip
+        fieldKey="identity_version"
+        sectionKey="status_bar"
+        context="receiver"
+        onOpenModal={openHelp}
+      />
     {/if}
     {#if store.updateState}
       <button

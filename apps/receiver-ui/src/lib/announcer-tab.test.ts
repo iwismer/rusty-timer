@@ -30,6 +30,7 @@ const mockState = vi.hoisted(() => ({
   importParticipantsFile: vi.fn(),
   importChipsFile: vi.fn(),
   loadDataStats: vi.fn(),
+  openHelp: vi.fn(),
   openFileDialog: vi.fn(),
   openUrl: vi.fn(),
 }));
@@ -41,6 +42,7 @@ vi.mock("$lib/store.svelte", () => ({
   importParticipantsFile: mockState.importParticipantsFile,
   importChipsFile: mockState.importChipsFile,
   loadDataStats: mockState.loadDataStats,
+  openHelp: mockState.openHelp,
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({

@@ -1,72 +1,88 @@
-import { describe, expect, it } from "vitest";
-import { filterSectionContent } from "./help-dialog";
-import type { SectionHelp } from "./help/help-types";
+import { describe, expect, it } from 'vitest';
+import {
+  FIELD_HIGHLIGHT_DURATION_MS,
+  filterSectionContent,
+  isHighlightedField,
+} from './help-dialog';
+import type { SectionHelp } from './help/help-types';
 
 const testSection: SectionHelp = {
-  title: "Test Section",
-  overview: "A section for testing.",
+  title: 'Test Section',
+  overview: 'A section for testing.',
   fields: {
     alpha: {
-      label: "Alpha Field",
-      summary: "Alpha summary about widgets.",
-      detailHtml: "Detailed info about alpha.",
+      label: 'Alpha Field',
+      summary: 'Alpha summary about widgets.',
+      detailHtml: 'Detailed info about alpha.',
     },
     beta: {
-      label: "Beta Field",
-      summary: "Beta summary about gadgets.",
-      detailHtml: "Detailed info about beta.",
-      default: "42",
+      label: 'Beta Field',
+      summary: 'Beta summary about gadgets.',
+      detailHtml: 'Detailed info about beta.',
+      default: '42',
     },
   },
-  tips: ["Check the widgets first.", "Gadgets need calibration."],
+  tips: ['Check the widgets first.', 'Gadgets need calibration.'],
 };
 
-describe("filterSectionContent", () => {
-  it("returns all fields and tips for empty query", () => {
-    const result = filterSectionContent(testSection, "");
+describe('filterSectionContent', () => {
+  it('returns all fields and tips for empty query', () => {
+    const result = filterSectionContent(testSection, '');
     expect(result.fields).toHaveLength(2);
     expect(result.tips).toHaveLength(2);
   });
 
-  it("returns all fields and tips for whitespace query", () => {
-    const result = filterSectionContent(testSection, "   ");
+  it('returns all fields and tips for whitespace query', () => {
+    const result = filterSectionContent(testSection, '   ');
     expect(result.fields).toHaveLength(2);
     expect(result.tips).toHaveLength(2);
   });
 
-  it("filters to matching fields", () => {
-    const result = filterSectionContent(testSection, "widgets");
+  it('filters to matching fields', () => {
+    const result = filterSectionContent(testSection, 'widgets');
     expect(result.fields).toHaveLength(1);
-    expect(result.fields[0].fieldKey).toBe("alpha");
+    expect(result.fields[0].fieldKey).toBe('alpha');
   });
 
-  it("filters tips", () => {
-    const result = filterSectionContent(testSection, "calibration");
+  it('filters tips', () => {
+    const result = filterSectionContent(testSection, 'calibration');
     expect(result.tips).toHaveLength(1);
-    expect(result.tips[0]).toContain("calibration");
+    expect(result.tips[0]).toContain('calibration');
   });
 
-  it("matches case-insensitively", () => {
-    const result = filterSectionContent(testSection, "WIDGETS");
+  it('matches case-insensitively', () => {
+    const result = filterSectionContent(testSection, 'WIDGETS');
     expect(result.fields).toHaveLength(1);
-    expect(result.fields[0].fieldKey).toBe("alpha");
+    expect(result.fields[0].fieldKey).toBe('alpha');
   });
 
-  it("returns empty arrays when nothing matches", () => {
-    const result = filterSectionContent(testSection, "zzz-no-match");
+  it('returns empty arrays when nothing matches', () => {
+    const result = filterSectionContent(testSection, 'zzz-no-match');
     expect(result.fields).toHaveLength(0);
     expect(result.tips).toHaveLength(0);
   });
 
-  it("matches on default field", () => {
-    const result = filterSectionContent(testSection, "42");
+  it('matches on default field', () => {
+    const result = filterSectionContent(testSection, '42');
     expect(result.fields).toHaveLength(1);
-    expect(result.fields[0].fieldKey).toBe("beta");
+    expect(result.fields[0].fieldKey).toBe('beta');
   });
 
-  it("handles section with no tips", () => {
+  it('handles section with no tips', () => {
     const noTips: SectionHelp = { ...testSection, tips: undefined };
-    const result = filterSectionContent(noTips, "");
+    const result = filterSectionContent(noTips, '');
     expect(result.tips).toHaveLength(0);
+  });
+});
+
+describe('field highlighting', () => {
+  it('uses a five-second highlight window', () => {
+    expect(FIELD_HIGHLIGHT_DURATION_MS).toBe(5000);
+  });
+
+  it('only highlights the requested field', () => {
+    expect(isHighlightedField('alpha', 'alpha')).toBe(true);
+    expect(isHighlightedField('beta', 'alpha')).toBe(false);
+    expect(isHighlightedField('alpha', undefined)).toBe(false);
   });
 });

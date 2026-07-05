@@ -250,6 +250,11 @@ export function setHelpScrollTarget(target: string | null): void {
   store.helpScrollTarget = target;
 }
 
+export function openHelp(fieldKey: string): void {
+  store.helpScrollTarget = fieldKey;
+  store.showHelpModal = true;
+}
+
 export function openUpdateModal(): void {
   store.updateModalOpen = true;
 }

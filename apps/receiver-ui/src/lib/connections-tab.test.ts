@@ -65,6 +65,7 @@ const mockState = vi.hoisted(() => {
     disconnectForwarder: vi.fn(async () => {}),
     reconnectForwarder: vi.fn(async () => {}),
     loadConnections: vi.fn(async () => {}),
+    openHelp: vi.fn(),
     readerControl: vi.fn(async () => ({
       success: true,
       message: "",
@@ -87,6 +88,7 @@ const mockState = vi.hoisted(() => {
 vi.mock("$lib/store.svelte", () => ({
   store: mockState.store,
   loadConnections: mockState.loadConnections,
+  openHelp: mockState.openHelp,
 }));
 
 vi.mock("$lib/api", () => ({
@@ -561,7 +563,8 @@ describe("ConnectionsTab", () => {
     expect(
       within(row)
         .getAllByRole("button")
-        .map((b) => b.textContent),
+        .map((b) => b.textContent)
+        .filter((text) => text !== "?"),
     ).toEqual(["Reconnect", "Disconnect"]);
   });
 

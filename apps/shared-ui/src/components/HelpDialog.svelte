@@ -1,16 +1,17 @@
 <script lang="ts">
+  import { shouldCancelOnBackdropClick, shouldCancelOnEscape } from '../lib/confirm-dialog';
   import {
-    shouldCancelOnBackdropClick,
-    shouldCancelOnEscape,
-  } from "../lib/confirm-dialog";
-  import { filterSectionContent } from "../lib/help-dialog";
-  import { getSection } from "../lib/help/index";
-  import type { HelpContextName } from "../lib/help/help-types";
+    FIELD_HIGHLIGHT_DURATION_MS,
+    filterSectionContent,
+    isHighlightedField,
+  } from '../lib/help-dialog';
+  import { getSection } from '../lib/help/index';
+  import type { HelpContextName } from '../lib/help/help-types';
 
   let {
     open = false,
-    sectionKey = "",
-    context = "forwarder" as HelpContextName,
+    sectionKey = '',
+    context = 'forwarder' as HelpContextName,
     scrollToField = undefined as string | undefined,
     onClose,
     onNavigate = undefined as ((sectionKey: string) => void) | undefined,
@@ -24,32 +25,38 @@
   } = $props();
 
   let dialogEl: HTMLDialogElement | undefined = $state();
-  let searchQuery = $state("");
+  let searchQuery = $state('');
+  let highlightedField = $state<string | undefined>(undefined);
+  let highlightTimer: ReturnType<typeof setTimeout> | undefined;
 
   let section = $derived(getSection(context, sectionKey));
   let filtered = $derived(
-    section ? filterSectionContent(section, searchQuery) : { fields: [], tips: [] },
+    section ? filterSectionContent(section, searchQuery) : { fields: [], tips: [] }
   );
 
-  let previousOverflow = "";
+  let previousOverflow = '';
 
   $effect(() => {
     if (!dialogEl) return;
     if (open && !dialogEl.open) {
       if (!section) {
         console.warn(
-          `[HelpDialog] No help section found for key "${sectionKey}" in context "${context}".`,
+          `[HelpDialog] No help section found for key "${sectionKey}" in context "${context}".`
         );
       }
       previousOverflow = document.body.style.overflow;
-      document.body.style.overflow = "hidden";
+      document.body.style.overflow = 'hidden';
       dialogEl.showModal();
-      searchQuery = "";
+      searchQuery = '';
     } else if (!open && dialogEl.open) {
+      highlightedField = undefined;
+      clearTimeout(highlightTimer);
       document.body.style.overflow = previousOverflow;
       dialogEl.close();
     }
     return () => {
+      highlightedField = undefined;
+      clearTimeout(highlightTimer);
       document.body.style.overflow = previousOverflow;
       if (dialogEl?.open) dialogEl.close();
     };
@@ -61,9 +68,16 @@
       const timer = setTimeout(() => {
         const el = document.getElementById(`help-${scrollToField}`);
         if (el) {
-          el.scrollIntoView({ behavior: "smooth", block: "start" });
+          el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          highlightedField = scrollToField;
+          clearTimeout(highlightTimer);
+          highlightTimer = setTimeout(() => {
+            highlightedField = undefined;
+          }, FIELD_HIGHLIGHT_DURATION_MS);
         } else {
-          console.warn(`[HelpDialog] Could not scroll to field "${scrollToField}" — element not found.`);
+          console.warn(
+            `[HelpDialog] Could not scroll to field "${scrollToField}" — element not found.`
+          );
         }
       }, 50);
       return () => clearTimeout(timer);
@@ -78,8 +92,8 @@
         onClose();
       }
     };
-    el.addEventListener("click", handleClick);
-    return () => el.removeEventListener("click", handleClick);
+    el.addEventListener('click', handleClick);
+    return () => el.removeEventListener('click', handleClick);
   });
 
   function handleKeydown(e: KeyboardEvent) {
@@ -103,8 +117,8 @@
           onclick={onClose}
           class="text-text-muted hover:text-text-primary text-lg cursor-pointer bg-transparent border-none p-1"
           aria-label="Close help"
-          type="button"
-        >&times;</button>
+          type="button">&times;</button
+        >
       </div>
       <input
         type="text"
@@ -117,7 +131,15 @@
       <p class="text-sm text-text-secondary mb-4">{section.overview}</p>
 
       {#each filtered.fields as { fieldKey, field }}
-        <div id="help-{fieldKey}" class="mb-6 scroll-mt-32">
+        <div
+          id="help-{fieldKey}"
+          class="-mx-3 mb-6 scroll-mt-32 rounded-md border-l-4 px-3 py-2 transition-colors duration-300 {isHighlightedField(
+            fieldKey,
+            highlightedField
+          )
+            ? 'border-accent bg-accent/10'
+            : 'border-transparent'}"
+        >
           <h3 class="text-sm font-semibold text-text-primary mb-1">{field.label}</h3>
           <p class="text-sm text-text-secondary mb-2">{@html field.detailHtml}</p>
           {#if field.default}
@@ -176,8 +198,8 @@
           onclick={onClose}
           class="text-text-muted hover:text-text-primary text-lg cursor-pointer bg-transparent border-none p-1"
           aria-label="Close help"
-          type="button"
-        >&times;</button>
+          type="button">&times;</button
+        >
       </div>
       <p class="text-sm text-text-muted">Help content for "{sectionKey}" is not yet available.</p>
     </div>

@@ -26,6 +26,7 @@ const mockState = vi.hoisted(() => {
 
   return {
     store,
+    openHelp: vi.fn(),
     openUpdateModal: vi.fn(() => {
       store.updateModalOpen = true;
     }),
@@ -39,6 +40,7 @@ const mockState = vi.hoisted(() => {
 vi.mock("$lib/store.svelte", () => ({
   store: mockState.store,
   getOverallHealth: () => "warn",
+  openHelp: mockState.openHelp,
   openUpdateModal: mockState.openUpdateModal,
   closeUpdateModal: mockState.closeUpdateModal,
   confirmUpdateInstall: mockState.confirmUpdateInstall,

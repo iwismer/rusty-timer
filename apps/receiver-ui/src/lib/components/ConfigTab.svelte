@@ -10,6 +10,7 @@
     setEditServerUrl,
     setEditToken,
     setEditReceiverId,
+    openHelp,
   } from "$lib/store.svelte";
   import { inputClass, btnPrimary, btnSecondary } from "$lib/ui-classes";
   import ReceiverModeConfig from "$lib/components/ReceiverModeConfig.svelte";
@@ -34,7 +35,12 @@
   <div class="grid gap-4">
     <label class="block text-xs font-medium text-text-muted">
       Receiver ID
-      <HelpTip fieldKey="receiver_id" sectionKey="config" context="receiver" />
+      <HelpTip
+        fieldKey="receiver_id"
+        sectionKey="config"
+        context="receiver"
+        onOpenModal={openHelp}
+      />
       <input
         data-testid="receiver-id-input"
         class="{inputClass} mt-1"
@@ -46,7 +52,12 @@
 
     <label class="block text-xs font-medium text-text-muted">
       Server URL
-      <HelpTip fieldKey="server_url" sectionKey="config" context="receiver" />
+      <HelpTip
+        fieldKey="server_url"
+        sectionKey="config"
+        context="receiver"
+        onOpenModal={openHelp}
+      />
       <input
         data-testid="server-url-input"
         class="{inputClass} mt-1"
@@ -59,7 +70,12 @@
 
     <label class="block text-xs font-medium text-text-muted">
       Token
-      <HelpTip fieldKey="token" sectionKey="config" context="receiver" />
+      <HelpTip
+        fieldKey="token"
+        sectionKey="config"
+        context="receiver"
+        onOpenModal={openHelp}
+      />
       <input
         data-testid="token-input"
         type="password"
@@ -115,10 +131,22 @@
           class="accent-accent"
         />
         Poll Race Director DBF files for participant and chip data
+        <HelpTip
+          fieldKey="rd_import_enabled"
+          sectionKey="rd_import"
+          context="receiver"
+          onOpenModal={openHelp}
+        />
       </label>
 
       <label class="block text-xs font-medium text-text-muted mt-3">
         Folder
+        <HelpTip
+          fieldKey="rd_import_dir"
+          sectionKey="rd_import"
+          context="receiver"
+          onOpenModal={openHelp}
+        />
         <input
           data-testid="rd-import-dir-input"
           class="{inputClass} mt-1"
@@ -130,6 +158,12 @@
 
       <label class="block text-xs font-medium text-text-muted mt-3">
         Poll interval (seconds)
+        <HelpTip
+          fieldKey="rd_import_interval"
+          sectionKey="rd_import"
+          context="receiver"
+          onOpenModal={openHelp}
+        />
         <input
           data-testid="rd-import-interval-input"
           type="number"
@@ -170,6 +204,12 @@
           class="accent-accent"
         />
         Write reads to Ipico Direct file for Race Director
+        <HelpTip
+          fieldKey="dbf_enabled"
+          sectionKey="dbf_output"
+          context="receiver"
+          onOpenModal={openHelp}
+        />
       </label>
 
       <p class="mt-3 text-xs text-text-muted">
@@ -179,6 +219,12 @@
       {#if store.editDbfEnabled}
         <label class="mt-3 flex items-center gap-2 text-xs text-text-primary">
           DBF write interval (seconds)
+          <HelpTip
+            fieldKey="dbf_flush_interval"
+            sectionKey="dbf_output"
+            context="receiver"
+            onOpenModal={openHelp}
+          />
           <input
             data-testid="dbf-flush-interval-input"
             type="number"
@@ -217,6 +263,12 @@
         >
           {store.dbfClearing ? "Clearing\u2026" : "Clear DBF File"}
         </button>
+        <HelpTip
+          fieldKey="clear_dbf"
+          sectionKey="dbf_output"
+          context="receiver"
+          onOpenModal={openHelp}
+        />
       </div>
     </div>
   </section>

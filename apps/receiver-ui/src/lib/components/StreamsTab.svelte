@@ -1,6 +1,10 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import { AlertBanner, BatteryIndicator } from "@rusty-timer/shared-ui";
+  import {
+    AlertBanner,
+    BatteryIndicator,
+    HelpTip,
+  } from "@rusty-timer/shared-ui";
   import { resizeWidth } from "$lib/actions/resizeWidth";
   import {
     store,
@@ -19,6 +23,7 @@
     formatEarliestEpochOption,
     setTargetedEpochInputs,
     markModeEdited,
+    openHelp,
   } from "$lib/store.svelte";
   import type { StreamEntry } from "$lib/api";
   import { btnPrimary, btnSecondary } from "$lib/ui-classes";
@@ -205,6 +210,12 @@
         >
           Subscribe All
         </button>
+        <HelpTip
+          fieldKey="subscribe_all"
+          sectionKey="streams"
+          context="receiver"
+          onOpenModal={openHelp}
+        />
       {/if}
       {#if store.modeDraft === "targeted_replay"}
         <button
@@ -214,6 +225,12 @@
         >
           Replay All
         </button>
+        <HelpTip
+          fieldKey="replay"
+          sectionKey="streams"
+          context="receiver"
+          onOpenModal={openHelp}
+        />
       {/if}
     </div>
   {/if}
@@ -229,12 +246,58 @@
           <tr
             class="sticky top-0 z-10 bg-surface-0 border-b border-border text-left text-text-muted"
           >
-            <th class="w-px whitespace-nowrap py-2 px-4 font-medium">Stream</th>
+            <th class="w-px whitespace-nowrap py-2 px-4 font-medium">
+              <span class="inline-flex items-center">
+                Stream
+                <HelpTip
+                  fieldKey="stream_identity"
+                  sectionKey="streams"
+                  context="receiver"
+                  onOpenModal={openHelp}
+                />
+                <HelpTip
+                  fieldKey="status_indicator"
+                  sectionKey="streams"
+                  context="receiver"
+                  onOpenModal={openHelp}
+                />
+              </span>
+            </th>
             {#if showLastReadCol()}
-              <th class="w-full py-2 px-2 font-medium text-left">Last Read</th>
+              <th class="w-full py-2 px-2 font-medium text-left">
+                <span class="inline-flex items-center">
+                  Last Read
+                  <HelpTip
+                    fieldKey="last_read"
+                    sectionKey="streams"
+                    context="receiver"
+                    onOpenModal={openHelp}
+                  />
+                </span>
+              </th>
             {/if}
-            <th class="py-2 px-2 font-medium text-right w-[70px]">Reads</th>
-            <th class="py-2 px-4 font-medium text-right w-[60px]">Port</th>
+            <th class="py-2 px-2 font-medium text-right w-[70px]">
+              <span class="inline-flex items-center justify-end">
+                Reads
+                <HelpTip
+                  fieldKey="reads"
+                  sectionKey="streams"
+                  context="receiver"
+                  onOpenModal={openHelp}
+                />
+              </span>
+            </th>
+            <th class="py-2 px-4 font-medium text-right w-[60px]">
+              <span class="inline-flex items-center justify-end">
+                Port
+                <HelpTip
+                  fieldKey="local_port"
+                  sectionKey="streams"
+                  context="receiver"
+                  onOpenModal={openHelp}
+                />
+              </span>
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -345,14 +408,30 @@
                         >
                       </div>
                       <div>
-                        <span class="text-text-muted">Forwarder:</span>
+                        <span class="text-text-muted">
+                          Forwarder:
+                          <HelpTip
+                            fieldKey="stream_identity"
+                            sectionKey="streams"
+                            context="receiver"
+                            onOpenModal={openHelp}
+                          />
+                        </span>
                         <span class="font-mono text-text-primary ml-1"
                           >{formatOptional(streamForwarderLabel(stream))}</span
                         >
                       </div>
                       {#if stream.stream_epoch != null}
                         <div>
-                          <span class="text-text-muted">Epoch:</span>
+                          <span class="text-text-muted">
+                            Epoch:
+                            <HelpTip
+                              fieldKey="stream_epoch"
+                              sectionKey="streams"
+                              context="receiver"
+                              onOpenModal={openHelp}
+                            />
+                          </span>
                           <span class="font-mono text-text-primary ml-1">
                             {stream.stream_epoch}{#if stream.current_epoch_name?.trim()}
                               ({stream.current_epoch_name.trim()}){/if}
@@ -367,6 +446,12 @@
                         <div>
                           <p class="text-muted text-xs font-medium mb-1">
                             Lifetime
+                            <HelpTip
+                              fieldKey="stream_metrics"
+                              sectionKey="streams"
+                              context="receiver"
+                              onOpenModal={openHelp}
+                            />
                           </p>
                           <div class="grid grid-cols-1 gap-y-2 text-xs">
                             <div
@@ -406,6 +491,12 @@
                         <div>
                           <p class="text-muted text-xs font-medium mb-1">
                             Current Epoch
+                            <HelpTip
+                              fieldKey="stream_metrics"
+                              sectionKey="streams"
+                              context="receiver"
+                              onOpenModal={openHelp}
+                            />
                           </p>
                           <div class="grid grid-cols-1 gap-y-2 text-xs">
                             <div title="Frames received in the current epoch">
@@ -482,6 +573,12 @@
                           <option value="finish">Finish</option>
                           <option value="start">Start</option>
                         </select>
+                        <HelpTip
+                          fieldKey="event_type"
+                          sectionKey="streams"
+                          context="receiver"
+                          onOpenModal={openHelp}
+                        />
                       {/if}
 
                       {#if stream.subscribed && store.modeDraft === "targeted_replay"}
@@ -526,12 +623,24 @@
                         >
                           Replay
                         </button>
+                        <HelpTip
+                          fieldKey="replay"
+                          sectionKey="streams"
+                          context="receiver"
+                          onOpenModal={openHelp}
+                        />
                       {:else if store.modeDraft !== "targeted_replay"}
                         {@const options = store.earliestEpochOptions[key] ?? []}
                         {@const selectedEarliest =
                           selectedEarliestEpochValue(stream)}
                         <label class="text-xs text-text-secondary mr-1">
                           From epoch:
+                          <HelpTip
+                            fieldKey="earliest_epoch"
+                            sectionKey="streams"
+                            context="receiver"
+                            onOpenModal={openHelp}
+                          />
                           <select
                             data-testid="earliest-epoch-{key}"
                             class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-36 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
@@ -578,6 +687,12 @@
                       >
                         {stream.subscribed ? "Unsubscribe" : "Subscribe"}
                       </button>
+                      <HelpTip
+                        fieldKey="subscribed"
+                        sectionKey="streams"
+                        context="receiver"
+                        onOpenModal={openHelp}
+                      />
 
                       {#if stream.subscribed}
                         <label
@@ -599,6 +714,12 @@
                             }}
                           />
                           Announce
+                          <HelpTip
+                            fieldKey="announce"
+                            sectionKey="streams"
+                            context="receiver"
+                            onOpenModal={openHelp}
+                          />
                         </label>
                       {/if}
                     </div>

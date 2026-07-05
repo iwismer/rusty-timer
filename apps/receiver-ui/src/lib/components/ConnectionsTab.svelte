@@ -4,13 +4,14 @@
   import {
     BatteryIndicator,
     Card,
+    HelpTip,
     ReaderControlPanel,
     StatusBadge,
     computeTickingClock,
     formatLastSeen,
     parseWallClock,
   } from "@rusty-timer/shared-ui";
-  import { loadConnections, store } from "$lib/store.svelte";
+  import { loadConnections, openHelp, store } from "$lib/store.svelte";
   import type {
     ForwarderConnectionStatus,
     ReaderControlResult,
@@ -344,7 +345,15 @@
     >
       <div class="flex items-start justify-between gap-4">
         <div>
-          <p class="text-xs font-medium text-text-muted">Server</p>
+          <p class="text-xs font-medium text-text-muted">
+            Server
+            <HelpTip
+              fieldKey="server_status"
+              sectionKey="connections"
+              context="receiver"
+              onOpenModal={openHelp}
+            />
+          </p>
           <p class="mt-1 text-sm text-text-primary">
             {reachableLabel(store.connections.server)}
           </p>
@@ -364,19 +373,35 @@
         </div>
 
         {#if store.connections.server.configured}
-          <button
-            data-testid="open-admin-panel-btn"
-            class={btnSecondary}
-            onclick={() => void openAdminPanel()}
-            disabled={!adminUrl()}
-          >
-            Open admin panel
-          </button>
+          <span class="inline-flex items-center gap-1">
+            <button
+              data-testid="open-admin-panel-btn"
+              class={btnSecondary}
+              onclick={() => void openAdminPanel()}
+              disabled={!adminUrl()}
+            >
+              Open admin panel
+            </button>
+            <HelpTip
+              fieldKey="open_admin_panel"
+              sectionKey="connections"
+              context="receiver"
+              onOpenModal={openHelp}
+            />
+          </span>
         {/if}
       </div>
     </section>
 
-    <h2 class="mt-6 mb-2 text-xs font-medium text-text-muted">Forwarders</h2>
+    <h2 class="mt-6 mb-2 text-xs font-medium text-text-muted">
+      Forwarders
+      <HelpTip
+        fieldKey="forwarder_state"
+        sectionKey="connections"
+        context="receiver"
+        onOpenModal={openHelp}
+      />
+    </h2>
 
     {#if store.connections.forwarders.length === 0}
       <Card>
@@ -408,6 +433,12 @@
                   {forwarder.subscribed_count} subscribed / {forwarder.available_count}
                   available
                 </span>
+                <HelpTip
+                  fieldKey="forwarder_state"
+                  sectionKey="connections"
+                  context="receiver"
+                  onOpenModal={openHelp}
+                />
                 {#if forwarder.ups}
                   <span
                     data-testid={`forwarder-ups-${forwarder.endpoint_id}`}
@@ -416,6 +447,12 @@
                     <BatteryIndicator
                       percent={forwarder.ups.battery_percent}
                       charging={!forwarder.ups.on_battery}
+                    />
+                    <HelpTip
+                      fieldKey="forwarder_battery"
+                      sectionKey="connections"
+                      context="receiver"
+                      onOpenModal={openHelp}
                     />
                   </span>
                 {/if}
@@ -435,6 +472,12 @@
                     >
                       Configure
                     </button>
+                    <HelpTip
+                      fieldKey="forwarder_configure"
+                      sectionKey="connections"
+                      context="receiver"
+                      onOpenModal={openHelp}
+                    />
                   {/if}
                   {#if showConnect(forwarder)}
                     <button
@@ -449,6 +492,12 @@
                     >
                       Connect
                     </button>
+                    <HelpTip
+                      fieldKey="forwarder_actions"
+                      sectionKey="connections"
+                      context="receiver"
+                      onOpenModal={openHelp}
+                    />
                   {/if}
                   {#if showReconnectBeforeDisconnect(forwarder)}
                     <button
@@ -477,6 +526,12 @@
                     >
                       Disconnect
                     </button>
+                    <HelpTip
+                      fieldKey="forwarder_actions"
+                      sectionKey="connections"
+                      context="receiver"
+                      onOpenModal={openHelp}
+                    />
                   {/if}
                   {#if showReconnect(forwarder) && !showReconnectBeforeDisconnect(forwarder)}
                     <button
@@ -497,6 +552,15 @@
 
               {#if forwarder.reader_control_available && forwarder.readers.length > 0}
                 <div class="mt-4 flex flex-col gap-4">
+                  <div class="flex items-center text-xs text-text-muted">
+                    Reader controls
+                    <HelpTip
+                      fieldKey="reader_controls"
+                      sectionKey="connections"
+                      context="receiver"
+                      onOpenModal={openHelp}
+                    />
+                  </div>
                   {#each forwarder.readers as reader (reader.stream_id)}
                     <Card borderStatus={readerBorderStatus(reader)}>
                       {#snippet header()}

@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { HelpTip } from "@rusty-timer/shared-ui";
   import {
     store,
     setAnnouncerEnabled,
@@ -9,6 +10,7 @@
     importParticipantsFile,
     importChipsFile,
     loadDataStats,
+    openHelp,
   } from "$lib/store.svelte";
   import { inputClass, btnSecondary } from "$lib/ui-classes";
 
@@ -77,11 +79,16 @@
       <div>
         <p class="text-sm font-medium text-text-primary">
           Announcer publishing
+          <HelpTip
+            fieldKey="announcer_enabled"
+            sectionKey="announcer"
+            context="receiver"
+            onOpenModal={openHelp}
+          />
         </p>
         <p class="mt-1 text-xs text-text-muted">
-          When on, subscribed streams you select publish finish reads to the
-          server announcer board. Choose which streams publish on the Streams
-          tab.
+          When on, subscribed streams you select publish reads to the server
+          announcer board. Choose which streams publish on the Streams tab.
         </p>
       </div>
       <label class="inline-flex items-center gap-2 text-xs text-text-muted">
@@ -93,12 +100,24 @@
           onchange={(e) => setAnnouncerEnabled(e.currentTarget.checked)}
         />
         {store.announcerEnabled ? "On" : "Off"}
+        <HelpTip
+          fieldKey="announcer_enabled"
+          sectionKey="announcer"
+          context="receiver"
+          onOpenModal={openHelp}
+        />
       </label>
     </div>
 
     <div class="mt-4 flex flex-wrap items-end justify-between gap-4">
       <label class="block text-xs font-medium text-text-muted">
         Max finishers shown
+        <HelpTip
+          fieldKey="max_list_size"
+          sectionKey="announcer"
+          context="receiver"
+          onOpenModal={openHelp}
+        />
         <input
           data-testid="announcer-max-list-input"
           class="{inputClass} mt-1 w-24"
@@ -114,21 +133,35 @@
         </span>
       </label>
 
-      <button
-        data-testid="open-announcer-page-btn"
-        type="button"
-        class={btnSecondary}
-        disabled={!announcerUrl}
-        onclick={openAnnouncerPage}
-      >
-        Open announcer page
-      </button>
+      <span class="inline-flex items-center gap-1">
+        <button
+          data-testid="open-announcer-page-btn"
+          type="button"
+          class={btnSecondary}
+          disabled={!announcerUrl}
+          onclick={openAnnouncerPage}
+        >
+          Open announcer page
+        </button>
+        <HelpTip
+          fieldKey="open_announcer_page"
+          sectionKey="announcer"
+          context="receiver"
+          onOpenModal={openHelp}
+        />
+      </span>
     </div>
   </section>
 
   <section class="mt-6 rounded-lg border border-border bg-surface-1 p-4">
     <p class="text-sm font-medium text-text-primary">
       Participant &amp; chip data
+      <HelpTip
+        fieldKey="data_stats"
+        sectionKey="announcer"
+        context="receiver"
+        onOpenModal={openHelp}
+      />
     </p>
     <p class="mt-1 text-xs text-text-muted">
       Import a participant file (<code>.ppl</code>) and a chip-assignment file (<code
@@ -145,12 +178,26 @@
         Race Director auto import is enabled for {store.rdImportDir}. You do not
         need to manually import participant or chip files unless you want to
         replace the auto-imported data.
+        <HelpTip
+          fieldKey="rd_auto_import"
+          sectionKey="announcer"
+          context="receiver"
+          onOpenModal={openHelp}
+        />
       </p>
     {/if}
 
     <div class="mt-4 grid gap-4">
       <div>
-        <p class="text-xs font-medium text-text-muted">Participants (.ppl)</p>
+        <p class="text-xs font-medium text-text-muted">
+          Participants (.ppl)
+          <HelpTip
+            fieldKey="participants_file"
+            sectionKey="announcer"
+            context="receiver"
+            onOpenModal={openHelp}
+          />
+        </p>
         <div class="mt-1 flex items-center gap-3">
           <button
             data-testid="participants-choose-btn"
@@ -176,6 +223,12 @@
       <div>
         <p class="text-xs font-medium text-text-muted">
           Chip assignments (.bibchip)
+          <HelpTip
+            fieldKey="chips_file"
+            sectionKey="announcer"
+            context="receiver"
+            onOpenModal={openHelp}
+          />
         </p>
         <div class="mt-1 flex items-center gap-3">
           <button
@@ -206,7 +259,15 @@
         data-testid="data-stats"
         class="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 rounded-md border border-border bg-surface-0 p-3 text-xs"
       >
-        <dt class="text-text-muted">Participants</dt>
+        <dt class="text-text-muted">
+          Participants
+          <HelpTip
+            fieldKey="data_stats"
+            sectionKey="announcer"
+            context="receiver"
+            onOpenModal={openHelp}
+          />
+        </dt>
         <dd
           data-testid="stat-participants"
           class="text-right text-text-primary"

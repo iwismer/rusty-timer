@@ -202,9 +202,9 @@ describe("StreamsTab", () => {
     expect(lastRead.closest("td")).toHaveClass("w-full");
     expect(screen.getByRole("table")).not.toHaveClass("table-fixed");
     expect(
-      screen.getByRole("columnheader", { name: "Stream" }),
+      screen.getByRole("columnheader", { name: /Stream/ }),
     ).not.toHaveClass("w-[120px]");
-    expect(screen.getByRole("columnheader", { name: "Stream" })).toHaveClass(
+    expect(screen.getByRole("columnheader", { name: /Stream/ })).toHaveClass(
       "w-px",
       "whitespace-nowrap",
     );

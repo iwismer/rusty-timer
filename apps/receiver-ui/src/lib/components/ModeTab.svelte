@@ -6,6 +6,7 @@
     markModeEdited,
     applyMode,
     setModeDraft,
+    openHelp,
   } from "$lib/store.svelte";
   import type { ReceiverMode } from "$lib/api";
   import { inputClass, btnPrimary } from "$lib/ui-classes";
@@ -15,7 +16,12 @@
   <div class="grid gap-4">
     <label class="block text-xs font-medium text-text-muted">
       Mode
-      <HelpTip fieldKey="mode" sectionKey="receiver_mode" context="receiver" />
+      <HelpTip
+        fieldKey="mode"
+        sectionKey="receiver_mode"
+        context="receiver"
+        onOpenModal={openHelp}
+      />
       <select
         data-testid="mode-select"
         class="{inputClass} mt-1"

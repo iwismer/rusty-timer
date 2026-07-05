@@ -6,6 +6,10 @@
   } from "$lib/store.svelte";
   import { RECEIVER_HELP } from "@rusty-timer/shared-ui/lib/help/receiver-help";
   import { RECEIVER_ADMIN_HELP } from "@rusty-timer/shared-ui/lib/help/receiver-admin-help";
+  import {
+    FIELD_HIGHLIGHT_DURATION_MS,
+    isHighlightedField,
+  } from "@rusty-timer/shared-ui/lib/help-dialog";
   import type {
     SectionHelp,
     FieldHelp,
@@ -13,6 +17,8 @@
   import { tick } from "svelte";
 
   let searchQuery = $state("");
+  let highlightedField = $state<string | undefined>(undefined);
+  let highlightTimer: ReturnType<typeof setTimeout> | undefined;
 
   type HelpSection = { key: string; section: SectionHelp; context: string };
 
@@ -54,6 +60,8 @@
     setShowHelpModal(false);
     setHelpScrollTarget(null);
     searchQuery = "";
+    highlightedField = undefined;
+    clearTimeout(highlightTimer);
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -70,7 +78,14 @@
         dialogRef?.focus();
         if (store.helpScrollTarget) {
           const el = document.getElementById(`help-${store.helpScrollTarget}`);
-          el?.scrollIntoView({ behavior: "smooth", block: "start" });
+          if (el) {
+            el.scrollIntoView({ behavior: "smooth", block: "start" });
+            highlightedField = store.helpScrollTarget;
+            clearTimeout(highlightTimer);
+            highlightTimer = setTimeout(() => {
+              highlightedField = undefined;
+            }, FIELD_HIGHLIGHT_DURATION_MS);
+          }
         }
       });
     }
@@ -92,7 +107,9 @@
     <div
       class="bg-surface-0 rounded-lg shadow-xl w-full max-w-[900px] max-h-[85vh] flex flex-col mx-4"
       onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => e.stopPropagation()}
+      onkeydown={(e) => {
+        if (e.key !== "Escape") e.stopPropagation();
+      }}
     >
       <div
         class="flex items-center justify-between px-4 py-3 border-b border-border shrink-0"
@@ -128,7 +145,12 @@
               {@const f = field as FieldHelp}
               <div
                 id="help-{fieldKey}"
-                class="mb-3 pl-3 border-l-2 border-border"
+                class="mb-3 rounded-md border-l-4 px-3 py-2 transition-colors duration-300 {isHighlightedField(
+                  fieldKey,
+                  highlightedField,
+                )
+                  ? 'border-accent bg-accent/10'
+                  : 'border-border'}"
               >
                 <h4 class="text-sm font-semibold text-text-primary mb-0.5">
                   {f.label}

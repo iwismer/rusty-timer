@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { HelpTip } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
-  import { loadAll as globalLoadAll } from "$lib/store.svelte";
+  import { loadAll as globalLoadAll, openHelp } from "$lib/store.svelte";
 
   let streams = $state<api.StreamEntry[]>([]);
   let subscriptions = $state<api.SubscriptionItem[]>([]);
@@ -244,6 +244,12 @@
       <section>
         <h3 class="text-sm font-semibold text-text-primary mb-1">
           Cursor Reset
+          <HelpTip
+            fieldKey="stream_cursor"
+            sectionKey="cursor_reset"
+            context="receiver-admin"
+            onOpenModal={openHelp}
+          />
         </h3>
         <p class="text-xs text-text-muted m-0 mb-3">
           Reset resume cursors per stream. The selected stream will replay from
@@ -256,7 +262,15 @@
             <thead>
               <tr class="border-b border-border text-left text-text-muted">
                 <th class="py-1.5 pr-3 font-medium text-xs">Stream</th>
-                <th class="py-1.5 pr-3 font-medium text-xs">Epoch</th>
+                <th class="py-1.5 pr-3 font-medium text-xs">
+                  Epoch
+                  <HelpTip
+                    fieldKey="stream_cursor"
+                    sectionKey="cursor_reset"
+                    context="receiver-admin"
+                    onOpenModal={openHelp}
+                  />
+                </th>
                 <th class="py-1.5 pr-3 font-medium text-xs">Seq</th>
                 <th class="py-1.5 font-medium text-xs"></th>
               </tr>
@@ -285,6 +299,12 @@
                     >
                       {inFlightKeys.has(key) ? "Resetting..." : "Reset Cursor"}
                     </button>
+                    <HelpTip
+                      fieldKey="reset_cursor"
+                      sectionKey="cursor_reset"
+                      context="receiver-admin"
+                      onOpenModal={openHelp}
+                    />
                   </td>
                 </tr>
               {/each}
@@ -305,6 +325,12 @@
                 ? "Resetting..."
                 : "Reset All Cursors"}
             </button>
+            <HelpTip
+              fieldKey="reset_all_cursors"
+              sectionKey="cursor_reset"
+              context="receiver-admin"
+              onOpenModal={openHelp}
+            />
           </div>
         {/if}
       </section>
@@ -315,6 +341,12 @@
       <section>
         <h3 class="text-sm font-semibold text-text-primary mb-1">
           Earliest-Epoch Overrides
+          <HelpTip
+            fieldKey="epoch_override"
+            sectionKey="epoch_overrides"
+            context="receiver-admin"
+            onOpenModal={openHelp}
+          />
         </h3>
         <p class="text-xs text-text-muted m-0 mb-3">
           Clear earliest-epoch overrides per stream or all at once.
@@ -344,6 +376,12 @@
                     >
                       {inFlightKeys.has(key) ? "Resetting..." : "Reset Epoch"}
                     </button>
+                    <HelpTip
+                      fieldKey="reset_epoch_override"
+                      sectionKey="epoch_overrides"
+                      context="receiver-admin"
+                      onOpenModal={openHelp}
+                    />
                   </td>
                 </tr>
               {/each}
@@ -364,6 +402,12 @@
                 ? "Resetting..."
                 : "Reset All Epoch Overrides"}
             </button>
+            <HelpTip
+              fieldKey="reset_all_epoch_overrides"
+              sectionKey="epoch_overrides"
+              context="receiver-admin"
+              onOpenModal={openHelp}
+            />
           </div>
         {/if}
       </section>
@@ -378,6 +422,7 @@
             fieldKey="port_override"
             sectionKey="port_overrides"
             context="receiver-admin"
+            onOpenModal={openHelp}
           />
         </h3>
         <p class="text-xs text-text-muted m-0 mb-3">
@@ -460,6 +505,12 @@
             ? "Purging..."
             : "Purge All Subscriptions"}
         </button>
+        <HelpTip
+          fieldKey="purge_all_subscriptions"
+          sectionKey="purge_subscriptions"
+          context="receiver-admin"
+          onOpenModal={openHelp}
+        />
       </section>
 
       <hr class="border-border" />
@@ -486,13 +537,27 @@
             ? "Resetting..."
             : "Reset Profile to Defaults"}
         </button>
+        <HelpTip
+          fieldKey="reset_profile_action"
+          sectionKey="reset_profile"
+          context="receiver-admin"
+          onOpenModal={openHelp}
+        />
       </section>
 
       <hr class="border-border" />
 
       <!-- Clear Data -->
       <section>
-        <h3 class="text-sm font-semibold text-status-err mb-1">Clear Data</h3>
+        <h3 class="text-sm font-semibold text-status-err mb-1">
+          Clear Data
+          <HelpTip
+            fieldKey="clear_data_action"
+            sectionKey="clear_data"
+            context="receiver-admin"
+            onOpenModal={openHelp}
+          />
+        </h3>
         <p class="text-xs text-text-muted m-0 mb-3">
           Clear local subscriptions, cursors, mode, and DBF config. Keeps the
           server URL, token, and receiver ID.
@@ -511,6 +576,12 @@
                 ? "Clearing..."
                 : "Yes, Clear Data"}
             </button>
+            <HelpTip
+              fieldKey="clear_data_action"
+              sectionKey="clear_data"
+              context="receiver-admin"
+              onOpenModal={openHelp}
+            />
             <button
               onclick={() => (confirmingClearData = false)}
               class={btnNeutral}
@@ -525,6 +596,12 @@
           >
             Clear Data...
           </button>
+          <HelpTip
+            fieldKey="clear_data_action"
+            sectionKey="clear_data"
+            context="receiver-admin"
+            onOpenModal={openHelp}
+          />
         {/if}
       </section>
 
@@ -534,6 +611,12 @@
       <section>
         <h3 class="text-sm font-semibold text-status-err mb-1">
           Factory Reset
+          <HelpTip
+            fieldKey="factory_reset_action"
+            sectionKey="factory_reset"
+            context="receiver-admin"
+            onOpenModal={openHelp}
+          />
         </h3>
         <p class="text-xs text-text-muted m-0 mb-3">
           Clear <strong>all</strong> local data. This cannot be undone.
@@ -552,6 +635,12 @@
                 ? "Resetting..."
                 : "Yes, Factory Reset"}
             </button>
+            <HelpTip
+              fieldKey="factory_reset_action"
+              sectionKey="factory_reset"
+              context="receiver-admin"
+              onOpenModal={openHelp}
+            />
             <button
               onclick={() => (confirmingFactoryReset = false)}
               class={btnNeutral}
@@ -566,6 +655,12 @@
           >
             Factory Reset...
           </button>
+          <HelpTip
+            fieldKey="factory_reset_action"
+            sectionKey="factory_reset"
+            context="receiver-admin"
+            onOpenModal={openHelp}
+          />
         {/if}
       </section>
     </div>

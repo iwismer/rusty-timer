@@ -1,6 +1,6 @@
 <script lang="ts">
-  import AlertBanner from "./AlertBanner.svelte";
-  import HelpTip from "./HelpTip.svelte";
+  import AlertBanner from './AlertBanner.svelte';
+  import HelpTip from './HelpTip.svelte';
   import {
     formatReadMode,
     formatTtoState,
@@ -13,14 +13,14 @@
     driftColorClass,
     computeDownloadPercent,
     readerControlDisabled,
-  } from "../lib/reader-view-model";
+  } from '../lib/reader-view-model';
   import {
     READ_MODE_OPTIONS,
     shouldShowTimeoutInput,
     initialTimeoutDraft,
     resolveTimeoutSeconds,
-  } from "../lib/read-mode-form";
-  import type { HelpContextName } from "../lib/help/help-types";
+  } from '../lib/read-mode-form';
+  import type { HelpContextName } from '../lib/help/help-types';
 
   /** Reader info matching the Rust ReaderInfo struct. */
   export interface ReaderInfoData {
@@ -38,20 +38,20 @@
     connect_failures?: number;
   }
 
-  export type ReaderConnectionState = "connected" | "connecting" | "disconnected";
-  export type DownloadStateType = "downloading" | "complete" | "error" | "idle";
+  export type ReaderConnectionState = 'connected' | 'connecting' | 'disconnected';
+  export type DownloadStateType = 'downloading' | 'complete' | 'error' | 'idle';
 
   let {
     readerIp,
     readerDetail = undefined,
     readerInfo = null,
-    readerState = "disconnected",
+    readerState = 'disconnected',
     readerStateLabel = undefined,
     showHeader = true,
     readsSession = null,
     readsTotal = null,
     lastSeenDisplay = undefined,
-    localPortLabel = "Local port",
+    localPortLabel = 'Local port',
     localPortValue = undefined,
     currentEpoch = null,
     currentEpochCreatedUnixMs = null,
@@ -65,7 +65,7 @@
     readerClockDisplay = undefined,
     forwarderClockDisplay = undefined,
     lastRefreshDisplay = undefined,
-    helpContext = "forwarder" as HelpContextName,
+    helpContext = 'forwarder' as HelpContextName,
     onOpenHelpModal = undefined,
     onSetEpochName = undefined,
     onAdvanceEpoch = undefined,
@@ -147,43 +147,38 @@
 
   // --- Local UI state ---
   let busy = $state(false);
-  let feedback: { kind: "ok" | "warn" | "err"; message: string } | undefined =
-    $state(undefined);
+  let feedback: { kind: 'ok' | 'warn' | 'err'; message: string } | undefined = $state(undefined);
   let feedbackTimer: ReturnType<typeof setTimeout> | undefined;
 
   let readModeDraft: string | undefined = $state(undefined);
   let timeoutDraft: string | undefined = $state(undefined);
-  let epochNameDraft = $state("");
+  let epochNameDraft = $state('');
   // svelte-ignore state_referenced_locally -- intentionally captures only the
   // initial collapsed state; the user owns the toggle afterwards.
   let detailsOpen = $state(!(detailsCollapsible && defaultCollapsed));
 
   let detailsShown = $derived(!detailsCollapsible || detailsOpen);
 
-  let currentReadMode = $derived(
-    readModeDraft ?? readerInfo?.config?.mode ?? "raw",
-  );
+  let currentReadMode = $derived(readModeDraft ?? readerInfo?.config?.mode ?? 'raw');
   let currentTimeoutDraft = $derived(
-    timeoutDraft ?? initialTimeoutDraft(readerInfo?.config?.timeout),
+    timeoutDraft ?? initialTimeoutDraft(readerInfo?.config?.timeout)
   );
   let showTimeout = $derived(shouldShowTimeoutInput(currentReadMode));
 
-  let showEpochRow = $derived(
-    onSetEpochName !== undefined || onAdvanceEpoch !== undefined,
-  );
+  let showEpochRow = $derived(onSetEpochName !== undefined || onAdvanceEpoch !== undefined);
   let showSummaryRow = $derived(
     readsSession != null ||
       readsTotal != null ||
       localPortValue !== undefined ||
       lastSeenDisplay !== undefined ||
-      detailsCollapsible,
+      detailsCollapsible
   );
 
-  function setFeedback(fb: { kind: "ok" | "err"; message: string }) {
+  function setFeedback(fb: { kind: 'ok' | 'err'; message: string }) {
     feedback = fb;
     clearTimeout(feedbackTimer);
     // Errors persist longer so the user has time to read them
-    const timeout = fb.kind === "err" ? 8000 : 3000;
+    const timeout = fb.kind === 'err' ? 8000 : 3000;
     feedbackTimer = setTimeout(() => {
       feedback = undefined;
     }, timeout);
@@ -200,10 +195,10 @@
     try {
       await fn();
     } catch (e: any) {
-      console.error(`ReaderControlPanel action failed${actionName ? ` (${actionName})` : ""}:`, e);
-      const detail = typeof e === "string" ? e : e?.message ?? "Unknown error";
+      console.error(`ReaderControlPanel action failed${actionName ? ` (${actionName})` : ''}:`, e);
+      const detail = typeof e === 'string' ? e : (e?.message ?? 'Unknown error');
       const msg = actionName ? `${actionName} failed: ${detail}` : detail;
-      setFeedback({ kind: "err", message: msg });
+      setFeedback({ kind: 'err', message: msg });
     } finally {
       busy = false;
     }
@@ -212,27 +207,24 @@
   async function handleSyncClock() {
     await wrap(async () => {
       await onSyncClock();
-      setFeedback({ kind: "ok", message: "Clock synced" });
-    }, "Sync Clock");
+      setFeedback({ kind: 'ok', message: 'Clock synced' });
+    }, 'Sync Clock');
   }
 
   async function handleSetReadMode() {
     const mode = currentReadMode;
-    const timeout = resolveTimeoutSeconds(
-      currentTimeoutDraft,
-      readerInfo?.config?.timeout,
-    );
+    const timeout = resolveTimeoutSeconds(currentTimeoutDraft, readerInfo?.config?.timeout);
     await wrap(async () => {
       await onSetReadMode(mode, timeout);
       readModeDraft = mode;
       timeoutDraft = String(timeout);
       setFeedback({
-        kind: "ok",
+        kind: 'ok',
         message: shouldShowTimeoutInput(mode)
           ? `Mode set to ${formatReadMode(mode)} (${timeout}s)`
           : `Mode set to ${formatReadMode(mode)}`,
       });
-    }, "Set Read Mode");
+    }, 'Set Read Mode');
   }
 
   async function handleSetTto() {
@@ -240,12 +232,10 @@
     await wrap(async () => {
       await onSetTto(!currentlyEnabled);
       setFeedback({
-        kind: "ok",
-        message: currentlyEnabled
-          ? "TTO reporting disabled"
-          : "TTO reporting enabled",
+        kind: 'ok',
+        message: currentlyEnabled ? 'TTO reporting disabled' : 'TTO reporting enabled',
       });
-    }, "Toggle TTO");
+    }, 'Toggle TTO');
   }
 
   async function handleSetRecording() {
@@ -253,48 +243,46 @@
     await wrap(async () => {
       await onSetRecording(!currentlyRecording);
       setFeedback({
-        kind: "ok",
-        message: currentlyRecording
-          ? "Recording stopped"
-          : "Recording started",
+        kind: 'ok',
+        message: currentlyRecording ? 'Recording stopped' : 'Recording started',
       });
-    }, "Toggle Recording");
+    }, 'Toggle Recording');
   }
 
   async function handleRefresh() {
     await wrap(async () => {
       await onRefresh();
-      setFeedback({ kind: "ok", message: "Reader info refreshed" });
-    }, "Refresh");
+      setFeedback({ kind: 'ok', message: 'Reader info refreshed' });
+    }, 'Refresh');
   }
 
   async function handleClearRecords() {
     await wrap(async () => {
       await onClearRecords();
-      setFeedback({ kind: "ok", message: "Clear records requested" });
-    }, "Clear Records");
+      setFeedback({ kind: 'ok', message: 'Clear records requested' });
+    }, 'Clear Records');
   }
 
   async function handleStartDownload() {
     await wrap(async () => {
       await onStartDownload();
-      setFeedback({ kind: "ok", message: "Download started" });
-    }, "Start Download");
+      setFeedback({ kind: 'ok', message: 'Download started' });
+    }, 'Start Download');
   }
 
   async function handleStopDownload() {
     if (!onStopDownload) return;
     await wrap(async () => {
       await onStopDownload!();
-      setFeedback({ kind: "ok", message: "Download stopped" });
-    }, "Stop Download");
+      setFeedback({ kind: 'ok', message: 'Download stopped' });
+    }, 'Stop Download');
   }
 
   async function handleReconnect() {
     await wrap(async () => {
       await onReconnect();
-      setFeedback({ kind: "ok", message: "Reconnect requested" });
-    }, "Reconnect");
+      setFeedback({ kind: 'ok', message: 'Reconnect requested' });
+    }, 'Reconnect');
   }
 
   async function handleSaveEpochName() {
@@ -302,46 +290,35 @@
     const name = normalizeEpochNameDraft(epochNameDraft);
     await wrap(async () => {
       await onSetEpochName!(name);
-      if (name === null) epochNameDraft = "";
+      if (name === null) epochNameDraft = '';
       setFeedback({
-        kind: "ok",
-        message: name === null ? "Epoch name cleared" : "Epoch name saved",
+        kind: 'ok',
+        message: name === null ? 'Epoch name cleared' : 'Epoch name saved',
       });
-    }, "Save Epoch Name");
+    }, 'Save Epoch Name');
   }
 
   async function handleAdvanceEpoch() {
     if (!onAdvanceEpoch) return;
     const draft = epochNameDraft;
     await wrap(async () => {
-      const result = await advanceEpochWithOptionalName(
-        draft,
-        onAdvanceEpoch!,
-        onSetEpochName,
-      );
+      const result = await advanceEpochWithOptionalName(draft, onAdvanceEpoch!, onSetEpochName);
       setFeedback({
-        kind: "ok",
+        kind: 'ok',
         message:
-          result === "advanced"
-            ? "Advanced to next epoch"
-            : "Advanced to next epoch and saved name",
+          result === 'advanced'
+            ? 'Advanced to next epoch'
+            : 'Advanced to next epoch and saved name',
       });
-    }, "Advance Epoch");
+    }, 'Advance Epoch');
   }
 
   let isDisabled = $derived(disabled || busy);
-  let controlDisabled = $derived(
-    disabled || readerControlDisabled(readerState, busy),
-  );
-  let epochControlDisabled = $derived(
-    disabled || busy || epochBusy || !epochEditable,
-  );
+  let controlDisabled = $derived(disabled || readerControlDisabled(readerState, busy));
+  let epochControlDisabled = $derived(disabled || busy || epochBusy || !epochEditable);
 
   let downloadPercent = $derived(
-    computeDownloadPercent(
-      downloadProgress,
-      readerInfo?.estimated_stored_reads,
-    ),
+    computeDownloadPercent(downloadProgress, readerInfo?.estimated_stored_reads)
   );
 
   function openHelp(fieldKey: string) {
@@ -350,7 +327,7 @@
 </script>
 
 <div
-  class={showHeader ? "mt-4 pt-4 border-t border-border" : ""}
+  class={showHeader ? 'mt-4 pt-4 border-t border-border' : ''}
   data-testid="reader-control-panel"
 >
   {#if showHeader}
@@ -382,59 +359,51 @@
   {#if showSummaryRow}
     <div class="mb-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
       {#if readsSession != null}
-        <div>
-          <span class="text-text-muted"
-            >Reads (session):{#if onOpenHelpModal}<HelpTip
-                fieldKey="reads_session"
-                sectionKey="reader_live"
-                context={helpContext}
-                onOpenModal={openHelp}
-              />{/if}</span
-          >
-          <span class="font-mono ml-1 text-text-primary"
-            >{readsSession.toLocaleString()}</span
-          >
+        <div class="inline-flex items-baseline gap-1">
+          <span class="text-text-muted">Reads (session):</span>
+          <span class="font-mono text-text-primary">{readsSession.toLocaleString()}</span>
+          {#if onOpenHelpModal}<HelpTip
+              fieldKey="reads_session"
+              sectionKey="reader_live"
+              context={helpContext}
+              onOpenModal={openHelp}
+            />{/if}
         </div>
       {/if}
       {#if readsTotal != null}
-        <div>
-          <span class="text-text-muted"
-            >Reads (total):{#if onOpenHelpModal}<HelpTip
-                fieldKey="reads_total"
-                sectionKey="reader_live"
-                context={helpContext}
-                onOpenModal={openHelp}
-              />{/if}</span
-          >
-          <span class="font-mono ml-1 text-text-primary"
-            >{readsTotal.toLocaleString()}</span
-          >
+        <div class="inline-flex items-baseline gap-1">
+          <span class="text-text-muted">Reads (total):</span>
+          <span class="font-mono text-text-primary">{readsTotal.toLocaleString()}</span>
+          {#if onOpenHelpModal}<HelpTip
+              fieldKey="reads_total"
+              sectionKey="reader_live"
+              context={helpContext}
+              onOpenModal={openHelp}
+            />{/if}
         </div>
       {/if}
       {#if localPortValue !== undefined}
-        <div>
-          <span class="text-text-muted"
-            >{localPortLabel}:{#if onOpenHelpModal}<HelpTip
-                fieldKey="local_port"
-                sectionKey="reader_live"
-                context={helpContext}
-                onOpenModal={openHelp}
-              />{/if}</span
-          >
-          <span class="font-mono ml-1 text-text-primary">{localPortValue}</span>
+        <div class="inline-flex items-baseline gap-1">
+          <span class="text-text-muted">{localPortLabel}:</span>
+          <span class="font-mono text-text-primary">{localPortValue}</span>
+          {#if onOpenHelpModal}<HelpTip
+              fieldKey="local_port"
+              sectionKey="reader_live"
+              context={helpContext}
+              onOpenModal={openHelp}
+            />{/if}
         </div>
       {/if}
       {#if lastSeenDisplay !== undefined}
-        <div>
-          <span class="text-text-muted"
-            >Last seen:{#if onOpenHelpModal}<HelpTip
-                fieldKey="last_seen"
-                sectionKey="reader_live"
-                context={helpContext}
-                onOpenModal={openHelp}
-              />{/if}</span
-          >
-          <span class="ml-1 text-text-secondary">{lastSeenDisplay}</span>
+        <div class="inline-flex items-baseline gap-1">
+          <span class="text-text-muted">Last seen:</span>
+          <span class="text-text-secondary">{lastSeenDisplay}</span>
+          {#if onOpenHelpModal}<HelpTip
+              fieldKey="last_seen"
+              sectionKey="reader_live"
+              context={helpContext}
+              onOpenModal={openHelp}
+            />{/if}
         </div>
       {/if}
       {#if detailsCollapsible}
@@ -444,10 +413,9 @@
             detailsOpen = !detailsOpen;
           }}
           aria-expanded={detailsOpen}
-          aria-label={detailsOpen ? "Hide details" : "Show details"}
+          aria-label={detailsOpen ? 'Hide details' : 'Show details'}
         >
-          <span
-            class={`inline-block transition-transform ${detailsOpen ? "rotate-180" : ""}`}
+          <span class={`inline-block transition-transform ${detailsOpen ? 'rotate-180' : ''}`}
             >▾</span
           >
           <span>Details</span>
@@ -461,16 +429,17 @@
     <div class="mb-3 flex flex-col gap-1">
       {#if currentEpoch != null || currentEpochName || currentEpochCreatedUnixMs != null}
         <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-muted">
-          <span>
-            Current epoch:{#if onOpenHelpModal}<HelpTip
+          <span class="inline-flex items-baseline gap-1">
+            <span>Current epoch:</span>
+            <span class="font-mono text-text-primary">
+              {#if currentEpoch != null}#{currentEpoch}{:else}—{/if}
+            </span>
+            {#if onOpenHelpModal}<HelpTip
                 fieldKey="current_epoch"
                 sectionKey="reader_live"
                 context={helpContext}
                 onOpenModal={openHelp}
               />{/if}
-            <span class="font-mono text-text-primary">
-              {#if currentEpoch != null}#{currentEpoch}{:else}—{/if}
-            </span>
           </span>
           <span>
             Name:
@@ -478,29 +447,23 @@
               {formatEpochName(currentEpochName)}
             </span>
           </span>
-          <span>
-            Created:{#if onOpenHelpModal}<HelpTip
+          <span class="inline-flex items-baseline gap-1">
+            <span>Created:</span>
+            <span class="font-mono text-text-primary">
+              {formatEpochCreatedAt(currentEpochCreatedUnixMs)}
+            </span>
+            {#if onOpenHelpModal}<HelpTip
                 fieldKey="current_epoch_created"
                 sectionKey="reader_live"
                 context={helpContext}
                 onOpenModal={openHelp}
               />{/if}
-            <span class="font-mono text-text-primary">
-              {formatEpochCreatedAt(currentEpochCreatedUnixMs)}
-            </span>
           </span>
         </div>
       {/if}
       <div class="flex items-center gap-2 flex-wrap">
         {#if onSetEpochName}
-          <span class="text-xs text-text-muted"
-            >New Epoch Name:{#if onOpenHelpModal}<HelpTip
-                fieldKey="epoch_name"
-                sectionKey="reader_live"
-                context={helpContext}
-                onOpenModal={openHelp}
-              />{/if}</span
-          >
+          <span class="text-xs text-text-muted">New Epoch Name:</span>
           <input
             type="text"
             class="w-48 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-primary border border-border"
@@ -508,6 +471,12 @@
             bind:value={epochNameDraft}
             disabled={epochControlDisabled}
           />
+          {#if onOpenHelpModal}<HelpTip
+              fieldKey="epoch_name"
+              sectionKey="reader_live"
+              context={helpContext}
+              onOpenModal={openHelp}
+            />{/if}
           <button
             onclick={handleSaveEpochName}
             class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -517,16 +486,6 @@
           </button>
         {/if}
         {#if onAdvanceEpoch}
-          {#if onOpenHelpModal}
-            <span class="text-xs text-text-muted"
-              ><HelpTip
-                fieldKey="advance_epoch"
-                sectionKey="reader_live"
-                context={helpContext}
-                onOpenModal={openHelp}
-              /></span
-            >
-          {/if}
           <button
             onclick={handleAdvanceEpoch}
             class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -534,14 +493,20 @@
           >
             Advance Epoch
           </button>
+          {#if onOpenHelpModal}<HelpTip
+              fieldKey="advance_epoch"
+              sectionKey="reader_live"
+              context={helpContext}
+              onOpenModal={openHelp}
+            />{/if}
         {/if}
       </div>
     </div>
   {/if}
 
   {#if detailsShown}
-    <div class={detailsCollapsible ? "mt-4 pt-4 border-t border-border" : ""}>
-      {#if !readerInfo && readerState === "disconnected"}
+    <div class={detailsCollapsible ? 'mt-4 pt-4 border-t border-border' : ''}>
+      {#if !readerInfo && readerState === 'disconnected'}
         <p class="mb-4 text-sm text-text-muted">No reader data available</p>
       {/if}
 
@@ -549,21 +514,15 @@
       <div class="grid grid-cols-2 gap-x-8 gap-y-2 text-sm mb-4">
         <div class="col-span-2">
           <span class="text-text-muted">Banner:</span>
-          <span class="font-mono ml-2 text-xs"
-            >{readerInfo?.banner ?? "\u2014"}</span
-          >
+          <span class="font-mono ml-2 text-xs">{readerInfo?.banner ?? '\u2014'}</span>
         </div>
         <div>
           <span class="text-text-muted">Firmware:</span>
-          <span class="font-mono ml-2"
-            >{readerInfo?.hardware?.fw_version ?? "\u2014"}</span
-          >
+          <span class="font-mono ml-2">{readerInfo?.hardware?.fw_version ?? '\u2014'}</span>
         </div>
         <div>
           <span class="text-text-muted">Hardware:</span>
-          <span class="font-mono ml-2"
-            >{formatHardwareCode(readerInfo?.hardware?.hw_code)}</span
-          >
+          <span class="font-mono ml-2">{formatHardwareCode(readerInfo?.hardware?.hw_code)}</span>
         </div>
         {#if readerClockDisplay !== undefined}
           <div>
@@ -571,19 +530,17 @@
             <span class="font-mono ml-2">{readerClockDisplay}</span>
           </div>
         {/if}
-        <div>
-          <span class="text-text-muted"
-            >Clock Drift:{#if onOpenHelpModal}<HelpTip
-                fieldKey="clock_drift"
-                sectionKey="reader_live"
-                context={helpContext}
-                onOpenModal={openHelp}
-              />{/if}</span
-          >
-          <span
-            class="{driftColorClass(readerInfo?.clock?.drift_ms)} font-mono ml-2"
+        <div class="inline-flex items-baseline gap-1">
+          <span class="text-text-muted">Clock Drift:</span>
+          <span class="{driftColorClass(readerInfo?.clock?.drift_ms)} font-mono"
             >{formatClockDrift(readerInfo?.clock?.drift_ms)}</span
           >
+          {#if onOpenHelpModal}<HelpTip
+              fieldKey="clock_drift"
+              sectionKey="reader_live"
+              context={helpContext}
+              onOpenModal={openHelp}
+            />{/if}
         </div>
         {#if forwarderClockDisplay !== undefined}
           <div>
@@ -600,30 +557,17 @@
       </div>
 
       <!-- Read mode controls -->
-      <div class="col-span-2 mb-4">
-        <span class="text-sm text-text-muted"
-          >Read Mode:{#if onOpenHelpModal}
-            <HelpTip
-              fieldKey="read_mode"
-              sectionKey="read_mode"
-              context={helpContext}
-              onOpenModal={openHelp}
-            />{/if}</span
-        >
-        <span class="ml-2 inline-flex items-center gap-2 flex-wrap">
+      <div class="col-span-2 mb-4 inline-flex items-center gap-2 flex-wrap">
+        <span class="text-sm text-text-muted">Read Mode:</span>
+        <span class="inline-flex items-center gap-2 flex-wrap">
           <select
             class="px-2 py-0.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
             value={currentReadMode}
             onchange={(e) => {
               const mode = (e.currentTarget as HTMLSelectElement).value;
               readModeDraft = mode;
-              if (
-                shouldShowTimeoutInput(mode) &&
-                timeoutDraft == null
-              ) {
-                timeoutDraft = initialTimeoutDraft(
-                  readerInfo?.config?.timeout,
-                );
+              if (shouldShowTimeoutInput(mode) && timeoutDraft == null) {
+                timeoutDraft = initialTimeoutDraft(readerInfo?.config?.timeout);
               }
             }}
             disabled={controlDisabled}
@@ -632,19 +576,17 @@
               <option value={option.value}>{option.label}</option>
             {/each}
           </select>
+          {#if onOpenHelpModal}
+            <HelpTip
+              fieldKey="read_mode"
+              sectionKey="read_mode"
+              context={helpContext}
+              onOpenModal={openHelp}
+            />
+          {/if}
           {#if showTimeout}
-            <label
-              class="inline-flex items-center gap-1 text-xs text-text-muted"
-            >
-              <span
-                >Timeout{#if onOpenHelpModal}
-                  <HelpTip
-                    fieldKey="timeout"
-                    sectionKey="read_mode"
-                    context={helpContext}
-                    onOpenModal={openHelp}
-                  />{/if}</span
-              >
+            <label class="inline-flex items-center gap-1 text-xs text-text-muted">
+              <span>Timeout</span>
               <input
                 class="w-16 px-2 py-0.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
                 type="number"
@@ -657,6 +599,14 @@
                 disabled={controlDisabled}
               />
               <span>s</span>
+              {#if onOpenHelpModal}
+                <HelpTip
+                  fieldKey="timeout"
+                  sectionKey="read_mode"
+                  context={helpContext}
+                  onOpenModal={openHelp}
+                />
+              {/if}
             </label>
           {/if}
           <button
@@ -668,33 +618,28 @@
       </div>
 
       <!-- TTO toggle -->
-      <div class="mb-4">
-        <span class="text-sm text-text-muted"
-          >TTO Bytes:{#if onOpenHelpModal}<HelpTip
+      <div class="mb-4 inline-flex items-center gap-2 flex-wrap">
+        <span class="text-sm text-text-muted">TTO Bytes:</span>
+        <span class="inline-flex items-center gap-2 flex-wrap">
+          <span class="font-mono text-sm">{formatTtoState(readerInfo?.tto_enabled)}</span>
+          {#if onOpenHelpModal}<HelpTip
               fieldKey="tto_bytes"
               sectionKey="reader_live"
               context={helpContext}
               onOpenModal={openHelp}
-            />{/if}</span
-        >
-        <span class="ml-2 inline-flex items-center gap-2 flex-wrap">
-          <span class="font-mono text-sm"
-            >{formatTtoState(readerInfo?.tto_enabled)}</span
-          >
+            />{/if}
           <button
             class="px-2.5 py-0.5 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
             onclick={handleSetTto}
             disabled={controlDisabled}
           >
-            {readerInfo?.tto_enabled ? "Disable TTO" : "Enable TTO"}
+            {readerInfo?.tto_enabled ? 'Disable TTO' : 'Enable TTO'}
           </button>
         </span>
       </div>
 
       <!-- Action buttons row -->
-      <div
-        class="flex items-center gap-3 pt-3 border-t border-border flex-wrap"
-      >
+      <div class="flex items-center gap-3 pt-3 border-t border-border flex-wrap">
         <span class="inline-flex items-center gap-1">
           <button
             class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
@@ -722,13 +667,11 @@
         <span class="inline-flex items-center gap-1">
           <button
             class={readerInfo?.recording
-              ? "px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
-              : "px-3 py-1.5 text-sm rounded-md bg-green-600 text-white border-none cursor-pointer hover:bg-green-700 disabled:opacity-50"}
+              ? 'px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50'
+              : 'px-3 py-1.5 text-sm rounded-md bg-green-600 text-white border-none cursor-pointer hover:bg-green-700 disabled:opacity-50'}
             onclick={handleSetRecording}
             disabled={controlDisabled}
-            >{readerInfo?.recording
-              ? "Stop Recording"
-              : "Start Recording"}</button
+            >{readerInfo?.recording ? 'Stop Recording' : 'Start Recording'}</button
           >{#if onOpenHelpModal}<HelpTip
               fieldKey="recording"
               sectionKey="reader_live"
@@ -760,14 +703,14 @@
               onOpenModal={openHelp}
             />{/if}
         </span>
-        {#if onStopDownload && downloadProgress?.state === "downloading"}
+        {#if onStopDownload && downloadProgress?.state === 'downloading'}
           <button
             class="px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
             onclick={handleStopDownload}
             disabled={controlDisabled}>Stop Download</button
           >
         {/if}
-        {#if readerState === "disconnected"}
+        {#if readerState === 'disconnected'}
           <button
             class="px-3 py-1.5 text-sm rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
             onclick={handleReconnect}
@@ -779,13 +722,9 @@
   {/if}
 
   <!-- Download progress bar -->
-  {#if downloadProgress?.state === "downloading"}
-    <div
-      class="mt-3 flex items-center gap-3 text-sm text-text-secondary"
-    >
-      <div
-        class="flex-1 h-2 rounded-full bg-surface-2 overflow-hidden"
-      >
+  {#if downloadProgress?.state === 'downloading'}
+    <div class="mt-3 flex items-center gap-3 text-sm text-text-secondary">
+      <div class="flex-1 h-2 rounded-full bg-surface-2 overflow-hidden">
         <div
           class="h-full bg-accent rounded-full transition-all"
           style="width: {downloadPercent}%"
