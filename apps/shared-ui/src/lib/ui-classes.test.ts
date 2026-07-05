@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { buttonClass, inputClass, inputMonoClass } from './ui-classes';
+import {
+  buttonClass,
+  inputClass,
+  inputMonoClass,
+  tableCellClass,
+  tableClass,
+  tableHeadRowClass,
+  tableHeaderCellClass,
+  tableRowClass,
+} from './ui-classes';
 
 const baseButtonClasses =
   'font-medium rounded-md cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed';
@@ -55,6 +64,56 @@ describe('buttonClass', () => {
     expect(buttonClass('primary', 'xs', '')).toBe(
       `${baseButtonClasses} ${sizeClasses.xs} ${variantClasses.primary}`
     );
+  });
+});
+
+describe('table classes', () => {
+  it('provides the table class', () => {
+    expect(tableClass).toBe('w-full border-collapse text-sm');
+  });
+
+  it('provides the table head row class', () => {
+    expect(tableHeadRowClass).toBe('text-left text-text-muted border-b border-border');
+  });
+
+  it('provides the table row class', () => {
+    expect(tableRowClass).toBe('border-b border-border/50 last:border-0');
+  });
+});
+
+describe('tableCellClass', () => {
+  it('defaults to comfortable padding', () => {
+    expect(tableCellClass()).toBe('py-2 pr-4');
+  });
+
+  it('uses compact padding when compact is true', () => {
+    expect(tableCellClass(true)).toBe('py-1.5 pr-3 text-xs');
+  });
+
+  it('appends extra classes last', () => {
+    expect(tableCellClass(false, 'text-right')).toBe('py-2 pr-4 text-right');
+  });
+
+  it('does not append empty extra classes', () => {
+    expect(tableCellClass(true, '')).toBe('py-1.5 pr-3 text-xs');
+  });
+});
+
+describe('tableHeaderCellClass', () => {
+  it('defaults to comfortable padding with medium font weight', () => {
+    expect(tableHeaderCellClass()).toBe('py-2 pr-4 font-medium');
+  });
+
+  it('uses compact padding when compact is true', () => {
+    expect(tableHeaderCellClass(true)).toBe('py-1.5 pr-3 text-xs font-medium');
+  });
+
+  it('appends extra classes last', () => {
+    expect(tableHeaderCellClass(false, 'text-right')).toBe('py-2 pr-4 font-medium text-right');
+  });
+
+  it('does not append empty extra classes', () => {
+    expect(tableHeaderCellClass(false, '')).toBe('py-2 pr-4 font-medium');
   });
 });
 

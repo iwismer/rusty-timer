@@ -34,3 +34,22 @@ const inputFocusClass = 'focus:outline-none focus:ring-1 focus:ring-accent';
 
 export const inputClass = `${inputBaseClass} ${inputFocusClass}`;
 export const inputMonoClass = `${inputBaseClass} font-mono ${inputFocusClass}`;
+
+export const tableClass = 'w-full border-collapse text-sm';
+export const tableHeadRowClass = 'text-left text-text-muted border-b border-border';
+export const tableRowClass = 'border-b border-border/50 last:border-0';
+
+const tableCellComfortableClass = 'py-2 pr-4';
+const tableCellCompactClass = 'py-1.5 pr-3 text-xs';
+
+export function tableCellClass(compact = false, extra = ''): string {
+  return [compact ? tableCellCompactClass : tableCellComfortableClass, extra]
+    .filter(Boolean)
+    .join(' ');
+}
+
+export function tableHeaderCellClass(compact = false, extra = ''): string {
+  return [compact ? tableCellCompactClass : tableCellComfortableClass, 'font-medium', extra]
+    .filter(Boolean)
+    .join(' ');
+}
