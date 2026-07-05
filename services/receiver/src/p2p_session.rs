@@ -549,6 +549,7 @@ pub async fn run_data_subscription(
         local_stream_key,
         mode,
         None,
+        None,
     )
     .await
 }
@@ -558,6 +559,14 @@ pub async fn run_data_subscription(
 /// gap-jump). The hint is sent strictly *after* the durable write so the
 /// insert-before-ack contract is preserved; downstream workers (durable proxy,
 /// DBF, announcer) use it to drain freshly persisted rows.
+///
+/// `min_after_seq` is an optional subscribe-time floor (from an earliest-epoch
+/// override resolved to the epoch's `start_seq - 1`). When it exceeds the
+/// durable cursor, the skip is persisted as a cursor jump (gap marker reason
+/// `"earliest_epoch_override"`) BEFORE `DataSubscribe` is sent, so the
+/// contiguous-cursor/ack contract holds for everything delivered afterwards.
+/// The jump is durable: clearing the override later does not re-fetch the
+/// skipped seqs.
 pub async fn run_data_subscription_with_hint(
     connection: &Connection,
     writer: &WriterHandle,
@@ -565,6 +574,7 @@ pub async fn run_data_subscription_with_hint(
     local_stream_key: &LocalStreamKey,
     mode: SubscribeMode,
     durable_hint_tx: Option<&broadcast::Sender<DurableBatch>>,
+    min_after_seq: Option<i64>,
 ) -> Result<SessionOutcome, P2pSessionError> {
     // The caller supplies both the forwarder wire stream id and the local
     // durable key; they must describe the same stream so data is not requested
@@ -574,10 +584,34 @@ pub async fn run_data_subscription_with_hint(
         wire_stream_id,
         "local stream key wire stream id must match subscription wire stream id"
     );
-    let after_seq = writer
+    let cursor = writer
         .load_cursor(local_stream_key.as_str().to_owned())
         .await
         .map_err(map_write_error)?;
+    let after_seq = cursor.max(min_after_seq.unwrap_or(0));
+    if after_seq > cursor {
+        // Persist the deliberate skip before subscribing so the durable
+        // cursor stays contiguous with the rows delivered above the floor.
+        let through_seq = writer
+            .persist_gap(
+                local_stream_key.as_str().to_owned(),
+                PreparedGap {
+                    requested_after_seq: cursor,
+                    earliest_available_seq: after_seq + 1,
+                    latest_available_seq: 0,
+                    reason: "earliest_epoch_override".to_owned(),
+                    created_unix_ms: now_unix_ms(),
+                },
+            )
+            .await
+            .map_err(map_write_error)?;
+        if let Some(tx) = durable_hint_tx {
+            let _ = tx.send(DurableBatch {
+                through_seq,
+                inserted: Arc::new(Vec::new()),
+            });
+        }
+    }
 
     let (mut send, mut recv) = connection
         .open_bi()
@@ -1118,6 +1152,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn override_floor_raises_after_seq_and_jumps_cursor() {
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            let stream_id = stream_id();
+            let mut script = base_script();
+            // Epoch 2 starts at seq 11; the receiver should only fetch 11+.
+            script.subscribe_ok = SubscribeOk {
+                stream_id: sid_bytes(),
+                earliest_available_seq: 1,
+                latest_seq_at_open: 12,
+            };
+            script.batches = vec![batch(&[11, 12])];
+            script.caught_up_through = Some(12);
+
+            let forwarder = MockForwarderPeer::start([61; 32], script).await.unwrap();
+            let endpoint = test_endpoint(62).await;
+            let store = test_store();
+
+            let session = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
+                .await
+                .unwrap();
+            run_data_subscription_with_hint(
+                &session.connection,
+                &store.writer,
+                stream_id,
+                &local_stream_key(),
+                SubscribeMode::Replay,
+                None,
+                Some(10),
+            )
+            .await
+            .unwrap();
+
+            // The subscribe carried the floor, not the empty cursor.
+            let subscribes = forwarder.subscribes();
+            assert_eq!(subscribes.len(), 1);
+            assert_eq!(
+                subscribes[0].after_seq, 10,
+                "override floor must raise the requested after_seq"
+            );
+
+            let guard = store.db.lock().await;
+            // The skip was recorded durably before any batch was acked.
+            let markers = guard.load_gap_markers(local_stream_key().as_str()).unwrap();
+            assert_eq!(markers.len(), 1);
+            assert_eq!(markers[0].reason, "earliest_epoch_override");
+            assert_eq!(markers[0].requested_after_seq, 0, "jump from empty cursor");
+            assert_eq!(markers[0].earliest_available_seq, 11);
+            assert!(markers[0].created_unix_ms > 0, "marker carries a timestamp");
+            // Rows 11..12 landed; nothing below the floor exists locally.
+            let events = guard
+                .load_received_events(local_stream_key().as_str())
+                .unwrap();
+            assert_eq!(
+                events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+                vec![11, 12]
+            );
+            assert_eq!(
+                guard
+                    .load_stream_cursor(local_stream_key().as_str())
+                    .unwrap(),
+                12
+            );
+            drop(guard);
+
+            // A floor at or below the durable cursor is a no-op: no second
+            // gap marker, resume from the cursor as usual.
+            let session2 = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
+                .await
+                .unwrap();
+            run_data_subscription_with_hint(
+                &session2.connection,
+                &store.writer,
+                stream_id,
+                &local_stream_key(),
+                SubscribeMode::Replay,
+                None,
+                Some(10),
+            )
+            .await
+            .unwrap();
+            let subscribes = forwarder.subscribes();
+            assert_eq!(subscribes.len(), 2);
+            assert_eq!(
+                subscribes[1].after_seq, 12,
+                "cursor above the floor wins on resume"
+            );
+            let guard = store.db.lock().await;
+            assert_eq!(
+                guard
+                    .load_gap_markers(local_stream_key().as_str())
+                    .unwrap()
+                    .len(),
+                1,
+                "no duplicate override gap marker on resume"
+            );
+            drop(guard);
+
+            forwarder.shutdown().await;
+        })
+        .await
+        .expect("override_floor_raises_after_seq_and_jumps_cursor timed out");
+    }
+
+    #[tokio::test]
     async fn duplicate_seq_deduped() {
         tokio::time::timeout(TEST_TIMEOUT, async {
             let stream_id = stream_id();
@@ -1203,6 +1341,7 @@ mod tests {
                 &local_stream_key(),
                 SubscribeMode::Replay,
                 Some(&hint_tx),
+                None,
             )
             .await
             .unwrap();

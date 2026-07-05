@@ -927,6 +927,7 @@ async fn sync_data_tasks(
                 &task_stream.local_stream_key,
                 task_stream.mode,
                 task_stream.durable_hint_tx.as_ref(),
+                None,
             )
             .await
         });
