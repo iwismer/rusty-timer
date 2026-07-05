@@ -409,12 +409,12 @@ export const FORWARDER_HELP = {
       epoch_name: {
         label: "Epoch Name",
         summary: "Optional label for the current epoch on this reader, e.g. 'Race 1' or 'Wave 2'.",
-        detailHtml: "Assigns a human-readable name to the reader's current epoch and displays it as the active epoch label. Clearing the field and saving removes the name. The name applies to the current epoch only — after advancing to a new epoch, set a new name to identify it.",
+        detailHtml: "Assigns a human-readable name to the reader's current epoch and displays it as the active epoch label. The name is stored durably with the epoch, survives forwarder restarts, and is visible to receivers in their epoch pickers. Clearing the field and saving removes the name. The name applies to the current epoch only — each epoch keeps its own name after you advance.",
       },
       advance_epoch: {
         label: "Advance Epoch",
         summary: "Starts a new epoch for this reader, separating subsequent reads from previous ones.",
-        detailHtml: "Advances the reader's stream to a new epoch. All reads from this point forward are recorded under the new epoch, allowing receivers to distinguish them from previous reads.<br><br>Reads already captured in earlier epochs are not deleted and will still be delivered if not yet received. Use this at the start of each race or wave to create a clean separation in the read stream. After advancing, set an epoch name to identify the new segment.",
+        detailHtml: "Advances the reader's stream to a new epoch, optionally naming it in the same step (type the name first, then press Advance). All reads from this point forward are recorded under the new epoch, allowing receivers to distinguish them from previous reads.<br><br>Reads already captured in earlier epochs are not deleted and will still be delivered to receivers that have not yet received them — a receiver that must not see older reads should set its per-stream 'From epoch' control. Use this at the start of each race or wave to create a clean separation in the read stream.",
       },
       clock_drift: {
         label: "Clock Drift",

@@ -28,10 +28,16 @@ Assumptions:
    - In `General`, set `Display Name` (examples: `Start`, `Split 1`, `Finish`).
    - Save before continuing.
 
-3. Reset stream epochs before official race reads.
+3. Advance stream epochs before official race reads.
    - Open each forwarder's local status page.
-   - Reset the current epoch for every active reader stream.
-   - If reset fails, confirm the forwarder is online and retry.
+   - Advance the current epoch for every active reader stream, giving it a
+     name (for example `Race 1`). Names persist across forwarder restarts.
+   - If the advance fails, confirm the forwarder is online and retry.
+   - Note: advancing the epoch labels new reads; it does NOT stop older reads
+     from reaching a receiver. A freshly subscribed receiver replays all
+     retained epochs unless its per-stream `From epoch` control is set — set
+     it to the new epoch on the receiver if pre-race data must not reach the
+     timing software.
 
 4. Start receiver and verify P2P connection.
    - Open Receiver UI.
@@ -75,10 +81,30 @@ Assumptions:
 
 - Wrong or mixed race data:
   - Confirm IPICO Connect loaded the intended participant and chip files.
-  - Confirm epoch reset was done for all active streams before race start.
+  - Confirm the epoch was advanced for all active streams before race start.
+  - Set each subscribed stream's `From epoch` control to the race's epoch so
+    older epochs are not fetched (epoch advance alone does not prevent a
+    receiver from replaying retained pre-race reads).
   - Confirm Receiver UI is subscribed only to the streams intended for this race.
   - Verify the stream entry shows the expected stream epoch and epoch name for the race in progress.
 
-- Replay requested for one stream but multiple streams replay:
-  - Use targeted replay for a single selected stream context.
-  - Confirm the selected stream matches the intended P2P stream identity before replaying.
+- Re-send one race's reads to timing software (crash/data-loss recovery):
+  - In the Streams tab, set the stream's `From epoch` to the race's epoch.
+  - In the Admin tab, run `Reset Stream Data` for that stream (subscription
+    and the From-epoch setting are preserved).
+  - Reconnect the timing software to the stream's local port; it receives
+    only the chosen epoch onward.
+
+- Stream shows `halted` (conflicting data at a seq):
+  - The receiver detected a record that conflicts with data it already stored
+    at the same sequence number and stopped delivery for safety (this can
+    happen after a forwarder journal loss between registry pushes).
+  - Do NOT clear receiver data blindly mid-race. Advance the epoch on the
+    forwarder, then on the receiver set `From epoch` to the new epoch and run
+    `Reset Stream Data` for the affected stream to resume from a clean
+    boundary.
+
+- Stream shows `paused: epoch unavailable`:
+  - The `From epoch` selection is not (or no longer) advertised by the
+    forwarder, so the receiver holds delivery rather than sending older data.
+  - Pick an available epoch (or `All available data`) to resume.
