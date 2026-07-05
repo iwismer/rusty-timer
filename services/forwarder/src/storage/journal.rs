@@ -446,6 +446,40 @@ impl Journal {
         Ok(())
     }
 
+    /// Advance the stream to the next epoch, optionally naming it, in one
+    /// transaction.
+    ///
+    /// Closes the open epoch and opens `current + 1` with `start_seq` at the
+    /// stream's next seq and reason `'advance'`. Returns the new current epoch
+    /// metadata. Errors when the stream is unknown.
+    pub fn advance_epoch(
+        &mut self,
+        stream_key: &str,
+        name: Option<&str>,
+    ) -> Result<CurrentEpochMetadata, JournalError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = current_epoch(&tx, stream_key)?;
+        let new_epoch = current + 1;
+        let start_seq = next_seq(&tx, stream_key)?;
+        tx.execute(
+            "UPDATE stream_epochs
+             SET end_seq = COALESCE(end_seq, ?2 - 1)
+             WHERE stream_id = ?1 AND end_seq IS NULL",
+            params![stream_key, start_seq],
+        )?;
+        tx.execute(
+            "INSERT INTO stream_epochs
+                 (stream_id, epoch, start_seq, end_seq, reason, created_unix_ms, name)
+             VALUES (?1, ?2, ?3, NULL, 'advance', ?4, ?5)",
+            params![stream_key, new_epoch, start_seq, unix_ms(), name],
+        )?;
+        tx.commit()?;
+        self.current_epoch_metadata(stream_key)?
+            .ok_or_else(|| JournalError::InvalidData(format!("stream {stream_key} not found")))
+    }
+
     /// Return the current epoch and next sequence number for a stream.
     pub fn current_epoch_and_next_seq(
         &mut self,
@@ -1334,6 +1368,61 @@ mod tests {
         assert_eq!(summaries[1].start_seq, 1);
         assert_eq!(summaries[1].end_seq, Some(2));
         assert_eq!(summaries[1].name.as_deref(), Some("Race 1"));
+    }
+
+    #[test]
+    fn advance_epoch_is_atomic_and_names_the_new_epoch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("journal.db");
+        let mut journal = Journal::open(&path).expect("open write journal");
+        journal
+            .ensure_stream_state("stream-a", 1)
+            .expect("ensure stream");
+        journal
+            .set_epoch_name("stream-a", Some("Race 1"))
+            .expect("name epoch 1");
+        journal
+            .append_read("stream-a", None, b"one", "RAW")
+            .expect("append read");
+
+        let advanced = journal
+            .advance_epoch("stream-a", Some("Race 2"))
+            .expect("advance epoch");
+        assert_eq!(advanced.epoch, 2);
+        assert_eq!(advanced.start_seq, 2, "new epoch starts at next seq");
+        assert_eq!(advanced.name.as_deref(), Some("Race 2"));
+
+        let summaries = journal.epoch_summaries("stream-a").expect("summaries");
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].epoch, 2);
+        assert_eq!(summaries[0].name.as_deref(), Some("Race 2"));
+        assert_eq!(
+            summaries[1].name.as_deref(),
+            Some("Race 1"),
+            "old epoch keeps its own name"
+        );
+        assert_eq!(summaries[1].end_seq, Some(1), "old epoch closed");
+
+        // reason column records 'advance'.
+        let reason: String = journal
+            .conn
+            .query_row(
+                "SELECT reason FROM stream_epochs WHERE stream_id = 'stream-a' AND epoch = 2",
+                [],
+                |row| row.get(0),
+            )
+            .expect("reason");
+        assert_eq!(reason, "advance");
+
+        // Advancing without a name opens an unnamed epoch.
+        let unnamed = journal
+            .advance_epoch("stream-a", None)
+            .expect("advance unnamed");
+        assert_eq!(unnamed.epoch, 3);
+        assert_eq!(unnamed.name, None);
+
+        // Unknown stream errors.
+        assert!(journal.advance_epoch("missing", None).is_err());
     }
 
     #[test]
