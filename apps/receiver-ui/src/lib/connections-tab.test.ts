@@ -321,13 +321,17 @@ describe("ConnectionsTab", () => {
       screen.queryByTestId("forwarder-reader-endpoint-live-10.0.0.1:10001"),
     ).not.toBeInTheDocument();
 
+    // Reader identity now lives in the wrapping card header rather than the
+    // control panel's own header.
+    const row = screen.getByTestId("forwarder-row-endpoint-live");
+    expect(row).toHaveTextContent("10.0.0.1:10000");
+    expect(row).toHaveTextContent("connected to forwarder");
+    expect(row).toHaveTextContent("10.0.0.1:10001");
+    expect(row).toHaveTextContent("disconnected from forwarder");
+
     const panels = screen.getAllByTestId("reader-control-panel");
     expect(panels).toHaveLength(2);
-    expect(panels[0]).toHaveTextContent("Reader: 10.0.0.1:10000");
-    expect(panels[0]).toHaveTextContent("Hardware reader ID: 0");
     expect(panels[0]).toHaveTextContent("Local proxy: 127.0.0.1:9100");
-    expect(panels[1]).toHaveTextContent("Reader: 10.0.0.1:10001");
-    expect(panels[1]).toHaveTextContent("Hardware reader ID: 0");
     expect(panels[1]).toHaveTextContent("Local proxy: not subscribed");
   });
 

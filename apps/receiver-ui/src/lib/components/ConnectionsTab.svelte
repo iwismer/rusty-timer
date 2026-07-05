@@ -3,7 +3,9 @@
   import { onMount, onDestroy, untrack } from "svelte";
   import {
     BatteryIndicator,
+    Card,
     ReaderControlPanel,
+    StatusBadge,
     computeTickingClock,
     formatLastSeen,
     parseWallClock,
@@ -244,6 +246,33 @@
     return "disconnected";
   }
 
+  function forwarderBorderStatus(
+    forwarder: ForwarderConnectionStatus,
+  ): "ok" | "warn" | "err" | undefined {
+    if (forwarder.pending) return "warn";
+    switch (forwarder.state) {
+      case "subscribed":
+      case "connected":
+        return "ok";
+      case "unavailable":
+        return "err";
+      default:
+        // Deliberately disconnected forwarders get a neutral card.
+        return undefined;
+    }
+  }
+
+  function readerBorderStatus(reader: ReaderLiveStatus): "ok" | "warn" | "err" {
+    switch (readerConnectionState(reader)) {
+      case "connected":
+        return "ok";
+      case "connecting":
+        return "warn";
+      default:
+        return "err";
+    }
+  }
+
   function readerInfoForPanel(reader: ReaderLiveStatus) {
     if (reader.reader_info) return reader.reader_info;
     if (
@@ -347,133 +376,141 @@
       </div>
     </section>
 
-    <section class="mt-4 rounded-lg border border-border bg-surface-1">
-      <div class="border-b border-border px-4 py-3">
-        <p class="text-xs font-medium text-text-muted">Forwarders</p>
-      </div>
+    <h2 class="mt-6 mb-2 text-xs font-medium text-text-muted">Forwarders</h2>
 
-      {#if store.connections.forwarders.length === 0}
-        <p class="px-4 py-6 text-sm text-text-muted">
+    {#if store.connections.forwarders.length === 0}
+      <Card>
+        <p class="m-0 text-sm text-text-muted">
           No forwarders are available yet.
         </p>
-      {:else}
-        <div class="divide-y divide-border">
-          {#each store.connections.forwarders as forwarder (forwarder.endpoint_id)}
-            {@const stateDisplay = forwarderStateDisplay(forwarder)}
-            <div
-              data-testid={`forwarder-row-${forwarder.endpoint_id}`}
-              class="px-4 py-3"
-            >
-              <div class="min-w-0">
-                <div class="flex items-center gap-2">
-                  <span
-                    data-testid={`forwarder-state-${forwarder.endpoint_id}`}
-                    class="flex items-center gap-2 text-sm font-medium {stateDisplay.textClass}"
-                  >
-                    <span class="h-2 w-2 rounded-full {stateDisplay.dotClass}"
-                    ></span>
-                    {stateDisplay.label}
-                  </span>
-                  <span class="text-xs text-text-muted">
-                    {forwarder.subscribed_count} subscribed / {forwarder.available_count}
-                    available
-                  </span>
-                </div>
-                <p class="mt-1 truncate text-sm font-medium text-text-primary">
+      </Card>
+    {:else}
+      <div class="flex flex-col gap-4">
+        {#each store.connections.forwarders as forwarder (forwarder.endpoint_id)}
+          {@const stateDisplay = forwarderStateDisplay(forwarder)}
+          <div data-testid={`forwarder-row-${forwarder.endpoint_id}`}>
+            <Card headerBg borderStatus={forwarderBorderStatus(forwarder)}>
+              {#snippet header()}
+                <span
+                  class="min-w-0 truncate text-sm font-semibold text-text-primary"
+                >
                   {forwarder.display_name ?? forwarder.endpoint_id}
-                </p>
-                <p class="mt-0.5 truncate font-mono text-xs text-text-muted">
-                  {forwarder.endpoint_id}
-                </p>
+                </span>
+                <span
+                  data-testid={`forwarder-state-${forwarder.endpoint_id}`}
+                  class="flex items-center gap-2 text-sm font-medium {stateDisplay.textClass}"
+                >
+                  <span class="h-2 w-2 rounded-full {stateDisplay.dotClass}"
+                  ></span>
+                  {stateDisplay.label}
+                </span>
+                <span class="text-xs text-text-muted">
+                  {forwarder.subscribed_count} subscribed / {forwarder.available_count}
+                  available
+                </span>
                 {#if forwarder.ups}
-                  <div class="mt-2 flex flex-wrap items-center gap-2">
-                    <span
-                      data-testid={`forwarder-ups-${forwarder.endpoint_id}`}
-                      class="inline-flex items-center rounded-full border border-border bg-surface-2 px-2 py-0.5 text-xs"
+                  <span
+                    data-testid={`forwarder-ups-${forwarder.endpoint_id}`}
+                    class="ml-auto inline-flex items-center rounded-full border border-border bg-surface-2 px-2 py-0.5 text-xs"
+                  >
+                    <BatteryIndicator
+                      percent={forwarder.ups.battery_percent}
+                      charging={!forwarder.ups.on_battery}
+                    />
+                  </span>
+                {/if}
+              {/snippet}
+
+              <p class="truncate font-mono text-xs text-text-muted">
+                {forwarder.endpoint_id}
+              </p>
+
+              {#if forwarder.remote_config_available === true || showConnect(forwarder) || showReconnectBeforeDisconnect(forwarder) || showDisconnect(forwarder) || (showReconnect(forwarder) && !showReconnectBeforeDisconnect(forwarder))}
+                <div class="mt-3 flex flex-wrap items-center gap-2">
+                  {#if forwarder.remote_config_available === true}
+                    <button
+                      data-testid={`forwarder-configure-${forwarder.endpoint_id}`}
+                      class={btnSecondary}
+                      onclick={() => (configEndpointId = forwarder.endpoint_id)}
                     >
-                      <BatteryIndicator
-                        percent={forwarder.ups.battery_percent}
-                        charging={!forwarder.ups.on_battery}
-                      />
-                    </span>
-                  </div>
-                {/if}
+                      Configure
+                    </button>
+                  {/if}
+                  {#if showConnect(forwarder)}
+                    <button
+                      data-testid={`forwarder-connect-${forwarder.endpoint_id}`}
+                      class={btnPrimary}
+                      onclick={() =>
+                        void runForwarderAction(
+                          forwarder.endpoint_id,
+                          connectForwarder,
+                        )}
+                      disabled={busyByEndpoint[forwarder.endpoint_id]}
+                    >
+                      Connect
+                    </button>
+                  {/if}
+                  {#if showReconnectBeforeDisconnect(forwarder)}
+                    <button
+                      data-testid={`forwarder-reconnect-${forwarder.endpoint_id}`}
+                      class={btnSecondary}
+                      onclick={() =>
+                        void runForwarderAction(
+                          forwarder.endpoint_id,
+                          reconnectForwarder,
+                        )}
+                      disabled={busyByEndpoint[forwarder.endpoint_id]}
+                    >
+                      Reconnect
+                    </button>
+                  {/if}
+                  {#if showDisconnect(forwarder)}
+                    <button
+                      data-testid={`forwarder-disconnect-${forwarder.endpoint_id}`}
+                      class={btnSecondary}
+                      onclick={() =>
+                        void runForwarderAction(
+                          forwarder.endpoint_id,
+                          disconnectForwarder,
+                        )}
+                      disabled={busyByEndpoint[forwarder.endpoint_id]}
+                    >
+                      Disconnect
+                    </button>
+                  {/if}
+                  {#if showReconnect(forwarder) && !showReconnectBeforeDisconnect(forwarder)}
+                    <button
+                      data-testid={`forwarder-reconnect-${forwarder.endpoint_id}`}
+                      class={btnSecondary}
+                      onclick={() =>
+                        void runForwarderAction(
+                          forwarder.endpoint_id,
+                          reconnectForwarder,
+                        )}
+                      disabled={busyByEndpoint[forwarder.endpoint_id]}
+                    >
+                      Reconnect
+                    </button>
+                  {/if}
+                </div>
+              {/if}
 
-                {#if forwarder.remote_config_available === true || showConnect(forwarder) || showReconnectBeforeDisconnect(forwarder) || showDisconnect(forwarder) || (showReconnect(forwarder) && !showReconnectBeforeDisconnect(forwarder))}
-                  <div class="mt-3 flex flex-wrap items-center gap-2">
-                    {#if forwarder.remote_config_available === true}
-                      <button
-                        data-testid={`forwarder-configure-${forwarder.endpoint_id}`}
-                        class={btnSecondary}
-                        onclick={() =>
-                          (configEndpointId = forwarder.endpoint_id)}
-                      >
-                        Configure
-                      </button>
-                    {/if}
-                    {#if showConnect(forwarder)}
-                      <button
-                        data-testid={`forwarder-connect-${forwarder.endpoint_id}`}
-                        class={btnPrimary}
-                        onclick={() =>
-                          void runForwarderAction(
-                            forwarder.endpoint_id,
-                            connectForwarder,
-                          )}
-                        disabled={busyByEndpoint[forwarder.endpoint_id]}
-                      >
-                        Connect
-                      </button>
-                    {/if}
-                    {#if showReconnectBeforeDisconnect(forwarder)}
-                      <button
-                        data-testid={`forwarder-reconnect-${forwarder.endpoint_id}`}
-                        class={btnSecondary}
-                        onclick={() =>
-                          void runForwarderAction(
-                            forwarder.endpoint_id,
-                            reconnectForwarder,
-                          )}
-                        disabled={busyByEndpoint[forwarder.endpoint_id]}
-                      >
-                        Reconnect
-                      </button>
-                    {/if}
-                    {#if showDisconnect(forwarder)}
-                      <button
-                        data-testid={`forwarder-disconnect-${forwarder.endpoint_id}`}
-                        class={btnSecondary}
-                        onclick={() =>
-                          void runForwarderAction(
-                            forwarder.endpoint_id,
-                            disconnectForwarder,
-                          )}
-                        disabled={busyByEndpoint[forwarder.endpoint_id]}
-                      >
-                        Disconnect
-                      </button>
-                    {/if}
-                    {#if showReconnect(forwarder) && !showReconnectBeforeDisconnect(forwarder)}
-                      <button
-                        data-testid={`forwarder-reconnect-${forwarder.endpoint_id}`}
-                        class={btnSecondary}
-                        onclick={() =>
-                          void runForwarderAction(
-                            forwarder.endpoint_id,
-                            reconnectForwarder,
-                          )}
-                        disabled={busyByEndpoint[forwarder.endpoint_id]}
-                      >
-                        Reconnect
-                      </button>
-                    {/if}
-                  </div>
-                {/if}
+              {#if forwarder.reader_control_available && forwarder.readers.length > 0}
+                <div class="mt-4 flex flex-col gap-4">
+                  {#each forwarder.readers as reader (reader.stream_id)}
+                    <Card borderStatus={readerBorderStatus(reader)}>
+                      {#snippet header()}
+                        <span class="font-mono text-sm text-text-primary">
+                          {readerLabel(reader)}
+                        </span>
+                        <StatusBadge
+                          label={readerForwarderStateLabel(reader)}
+                          state={readerBorderStatus(reader)}
+                        />
+                      {/snippet}
 
-                {#if forwarder.reader_control_available && forwarder.readers.length > 0}
-                  <div class="mt-3 space-y-3">
-                    {#each forwarder.readers as reader (reader.stream_id)}
                       <ReaderControlPanel
+                        showHeader={false}
                         readerIp={readerLabel(reader)}
                         readerInfo={readerInfoForPanel(reader)}
                         readerClockDisplay={readerClockDisplay(reader)}
@@ -575,15 +612,15 @@
                             ),
                           )}
                       />
-                    {/each}
-                  </div>
-                {/if}
-              </div>
-            </div>
-          {/each}
-        </div>
-      {/if}
-    </section>
+                    </Card>
+                  {/each}
+                </div>
+              {/if}
+            </Card>
+          </div>
+        {/each}
+      </div>
+    {/if}
 
     {#if actionError}
       <p class="mt-3 text-xs text-status-err">{actionError}</p>
