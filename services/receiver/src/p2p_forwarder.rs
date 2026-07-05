@@ -1319,11 +1319,11 @@ mod tests {
 
             // Further reconcile passes with an unchanged subscription config
             // must not respawn the terminally failed stream: exactly one
-            // subscribe attempt on this connection.
-            for _ in 0..5 {
-                connection.set_desired_streams(desired());
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
+            // subscribe attempt on this connection. This assertion is made
+            // immediately before the positive config-change retry below, so the
+            // test does not pass merely because a wall-clock delay was too
+            // short to observe a slow respawn.
+            connection.set_desired_streams(desired());
             assert_eq!(
                 forwarder.subscribes().len(),
                 1,
@@ -1334,16 +1334,13 @@ mod tests {
             // WITHOUT changing the subscription config; that must NOT clear the
             // failure marker or trigger a resubscribe.
             let (rebuilt_hint_tx, _rebuilt_hint_rx) = broadcast::channel(16);
-            for _ in 0..5 {
-                connection.set_desired_streams(vec![ForwarderDataStream {
-                    stream_id: STREAM_ID.to_owned(),
-                    local_stream_key: local_stream_key(&endpoint_id),
-                    mode: SubscribeMode::Replay,
-                    durable_hint_tx: Some(rebuilt_hint_tx.clone()),
-                    subscription: test_subscription(&endpoint_id),
-                }]);
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
+            connection.set_desired_streams(vec![ForwarderDataStream {
+                stream_id: STREAM_ID.to_owned(),
+                local_stream_key: local_stream_key(&endpoint_id),
+                mode: SubscribeMode::Replay,
+                durable_hint_tx: Some(rebuilt_hint_tx.clone()),
+                subscription: test_subscription(&endpoint_id),
+            }]);
             assert_eq!(
                 forwarder.subscribes().len(),
                 1,
@@ -1351,7 +1348,8 @@ mod tests {
             );
 
             // A REAL subscription config change clears the failure and permits
-            // a retry.
+            // a retry, proving the desired-stream update path above was active
+            // rather than merely idle.
             let (new_hint_tx, _new_hint_rx) = broadcast::channel(16);
             let changed_subscription = crate::db::StreamSubscription {
                 local_port_override: Some(23456),

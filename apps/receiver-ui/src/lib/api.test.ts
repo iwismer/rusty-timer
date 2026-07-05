@@ -379,6 +379,36 @@ describe("api client", () => {
       },
     });
   });
+
+  it("resetEarliestEpoch calls admin_reset_earliest_epoch with composite body", async () => {
+    const { resetEarliestEpoch } = await import("./api");
+    mockInvoke.mockResolvedValue(undefined);
+
+    await resetEarliestEpoch({
+      forwarder_endpoint_id: "endpoint-1",
+      stream_id: "11111111-1111-1111-1111-111111111111",
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("admin_reset_earliest_epoch", {
+      body: {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "11111111-1111-1111-1111-111111111111",
+      },
+    });
+  });
+
+  it("setStreamAnnouncerPublish calls command with composite stream args", async () => {
+    const { setStreamAnnouncerPublish } = await import("./api");
+    mockInvoke.mockResolvedValue(undefined);
+
+    await setStreamAnnouncerPublish("endpoint-1", "10.0.0.1:10000", true);
+
+    expect(mockInvoke).toHaveBeenCalledWith("set_stream_announcer_publish", {
+      forwarderEndpointId: "endpoint-1",
+      streamId: "10.0.0.1:10000",
+      publish: true,
+    });
+  });
 });
 
 describe("sse client", () => {
