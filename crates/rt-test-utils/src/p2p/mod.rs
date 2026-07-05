@@ -28,7 +28,7 @@ use prost::Message;
 use rt_iroh::{RecvStream, SendStream};
 use rt_p2p_protocol::{decode_frame_len, decode_frame_payload, encode_frame};
 
-pub use mock_forwarder::{ForwarderScript, MockForwarderPeer};
+pub use mock_forwarder::{BatchGate, ForwarderScript, MockForwarderPeer};
 pub use mock_receiver::{DataSubscription, MockReceiverPeer, ReceiverSession};
 
 /// Result type used throughout the harness.

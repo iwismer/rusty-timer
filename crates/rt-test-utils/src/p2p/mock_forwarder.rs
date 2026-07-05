@@ -15,6 +15,27 @@ use tokio::task::JoinHandle;
 
 use super::{ConnectivityFault, HarnessResult, read_frame, write_frame};
 
+/// Deterministically holds back the tail of a script's event batches until a
+/// test releases them.
+///
+/// Batches at index `>= after_batches` (and the trailing `CaughtUp`, which is
+/// only sent once every batch has been sent) wait until the watch value
+/// becomes `true`. This gives tests an unbounded, race-free window to act
+/// between "early batches delivered" and "late batches exist anywhere" —
+/// e.g. forcing a reconnect mid-stream — instead of relying on injected frame
+/// delays and hoping the runner is fast enough.
+///
+/// The gate is shared across connections: a reconnecting peer served from
+/// scratch also blocks at the same batch index until the release.
+#[derive(Clone, Debug)]
+pub struct BatchGate {
+    /// Number of leading batches served immediately (ungated).
+    pub after_batches: usize,
+    /// Gated batches are sent once this observes `true`. If the test drops
+    /// the sender without releasing, gated batches are never sent.
+    pub release: tokio::sync::watch::Receiver<bool>,
+}
+
 /// The scripted responses a [`MockForwarderPeer`] serves to a connecting peer.
 #[derive(Clone, Debug)]
 pub struct ForwarderScript {
@@ -34,6 +55,10 @@ pub struct ForwarderScript {
     pub caught_up_through: Option<u64>,
     /// Fault injected into outbound data-plane frames after a subscription.
     pub data_fault: ConnectivityFault,
+    /// If set, holds back event batches at index `>= after_batches` until the
+    /// test releases the gate. See [`BatchGate`]. Defaults to `None` (all
+    /// batches sent immediately).
+    pub batch_gate: Option<BatchGate>,
     /// When `true`, every outbound data-plane frame's `stream_id` (the
     /// `SubscribeOk` and each `EventBatch` record, plus any `GapNotice`) is
     /// rewritten to the `stream_id` carried by the inbound `DataSubscribe`, so a
@@ -506,7 +531,17 @@ async fn serve_one_data_stream(
         .await?;
     }
 
-    for batch in &script.batches {
+    for (index, batch) in script.batches.iter().enumerate() {
+        if let Some(gate) = &script.batch_gate
+            && index >= gate.after_batches
+        {
+            let mut release = gate.release.clone();
+            // A dropped sender means the test abandoned the gate; stop
+            // serving rather than sending the gated batches.
+            if release.wait_for(|open| *open).await.is_err() {
+                return Ok(());
+            }
+        }
         let mut batch = batch.clone();
         if script.echo_subscribed_stream_id {
             for record in &mut batch.records {

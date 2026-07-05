@@ -26,7 +26,7 @@ use receiver::writer::PreparedRecord;
 use rt_p2p_protocol::{
     EventBatch, Hello, MAX_FRAME_BYTES, ReadRecord, StreamCatalog, StreamEntry, SubscribeOk,
 };
-use rt_test_utils::p2p::{ConnectivityFault, ForwarderScript, MockForwarderPeer};
+use rt_test_utils::p2p::{BatchGate, ConnectivityFault, ForwarderScript, MockForwarderPeer};
 use rt_test_utils::poll_until;
 use tokio::io::AsyncReadExt;
 
@@ -106,6 +106,7 @@ fn script_two(raw: &[u8]) -> ForwarderScript {
         }],
         caught_up_through: Some(2),
         data_fault: ConnectivityFault::healthy(),
+        batch_gate: None,
         echo_subscribed_stream_id: false,
         close_connection_after_data: false,
         control_events: Vec::new(),
@@ -119,9 +120,14 @@ fn script_two(raw: &[u8]) -> ForwarderScript {
     }
 }
 
-/// A delayed two-batch script. The delay gives the test a deterministic window
-/// to force a reconnect after seqs 1-2 are projected but before seqs 3-4 arrive.
-fn script_four_in_two_delayed_batches(raw: &[u8]) -> ForwarderScript {
+/// A two-batch script whose second batch (seqs 3-4) is gated behind `release`.
+/// The gate gives the test an unbounded, race-free window to force a reconnect
+/// after seqs 1-2 are projected but before seqs 3-4 are sent anywhere — on any
+/// connection, including a post-reconnect one served from scratch.
+fn script_four_in_two_gated_batches(
+    raw: &[u8],
+    release: tokio::sync::watch::Receiver<bool>,
+) -> ForwarderScript {
     let mut script = script_two(raw);
     script.subscribe_ok.latest_seq_at_open = 4;
     script.batches = vec![
@@ -135,7 +141,10 @@ fn script_four_in_two_delayed_batches(raw: &[u8]) -> ForwarderScript {
         },
     ];
     script.caught_up_through = Some(4);
-    script.data_fault = ConnectivityFault::delayed(Duration::from_millis(750));
+    script.batch_gate = Some(BatchGate {
+        after_batches: 1,
+        release,
+    });
     script
 }
 
@@ -406,10 +415,13 @@ async fn runtime_projects_canonical_stream_address_events_to_ui_state() {
 #[tokio::test]
 async fn reconnect_all_preserves_stream_metrics_and_continues_counting() {
     tokio::time::timeout(TEST_TIMEOUT, async {
-        let forwarder =
-            MockForwarderPeer::start([86; 32], script_four_in_two_delayed_batches(VALID_FRAME))
-                .await
-                .unwrap();
+        let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
+        let forwarder = MockForwarderPeer::start(
+            [86; 32],
+            script_four_in_two_gated_batches(VALID_FRAME, gate_rx),
+        )
+        .await
+        .unwrap();
         let (endpoint_id, direct) = forwarder_config(&forwarder);
 
         let dir = tempfile::tempdir().unwrap();
@@ -449,6 +461,12 @@ async fn reconnect_all_preserves_stream_metrics_and_continues_counting() {
             Some(2),
             "forced reconnect-all must not clear the user-visible metrics cache"
         );
+
+        // Only now release seqs 3-4. The reconnected session re-receives the
+        // scripted seqs 1-2 first (deduplicated by the durable store, so they
+        // do not move the counters) and then counts 3-4 on top of the
+        // preserved metrics.
+        gate_tx.send(true).expect("gate receiver alive");
 
         poll_until(
             || {
@@ -1128,6 +1146,7 @@ fn script_stream_mismatch() -> ForwarderScript {
         }],
         caught_up_through: None,
         data_fault: ConnectivityFault::healthy(),
+        batch_gate: None,
         echo_subscribed_stream_id: false,
         close_connection_after_data: false,
         control_events: Vec::new(),

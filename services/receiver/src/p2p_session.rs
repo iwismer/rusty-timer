@@ -780,6 +780,7 @@ mod tests {
             batches: Vec::new(),
             caught_up_through: None,
             data_fault: ConnectivityFault::healthy(),
+            batch_gate: None,
             echo_subscribed_stream_id: false,
             close_connection_after_data: false,
             control_events: Vec::new(),
