@@ -429,6 +429,9 @@ pub struct Signals {
     // Keepalive receiver so that `connection_state.send()` never fails due
     // to "no receivers" even when no external subscriber is active.
     _conn_state_keepalive: watch::Receiver<ConnectionState>,
+    /// State transitions already applied by the sync guard-drop fallback but
+    /// still needing the async path's UI/log side effects.
+    pending_connection_state_side_effect: StdMutex<Option<ConnectionState>>,
     pub shutdown_tx: watch::Sender<ShutdownSignal>,
     connect_attempt: AtomicU64,
     connect_attempt_version: watch::Sender<ConnectAttempt>,
@@ -588,6 +591,7 @@ impl AppState {
             signals: Signals {
                 connection_state: conn_tx,
                 _conn_state_keepalive: conn_keepalive_rx,
+                pending_connection_state_side_effect: StdMutex::new(None),
                 shutdown_tx,
                 connect_attempt: AtomicU64::new(0),
                 connect_attempt_version,
@@ -1222,14 +1226,21 @@ impl AppState {
         } else {
             ConnectionState::Disconnected
         };
-        let _ = self.signals.connection_state.send_if_modified(|state| {
+        let changed = self.signals.connection_state.send_if_modified(|state| {
             if *state == next {
                 false
             } else {
-                *state = next;
+                *state = next.clone();
                 true
             }
         });
+        if changed {
+            *self
+                .signals
+                .pending_connection_state_side_effect
+                .lock()
+                .unwrap() = Some(next);
+        }
     }
 
     pub(crate) async fn recompute_aggregate_connection_state(&self) {
@@ -1382,7 +1393,27 @@ impl AppState {
                 true
             }
         });
-        if changed {
+        let should_emit = if changed {
+            self.signals
+                .pending_connection_state_side_effect
+                .lock()
+                .unwrap()
+                .take();
+            true
+        } else {
+            let mut pending = self
+                .signals
+                .pending_connection_state_side_effect
+                .lock()
+                .unwrap();
+            if pending.as_ref() == Some(&new_state) {
+                pending.take();
+                true
+            } else {
+                false
+            }
+        };
+        if should_emit {
             self.emit_connection_state_side_effects(new_state).await;
         }
     }
@@ -1441,6 +1472,11 @@ impl AppState {
     /// Update connection state, broadcast status change, and emit a log entry.
     pub async fn set_connection_state(&self, new_state: ConnectionState) {
         let _ = self.signals.connection_state.send(new_state.clone());
+        self.signals
+            .pending_connection_state_side_effect
+            .lock()
+            .unwrap()
+            .take();
         self.emit_connection_state_side_effects(new_state).await;
     }
 
@@ -3476,6 +3512,62 @@ mod tests {
             Some("endpoint-1")
         );
         assert!(connect_rx.borrow().restart);
+    }
+
+    #[tokio::test]
+    async fn guard_drop_disconnect_emits_status_side_effects_once_after_sync_fallback() {
+        let db = Db::open_in_memory().unwrap();
+        db.set_forwarder_intent("endpoint-1", false).unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        state.update_forwarder_runtime_sync("endpoint-1", |status| {
+            status.control_up = true;
+            status.data_sessions = 0;
+        });
+        state.recompute_aggregate_connection_state().await;
+        assert_eq!(
+            *state.signals.connection_state.borrow(),
+            ConnectionState::Connected
+        );
+
+        let mut ui_rx = state.ui.ui_tx.subscribe();
+        state.update_forwarder_runtime_sync("endpoint-1", |status| {
+            status.control_up = false;
+            status.data_sessions = 0;
+            status.pending_started_at = Some(std::time::Instant::now());
+        });
+        state.recompute_aggregate_connection_state_sync_default_trying();
+        assert_eq!(
+            *state.signals.connection_state.borrow(),
+            ConnectionState::Disconnected
+        );
+
+        state.recompute_aggregate_connection_state().await;
+
+        let mut status_changed = 0;
+        let mut log_entry = 0;
+        while let Ok(Ok(event)) =
+            tokio::time::timeout(std::time::Duration::from_millis(25), ui_rx.recv()).await
+        {
+            match event {
+                ReceiverUiEvent::StatusChanged {
+                    connection_state: ConnectionState::Disconnected,
+                    ..
+                } => status_changed += 1,
+                ReceiverUiEvent::LogEntry { entry } if entry.contains("Disconnected") => {
+                    log_entry += 1;
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            status_changed, 1,
+            "guard-drop Connected→Disconnected should emit exactly one StatusChanged"
+        );
+        assert_eq!(
+            log_entry, 1,
+            "guard-drop Connected→Disconnected should emit exactly one Disconnected log entry"
+        );
     }
 
     #[tokio::test]
