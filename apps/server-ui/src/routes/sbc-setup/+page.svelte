@@ -6,6 +6,11 @@
     StatusBadge,
     buttonClass,
     inputClass,
+    tableCellClass,
+    tableClass,
+    tableHeadRowClass,
+    tableHeaderCellClass,
+    tableRowClass,
   } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
   import type {
@@ -412,55 +417,61 @@
       {:else if forwarderTokens.length === 0}
         <p class="text-sm text-text-muted m-0">No enrollment tokens yet.</p>
       {:else}
-        <div class="overflow-x-auto rounded-md border border-border">
-          <table class="w-full border-collapse text-left text-sm">
-            <thead class="bg-surface-2 text-xs uppercase text-text-muted">
-              <tr>
-                <th class="px-3 py-2">Display name</th>
-                <th class="px-3 py-2">Token ID</th>
-                <th class="px-3 py-2">Status</th>
-                <th class="px-3 py-2">Created</th>
-                <th class="px-3 py-2">Used by endpoint</th>
-                <th class="px-3 py-2">Used at</th>
-                <th class="px-3 py-2">Revoked at</th>
-                <th class="px-3 py-2">Actions</th>
+        <div class="overflow-x-auto">
+          <table class={tableClass}>
+            <thead>
+              <tr class={tableHeadRowClass}>
+                <th class={tableHeaderCellClass()}>Display name</th>
+                <th class={tableHeaderCellClass()}>Token ID</th>
+                <th class={tableHeaderCellClass()}>Status</th>
+                <th class={tableHeaderCellClass()}>Created</th>
+                <th class={tableHeaderCellClass()}>Used by endpoint</th>
+                <th class={tableHeaderCellClass()}>Used at</th>
+                <th class={tableHeaderCellClass()}>Revoked at</th>
+                <th class={tableHeaderCellClass()}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {#each forwarderTokens as token (token.token_id)}
-                <tr class="border-t border-border">
-                  <td class="px-3 py-2 text-text-primary"
+                <tr class={tableRowClass}>
+                  <td class={tableCellClass(false, "text-text-primary")}
                     >{token.display_name ?? "—"}</td
                   >
-                  <td class="px-3 py-2 font-mono text-xs text-text-muted"
-                    >{token.token_id}</td
+                  <td
+                    class={tableCellClass(
+                      false,
+                      "font-mono text-xs text-text-muted",
+                    )}>{token.token_id}</td
                   >
-                  <td class="px-3 py-2">
+                  <td class={tableCellClass()}>
                     <StatusBadge
                       label={token.status}
                       state={tokenState(token.status)}
                     />
                   </td>
-                  <td class="px-3 py-2 text-text-muted"
+                  <td class={tableCellClass(false, "text-text-muted")}
                     >{formatTime(token.created_unix_ms)}</td
                   >
                   <td
-                    class="px-3 py-2 font-mono text-xs text-text-muted"
+                    class={tableCellClass(
+                      false,
+                      "font-mono text-xs text-text-muted",
+                    )}
                     title={token.used_endpoint_id ?? ""}
                   >
                     {endpointShort(token.used_endpoint_id)}
                   </td>
-                  <td class="px-3 py-2 text-text-muted"
+                  <td class={tableCellClass(false, "text-text-muted")}
                     >{formatTime(token.used_unix_ms)}</td
                   >
-                  <td class="px-3 py-2 text-text-muted"
+                  <td class={tableCellClass(false, "text-text-muted")}
                     >{formatTime(token.revoked_unix_ms)}</td
                   >
-                  <td class="px-3 py-2">
+                  <td class={tableCellClass()}>
                     {#if token.status !== "revoked"}
                       <button
                         type="button"
-                        class="rounded-md border border-status-err-border bg-status-err-bg px-3 py-1 text-xs font-medium text-status-err disabled:opacity-50"
+                        class={buttonClass("danger-soft", "xs")}
                         disabled={tokenBusy != null}
                         onclick={() => void revokeToken(token)}
                       >

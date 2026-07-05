@@ -24,6 +24,8 @@ const variantClasses = {
   secondary: 'bg-surface-2 text-text-primary border border-border hover:bg-surface-3',
   warn: 'text-status-warn border border-status-warn-border bg-status-warn-bg hover:opacity-80',
   danger: 'text-status-err border border-status-err bg-transparent hover:opacity-80',
+  'danger-soft':
+    'text-status-err border border-status-err-border bg-status-err-bg hover:opacity-80',
   'danger-solid': 'text-white bg-status-err border border-status-err hover:opacity-80',
 };
 

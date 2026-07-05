@@ -10,7 +10,11 @@ export function serverApprovalTextClass(server: ServerApprovalLike): string {
   return 'text-text-muted';
 }
 
-/** "active" => "ok", anything else => "warn" */
+/**
+ * Badge state for DEVICE approval states only: "active" => "ok", anything
+ * else (pending, null) => "warn". Do not use for enrollment-token statuses,
+ * where "used"/"expired"/"revoked" need their own treatment.
+ */
 export function approvalBadgeState(state: string | null): 'ok' | 'warn' {
   return state === 'active' ? 'ok' : 'warn';
 }

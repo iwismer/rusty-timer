@@ -382,7 +382,7 @@
                     {#if token.status !== "revoked"}
                       <button
                         type="button"
-                        class="rounded-md border border-status-err-border bg-status-err-bg px-3 py-1 text-xs font-medium text-status-err disabled:opacity-50"
+                        class={buttonClass("danger-soft", "xs")}
                         disabled={tokenBusy != null}
                         onclick={() => void revokeToken(token)}
                       >
