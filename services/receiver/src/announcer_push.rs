@@ -162,6 +162,21 @@ fn clamp_wire_string(value: &str, max_len: usize) -> String {
     value[..boundary].to_owned()
 }
 
+fn checked_identity_field(
+    field: &str,
+    value: &str,
+    max_len: usize,
+) -> Result<String, AnnouncerPushError> {
+    if value.len() <= max_len {
+        Ok(value.to_owned())
+    } else {
+        Err(AnnouncerPushError::BadRequest(format!(
+            "{field} length {} exceeds max {max_len}",
+            value.len()
+        )))
+    }
+}
+
 /// Build the `PushRowsRequest` body posted to the server `/announcer/rows`
 /// endpoint. Extracted so the wire shape (composite stream identity, division,
 /// bib fallback labels) is unit testable without a live server. Server `bib`
@@ -207,8 +222,12 @@ fn push_rows_request_body(
         .collect::<Result<Vec<_>, AnnouncerPushError>>()?;
     Ok(PushRowsRequest {
         announcer_source_generation,
-        forwarder_endpoint_id: clamp_wire_string(batch.forwarder_endpoint_id, MAX_ANNOUNCER_ID_LEN),
-        stream_id: clamp_wire_string(batch.stream_id, MAX_ANNOUNCER_ID_LEN),
+        forwarder_endpoint_id: checked_identity_field(
+            "forwarder_endpoint_id",
+            batch.forwarder_endpoint_id,
+            MAX_ANNOUNCER_ID_LEN,
+        )?,
+        stream_id: checked_identity_field("stream_id", batch.stream_id, MAX_ANNOUNCER_ID_LEN)?,
         rows,
         max_list_size: Some(batch.max_list_size),
     })
@@ -401,9 +420,10 @@ pub enum AnnouncerPushError {
     Db(#[from] DbError),
     #[error("announcer push transport: {0}")]
     Transport(String),
-    /// The server rejected the push with 400. With receiver-side clamping this
-    /// means the receiver sent a structurally invalid request, so the batch is
-    /// left unmarked and the worker reports the terminal pass failure.
+    /// The server rejected the push with 400, or the receiver built an invalid
+    /// identity-bearing request. The batch is left unmarked; the push worker
+    /// parks this stream until a generation/config rebuild creates a fresh
+    /// worker rather than retrying the same poisoned batch forever.
     #[error("announcer push bad request: {0}")]
     BadRequest(String),
     /// The server rejected the push with 409: our announcer source generation
@@ -417,9 +437,9 @@ pub enum AnnouncerPushError {
 /// Classify a non-success `/announcer/rows` response. A 409 means the server's
 /// generation fence rejected our generation ([`AnnouncerPushError::StaleGeneration`],
 /// recoverable only via re-takeover). A 400 means receiver-side request
-/// construction is invalid; log the response body at error level and leave the
-/// rows pending rather than marking a poisoned batch as pushed. Other statuses
-/// are transient transport failures worth a plain retry.
+/// construction is invalid; leave rows pending rather than marking a poisoned
+/// batch as pushed. The worker logs the response body once and parks the stream.
+/// Other statuses are transient transport failures worth a plain retry.
 pub(crate) fn classify_push_failure(
     status: reqwest::StatusCode,
     body: String,
@@ -427,7 +447,6 @@ pub(crate) fn classify_push_failure(
     if status == reqwest::StatusCode::CONFLICT {
         AnnouncerPushError::StaleGeneration(body)
     } else if status == reqwest::StatusCode::BAD_REQUEST {
-        tracing::error!(response_body = %body, "server rejected announcer rows as bad request");
         AnnouncerPushError::BadRequest(body)
     } else {
         AnnouncerPushError::Transport(format!("server /announcer/rows returned {status}: {body}"))
@@ -961,6 +980,19 @@ mod tests {
         assert_eq!(row.division.as_deref(), Some("5k"));
         assert_eq!(row.bib, Some(42));
         assert_eq!(row.display_name, "Ada Lovelace");
+    }
+
+    #[test]
+    fn over_limit_stream_identity_is_rejected_in_push_request_body() {
+        let rows = vec![sample_row()];
+        let mut batch = sample_batch(&rows);
+        let over_limit_stream_id = "s".repeat(MAX_ANNOUNCER_ID_LEN + 1);
+        batch.stream_id = &over_limit_stream_id;
+
+        assert!(matches!(
+            push_rows_request_body(&batch),
+            Err(AnnouncerPushError::BadRequest(message)) if message.contains("stream_id")
+        ));
     }
 
     #[test]

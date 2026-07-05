@@ -50,7 +50,7 @@ use rt_p2p_protocol::{
 };
 use tokio::sync::{Mutex, broadcast, watch};
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::announcer_push::{
     self, AnnouncerPushClient, AnnouncerPushError, ParticipantResolver, ResolvedParticipant,
@@ -1866,8 +1866,10 @@ async fn run_announcer_worker(
     // `needs_retry` is set whenever a push attempt fails to reach the announcer
     // sink. While set, the worker retries on `retry_interval` even if no new
     // durable hint arrives, so pending rows are not stranded after the last
-    // hint. A successful (or stale-generation) attempt clears it.
-    let mut needs_retry = !push_announcer(
+    // hint. A successful (or stale-generation) attempt clears it. A bad request
+    // parks by exiting this worker; the reconcile path creates a fresh worker
+    // on the next announcer generation/config rebuild.
+    let mut needs_retry = match push_announcer(
         &db,
         &chip_lookup,
         &stream_key,
@@ -1875,7 +1877,12 @@ async fn run_announcer_worker(
         generation,
         &announcer_stale,
     )
-    .await;
+    .await
+    {
+        AnnouncerPushResult::NoRetry => false,
+        AnnouncerPushResult::Retry => true,
+        AnnouncerPushResult::Parked => return,
+    };
     loop {
         tokio::select! {
             biased;
@@ -1885,24 +1892,37 @@ async fn run_announcer_worker(
             recv = hint_rx.recv() => {
                 match recv {
                     Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                        needs_retry =
-                            !push_announcer(&db, &chip_lookup, &stream_key, &client, generation, &announcer_stale).await;
+                        match push_announcer(&db, &chip_lookup, &stream_key, &client, generation, &announcer_stale).await {
+                            AnnouncerPushResult::NoRetry => needs_retry = false,
+                            AnnouncerPushResult::Retry => needs_retry = true,
+                            AnnouncerPushResult::Parked => break,
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
             () = tokio::time::sleep(retry_interval), if needs_retry => {
-                needs_retry =
-                    !push_announcer(&db, &chip_lookup, &stream_key, &client, generation, &announcer_stale).await;
+                match push_announcer(&db, &chip_lookup, &stream_key, &client, generation, &announcer_stale).await {
+                    AnnouncerPushResult::NoRetry => needs_retry = false,
+                    AnnouncerPushResult::Retry => needs_retry = true,
+                    AnnouncerPushResult::Parked => break,
+                }
             }
         }
     }
 }
 
-/// Run one announcer push pass. Returns `true` when no retry is needed (the
-/// push was accepted, there was nothing pending, or the generation was stale
-/// and retrying cannot help), and `false` when the caller should schedule a
-/// retry (transport failure or task error left rows unpushed).
+enum AnnouncerPushResult {
+    NoRetry,
+    Retry,
+    Parked,
+}
+
+/// Run one announcer push pass. Returns [`AnnouncerPushResult::NoRetry`] when
+/// the push was accepted, there was nothing pending, or the generation was stale
+/// and retrying cannot help; [`AnnouncerPushResult::Retry`] for transient
+/// failures; and [`AnnouncerPushResult::Parked`] for terminal bad requests that
+/// should wait for a worker rebuild rather than retrying the same batch.
 async fn push_announcer(
     db: &Arc<Mutex<Db>>,
     chip_lookup: &Arc<tokio::sync::RwLock<crate::control_api::ChipLookup>>,
@@ -1910,7 +1930,7 @@ async fn push_announcer(
     client: &Arc<dyn AnnouncerPushClient + Send + Sync>,
     generation: i64,
     announcer_stale: &Arc<AtomicBool>,
-) -> bool {
+) -> AnnouncerPushResult {
     // Snapshot the chip lookup so the blocking task owns Send + 'static data.
     let snapshot = chip_lookup.read().await.clone();
     let db = Arc::clone(db);
@@ -1931,7 +1951,7 @@ async fn push_announcer(
     .await;
 
     match result {
-        Ok(Ok(_outcome)) => true,
+        Ok(Ok(_outcome)) => AnnouncerPushResult::NoRetry,
         Ok(Err(AnnouncerPushError::StaleGeneration(detail))) => {
             // The server's generation diverged from ours; a plain retry can
             // never succeed. Signal the reconcile loop to re-register and
@@ -1939,15 +1959,19 @@ async fn push_announcer(
             // once the worker is rebuilt with the new generation.
             warn!(%detail, stream_id = %stream_key, "announcer generation stale on server; requesting re-takeover");
             announcer_stale.store(true, Ordering::SeqCst);
-            true
+            AnnouncerPushResult::NoRetry
+        }
+        Ok(Err(AnnouncerPushError::BadRequest(detail))) => {
+            error!(response_body = %detail, stream_id = %stream_key, "announcer push bad request; parking stream until worker rebuild");
+            AnnouncerPushResult::Parked
         }
         Ok(Err(e)) => {
             warn!(error = %e, stream_id = %stream_key, "announcer push failed; will retry");
-            false
+            AnnouncerPushResult::Retry
         }
         Err(e) => {
             warn!(error = %e, stream_id = %stream_key, "announcer push task failed");
-            false
+            AnnouncerPushResult::Retry
         }
     }
 }
@@ -2206,7 +2230,7 @@ mod tests {
     use crate::announcer_push::AnnouncerPushError;
     use crate::control_api::ChipLookup;
     use crate::db::{EventType, ReceivedEventInsert};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// Valid IPICO chip-read frames with distinct chip ids.
     const SAMPLE_FRAME: &[u8] = b"aa400000000123450a2a01123018455927a7";
@@ -3080,6 +3104,22 @@ mod tests {
         }
     }
 
+    struct BadRequestAnnouncerClient {
+        attempts: AtomicUsize,
+    }
+
+    impl AnnouncerPushClient for BadRequestAnnouncerClient {
+        fn push(
+            &self,
+            _batch: &crate::announcer_push::AnnouncerBatch<'_>,
+        ) -> Result<(), AnnouncerPushError> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            Err(AnnouncerPushError::BadRequest(
+                "invalid identity".to_owned(),
+            ))
+        }
+    }
+
     #[test]
     fn parse_secret_key_seed_hex_roundtrip() {
         let hex = "".to_owned() + &"ab".repeat(32);
@@ -3655,6 +3695,66 @@ mod tests {
         for (endpoint, wire_id, _) in client.pushed.lock().unwrap().iter() {
             assert_eq!(endpoint, "fwd-retry");
             assert_eq!(wire_id, "ann-retry-stream");
+        }
+
+        let _ = shutdown_tx.send(true);
+        let _ = handle.await;
+        drop(hint_tx);
+    }
+
+    #[tokio::test]
+    async fn announcer_worker_parks_stream_after_bad_request_without_marking_rows() {
+        let stream_key = LocalStreamKey::new("fwd-bad", "ann-bad-stream");
+        let stream_id = stream_key.as_str().to_owned();
+
+        let db = Db::open_in_memory().unwrap();
+        insert_chip_event(&db, &stream_id, 1, 1_700_000_000_100);
+        let db = Arc::new(Mutex::new(db));
+        let chip_lookup = Arc::new(tokio::sync::RwLock::new(ChipLookup::new()));
+
+        let client = Arc::new(BadRequestAnnouncerClient {
+            attempts: AtomicUsize::new(0),
+        });
+        let client_dyn: Arc<dyn AnnouncerPushClient + Send + Sync> = Arc::clone(&client) as _;
+
+        let (hint_tx, hint_rx) = broadcast::channel::<DurableBatch>(16);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let handle = tokio::spawn(run_announcer_worker(
+            Arc::clone(&db),
+            chip_lookup,
+            stream_key,
+            client_dyn,
+            1,
+            Arc::new(AtomicBool::new(false)),
+            Duration::from_millis(25),
+            hint_rx,
+            shutdown_rx,
+        ));
+
+        assert!(
+            poll_async(Duration::from_secs(1), || {
+                let client = Arc::clone(&client);
+                async move { client.attempts.load(Ordering::SeqCst) >= 1 }
+            })
+            .await,
+            "startup should attempt the first announcer push"
+        );
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            client.attempts.load(Ordering::SeqCst),
+            1,
+            "bad request must park the stream instead of retrying the same poisoned batch"
+        );
+        {
+            let guard = db.lock().await;
+            assert_eq!(
+                guard
+                    .load_unpushed_announcer_events(&stream_id)
+                    .unwrap()
+                    .len(),
+                1,
+                "bad-request rows must stay unmarked for a future rebuilt worker"
+            );
         }
 
         let _ = shutdown_tx.send(true);

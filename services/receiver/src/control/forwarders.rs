@@ -201,8 +201,8 @@ pub async fn connect_forwarder(state: &AppState, endpoint_id: String) -> Result<
         let db = state.storage.db.lock().await;
         db.set_forwarder_intent(&endpoint_id, true)
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+        state.cache_forwarder_intent(&endpoint_id, true);
     }
-    state.cache_forwarder_intent(&endpoint_id, true);
     state.recompute_aggregate_connection_state().await;
     state.wake_reconcile();
     state.emit_resync();
@@ -217,8 +217,8 @@ pub async fn disconnect_forwarder(
         let db = state.storage.db.lock().await;
         db.set_forwarder_intent(&endpoint_id, false)
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+        state.cache_forwarder_intent(&endpoint_id, false);
     }
-    state.cache_forwarder_intent(&endpoint_id, false);
     state.recompute_aggregate_connection_state().await;
     state.wake_reconcile();
     state.emit_resync();
@@ -233,8 +233,8 @@ pub async fn reconnect_forwarder(
         let db = state.storage.db.lock().await;
         db.set_forwarder_intent(&endpoint_id, true)
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+        state.cache_forwarder_intent(&endpoint_id, true);
     }
-    state.cache_forwarder_intent(&endpoint_id, true);
     state.recompute_aggregate_connection_state().await;
     state.request_forwarder_reconnect(endpoint_id).await;
     state.emit_resync();
