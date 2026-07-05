@@ -446,21 +446,6 @@ export function parseNonNegativeInt(raw: unknown): number | null {
   return !Number.isSafeInteger(parsed) || parsed < 0 ? null : parsed;
 }
 
-export function isApiReturnedEpoch(key: string, epoch: number): boolean {
-  return (store.streamEpochOptions[key] ?? []).some(
-    (option) => option.stream_epoch === epoch,
-  );
-}
-
-export function parseApiReturnedEpoch(
-  key: string,
-  raw: unknown,
-): number | null {
-  const parsed = parseNonNegativeInt(raw);
-  if (parsed === null) return null;
-  return isApiReturnedEpoch(key, parsed) ? parsed : null;
-}
-
 export function formatEarliestEpochOption(
   option: api.StreamEpochOption,
 ): string {

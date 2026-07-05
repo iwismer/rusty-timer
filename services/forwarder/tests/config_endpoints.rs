@@ -1,6 +1,6 @@
 //! Integration tests for forwarder config editing endpoints.
 
-use forwarder::status_http::{EpochResetError, JournalAccess};
+use forwarder::status_http::{EpochAdvanceError, JournalAccess};
 use forwarder::status_http::{StatusConfig, StatusServer};
 use forwarder::status_store::SubsystemStatus;
 use std::net::SocketAddr;
@@ -132,15 +132,15 @@ impl JournalAccess for NoopJournal {
         &mut self,
         _stream_key: &str,
         _name: Option<&str>,
-    ) -> Result<forwarder::storage::journal::CurrentEpochMetadata, EpochResetError> {
-        Err(EpochResetError::NotFound)
+    ) -> Result<forwarder::storage::journal::CurrentEpochMetadata, EpochAdvanceError> {
+        Err(EpochAdvanceError::NotFound)
     }
     fn set_epoch_name(
         &mut self,
         _stream_key: &str,
         _name: Option<&str>,
-    ) -> Result<forwarder::storage::journal::CurrentEpochMetadata, EpochResetError> {
-        Err(EpochResetError::NotFound)
+    ) -> Result<forwarder::storage::journal::CurrentEpochMetadata, EpochAdvanceError> {
+        Err(EpochAdvanceError::NotFound)
     }
     fn current_epoch_metadata(
         &self,

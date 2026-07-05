@@ -26,6 +26,10 @@ pub struct ForwarderCatalogResponse {
 /// Wire-format response for `GET /forwarder/catalog`: the caller's own stored
 /// stream catalog (per-stream `epoch`/`next_seq` high-water), used by a forwarder
 /// to restore stream identity after local journal loss.
+///
+/// Forwarders refresh this catalog on a periodic push cadence and immediately
+/// on epoch advances and graceful shutdown, so the stored high-water may still
+/// trail reality by up to one push interval after an abrupt power loss.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForwarderOwnCatalogResponse {
     pub streams: Vec<ForwarderCatalogStream>,

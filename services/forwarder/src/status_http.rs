@@ -472,14 +472,14 @@ pub trait JournalAccess {
         &mut self,
         stream_key: &str,
         name: Option<&str>,
-    ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochResetError>;
+    ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochAdvanceError>;
 
     /// Set (or clear) the name of the currently open epoch for `stream_key`.
     fn set_epoch_name(
         &mut self,
         stream_key: &str,
         name: Option<&str>,
-    ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochResetError>;
+    ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochAdvanceError>;
 
     /// Return the current epoch metadata for a stream_key, or `None` if stream unknown.
     fn current_epoch_metadata(
@@ -492,7 +492,7 @@ pub trait JournalAccess {
 }
 
 #[derive(Debug)]
-pub enum EpochResetError {
+pub enum EpochAdvanceError {
     NotFound,
     Storage(String),
 }
@@ -503,14 +503,14 @@ impl JournalAccess for Journal {
         &mut self,
         stream_key: &str,
         name: Option<&str>,
-    ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochResetError> {
+    ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochAdvanceError> {
         Journal::advance_epoch(self, stream_key, name).map_err(|e| {
             // An unknown stream has no current-epoch row; rusqlite reports
             // QueryReturnedNoRows for it.
             if e.to_string().contains("returned no rows") {
-                EpochResetError::NotFound
+                EpochAdvanceError::NotFound
             } else {
-                EpochResetError::Storage(e.to_string())
+                EpochAdvanceError::Storage(e.to_string())
             }
         })
     }
@@ -519,10 +519,10 @@ impl JournalAccess for Journal {
         &mut self,
         stream_key: &str,
         name: Option<&str>,
-    ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochResetError> {
+    ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochAdvanceError> {
         Journal::set_epoch_name(self, stream_key, name).map_err(|e| match e {
-            crate::storage::journal::JournalError::InvalidData(_) => EpochResetError::NotFound,
-            other => EpochResetError::Storage(other.to_string()),
+            crate::storage::journal::JournalError::InvalidData(_) => EpochAdvanceError::NotFound,
+            other => EpochAdvanceError::Storage(other.to_string()),
         })
     }
 
@@ -546,16 +546,16 @@ impl JournalAccess for NoJournal {
         &mut self,
         _stream_key: &str,
         _name: Option<&str>,
-    ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochResetError> {
-        Err(EpochResetError::NotFound)
+    ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochAdvanceError> {
+        Err(EpochAdvanceError::NotFound)
     }
 
     fn set_epoch_name(
         &mut self,
         _stream_key: &str,
         _name: Option<&str>,
-    ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochResetError> {
-        Err(EpochResetError::NotFound)
+    ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochAdvanceError> {
+        Err(EpochAdvanceError::NotFound)
     }
 
     fn current_epoch_metadata(
@@ -1602,8 +1602,10 @@ async fn advance_epoch_handler<J: JournalAccess + Send + 'static>(
             .to_string();
             json_response(StatusCode::OK, body)
         }
-        Err(EpochResetError::NotFound) => text_response(StatusCode::NOT_FOUND, "stream not found"),
-        Err(EpochResetError::Storage(e)) => text_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(EpochAdvanceError::NotFound) => {
+            text_response(StatusCode::NOT_FOUND, "stream not found")
+        }
+        Err(EpochAdvanceError::Storage(e)) => text_response(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
@@ -1647,8 +1649,10 @@ async fn set_current_epoch_name_handler<J: JournalAccess + Send + 'static>(
             ));
             json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string())
         }
-        Err(EpochResetError::NotFound) => text_response(StatusCode::NOT_FOUND, "stream not found"),
-        Err(EpochResetError::Storage(e)) => text_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(EpochAdvanceError::NotFound) => {
+            text_response(StatusCode::NOT_FOUND, "stream not found")
+        }
+        Err(EpochAdvanceError::Storage(e)) => text_response(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 

@@ -64,7 +64,7 @@ fn set_received_unix_ms(path: &PathBuf, stream_key: &str, seq: i64, received_uni
     .expect("set received_unix_ms");
 }
 
-fn remaining_seqs(journal: &Journal, stream_key: &str, epoch: i64) -> Vec<i64> {
+fn remaining_seqs(journal: &Journal, stream_key: &str) -> Vec<i64> {
     journal
         .read_events_after(stream_key, 0, usize::MAX)
         .expect("events")
@@ -354,7 +354,7 @@ fn rule1_age_floor_protects() {
         .expect("prune retention");
 
     assert_eq!(stats.acked_deleted, 1);
-    assert_eq!(remaining_seqs(&journal, stream_key, epoch), vec![2]);
+    assert_eq!(remaining_seqs(&journal, stream_key), vec![2]);
     let retention = journal.retention_state(stream_key).unwrap();
     assert_eq!(retention.earliest_available_seq, 2);
     assert_eq!(retention.forced_gap_count, 0);
@@ -381,7 +381,7 @@ fn rule2_prunes_acked_old() {
         .expect("prune retention");
 
     assert_eq!(stats.acked_deleted, 2);
-    assert_eq!(remaining_seqs(&journal, stream_key, epoch), vec![3]);
+    assert_eq!(remaining_seqs(&journal, stream_key), vec![3]);
     let retention = journal.retention_state(stream_key).unwrap();
     assert_eq!(retention.earliest_available_seq, 3);
     assert_eq!(retention.forced_gap_count, 0);
@@ -407,7 +407,7 @@ fn rule3_hard_cap_prunes_unacked() {
         .expect("prune retention");
 
     assert_eq!(stats.hard_cap_deleted, 1);
-    assert_eq!(remaining_seqs(&journal, stream_key, epoch), vec![2]);
+    assert_eq!(remaining_seqs(&journal, stream_key), vec![2]);
     let retention = journal.retention_state(stream_key).unwrap();
     assert_eq!(retention.earliest_available_seq, 2);
     assert_eq!(retention.forced_gap_count, 1);
@@ -432,7 +432,7 @@ fn rule4_storage_emergency() {
         .expect("prune retention");
 
     assert_eq!(stats.emergency_deleted, 2);
-    assert_eq!(remaining_seqs(&journal, stream_key, epoch), vec![3, 4, 5]);
+    assert_eq!(remaining_seqs(&journal, stream_key), vec![3, 4, 5]);
     let retention = journal.retention_state(stream_key).unwrap();
     assert_eq!(retention.earliest_available_seq, 3);
     assert_eq!(retention.forced_gap_count, 2);
@@ -467,7 +467,7 @@ fn forced_prune_preserves_high_water_with_newer_low_seq() {
         stats.hard_cap_deleted, 0,
         "non-prefix forced deletion of seq 2 must not occur while seq 1 remains"
     );
-    assert_eq!(remaining_seqs(&journal, stream_key, epoch), vec![1, 2]);
+    assert_eq!(remaining_seqs(&journal, stream_key), vec![1, 2]);
     let retention = journal.retention_state(stream_key).unwrap();
     assert_eq!(retention.earliest_available_seq, 1);
     assert_eq!(
@@ -483,7 +483,7 @@ fn forced_prune_preserves_high_water_with_newer_low_seq() {
         .prune_retention(&test_policy(1_000_000), retention_context(now))
         .expect("prune retention again");
     assert_eq!(stats.hard_cap_deleted, 2);
-    assert!(remaining_seqs(&journal, stream_key, epoch).is_empty());
+    assert!(remaining_seqs(&journal, stream_key).is_empty());
     assert_eq!(
         journal.next_seq(stream_key).unwrap(),
         3,

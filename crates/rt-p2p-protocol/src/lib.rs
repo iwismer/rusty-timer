@@ -38,7 +38,7 @@ pub mod negotiate;
 /// Bump this on breaking wire changes so old/new peers refuse to pair during
 /// `Hello` negotiation instead of mis-decoding frames. History:
 /// - 1: initial clean-slate protocol
-/// - 2: int64 epochs, `StreamEpochSummary` start_seq/end_seq/name,
+/// - 2: int64 epochs, `StreamEpochSummary` `start_seq`/`end_seq`/`name`,
 ///   `ReaderStatus.current_epoch_start_seq`, `StreamEpochStarted` removed
 pub const PROTOCOL_MINOR: u32 = 2;
 

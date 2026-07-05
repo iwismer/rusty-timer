@@ -5,7 +5,7 @@
 //! 2. /readyz returns 200 when local subsystems ready (not dependent on P2P)
 //! 3. /readyz returns 503 when subsystems not initialized
 //! 4. POST /api/v1/streams/{reader_ip}/advance-epoch triggers epoch bump
-//! 5. epoch reset preserves old-epoch unacked events
+//! 5. epoch advance preserves old-epoch unacked events
 //! 6. status page returns HTML with expected content
 //! 7. graceful shutdown handler registered
 
@@ -180,7 +180,7 @@ async fn readyz_independent_of_p2p() {
 }
 
 #[tokio::test]
-async fn epoch_reset_endpoint_returns_200() {
+async fn advance_epoch_endpoint_returns_200() {
     use forwarder::storage::journal::Journal;
     use tempfile::tempdir;
 
@@ -277,7 +277,7 @@ async fn advance_epoch_endpoint_names_the_new_epoch() {
 }
 
 #[tokio::test]
-async fn epoch_reset_endpoint_accepts_percent_encoded_stream_key() {
+async fn advance_epoch_endpoint_accepts_percent_encoded_stream_key() {
     use forwarder::storage::journal::Journal;
     use tempfile::tempdir;
 
@@ -320,7 +320,7 @@ async fn epoch_reset_endpoint_accepts_percent_encoded_stream_key() {
 }
 
 #[tokio::test]
-async fn epoch_reset_preserves_old_epoch_events() {
+async fn advance_epoch_preserves_old_epoch_events() {
     use forwarder::storage::journal::Journal;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -371,7 +371,7 @@ async fn epoch_reset_preserves_old_epoch_events() {
 }
 
 #[tokio::test]
-async fn epoch_reset_unknown_stream_returns_404() {
+async fn advance_epoch_unknown_stream_returns_404() {
     let cfg = StatusConfig {
         bind: "127.0.0.1:0".to_owned(),
         forwarder_version: "0.1.0-test".to_owned(),
@@ -658,9 +658,9 @@ impl forwarder::status_http::JournalAccess for NoJournalForNameApi {
         _name: Option<&str>,
     ) -> Result<
         forwarder::storage::journal::CurrentEpochMetadata,
-        forwarder::status_http::EpochResetError,
+        forwarder::status_http::EpochAdvanceError,
     > {
-        Err(forwarder::status_http::EpochResetError::NotFound)
+        Err(forwarder::status_http::EpochAdvanceError::NotFound)
     }
 
     fn set_epoch_name(
@@ -669,9 +669,9 @@ impl forwarder::status_http::JournalAccess for NoJournalForNameApi {
         _name: Option<&str>,
     ) -> Result<
         forwarder::storage::journal::CurrentEpochMetadata,
-        forwarder::status_http::EpochResetError,
+        forwarder::status_http::EpochAdvanceError,
     > {
-        Err(forwarder::status_http::EpochResetError::NotFound)
+        Err(forwarder::status_http::EpochAdvanceError::NotFound)
     }
 
     fn current_epoch_metadata(
@@ -846,7 +846,7 @@ async fn record_read_increments_counter() {
 
 #[tokio::test]
 async fn status_page_does_not_query_journal_for_totals() {
-    use forwarder::status_http::{EpochResetError, JournalAccess};
+    use forwarder::status_http::{EpochAdvanceError, JournalAccess};
     use tokio::sync::Mutex;
 
     struct CountingJournal {
@@ -858,7 +858,7 @@ async fn status_page_does_not_query_journal_for_totals() {
             &mut self,
             _stream_key: &str,
             _name: Option<&str>,
-        ) -> Result<forwarder::storage::journal::CurrentEpochMetadata, EpochResetError> {
+        ) -> Result<forwarder::storage::journal::CurrentEpochMetadata, EpochAdvanceError> {
             Ok(forwarder::storage::journal::CurrentEpochMetadata {
                 epoch: 1,
                 created_unix_ms: Some(1),
@@ -871,8 +871,8 @@ async fn status_page_does_not_query_journal_for_totals() {
             &mut self,
             _stream_key: &str,
             _name: Option<&str>,
-        ) -> Result<forwarder::storage::journal::CurrentEpochMetadata, EpochResetError> {
-            Err(EpochResetError::NotFound)
+        ) -> Result<forwarder::storage::journal::CurrentEpochMetadata, EpochAdvanceError> {
+            Err(EpochAdvanceError::NotFound)
         }
 
         fn current_epoch_metadata(
