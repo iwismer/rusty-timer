@@ -43,8 +43,8 @@ fn sid_bytes() -> Vec<u8> {
 
 fn server_hello() -> Hello {
     Hello {
-        min_minor: 1,
-        max_minor: 1,
+        min_minor: rt_p2p_protocol::PROTOCOL_MINOR,
+        max_minor: rt_p2p_protocol::PROTOCOL_MINOR,
         capabilities: vec!["data".to_owned()],
         max_frame_bytes: u32::try_from(MAX_FRAME_BYTES).unwrap(),
         catalog_generation: 1,

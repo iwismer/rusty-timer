@@ -54,6 +54,8 @@ pub struct ReaderStatus {
     pub current_epoch: Option<i64>,
     /// The current epoch creation time, in unix milliseconds, if available.
     pub current_epoch_created_unix_ms: Option<i64>,
+    /// The first seq recorded in the current epoch, if available.
+    pub current_epoch_start_seq: Option<i64>,
     /// The name of the current epoch, if any.
     pub current_epoch_name: Option<String>,
     /// Control protocol info (firmware, clock, etc.) — populated on connect.
@@ -1037,6 +1039,7 @@ impl StatusStore {
                     local_port: *local_port,
                     current_epoch: None,
                     current_epoch_created_unix_ms: None,
+                    current_epoch_start_seq: None,
                     current_epoch_name: None,
                     reader_info: None,
                 });
@@ -1184,6 +1187,7 @@ pub(crate) async fn apply_epoch_metadata_to_subsystem(
     }
     r.current_epoch = Some(metadata.epoch);
     r.current_epoch_created_unix_ms = metadata.created_unix_ms;
+    r.current_epoch_start_seq = Some(metadata.start_seq);
     r.current_epoch_name = metadata.name;
     let _ = ui_tx.send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
         ip: reader_ip.to_owned(),

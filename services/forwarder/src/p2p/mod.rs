@@ -163,8 +163,11 @@ pub async fn start_forwarder_p2p(
                         .into_iter()
                         .map(|summary| {
                             Ok(StreamEpochSummary {
-                                epoch: u64::try_from(summary.epoch)?,
+                                epoch: summary.epoch,
                                 created_unix_ms: summary.created_unix_ms,
+                                start_seq: u64::try_from(summary.start_seq)?,
+                                end_seq: summary.end_seq.map(u64::try_from).transpose()?,
+                                name: summary.name,
                             })
                         })
                         .collect::<Result<Vec<_>, TryFromIntError>>()?,
@@ -424,22 +427,42 @@ fn apply_reader_status(
             entry.reader_connected = connected;
             changed = true;
         }
-        if let Some(epoch) = status
-            .current_epoch
-            .and_then(|epoch| u64::try_from(epoch).ok())
-            && !entry
+        if let Some(epoch) = status.current_epoch {
+            if let Some(summary) = entry
                 .epoch_summaries
-                .iter()
-                .any(|summary| summary.epoch == epoch)
-        {
-            entry.epoch_summaries.insert(
-                0,
-                StreamEpochSummary {
-                    epoch,
-                    created_unix_ms: status.current_epoch_created_unix_ms,
-                },
-            );
-            changed = true;
+                .iter_mut()
+                .find(|summary| summary.epoch == epoch)
+            {
+                // Known epoch: keep its advertised name in sync so receivers
+                // connecting later see name edits.
+                if summary.name != status.current_epoch_name {
+                    summary.name = status.current_epoch_name.clone();
+                    changed = true;
+                }
+            } else {
+                let start_seq = status
+                    .current_epoch_start_seq
+                    .and_then(|seq| u64::try_from(seq).ok())
+                    .unwrap_or_default();
+                // The previously-open head epoch is now closed by this advance.
+                if let Some(head) = entry.epoch_summaries.first_mut()
+                    && head.end_seq.is_none()
+                    && start_seq > 0
+                {
+                    head.end_seq = Some(start_seq - 1);
+                }
+                entry.epoch_summaries.insert(
+                    0,
+                    StreamEpochSummary {
+                        epoch,
+                        created_unix_ms: status.current_epoch_created_unix_ms,
+                        start_seq,
+                        end_seq: None,
+                        name: status.current_epoch_name.clone(),
+                    },
+                );
+                changed = true;
+            }
         }
         if changed {
             catalog.generation += 1;

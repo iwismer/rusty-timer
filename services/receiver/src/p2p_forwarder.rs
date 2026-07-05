@@ -1026,8 +1026,8 @@ mod tests {
 
     fn test_hello() -> Hello {
         Hello {
-            min_minor: 1,
-            max_minor: 1,
+            min_minor: rt_p2p_protocol::PROTOCOL_MINOR,
+            max_minor: rt_p2p_protocol::PROTOCOL_MINOR,
             capabilities: vec!["data".to_owned()],
             max_frame_bytes: u32::try_from(MAX_FRAME_BYTES).unwrap(),
             catalog_generation: 0,
@@ -1614,6 +1614,7 @@ mod tests {
                     current_epoch_name: None,
                     current_epoch: None,
                     current_epoch_created_unix_ms: None,
+                    current_epoch_start_seq: None,
                     reads_epoch: None,
                 })),
             },
@@ -1727,8 +1728,8 @@ mod tests {
     /// forwarder also advertises it.
     fn remote_config_hello() -> Hello {
         Hello {
-            min_minor: 1,
-            max_minor: 1,
+            min_minor: rt_p2p_protocol::PROTOCOL_MINOR,
+            max_minor: rt_p2p_protocol::PROTOCOL_MINOR,
             capabilities: vec!["data".to_owned(), CAP_REMOTE_CONFIG.to_owned()],
             max_frame_bytes: u32::try_from(MAX_FRAME_BYTES).unwrap(),
             catalog_generation: 0,
@@ -1757,8 +1758,8 @@ mod tests {
 
     fn reader_control_hello() -> Hello {
         Hello {
-            min_minor: 1,
-            max_minor: 1,
+            min_minor: rt_p2p_protocol::PROTOCOL_MINOR,
+            max_minor: rt_p2p_protocol::PROTOCOL_MINOR,
             capabilities: vec!["data".to_owned(), CAP_READER_CONTROL.to_owned()],
             max_frame_bytes: u32::try_from(MAX_FRAME_BYTES).unwrap(),
             catalog_generation: 0,

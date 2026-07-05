@@ -446,7 +446,7 @@ fn prepare_batch(
     for record in &batch.records {
         check_stream_id(stream_id, &record.stream_id)?;
         let seq = u64_to_i64(record.seq, "record.seq")?;
-        let epoch = u64_to_i64(record.epoch, "record.epoch")?;
+        let epoch = record.epoch;
         // A non-zero received_unix_ms is part of the immutable payload for
         // duplicate-conflict checks (it is persisted and used as the announcer
         // ordering key); zero means the forwarder omitted it and the receiver
@@ -650,14 +650,11 @@ pub async fn run_data_subscription_with_hint(
                 }
                 send_ack(&mut send, wire_stream_id, through_seq).await?;
             }
-            // CaughtUp / StreamEpochStarted carry no durable state to persist
-            // here, but they are stream-scoped: validate the stream_id and keep
-            // listening for further live frames.
+            // CaughtUp carries no durable state to persist here, but it is
+            // stream-scoped: validate the stream_id and keep listening for
+            // further live frames.
             Some(data_f2c::Msg::CaughtUp(caught_up)) => {
                 check_stream_id(wire_stream_id, &caught_up.stream_id)?;
-            }
-            Some(data_f2c::Msg::StreamEpochStarted(epoch_started)) => {
-                check_stream_id(wire_stream_id, &epoch_started.stream_id)?;
             }
             // A second SubscribeOk after open is out of sequence.
             Some(data_f2c::Msg::SubscribeOk(_)) => {
@@ -727,8 +724,8 @@ mod tests {
 
     fn test_hello(catalog_generation: u64) -> Hello {
         Hello {
-            min_minor: 1,
-            max_minor: 1,
+            min_minor: rt_p2p_protocol::PROTOCOL_MINOR,
+            max_minor: rt_p2p_protocol::PROTOCOL_MINOR,
             capabilities: vec!["data".to_owned()],
             max_frame_bytes: u32::try_from(MAX_FRAME_BYTES).unwrap(),
             catalog_generation,

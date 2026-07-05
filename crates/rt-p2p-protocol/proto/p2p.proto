@@ -48,8 +48,15 @@ message HelloOk {
 
 // A forwarder-known epoch for a stream.
 message StreamEpochSummary {
-  uint64 epoch = 1;
+  int64 epoch = 1;
   optional int64 created_unix_ms = 2;
+  // First seq recorded in this epoch. Receivers use it to translate an
+  // epoch selection into a subscribe-time after_seq floor.
+  uint64 start_seq = 3;
+  // Last seq of a closed epoch; absent while the epoch is open.
+  optional uint64 end_seq = 4;
+  // Operator label for the epoch, if any.
+  optional string name = 5;
 }
 
 // A single stream advertised in the catalog.
@@ -102,7 +109,8 @@ message ReaderControlResponse {
   optional int64 current_epoch = 6;
   // Updated current epoch creation time, in unix milliseconds.
   optional int64 current_epoch_created_unix_ms = 7;
-  // Updated current epoch name, present when the command changes or refreshes it.
+  // Updated current epoch name. Present = the epoch's authoritative name;
+  // absent = the epoch has no name (cleared or never set).
   optional string current_epoch_name = 8;
 }
 
@@ -121,7 +129,8 @@ message ReaderStatus {
   int64 reads_total = 6;
   // Seconds since the forwarder last saw a read for this reader.
   optional uint64 last_seen_secs = 7;
-  // Forwarder-authoritative current epoch name, if any.
+  // Forwarder-authoritative current epoch name. Present = the epoch's
+  // authoritative name; absent = the current epoch has no name.
   optional string current_epoch_name = 8;
   // Forwarder-authoritative current epoch id, if available.
   optional int64 current_epoch = 9;
@@ -129,6 +138,8 @@ message ReaderStatus {
   optional int64 current_epoch_created_unix_ms = 10;
   // Forwarder-authoritative durable reads in the current epoch for this stream.
   optional int64 reads_epoch = 11;
+  // First seq recorded in the current epoch, if available.
+  optional int64 current_epoch_start_seq = 12;
 }
 
 // Static descriptive information about a reader.
@@ -257,7 +268,7 @@ message ReadRecord {
   // Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
   bytes stream_id = 1;
   uint64 seq = 2;
-  uint64 epoch = 3;
+  int64 epoch = 3;
   bytes raw_frame = 4;
   // Classification of the read (e.g. "chip", "gun", "manual").
   string read_kind = 5;
@@ -296,15 +307,6 @@ message GapNotice {
   uint64 earliest_available_seq = 3;
   uint64 latest_available_seq = 4;
   string reason = 5;
-}
-
-// Notice that a new stream epoch has begun (e.g. reader restart).
-message StreamEpochStarted {
-  // Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
-  bytes stream_id = 1;
-  uint64 epoch = 2;
-  uint64 start_seq = 3;
-  string reason = 4;
 }
 
 // ---------------------------------------------------------------------------
@@ -354,11 +356,14 @@ message DataC2F {
 
 // Data plane, forwarder -> client (receiver).
 message DataF2C {
+  // Tag 5 belonged to the removed StreamEpochStarted notice; epoch metadata
+  // now travels on each ReadRecord and via the control-plane ReaderStatus.
+  reserved 5;
+
   oneof msg {
     SubscribeOk subscribe_ok = 1;
     EventBatch event_batch = 2;
     CaughtUp caught_up = 3;
     GapNotice gap_notice = 4;
-    StreamEpochStarted stream_epoch_started = 5;
   }
 }

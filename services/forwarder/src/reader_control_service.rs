@@ -558,6 +558,7 @@ mod tests {
                     local_port: 10_001,
                     current_epoch: None,
                     current_epoch_created_unix_ms: None,
+                    current_epoch_start_seq: None,
                     current_epoch_name: None,
                     reader_info: None,
                 },

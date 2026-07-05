@@ -32,6 +32,16 @@ pub mod codec;
 pub mod error;
 pub mod negotiate;
 
+/// The current protocol minor version spoken by this workspace's forwarder
+/// and receiver.
+///
+/// Bump this on breaking wire changes so old/new peers refuse to pair during
+/// `Hello` negotiation instead of mis-decoding frames. History:
+/// - 1: initial clean-slate protocol
+/// - 2: int64 epochs, `StreamEpochSummary` start_seq/end_seq/name,
+///   `ReaderStatus.current_epoch_start_seq`, `StreamEpochStarted` removed
+pub const PROTOCOL_MINOR: u32 = 2;
+
 // The generated module mirrors `protoc`/`prost-build` output and intentionally
 // does not follow this workspace's stricter lints.
 #[allow(clippy::all, clippy::pedantic, missing_docs)]
@@ -55,7 +65,7 @@ pub use generated::{
     ControlC2F, ControlF2C, DataC2F, DataF2C, DataSubscribe, DownloadProgress, EventBatch,
     GapNotice, Hello, HelloOk, Ping, Pong, ProtocolError as WireProtocolError, ReadRecord,
     ReaderControlRequest, ReaderControlResponse, ReaderInfo, ReaderStatus, RestartRequest,
-    RestartResponse, StreamCatalog, StreamEntry, StreamEpochStarted, StreamEpochSummary,
-    SubscribeMode, SubscribeOk, SyncClock, UpsStatus, control_c2f, control_f2c, data_c2f, data_f2c,
+    RestartResponse, StreamCatalog, StreamEntry, StreamEpochSummary, SubscribeMode, SubscribeOk,
+    SyncClock, UpsStatus, control_c2f, control_f2c, data_c2f, data_f2c,
 };
 pub use negotiate::negotiate;

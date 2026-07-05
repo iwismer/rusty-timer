@@ -160,7 +160,7 @@ async fn dispatch_action(
             Ok(DispatchOutcome {
                 current_epoch: Some(metadata.epoch),
                 current_epoch_created_unix_ms: metadata.created_unix_ms,
-                current_epoch_name: Some(metadata.name.unwrap_or_default()),
+                current_epoch_name: metadata.name,
                 ..DispatchOutcome::default()
             })
         }
@@ -176,7 +176,7 @@ async fn dispatch_action(
             Ok(DispatchOutcome {
                 current_epoch: Some(metadata.epoch),
                 current_epoch_created_unix_ms: metadata.created_unix_ms,
-                current_epoch_name: Some(metadata.name.clone().unwrap_or_default()),
+                current_epoch_name: metadata.name,
                 ..DispatchOutcome::default()
             })
         }

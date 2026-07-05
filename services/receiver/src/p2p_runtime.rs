@@ -213,8 +213,8 @@ impl P2pReceiverConfig {
 /// Build the client `Hello` presented during control-plane negotiation.
 fn client_hello() -> Hello {
     Hello {
-        min_minor: 1,
-        max_minor: 1,
+        min_minor: rt_p2p_protocol::PROTOCOL_MINOR,
+        max_minor: rt_p2p_protocol::PROTOCOL_MINOR,
         capabilities: vec![
             "data".to_owned(),
             CAP_CONTROL_EVENTS.to_owned(),
@@ -3949,10 +3949,14 @@ mod tests {
             DiscoveredEpochSummary {
                 stream_epoch: 2,
                 created_unix_ms: Some(2_000),
+                start_seq: Some(10),
+                name: Some("Race 2".to_owned()),
             },
             DiscoveredEpochSummary {
                 stream_epoch: 1,
                 created_unix_ms: Some(1_000),
+                start_seq: Some(1),
+                name: None,
             },
         ];
 
