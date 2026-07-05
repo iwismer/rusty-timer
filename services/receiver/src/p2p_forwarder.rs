@@ -1021,7 +1021,6 @@ async fn reap_finished_data_task(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 async fn sync_data_tasks(
     endpoint_id: &str,
     connection: &rt_iroh::Connection,

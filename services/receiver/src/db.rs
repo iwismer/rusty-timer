@@ -366,7 +366,16 @@ impl Db {
         let Some(raw_json) = self.load_receiver_mode_json_raw()? else {
             return Ok(None);
         };
-        Ok(Some(serde_json::from_str::<ReceiverMode>(&raw_json)?))
+        match serde_json::from_str::<ReceiverMode>(&raw_json) {
+            Ok(mode) => Ok(Some(mode)),
+            Err(error) => {
+                // A stored mode from a removed variant (e.g. the old
+                // targeted_replay) must not brick startup: fall back to the
+                // default (Live) by reporting no stored mode.
+                tracing::warn!(%error, "stored receiver mode is unreadable; falling back to default");
+                Ok(None)
+            }
+        }
     }
 
     pub fn save_receiver_mode(&self, mode: &ReceiverMode) -> DbResult<()> {
@@ -2153,10 +2162,7 @@ mod tests {
         let mut db = Db::open_in_memory().unwrap();
         db.save_profile("https://example.com", "tok", "check-and-download", None)
             .unwrap();
-        let mode = ReceiverMode::Live {
-            streams: vec![],
-            earliest_epochs: vec![],
-        };
+        let mode = ReceiverMode::Live { streams: vec![] };
         db.save_receiver_mode(&mode).unwrap();
 
         let loaded = db.load_receiver_mode().unwrap().unwrap();
@@ -2164,21 +2170,22 @@ mod tests {
     }
 
     #[test]
-    fn targeted_replay_mode_round_trips_with_targets() {
+    fn stored_targeted_replay_mode_falls_back_to_default() {
+        // A mode persisted by an old build (the removed targeted_replay
+        // variant) must load as "no stored mode" rather than erroring.
         let mut db = Db::open_in_memory().unwrap();
         db.save_profile("https://example.com", "tok", "check-and-download", None)
             .unwrap();
-        let targeted = ReceiverMode::TargetedReplay {
-            targets: vec![rt_domain::ReplayTarget {
-                forwarder_id: "f1".to_owned(),
-                reader_ip: "10.0.0.1".to_owned(),
-                stream_epoch: 3,
-                from_seq: 1,
-            }],
-        };
+        db.conn
+            .execute(
+                "UPDATE profile SET receiver_mode_json = ?1",
+                rusqlite::params![
+                    r#"{"mode":"targeted_replay","targets":[{"forwarder_id":"f1","reader_ip":"10.0.0.1","stream_epoch":3,"from_seq":1}]}"#
+                ],
+            )
+            .unwrap();
 
-        db.save_receiver_mode(&targeted).unwrap();
-        assert_eq!(db.load_receiver_mode().unwrap().unwrap(), targeted);
+        assert_eq!(db.load_receiver_mode().unwrap(), None);
     }
 
     #[test]

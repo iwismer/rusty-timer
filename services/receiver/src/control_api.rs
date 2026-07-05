@@ -1793,6 +1793,16 @@ impl AppState {
         };
         let announcer_publish_streams = db.load_announcer_publish_streams().unwrap_or_default();
         let intents = db.load_forwarder_intents().unwrap_or_default();
+        // Earliest-epoch overrides keyed by local stream key: the UI's
+        // read-back path for the "From epoch" control.
+        let earliest_epochs: HashMap<String, i64> = db
+            .load_stream_earliest_epochs()
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| (row.stream_id, row.earliest_epoch))
+                    .collect()
+            })
+            .unwrap_or_default();
         drop(db);
 
         let runtime_statuses = self.forwarders.forwarder_runtime.lock().unwrap().clone();
@@ -1867,6 +1877,7 @@ impl AppState {
             let discovered_stream = discovered_pair.map(|(_, stream)| stream);
             streams.push(StreamEntry {
                 override_held,
+                earliest_epoch: earliest_epochs.get(local_stream_key.as_str()).copied(),
                 forwarder_endpoint_id: sub.forwarder_endpoint_id.clone(),
                 stream_id: sub.stream_id.clone(),
                 forwarder_id: display_forwarder_id,
@@ -1929,8 +1940,10 @@ impl AppState {
                 let override_held = live_statuses
                     .get(endpoint_id)
                     .is_some_and(|status| status.override_held_streams.contains(&stream.stream_id));
+                let local_stream_key = LocalStreamKey::new(endpoint_id, &stream.stream_id);
                 streams.push(StreamEntry {
                     override_held,
+                    earliest_epoch: earliest_epochs.get(local_stream_key.as_str()).copied(),
                     forwarder_endpoint_id: endpoint_id.clone(),
                     stream_id: stream.stream_id.clone(),
                     forwarder_id: None,
@@ -2087,6 +2100,10 @@ pub struct StreamEntry {
     /// cleared.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub override_held: bool,
+    /// The stored earliest-epoch override for this stream, if any. The UI's
+    /// read-back path for the "From epoch" control.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub earliest_epoch: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
