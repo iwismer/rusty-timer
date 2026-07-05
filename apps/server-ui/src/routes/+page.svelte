@@ -6,6 +6,11 @@
     StatCard,
     StatusBadge,
     approvalBadgeState,
+    tableClass,
+    tableHeadRowClass,
+    tableRowClass,
+    tableCellClass,
+    tableHeaderCellClass,
   } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
   import type { DeviceKind, DeviceRecord, StatusResponse } from "$lib/api";
@@ -114,36 +119,36 @@
       </p>
     {:else}
       <div class="overflow-x-auto">
-        <table class="w-full border-collapse text-sm">
+        <table class={tableClass}>
           <thead>
-            <tr class="text-left text-text-muted border-b border-border">
-              <th class="py-2 pr-4 font-medium">Forwarder</th>
-              <th class="py-2 pr-4 font-medium">Stream</th>
-              <th class="py-2 pr-4 font-medium">Epoch</th>
-              <th class="py-2 pr-4 font-medium">Next seq</th>
-              <th class="py-2 pr-4 font-medium">Approval</th>
+            <tr class={tableHeadRowClass}>
+              <th class={tableHeaderCellClass()}>Forwarder</th>
+              <th class={tableHeaderCellClass()}>Stream</th>
+              <th class={tableHeaderCellClass()}>Epoch</th>
+              <th class={tableHeaderCellClass()}>Next seq</th>
+              <th class={tableHeaderCellClass()}>Approval</th>
             </tr>
           </thead>
           <tbody>
             {#each status.forwarder_streams as stream (stream.stream_id)}
-              <tr class="border-b border-border last:border-0">
-                <td class="py-2 pr-4 text-text-primary">
+              <tr class={tableRowClass}>
+                <td class={tableCellClass(false, "text-text-primary")}>
                   {streamForwarderNames[stream.endpoint_id] ??
                     stream.endpoint_id}
                   <span class="block text-xs text-text-muted font-mono">
                     {stream.endpoint_id}
                   </span>
                 </td>
-                <td class="py-2 pr-4 text-text-primary font-mono"
+                <td class={tableCellClass(false, "text-text-primary font-mono")}
                   >{stream.stream_id}</td
                 >
-                <td class="py-2 pr-4 text-text-primary font-mono"
+                <td class={tableCellClass(false, "text-text-primary font-mono")}
                   >{stream.epoch}</td
                 >
-                <td class="py-2 pr-4 text-text-primary font-mono"
+                <td class={tableCellClass(false, "text-text-primary font-mono")}
                   >{stream.next_seq}</td
                 >
-                <td class="py-2 pr-4">
+                <td class={tableCellClass()}>
                   {#if streamDevices[stream.endpoint_id]}
                     <StatusBadge
                       label={streamDevices[stream.endpoint_id].approval_state}
@@ -158,17 +163,17 @@
               </tr>
             {/each}
             {#each forwardersWithoutStreams as forwarder (forwarder.endpoint_id)}
-              <tr class="border-b border-border last:border-0">
-                <td class="py-2 pr-4 text-text-primary">
+              <tr class={tableRowClass}>
+                <td class={tableCellClass(false, "text-text-primary")}>
                   {forwarder.display_name ?? forwarder.endpoint_id}
                   <span class="block text-xs text-text-muted font-mono">
                     {forwarder.endpoint_id}
                   </span>
                 </td>
-                <td class="py-2 pr-4 text-text-muted" colspan="3"
+                <td class={tableCellClass(false, "text-text-muted")} colspan="3"
                   >No streams reported</td
                 >
-                <td class="py-2 pr-4">
+                <td class={tableCellClass()}>
                   <StatusBadge
                     label={forwarder.approval_state}
                     state={approvalBadgeState(forwarder.approval_state)}
@@ -189,24 +194,24 @@
       <p class="text-sm text-text-muted m-0">No devices registered.</p>
     {:else}
       <div class="overflow-x-auto">
-        <table class="w-full border-collapse text-sm">
+        <table class={tableClass}>
           <thead>
-            <tr class="text-left text-text-muted border-b border-border">
-              <th class="py-2 pr-4 font-medium">Endpoint</th>
-              <th class="py-2 pr-4 font-medium">Kind</th>
-              <th class="py-2 pr-4 font-medium">Approval</th>
+            <tr class={tableHeadRowClass}>
+              <th class={tableHeaderCellClass()}>Endpoint</th>
+              <th class={tableHeaderCellClass()}>Kind</th>
+              <th class={tableHeaderCellClass()}>Approval</th>
             </tr>
           </thead>
           <tbody>
             {#each status.devices as device (device.endpoint_id)}
-              <tr class="border-b border-border last:border-0">
-                <td class="py-2 pr-4 text-text-primary font-mono"
+              <tr class={tableRowClass}>
+                <td class={tableCellClass(false, "text-text-primary font-mono")}
                   >{device.endpoint_id}</td
                 >
-                <td class="py-2 pr-4 text-text-primary"
+                <td class={tableCellClass(false, "text-text-primary")}
                   >{kindLabel(device.device_kind)}</td
                 >
-                <td class="py-2 pr-4">
+                <td class={tableCellClass()}>
                   <StatusBadge
                     label={device.approval_state}
                     state={approvalBadgeState(device.approval_state)}

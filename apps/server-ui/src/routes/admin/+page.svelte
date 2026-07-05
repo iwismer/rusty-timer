@@ -1,6 +1,17 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import { AlertBanner, Card, StatusBadge } from "@rusty-timer/shared-ui";
+  import {
+    AlertBanner,
+    Card,
+    StatusBadge,
+    buttonClass,
+    inputClass,
+    tableClass,
+    tableHeadRowClass,
+    tableRowClass,
+    tableCellClass,
+    tableHeaderCellClass,
+  } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
   import type {
     CreateEnrollmentTokenResponse,
@@ -232,7 +243,7 @@
             >Display name</span
           >
           <input
-            class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
+            class={inputClass}
             bind:value={createDisplayName}
             placeholder="Finish Line"
           />
@@ -242,7 +253,7 @@
             >Manual token (optional)</span
           >
           <input
-            class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
+            class={inputClass}
             bind:value={manualToken}
             placeholder="Paste pre-shared token"
             type="password"
@@ -251,7 +262,7 @@
         </label>
         <button
           type="button"
-          class="rounded-md border-none bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+          class={buttonClass("primary", "md")}
           disabled={tokenBusy != null}
           onclick={() => void createToken(false)}
         >
@@ -259,7 +270,7 @@
         </button>
         <button
           type="button"
-          class="rounded-md border border-border bg-surface-2 px-4 py-2 text-sm font-medium text-text-primary hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-50"
+          class={buttonClass("secondary", "md")}
           disabled={tokenBusy != null}
           onclick={() => void createToken(true)}
         >
@@ -304,7 +315,7 @@
         </p>
         <button
           type="button"
-          class="rounded-md border border-border bg-surface-2 px-3 py-1.5 text-xs font-medium text-text-primary hover:bg-surface-3 disabled:opacity-50"
+          class={buttonClass("secondary", "xs")}
           disabled={tokensLoading}
           onclick={() => void loadTokens()}>Refresh</button
         >
@@ -317,51 +328,57 @@
           No receiver enrollment tokens yet.
         </p>
       {:else}
-        <div class="overflow-x-auto rounded-md border border-border">
-          <table class="w-full border-collapse text-left text-sm">
-            <thead class="bg-surface-2 text-xs uppercase text-text-muted">
-              <tr>
-                <th class="px-3 py-2">Display name</th>
-                <th class="px-3 py-2">Token ID</th>
-                <th class="px-3 py-2">Status</th>
-                <th class="px-3 py-2">Created</th>
-                <th class="px-3 py-2">Used by endpoint</th>
-                <th class="px-3 py-2">Used at</th>
-                <th class="px-3 py-2">Revoked at</th>
-                <th class="px-3 py-2">Actions</th>
+        <div class="overflow-x-auto">
+          <table class={tableClass}>
+            <thead>
+              <tr class={tableHeadRowClass}>
+                <th class={tableHeaderCellClass()}>Display name</th>
+                <th class={tableHeaderCellClass()}>Token ID</th>
+                <th class={tableHeaderCellClass()}>Status</th>
+                <th class={tableHeaderCellClass()}>Created</th>
+                <th class={tableHeaderCellClass()}>Used by endpoint</th>
+                <th class={tableHeaderCellClass()}>Used at</th>
+                <th class={tableHeaderCellClass()}>Revoked at</th>
+                <th class={tableHeaderCellClass()}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {#each receiverTokens as token (token.token_id)}
-                <tr class="border-t border-border">
-                  <td class="px-3 py-2 text-text-primary"
+                <tr class={tableRowClass}>
+                  <td class={tableCellClass(false, "text-text-primary")}
                     >{token.display_name ?? "\u2014"}</td
                   >
-                  <td class="px-3 py-2 font-mono text-xs text-text-muted"
-                    >{token.token_id}</td
+                  <td
+                    class={tableCellClass(
+                      false,
+                      "font-mono text-xs text-text-muted",
+                    )}>{token.token_id}</td
                   >
-                  <td class="px-3 py-2">
+                  <td class={tableCellClass()}>
                     <StatusBadge
                       label={token.status}
                       state={tokenState(token.status)}
                     />
                   </td>
-                  <td class="px-3 py-2 text-text-muted"
+                  <td class={tableCellClass(false, "text-text-muted")}
                     >{formatTime(token.created_unix_ms)}</td
                   >
                   <td
-                    class="px-3 py-2 font-mono text-xs text-text-muted"
+                    class={tableCellClass(
+                      false,
+                      "font-mono text-xs text-text-muted",
+                    )}
                     title={token.used_endpoint_id ?? ""}
                   >
                     {endpointShort(token.used_endpoint_id)}
                   </td>
-                  <td class="px-3 py-2 text-text-muted"
+                  <td class={tableCellClass(false, "text-text-muted")}
                     >{formatTime(token.used_unix_ms)}</td
                   >
-                  <td class="px-3 py-2 text-text-muted"
+                  <td class={tableCellClass(false, "text-text-muted")}
                     >{formatTime(token.revoked_unix_ms)}</td
                   >
-                  <td class="px-3 py-2">
+                  <td class={tableCellClass()}>
                     {#if token.status !== "revoked"}
                       <button
                         type="button"
@@ -416,7 +433,7 @@
             </div>
             <button
               type="submit"
-              class="rounded-md border-none bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+              class={buttonClass("primary", "md")}
               disabled={busyEndpoint === device.endpoint_id}
             >
               {busyEndpoint === device.endpoint_id ? "Approving…" : "Approve"}

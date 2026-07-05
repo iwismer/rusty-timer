@@ -1,6 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { AlertBanner, Card, StatusBadge } from "@rusty-timer/shared-ui";
+  import {
+    AlertBanner,
+    Card,
+    StatusBadge,
+    buttonClass,
+    inputClass,
+  } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
   import type {
     CreateEnrollmentTokenResponse,
@@ -325,7 +331,7 @@
             >Display name</span
           >
           <input
-            class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
+            class={inputClass}
             bind:value={createDisplayName}
             placeholder="Start Line"
           />
@@ -335,7 +341,7 @@
             >Manual token (optional)</span
           >
           <input
-            class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
+            class={inputClass}
             bind:value={manualToken}
             placeholder="Paste pre-shared token"
             type="password"
@@ -344,7 +350,7 @@
         </label>
         <button
           type="button"
-          class="rounded-md border-none bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+          class={buttonClass("primary", "md")}
           disabled={tokenBusy != null}
           onclick={() => void createToken(false)}
         >
@@ -352,7 +358,7 @@
         </button>
         <button
           type="button"
-          class="rounded-md border border-border bg-surface-2 px-4 py-2 text-sm font-medium text-text-primary hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-50"
+          class={buttonClass("secondary", "md")}
           disabled={tokenBusy != null}
           onclick={() => void createToken(true)}
         >
@@ -395,7 +401,7 @@
         </p>
         <button
           type="button"
-          class="rounded-md border border-border bg-surface-2 px-3 py-1.5 text-xs font-medium text-text-primary hover:bg-surface-3 disabled:opacity-50"
+          class={buttonClass("secondary", "xs")}
           disabled={tokensLoading}
           onclick={() => void loadTokens()}>Refresh</button
         >
@@ -480,26 +486,20 @@
           <span class="block text-xs font-medium text-text-muted mb-1"
             >Hostname</span
           >
-          <input
-            class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
-            bind:value={form.hostname}
-          />
+          <input class={inputClass} bind:value={form.hostname} />
         </label>
         <label class="block">
           <span class="block text-xs font-medium text-text-muted mb-1"
             >SSH admin username</span
           >
-          <input
-            class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
-            bind:value={form.adminUsername}
-          />
+          <input class={inputClass} bind:value={form.adminUsername} />
         </label>
         <label class="block">
           <span class="block text-xs font-medium text-text-muted mb-1"
             >SSH public key</span
           >
           <textarea
-            class="min-h-24 w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
+            class="min-h-24 {inputClass}"
             bind:value={form.sshPublicKey}
             placeholder="ssh-ed25519 …"
           ></textarea>
@@ -514,7 +514,7 @@
             >Static IPv4/CIDR</span
           >
           <input
-            class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
+            class={inputClass}
             bind:value={form.staticIpv4Cidr}
             placeholder="192.168.1.50/24"
           />
@@ -524,7 +524,7 @@
             >Default gateway</span
           >
           <input
-            class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
+            class={inputClass}
             bind:value={form.gateway}
             placeholder="192.168.1.1"
           />
@@ -534,7 +534,7 @@
             >DNS servers</span
           >
           <input
-            class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
+            class={inputClass}
             bind:value={form.dnsServers}
             placeholder="8.8.8.8,8.8.4.4"
           />
@@ -549,17 +549,14 @@
               <span class="block text-xs font-medium text-text-muted mb-1"
                 >Wi-Fi SSID</span
               >
-              <input
-                class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
-                bind:value={form.wifiSsid}
-              />
+              <input class={inputClass} bind:value={form.wifiSsid} />
             </label>
             <label class="block">
               <span class="block text-xs font-medium text-text-muted mb-1"
                 >Country</span
               >
               <input
-                class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
+                class={inputClass}
                 bind:value={form.wifiCountry}
                 maxlength="2"
               />
@@ -570,7 +567,7 @@
               >Wi-Fi password</span
             >
             <input
-              class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
+              class={inputClass}
               bind:value={form.wifiPassword}
               type="password"
               autocomplete="off"
@@ -590,7 +587,7 @@
             >Server URL</span
           >
           <input
-            class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
+            class={inputClass}
             bind:value={form.serverUrl}
             placeholder="https://timer.example.com"
           />
@@ -600,7 +597,7 @@
             >Auth token</span
           >
           <input
-            class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
+            class={inputClass}
             bind:value={form.authToken}
             type="password"
             autocomplete="off"
@@ -611,7 +608,7 @@
             >Display name</span
           >
           <input
-            class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
+            class={inputClass}
             bind:value={form.displayName}
             placeholder="Start Line"
           />
@@ -621,7 +618,7 @@
             >Reader targets</span
           >
           <textarea
-            class="min-h-24 w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
+            class="min-h-24 {inputClass}"
             bind:value={form.readerTargets}
             placeholder="192.168.1.10:10000"
           ></textarea>
@@ -639,7 +636,7 @@
             >Status HTTP bind</span
           >
           <input
-            class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
+            class={inputClass}
             bind:value={form.statusBind}
             placeholder="0.0.0.0:80"
           />
@@ -648,10 +645,7 @@
           <span class="block text-xs font-medium text-text-muted mb-1"
             >Setup script URL</span
           >
-          <input
-            class="w-full rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary"
-            bind:value={form.setupScriptUrl}
-          />
+          <input class={inputClass} bind:value={form.setupScriptUrl} />
         </label>
         <label class="flex items-center gap-2 text-sm text-text-primary">
           <input type="checkbox" bind:checked={form.upsEnabled} />
@@ -665,17 +659,17 @@
     <div class="flex flex-wrap items-center gap-3">
       <button
         type="button"
-        class="rounded-md border-none bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover"
+        class={buttonClass("primary", "md")}
         onclick={downloadUserData}>Download user-data</button
       >
       <button
         type="button"
-        class="rounded-md border-none bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover"
+        class={buttonClass("primary", "md")}
         onclick={downloadNetworkConfig}>Download network-config</button
       >
       <button
         type="button"
-        class="rounded-md border border-border bg-surface-2 px-4 py-2 text-sm font-medium text-text-primary hover:bg-surface-3"
+        class={buttonClass("secondary", "md")}
         onclick={saveAndNextDevice}>Save &amp; Next Device</button
       >
     </div>
