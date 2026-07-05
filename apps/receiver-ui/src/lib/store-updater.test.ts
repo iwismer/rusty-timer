@@ -1563,6 +1563,170 @@ describe("canonical-only stream identity", () => {
     expect(selectedEarliestEpochValue(streamB)).toBe("9");
   });
 
+  it("formats epoch dropdown labels with created time or first-read time", async () => {
+    const { formatEarliestEpochOption } = await import("./store.svelte");
+    const created = 1_783_238_640_000;
+    const firstSeen = "2026-07-05T09:51:11.314Z";
+
+    expect(
+      formatEarliestEpochOption({
+        stream_epoch: 2,
+        name: "Race Morning",
+        first_seen_at: firstSeen,
+        created_unix_ms: created,
+        race_names: [],
+      }),
+    ).toBe(`#2 — Race Morning — ${new Date(created).toLocaleString()}`);
+    expect(
+      formatEarliestEpochOption({
+        stream_epoch: 1,
+        name: "  ",
+        first_seen_at: firstSeen,
+        race_names: [],
+      }),
+    ).toBe(`#1 — unnamed — first read ${new Date(firstSeen).toLocaleString()}`);
+  });
+
+  it("adds the live current epoch to dropdown options when only older epochs are stored", async () => {
+    const { store, streamIdentity, prefetchEarliestEpochOptions } =
+      await import("./store.svelte");
+
+    store.earliestEpochOptions = {};
+    store.earliestEpochLoading = {};
+    apiMocks.getReplayTargetEpochs.mockResolvedValueOnce({
+      epochs: [
+        {
+          stream_epoch: 1,
+          name: null,
+          first_seen_at: "2026-07-05T09:40:00.000Z",
+          race_names: [],
+        },
+      ],
+    });
+
+    const stream = {
+      forwarder_endpoint_id: "endpoint-1",
+      stream_id: "11111111-1111-1111-1111-111111111111",
+      subscribed: true,
+      local_port: null,
+      stream_epoch: 2,
+      current_epoch_name: "Race Morning",
+      current_epoch_created_unix_ms: 1_783_238_640_000,
+    };
+
+    await prefetchEarliestEpochOptions([stream]);
+
+    expect(store.earliestEpochOptions[streamIdentity(stream)]).toEqual([
+      {
+        stream_epoch: 2,
+        name: "Race Morning",
+        first_seen_at: null,
+        created_unix_ms: 1_783_238_640_000,
+        race_names: [],
+      },
+      {
+        stream_epoch: 1,
+        name: null,
+        first_seen_at: "2026-07-05T09:40:00.000Z",
+        race_names: [],
+      },
+    ]);
+  });
+
+  it("uses live current epoch metadata for matching epoch dropdown options", async () => {
+    const { store, streamIdentity, prefetchEarliestEpochOptions } =
+      await import("./store.svelte");
+
+    store.earliestEpochOptions = {};
+    store.earliestEpochLoading = {};
+    apiMocks.getReplayTargetEpochs.mockResolvedValueOnce({
+      epochs: [
+        {
+          stream_epoch: 12,
+          name: null,
+          first_seen_at: "2026-07-05T09:51:11.314Z",
+          race_names: [],
+        },
+        {
+          stream_epoch: 11,
+          name: "Warmup",
+          first_seen_at: "2026-07-05T09:40:00.000Z",
+          race_names: [],
+        },
+      ],
+    });
+
+    const stream = {
+      forwarder_endpoint_id: "endpoint-1",
+      stream_id: "11111111-1111-1111-1111-111111111111",
+      subscribed: true,
+      local_port: null,
+      stream_epoch: 12,
+      current_epoch_name: "Race Morning",
+      current_epoch_created_unix_ms: 1_783_238_640_000,
+    };
+
+    await prefetchEarliestEpochOptions([stream]);
+
+    expect(store.earliestEpochOptions[streamIdentity(stream)]).toEqual([
+      {
+        stream_epoch: 12,
+        name: "Race Morning",
+        first_seen_at: "2026-07-05T09:51:11.314Z",
+        created_unix_ms: 1_783_238_640_000,
+        race_names: [],
+      },
+      {
+        stream_epoch: 11,
+        name: "Warmup",
+        first_seen_at: "2026-07-05T09:40:00.000Z",
+        race_names: [],
+      },
+    ]);
+  });
+
+  it("merges forwarder-advertised historical epochs into dropdown options", async () => {
+    const { store, streamIdentity, prefetchEarliestEpochOptions } =
+      await import("./store.svelte");
+
+    store.earliestEpochOptions = {};
+    store.earliestEpochLoading = {};
+    apiMocks.getReplayTargetEpochs.mockResolvedValueOnce({ epochs: [] });
+
+    const stream = {
+      forwarder_endpoint_id: "endpoint-1",
+      stream_id: "11111111-1111-1111-1111-111111111111",
+      subscribed: true,
+      local_port: null,
+      stream_epoch: 2,
+      current_epoch_name: "Race Morning",
+      current_epoch_created_unix_ms: 1_783_238_640_000,
+      epoch_options: [
+        { stream_epoch: 2, created_unix_ms: 1_783_238_640_000 },
+        { stream_epoch: 1, created_unix_ms: 1_783_235_000_000 },
+      ],
+    };
+
+    await prefetchEarliestEpochOptions([stream]);
+
+    expect(store.earliestEpochOptions[streamIdentity(stream)]).toEqual([
+      {
+        stream_epoch: 2,
+        name: "Race Morning",
+        first_seen_at: null,
+        created_unix_ms: 1_783_238_640_000,
+        race_names: [],
+      },
+      {
+        stream_epoch: 1,
+        name: null,
+        first_seen_at: null,
+        created_unix_ms: 1_783_235_000_000,
+        race_names: [],
+      },
+    ]);
+  });
+
   it("falls back to the advertised stream epoch when no events are stored yet", async () => {
     const { store, streamIdentity, prefetchEarliestEpochOptions } =
       await import("./store.svelte");
@@ -1578,6 +1742,7 @@ describe("canonical-only stream identity", () => {
       local_port: null,
       stream_epoch: 12,
       current_epoch_name: "Race Morning",
+      current_epoch_created_unix_ms: 1_783_238_640_000,
     };
 
     await prefetchEarliestEpochOptions([stream]);
@@ -1591,6 +1756,7 @@ describe("canonical-only stream identity", () => {
         stream_epoch: 12,
         name: "Race Morning",
         first_seen_at: null,
+        created_unix_ms: 1_783_238_640_000,
         race_names: [],
       },
     ]);

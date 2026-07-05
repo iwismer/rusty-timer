@@ -353,8 +353,21 @@ async fn main() {
             }
         };
         if let Some(metadata) = epoch_metadata {
+            let epoch_reads = {
+                let j = journal.lock().await;
+                match j.count_events_for_epoch(reader_addr, metadata.epoch) {
+                    Ok(count) => count,
+                    Err(e) => {
+                        warn!(reader_ip = %reader_addr, error = %e, "failed to load reader epoch read count");
+                        0
+                    }
+                }
+            };
             status_server
                 .set_reader_epoch_metadata(reader_addr, metadata)
+                .await;
+            status_server
+                .set_reader_epoch_reads(reader_addr, epoch_reads)
                 .await;
         }
     }

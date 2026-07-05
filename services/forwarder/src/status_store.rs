@@ -46,6 +46,8 @@ pub struct ReaderStatus {
     pub last_seen: Option<Instant>,
     pub reads_since_restart: u64,
     pub reads_total: i64,
+    /// Durable reads recorded in the current epoch.
+    pub reads_epoch: i64,
     /// The local port the forwarder listens on to re-expose reads from this reader.
     pub local_port: u16,
     /// The current epoch id, if available.
@@ -1031,6 +1033,7 @@ impl StatusStore {
                     last_seen: None,
                     reads_since_restart: 0,
                     reads_total: 0,
+                    reads_epoch: 0,
                     local_port: *local_port,
                     current_epoch: None,
                     current_epoch_created_unix_ms: None,
@@ -1053,6 +1056,17 @@ impl StatusStore {
         self.publish_display_state().await;
     }
 
+    /// Seed a reader's current-epoch read count from durable journal state.
+    pub async fn set_reader_epoch_reads(&self, reader_ip: &str, count: i64) {
+        {
+            let mut ss = self.subsystem.lock().await;
+            if let Some(r) = ss.readers.get_mut(reader_ip) {
+                r.reads_epoch = count;
+            }
+        }
+        self.publish_display_state().await;
+    }
+
     /// Seed a reader's current epoch metadata from durable journal state.
     pub async fn set_reader_epoch_metadata(
         &self,
@@ -1062,8 +1076,18 @@ impl StatusStore {
         {
             let mut ss = self.subsystem.lock().await;
             if let Some(r) = ss.readers.get_mut(reader_ip) {
+                if r.current_epoch.is_some_and(|e| e != metadata.epoch) {
+                    // Epoch changed: the new epoch starts with zero reads.
+                    r.reads_epoch = 0;
+                }
                 r.current_epoch = Some(metadata.epoch);
                 r.current_epoch_created_unix_ms = metadata.created_unix_ms;
+                let _ = self
+                    .status_event_tx
+                    .send(ForwarderStatusEvent::ReaderStatus {
+                        stream_id: reader_ip.to_owned(),
+                        status: r.clone(),
+                    });
             }
         }
         self.publish_display_state().await;
@@ -1082,6 +1106,7 @@ impl StatusStore {
                         state: (&r.state).into(),
                         reads_session: r.reads_since_restart,
                         reads_total: r.reads_total,
+                        reads_epoch: r.reads_epoch,
                         last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                         local_port: r.local_port,
                         current_epoch_name: r.current_epoch_name.clone(),
@@ -1108,6 +1133,7 @@ impl StatusStore {
                         state: (&r.state).into(),
                         reads_session: r.reads_since_restart,
                         reads_total: r.reads_total,
+                        reads_epoch: r.reads_epoch,
                         last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                         local_port: r.local_port,
                         current_epoch_name: r.current_epoch_name.clone(),
@@ -1136,6 +1162,7 @@ impl StatusStore {
             if let Some(r) = ss.readers.get_mut(reader_ip) {
                 r.reads_since_restart += 1;
                 r.reads_total += 1;
+                r.reads_epoch += 1;
                 r.last_seen = Some(Instant::now());
                 let _ = self
                     .ui_tx
@@ -1144,6 +1171,7 @@ impl StatusStore {
                         state: (&r.state).into(),
                         reads_session: r.reads_since_restart,
                         reads_total: r.reads_total,
+                        reads_epoch: r.reads_epoch,
                         last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                         local_port: r.local_port,
                         current_epoch_name: r.current_epoch_name.clone(),
@@ -1194,6 +1222,7 @@ mod tests {
         let store = StatusStore::new(SubsystemStatus::ready());
         store.init_readers(&[("reader-a".to_owned(), 10_001)]).await;
 
+        let (mut status_rx, _snapshot) = store.status_feed().subscribe_and_snapshot().await;
         store
             .set_reader_epoch_metadata(
                 "reader-a",
@@ -1203,6 +1232,19 @@ mod tests {
                 },
             )
             .await;
+
+        let event = status_rx.try_recv().expect("epoch metadata status event");
+        match event {
+            ForwarderStatusEvent::ReaderStatus { stream_id, status } => {
+                assert_eq!(stream_id, "reader-a");
+                assert_eq!(status.current_epoch, Some(4));
+                assert_eq!(
+                    status.current_epoch_created_unix_ms,
+                    Some(1_783_238_640_000)
+                );
+            }
+            other => panic!("unexpected status event: {other:?}"),
+        }
 
         let (_rx, snapshot) = store.status_feed().subscribe_and_snapshot().await;
         let (_stream_id, status) = snapshot
@@ -1215,6 +1257,67 @@ mod tests {
             status.current_epoch_created_unix_ms,
             Some(1_783_238_640_000)
         );
+    }
+
+    #[tokio::test]
+    async fn reads_epoch_seeds_increments_and_resets_on_epoch_change() {
+        let store = StatusStore::new(SubsystemStatus::ready());
+        store.init_readers(&[("reader-a".to_owned(), 10_001)]).await;
+
+        // Startup: seed epoch metadata, then the durable epoch read count.
+        store
+            .set_reader_epoch_metadata(
+                "reader-a",
+                crate::storage::journal::CurrentEpochMetadata {
+                    epoch: 4,
+                    created_unix_ms: None,
+                },
+            )
+            .await;
+        store.set_reader_epoch_reads("reader-a", 10).await;
+
+        // Reads bump the epoch counter alongside session/total.
+        store.record_read("reader-a").await;
+        store.record_read("reader-a").await;
+
+        let (_rx, snapshot) = store.status_feed().subscribe_and_snapshot().await;
+        let (_stream_id, status) = snapshot
+            .readers
+            .iter()
+            .find(|(stream_id, _)| stream_id == "reader-a")
+            .expect("reader status should be present");
+        assert_eq!(status.reads_epoch, 12);
+        assert_eq!(status.reads_since_restart, 2);
+
+        // Re-seeding the SAME epoch must not reset the counter.
+        store
+            .set_reader_epoch_metadata(
+                "reader-a",
+                crate::storage::journal::CurrentEpochMetadata {
+                    epoch: 4,
+                    created_unix_ms: None,
+                },
+            )
+            .await;
+        // Advancing to a NEW epoch resets the counter to zero.
+        store
+            .set_reader_epoch_metadata(
+                "reader-a",
+                crate::storage::journal::CurrentEpochMetadata {
+                    epoch: 5,
+                    created_unix_ms: None,
+                },
+            )
+            .await;
+
+        let (_rx, snapshot) = store.status_feed().subscribe_and_snapshot().await;
+        let (_stream_id, status) = snapshot
+            .readers
+            .iter()
+            .find(|(stream_id, _)| stream_id == "reader-a")
+            .expect("reader status should be present");
+        assert_eq!(status.reads_epoch, 0);
+        assert_eq!(status.current_epoch, Some(5));
     }
 
     #[tokio::test]

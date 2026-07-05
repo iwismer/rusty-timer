@@ -45,6 +45,7 @@ pub struct ReplayTargetEpochOption {
     pub stream_epoch: i64,
     pub name: Option<String>,
     pub first_seen_at: Option<String>,
+    pub created_unix_ms: Option<i64>,
     pub race_names: Vec<String>,
 }
 
@@ -126,6 +127,7 @@ pub async fn get_replay_target_epochs(
                 stream_epoch,
                 name: None,
                 first_seen_at,
+                created_unix_ms: None,
                 race_names: Vec::new(),
             })
             .collect(),

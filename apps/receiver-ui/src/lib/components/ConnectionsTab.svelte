@@ -11,7 +11,12 @@
     formatLastSeen,
     parseWallClock,
   } from "@rusty-timer/shared-ui";
-  import { loadConnections, openHelp, store } from "$lib/store.svelte";
+  import {
+    loadConnections,
+    openHelp,
+    refreshStreamsAndEpochOptions,
+    store,
+  } from "$lib/store.svelte";
   import type {
     ForwarderConnectionStatus,
     ReaderControlResult,
@@ -319,9 +324,13 @@
 
   async function runReaderCommand(
     command: () => Promise<ReaderControlResult>,
+    refreshEpochStream?: { forwarder_endpoint_id: string; stream_id: string },
   ): Promise<void> {
     const result = await command();
     await loadConnections();
+    if (refreshEpochStream) {
+      await refreshStreamsAndEpochOptions([refreshEpochStream]);
+    }
     if (!result.success) {
       throw new Error(result.message || "Reader command failed");
     }
@@ -582,6 +591,7 @@
                         readerState={readerConnectionState(reader)}
                         readerStateLabel={readerForwarderStateLabel(reader)}
                         readsSession={reader.reads_session ?? null}
+                        readsEpoch={reader.reads_epoch ?? null}
                         readsTotal={reader.reads_total ?? null}
                         lastSeenDisplay={lastSeenDisplayForPanel(reader)}
                         currentEpoch={reader.current_epoch ?? null}
@@ -597,19 +607,29 @@
                         disabled={busyByEndpoint[forwarder.endpoint_id]}
                         helpContext="forwarder"
                         onSetEpochName={(name) =>
-                          runReaderCommand(() =>
-                            readerSetEpochName(
-                              forwarder.endpoint_id,
-                              reader.stream_id,
-                              name,
-                            ),
+                          runReaderCommand(
+                            () =>
+                              readerSetEpochName(
+                                forwarder.endpoint_id,
+                                reader.stream_id,
+                                name,
+                              ),
+                            {
+                              forwarder_endpoint_id: forwarder.endpoint_id,
+                              stream_id: reader.stream_id,
+                            },
                           )}
                         onAdvanceEpoch={() =>
-                          runReaderCommand(() =>
-                            readerAdvanceEpoch(
-                              forwarder.endpoint_id,
-                              reader.stream_id,
-                            ),
+                          runReaderCommand(
+                            () =>
+                              readerAdvanceEpoch(
+                                forwarder.endpoint_id,
+                                reader.stream_id,
+                              ),
+                            {
+                              forwarder_endpoint_id: forwarder.endpoint_id,
+                              stream_id: reader.stream_id,
+                            },
                           )}
                         onSyncClock={() =>
                           runReaderCommand(() =>

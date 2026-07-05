@@ -376,6 +376,11 @@ export const FORWARDER_HELP = {
         summary: "Number of chip reads received from this reader since the forwarder last started.",
         detailHtml: "A running count of chip reads received from this reader since the forwarder service was last started. This counter resets to zero on each service restart. Use this to confirm reads are actively flowing from a reader during the current session.",
       },
+      reads_epoch: {
+        label: "Reads (Epoch)",
+        summary: "Chip reads from this reader recorded in the current epoch.",
+        detailHtml: "The number of chip reads recorded under the reader's current epoch. The count starts at zero when the epoch is advanced and persists across service restarts, so it reflects the full epoch even after a mid-race restart. Use this to track reads for the active race or wave segment.",
+      },
       reads_total: {
         label: "Reads (Total)",
         summary: "Total chip reads from this reader recorded in the journal, across all sessions.",

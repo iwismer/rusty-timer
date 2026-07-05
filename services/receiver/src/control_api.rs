@@ -10,7 +10,7 @@ use crate::stream_key::{LocalStreamKey, is_valid_endpoint_id, is_valid_identity_
 use crate::ui_events::ReceiverUiEvent;
 use rt_p2p_protocol::{
     ConfigGetResponse, ConfigSetResponse, DownloadProgress, ReaderControlResponse, ReaderInfo,
-    ReaderStatus, RestartResponse, UpsStatus,
+    ReaderStatus, RestartResponse, StreamCatalog, UpsStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -32,11 +32,18 @@ pub type ChipLookup = HashMap<String, HashMap<String, ChipEntry>>;
 
 /// One stream a discovered forwarder exposes, learned from the server
 /// `GET /forwarders` discovery feed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DiscoveredEpochSummary {
+    pub stream_epoch: i64,
+    pub created_unix_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredStream {
     pub stream_id: String,
     pub epoch: i64,
     pub next_seq: i64,
+    pub epoch_options: Vec<DiscoveredEpochSummary>,
 }
 
 /// An approved forwarder discovered from the server (or seeded from an
@@ -240,6 +247,43 @@ pub(crate) fn validate_stream_identity(
         ));
     }
     Ok(())
+}
+
+fn merge_epoch_options(
+    discovered_stream: Option<&DiscoveredStream>,
+    current_epoch: Option<i64>,
+    current_epoch_created_unix_ms: Option<i64>,
+) -> Vec<DiscoveredEpochSummary> {
+    let mut options = Vec::new();
+    if let Some(epoch) = current_epoch.filter(|epoch| *epoch > 0) {
+        options.push(DiscoveredEpochSummary {
+            stream_epoch: epoch,
+            created_unix_ms: current_epoch_created_unix_ms,
+        });
+    }
+    if let Some(stream) = discovered_stream {
+        for option in &stream.epoch_options {
+            if option.stream_epoch > 0
+                && !options
+                    .iter()
+                    .any(|existing| existing.stream_epoch == option.stream_epoch)
+            {
+                options.push(*option);
+            }
+        }
+        if stream.epoch > 0
+            && !options
+                .iter()
+                .any(|existing| existing.stream_epoch == stream.epoch)
+        {
+            options.push(DiscoveredEpochSummary {
+                stream_epoch: stream.epoch,
+                created_unix_ms: None,
+            });
+        }
+    }
+    options.sort_by(|left, right| right.stream_epoch.cmp(&left.stream_epoch));
+    options
 }
 
 fn parse_reader_info_json(
@@ -820,6 +864,56 @@ impl AppState {
         .await;
     }
 
+    pub(crate) async fn store_forwarder_catalog(&self, endpoint_id: &str, catalog: &StreamCatalog) {
+        let mut discovered = self.forwarders.discovered_forwarders.write().await;
+        let forwarder =
+            discovered
+                .entry(endpoint_id.to_owned())
+                .or_insert_with(|| DiscoveredForwarder {
+                    display_name: None,
+                    direct_addrs: Vec::new(),
+                    streams: Vec::new(),
+                });
+        let existing = forwarder
+            .streams
+            .iter()
+            .map(|stream| (stream.stream_id.clone(), stream.clone()))
+            .collect::<HashMap<_, _>>();
+        forwarder.streams = catalog
+            .entries
+            .iter()
+            .map(|entry| {
+                let stream_id = decode_stream_id(entry.stream_id.clone());
+                let epoch_options = entry
+                    .epoch_summaries
+                    .iter()
+                    .filter_map(|summary| {
+                        Some(DiscoveredEpochSummary {
+                            stream_epoch: i64::try_from(summary.epoch).ok()?,
+                            created_unix_ms: summary.created_unix_ms,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let existing = existing.get(&stream_id);
+                let epoch = epoch_options
+                    .first()
+                    .map(|summary| summary.stream_epoch)
+                    .or_else(|| existing.map(|stream| stream.epoch))
+                    .unwrap_or_default();
+                let next_seq = existing.map(|stream| stream.next_seq).unwrap_or_default();
+                DiscoveredStream {
+                    stream_id,
+                    epoch,
+                    next_seq,
+                    epoch_options,
+                }
+            })
+            .collect();
+        drop(discovered);
+        self.recompute_aggregate_connection_state().await;
+        self.emit_streams_snapshot().await;
+    }
+
     pub async fn forwarder_state(&self, endpoint_id: &str) -> ForwarderStateSnapshot {
         let runtime = self
             .forwarders
@@ -871,6 +965,7 @@ impl AppState {
                     stream_id: stream_id.clone(),
                     reads_session: status.reads_session,
                     reads_total: status.reads_total,
+                    reads_epoch: status.reads_epoch,
                     last_read_unix_ms: (status.last_read_unix_ms != 0)
                         .then_some(status.last_read_unix_ms),
                     last_seen_secs: status.last_seen_secs,
@@ -883,6 +978,7 @@ impl AppState {
             last_read_unix_ms: (status.last_read_unix_ms != 0).then_some(status.last_read_unix_ms),
             reads_session: Some(status.reads_session),
             reads_total: Some(status.reads_total),
+            reads_epoch: status.reads_epoch,
             last_seen_secs: status.last_seen_secs,
             current_epoch: status.current_epoch,
             current_epoch_created_unix_ms: status.current_epoch_created_unix_ms,
@@ -942,6 +1038,11 @@ impl AppState {
             .entry(stream_id.to_owned())
             .and_modify(|reader| {
                 if current_epoch.is_some() {
+                    if reader.current_epoch.is_some() && reader.current_epoch != current_epoch {
+                        // Epoch changed: the new epoch starts with zero reads
+                        // until the next authoritative status delta arrives.
+                        reader.reads_epoch = Some(0);
+                    }
                     reader.current_epoch = current_epoch;
                     reader.current_epoch_created_unix_ms = current_epoch_created_unix_ms;
                 }
@@ -956,6 +1057,7 @@ impl AppState {
                 last_read_unix_ms: None,
                 reads_session: None,
                 reads_total: None,
+                reads_epoch: None,
                 last_seen_secs: None,
                 current_epoch,
                 current_epoch_created_unix_ms,
@@ -1014,6 +1116,7 @@ impl AppState {
                 last_read_unix_ms: None,
                 reads_session: None,
                 reads_total: None,
+                reads_epoch: None,
                 last_seen_secs: None,
                 current_epoch: None,
                 current_epoch_created_unix_ms: None,
@@ -1070,6 +1173,7 @@ impl AppState {
                 last_read_unix_ms: None,
                 reads_session: None,
                 reads_total: None,
+                reads_epoch: None,
                 last_seen_secs: None,
                 current_epoch: None,
                 current_epoch_created_unix_ms: None,
@@ -1613,8 +1717,9 @@ impl AppState {
             let local_stream_key = LocalStreamKey::new(&sub.forwarder_endpoint_id, &sub.stream_id);
             let counts = counts_snapshot.get(&local_stream_key);
             let cursor = cursor_map.get(local_stream_key.as_str());
-            let discovered_stream = discovered_streams
-                .get(&(sub.forwarder_endpoint_id.as_str(), sub.stream_id.as_str()));
+            let discovered_pair = discovered_streams
+                .get(&(sub.forwarder_endpoint_id.as_str(), sub.stream_id.as_str()))
+                .copied();
             let runtime = runtime_statuses
                 .get(&sub.forwarder_endpoint_id)
                 .copied()
@@ -1625,11 +1730,16 @@ impl AppState {
                 snapshot.state,
                 ForwarderConnState::Connected | ForwarderConnState::Subscribed
             ));
-            let reader_connected = live_statuses
+            let live_reader = live_statuses
                 .get(&sub.forwarder_endpoint_id)
-                .and_then(|status| status.readers.get(&sub.stream_id))
+                .and_then(|status| status.readers.get(&sub.stream_id));
+            let reader_connected = live_reader
                 .map(|reader| reader.connected)
                 .or_else(|| (snapshot.state == ForwarderConnState::Subscribed).then_some(true));
+            let current_epoch = live_reader.and_then(|reader| reader.current_epoch);
+            let current_epoch_created_unix_ms =
+                live_reader.and_then(|reader| reader.current_epoch_created_unix_ms);
+            let discovered_stream = discovered_pair.map(|(_, stream)| stream);
             streams.push(StreamEntry {
                 forwarder_endpoint_id: sub.forwarder_endpoint_id.clone(),
                 stream_id: sub.stream_id.clone(),
@@ -1642,10 +1752,18 @@ impl AppState {
                 event_type: Some(sub.event_type),
                 online,
                 reader_connected,
-                display_alias: discovered_stream
+                display_alias: discovered_pair
                     .and_then(|(forwarder, _)| forwarder.display_name.clone()),
-                stream_epoch: discovered_stream.map(|(_, stream)| stream.epoch),
-                current_epoch_name: None,
+                stream_epoch: current_epoch
+                    .or_else(|| discovered_stream.map(|stream| stream.epoch)),
+                epoch_options: merge_epoch_options(
+                    discovered_stream,
+                    current_epoch,
+                    current_epoch_created_unix_ms,
+                ),
+                current_epoch_name: live_reader
+                    .and_then(|reader| reader.current_epoch_name.clone()),
+                current_epoch_created_unix_ms,
                 reads_total: counts.as_ref().map(|c| c.total),
                 reads_epoch: counts.as_ref().map(|c| c.epoch),
                 cursor_epoch: cursor.and_then(|c| c.stream_epoch),
@@ -1677,11 +1795,15 @@ impl AppState {
                     snapshot.state,
                     ForwarderConnState::Connected | ForwarderConnState::Subscribed
                 ));
-                let reader_connected = live_statuses
+                let live_reader = live_statuses
                     .get(endpoint_id)
-                    .and_then(|status| status.readers.get(&stream.stream_id))
+                    .and_then(|status| status.readers.get(&stream.stream_id));
+                let reader_connected = live_reader
                     .map(|reader| reader.connected)
                     .or_else(|| (snapshot.state == ForwarderConnState::Subscribed).then_some(true));
+                let current_epoch = live_reader.and_then(|reader| reader.current_epoch);
+                let current_epoch_created_unix_ms =
+                    live_reader.and_then(|reader| reader.current_epoch_created_unix_ms);
                 streams.push(StreamEntry {
                     forwarder_endpoint_id: endpoint_id.clone(),
                     stream_id: stream.stream_id.clone(),
@@ -1695,8 +1817,15 @@ impl AppState {
                     online,
                     reader_connected,
                     display_alias: forwarder.display_name.clone(),
-                    stream_epoch: Some(stream.epoch),
-                    current_epoch_name: None,
+                    stream_epoch: current_epoch.or(Some(stream.epoch)),
+                    epoch_options: merge_epoch_options(
+                        Some(stream),
+                        current_epoch,
+                        current_epoch_created_unix_ms,
+                    ),
+                    current_epoch_name: live_reader
+                        .and_then(|reader| reader.current_epoch_name.clone()),
+                    current_epoch_created_unix_ms,
                     reads_total: None,
                     reads_epoch: None,
                     cursor_epoch: None,
@@ -1816,8 +1945,12 @@ pub struct StreamEntry {
     pub display_alias: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_epoch: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub epoch_options: Vec<DiscoveredEpochSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_epoch_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_epoch_created_unix_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reads_total: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1843,6 +1976,7 @@ pub struct ReaderLiveStatus {
     pub last_read_unix_ms: Option<i64>,
     pub reads_session: Option<u64>,
     pub reads_total: Option<i64>,
+    pub reads_epoch: Option<i64>,
     pub last_seen_secs: Option<u64>,
     pub current_epoch: Option<i64>,
     pub current_epoch_created_unix_ms: Option<i64>,
@@ -2102,7 +2236,7 @@ pub fn event_name(event: &ReceiverUiEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{DEFAULT_UPDATE_MODE, Db, Profile};
+    use crate::db::{DEFAULT_UPDATE_MODE, Db, Profile, ReceivedEventInsert};
     use rt_domain::ReceiverMode;
 
     fn profile(url: &str, token: &str) -> Profile {
@@ -2526,6 +2660,7 @@ mod tests {
                 stream_id: "ip".to_owned(),
                 reads_session: 0,
                 reads_total: 0,
+                reads_epoch: None,
                 last_read_unix_ms: None,
                 last_seen_secs: None,
             }),
@@ -2737,6 +2872,7 @@ mod tests {
                     last_read_unix_ms: 1234,
                     reads_session: 12,
                     reads_total: 120,
+                    reads_epoch: Some(34),
                     last_seen_secs: Some(3),
                     current_epoch: Some(9),
                     current_epoch_created_unix_ms: Some(1_783_238_640_000),
@@ -2754,6 +2890,7 @@ mod tests {
                     last_read_unix_ms: 0,
                     reads_session: 0,
                     reads_total: 0,
+                    reads_epoch: None,
                     last_seen_secs: None,
                     current_epoch: None,
                     current_epoch_created_unix_ms: None,
@@ -2820,6 +2957,7 @@ mod tests {
                     last_read_unix_ms: 5678,
                     reads_session: 13,
                     reads_total: 121,
+                    reads_epoch: Some(35),
                     last_seen_secs: Some(1),
                     current_epoch: Some(10),
                     current_epoch_created_unix_ms: Some(1_783_238_700_000),
@@ -2933,6 +3071,7 @@ mod tests {
                     last_read_unix_ms: 10,
                     reads_session: 1,
                     reads_total: 10,
+                    reads_epoch: None,
                     last_seen_secs: Some(1),
                     current_epoch: None,
                     current_epoch_created_unix_ms: None,
@@ -3033,11 +3172,13 @@ mod tests {
                                 stream_id: "stream-a".to_owned(),
                                 epoch: 1,
                                 next_seq: 10,
+                                epoch_options: Vec::new(),
                             },
                             DiscoveredStream {
                                 stream_id: "stream-b".to_owned(),
                                 epoch: 2,
                                 next_seq: 20,
+                                epoch_options: Vec::new(),
                             },
                         ],
                     },
@@ -3117,6 +3258,7 @@ mod tests {
                 last_read_unix_ms: 1234,
                 reads_session,
                 reads_total,
+                reads_epoch: None,
                 last_seen_secs: Some(reads_session),
                 current_epoch: None,
                 current_epoch_created_unix_ms: None,
@@ -3187,6 +3329,7 @@ mod tests {
                     stream_id: "stream-a".to_owned(),
                     epoch: 1,
                     next_seq: 10,
+                    epoch_options: Vec::new(),
                 }],
             },
         );
@@ -3438,6 +3581,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn store_forwarder_catalog_exposes_epoch_options_for_streams() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+
+        state
+            .store_forwarder_catalog(
+                "endpoint-1",
+                &StreamCatalog {
+                    generation: 1,
+                    entries: vec![rt_p2p_protocol::StreamEntry {
+                        stream_id: b"stream-a".to_vec(),
+                        display_name: "Finish".to_owned(),
+                        network_addr: "10.0.0.1:10000".to_owned(),
+                        reader_connected: true,
+                        hardware_reader_id: "R1".to_owned(),
+                        epoch_summaries: vec![
+                            rt_p2p_protocol::StreamEpochSummary {
+                                epoch: 2,
+                                created_unix_ms: Some(1_783_238_640_000),
+                            },
+                            rt_p2p_protocol::StreamEpochSummary {
+                                epoch: 1,
+                                created_unix_ms: Some(1_783_235_000_000),
+                            },
+                        ],
+                    }],
+                },
+            )
+            .await;
+
+        let response = state.build_streams_response().await;
+
+        assert_eq!(response.streams.len(), 1);
+        assert_eq!(response.streams[0].stream_epoch, Some(2));
+        assert_eq!(
+            response.streams[0].epoch_options,
+            vec![
+                DiscoveredEpochSummary {
+                    stream_epoch: 2,
+                    created_unix_ms: Some(1_783_238_640_000),
+                },
+                DiscoveredEpochSummary {
+                    stream_epoch: 1,
+                    created_unix_ms: Some(1_783_235_000_000),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn build_streams_response_uses_discovered_epoch_for_subscription() {
         let mut db = Db::open_in_memory().unwrap();
         db.replace_stream_subscriptions(&[crate::db::StreamSubscription {
@@ -3459,6 +3652,7 @@ mod tests {
                     stream_id: "stream-a".to_owned(),
                     epoch: 7,
                     next_seq: 42,
+                    epoch_options: Vec::new(),
                 }],
             },
         );
@@ -3496,6 +3690,7 @@ mod tests {
                     stream_id: "stream-a".to_owned(),
                     epoch: 7,
                     next_seq: 42,
+                    epoch_options: Vec::new(),
                 }],
             },
         );
@@ -3515,10 +3710,11 @@ mod tests {
                     last_read_unix_ms: 1234,
                     reads_session: 1,
                     reads_total: 1,
+                    reads_epoch: Some(1),
                     last_seen_secs: Some(1),
-                    current_epoch: None,
-                    current_epoch_created_unix_ms: None,
-                    current_epoch_name: None,
+                    current_epoch: Some(7),
+                    current_epoch_created_unix_ms: Some(1_783_238_640_000),
+                    current_epoch_name: Some("Race Morning".to_owned()),
                 },
             )
             .await;
@@ -3528,6 +3724,14 @@ mod tests {
         assert_eq!(response.streams.len(), 1);
         assert_eq!(response.streams[0].online, Some(true));
         assert_eq!(response.streams[0].reader_connected, Some(true));
+        assert_eq!(
+            response.streams[0].current_epoch_name.as_deref(),
+            Some("Race Morning")
+        );
+        assert_eq!(
+            response.streams[0].current_epoch_created_unix_ms,
+            Some(1_783_238_640_000)
+        );
     }
 
     #[tokio::test]
@@ -4002,6 +4206,53 @@ mod tests {
         ));
         let db = state.storage.db.lock().await;
         assert!(db.load_stream_subscriptions().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_replay_target_epochs_uses_local_stream_key() {
+        let db = Db::open_in_memory().unwrap();
+        let local_stream_key = LocalStreamKey::new("endpoint-1", "stream-canonical");
+        db.insert_received_event(&ReceivedEventInsert {
+            stream_id: local_stream_key.as_str(),
+            seq: 1,
+            epoch: 1,
+            raw_frame: b"raw-1",
+            read_kind: "live",
+            reader_timestamp: Some("2026-07-05T09:40:00Z"),
+            received_unix_ms: 1_783_237_600_000,
+            dbf_delivered_unix_ms: None,
+            chip_id: Some("chip-1"),
+        })
+        .unwrap();
+        db.insert_received_event(&ReceivedEventInsert {
+            stream_id: local_stream_key.as_str(),
+            seq: 2,
+            epoch: 2,
+            raw_frame: b"raw-2",
+            read_kind: "live",
+            reader_timestamp: Some("2026-07-05T09:51:11Z"),
+            received_unix_ms: 1_783_238_271_000,
+            dbf_delivered_unix_ms: None,
+            chip_id: Some("chip-2"),
+        })
+        .unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+
+        let result = get_replay_target_epochs(
+            &state,
+            "endpoint-1".to_owned(),
+            "stream-canonical".to_owned(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.epochs.len(), 2);
+        assert_eq!(result.epochs[0].stream_epoch, 2);
+        assert_eq!(
+            result.epochs[0].first_seen_at.as_deref(),
+            Some("2026-07-05T09:51:11Z")
+        );
+        assert_eq!(result.epochs[1].stream_epoch, 1);
     }
 
     #[tokio::test]

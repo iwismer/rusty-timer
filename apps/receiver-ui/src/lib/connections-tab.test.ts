@@ -65,6 +65,7 @@ const mockState = vi.hoisted(() => {
     disconnectForwarder: vi.fn(async () => {}),
     reconnectForwarder: vi.fn(async () => {}),
     loadConnections: vi.fn(async () => {}),
+    refreshStreamsAndEpochOptions: vi.fn(async () => {}),
     openHelp: vi.fn(),
     readerControl: vi.fn(async () => ({
       success: true,
@@ -88,6 +89,7 @@ const mockState = vi.hoisted(() => {
 vi.mock("$lib/store.svelte", () => ({
   store: mockState.store,
   loadConnections: mockState.loadConnections,
+  refreshStreamsAndEpochOptions: mockState.refreshStreamsAndEpochOptions,
   openHelp: mockState.openHelp,
 }));
 
@@ -495,6 +497,12 @@ describe("ConnectionsTab", () => {
       "10.0.0.1:10000",
       "Lap 2",
     );
+    expect(mockState.refreshStreamsAndEpochOptions).toHaveBeenCalledWith([
+      {
+        forwarder_endpoint_id: "endpoint-live",
+        stream_id: "10.0.0.1:10000",
+      },
+    ]);
     expect(await screen.findByText("Epoch name saved")).toBeInTheDocument();
 
     await fireEvent.click(screen.getByText("Advance Epoch"));
@@ -508,6 +516,12 @@ describe("ConnectionsTab", () => {
       "10.0.0.1:10000",
       "Lap 2",
     );
+    expect(mockState.refreshStreamsAndEpochOptions).toHaveBeenLastCalledWith([
+      {
+        forwarder_endpoint_id: "endpoint-live",
+        stream_id: "10.0.0.1:10000",
+      },
+    ]);
     expect(
       await screen.findByText("Advanced to next epoch and saved name"),
     ).toBeInTheDocument();

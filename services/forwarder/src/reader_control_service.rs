@@ -87,6 +87,7 @@ impl ReaderControlService {
                     state: (&reader.state).into(),
                     reads_session: reader.reads_since_restart,
                     reads_total: reader.reads_total,
+                    reads_epoch: reader.reads_epoch,
                     last_seen_secs: reader.last_seen.map(|t| t.elapsed().as_secs()),
                     local_port: reader.local_port,
                     current_epoch_name: reader.current_epoch_name.clone(),
@@ -109,6 +110,10 @@ impl ReaderControlService {
     ) {
         let mut ss = self.subsystem.lock().await;
         if let Some(status) = ss.readers.get_mut(reader_ip) {
+            if status.current_epoch.is_some_and(|e| e != metadata.epoch) {
+                // Epoch changed: the new epoch starts with zero reads.
+                status.reads_epoch = 0;
+            }
             status.current_epoch = Some(metadata.epoch);
             status.current_epoch_created_unix_ms = metadata.created_unix_ms;
             status.current_epoch_name = None;
@@ -119,6 +124,7 @@ impl ReaderControlService {
                     state: (&status.state).into(),
                     reads_session: status.reads_since_restart,
                     reads_total: status.reads_total,
+                    reads_epoch: status.reads_epoch,
                     last_seen_secs: status.last_seen.map(|t| t.elapsed().as_secs()),
                     local_port: status.local_port,
                     current_epoch_name: None,
@@ -599,6 +605,7 @@ mod tests {
                     last_seen: None,
                     reads_since_restart: 0,
                     reads_total: 0,
+                    reads_epoch: 0,
                     local_port: 10_001,
                     current_epoch: None,
                     current_epoch_created_unix_ms: None,

@@ -469,10 +469,14 @@ export function parseApiReturnedEpoch(
 export function formatEarliestEpochOption(
   option: api.ReplayTargetEpochOption,
 ): string {
-  const name = option.name?.trim();
-  return name && name.length > 0
-    ? `${option.stream_epoch} (${name})`
-    : String(option.stream_epoch);
+  const name = option.name?.trim() || "unnamed";
+  const timestamp =
+    option.created_unix_ms != null
+      ? new Date(option.created_unix_ms).toLocaleString()
+      : option.first_seen_at
+        ? `first read ${new Date(option.first_seen_at).toLocaleString()}`
+        : "created date unknown";
+  return `#${option.stream_epoch} — ${name} — ${timestamp}`;
 }
 
 export function selectedEarliestEpochValue(stream: api.StreamEntry): string {
@@ -700,20 +704,48 @@ export async function prefetchEarliestEpochOptions(
         forwarder_endpoint_id: stream.forwarder_endpoint_id,
         stream_id: stream.stream_id,
       });
-      const epochs =
-        response.epochs.length === 0 && stream.stream_epoch != null
-          ? [
-              {
-                stream_epoch: stream.stream_epoch,
-                name: stream.current_epoch_name ?? null,
-                first_seen_at: null,
-                race_names: [],
-              },
-            ]
-          : response.epochs;
+      const currentEpochName = stream.current_epoch_name?.trim() || null;
+      const byEpoch = new Map<number, api.ReplayTargetEpochOption>();
+      for (const option of response.epochs) {
+        byEpoch.set(option.stream_epoch, option);
+      }
+      const advertisedOptions = [...(stream.epoch_options ?? [])];
+      if (
+        stream.stream_epoch != null &&
+        !advertisedOptions.some(
+          (option) => option.stream_epoch === stream.stream_epoch,
+        )
+      ) {
+        advertisedOptions.unshift({
+          stream_epoch: stream.stream_epoch,
+          created_unix_ms: stream.current_epoch_created_unix_ms ?? null,
+        });
+      }
+      for (const option of advertisedOptions) {
+        const existing = byEpoch.get(option.stream_epoch);
+        const isCurrent = option.stream_epoch === stream.stream_epoch;
+        byEpoch.set(option.stream_epoch, {
+          stream_epoch: option.stream_epoch,
+          name: existing?.name?.trim()
+            ? existing.name
+            : isCurrent
+              ? currentEpochName
+              : null,
+          first_seen_at: existing?.first_seen_at ?? null,
+          created_unix_ms: isCurrent
+            ? (stream.current_epoch_created_unix_ms ??
+              option.created_unix_ms ??
+              existing?.created_unix_ms ??
+              null)
+            : (option.created_unix_ms ?? existing?.created_unix_ms ?? null),
+          race_names: existing?.race_names ?? [],
+        });
+      }
       store.earliestEpochOptions = {
         ...store.earliestEpochOptions,
-        [key]: [...epochs].sort((a, b) => b.stream_epoch - a.stream_epoch),
+        [key]: [...byEpoch.values()].sort(
+          (a, b) => b.stream_epoch - a.stream_epoch,
+        ),
       };
     } catch (e) {
       store.earliestEpochLoadErrors = {
@@ -818,6 +850,28 @@ function applyStreamCountUpdates(updates: StreamCountUpdate[]): boolean {
 export async function loadConnections(): Promise<void> {
   try {
     store.connections = await api.getConnections();
+  } catch (e) {
+    store.error = String(e);
+  }
+}
+
+export async function refreshStreamsAndEpochOptions(
+  refreshStreams: api.StreamIdentity[] = [],
+): Promise<void> {
+  const refreshVersion = ++streamRefreshVersion;
+  try {
+    const latestStreams = await api.getStreams();
+    if (refreshVersion === streamRefreshVersion) {
+      store.streams = latestStreams;
+      clearSubscriptionPending(latestStreams.streams);
+      const refreshEpochOptionKeys = new Set(
+        refreshStreams.map(streamIdentity),
+      );
+      await prefetchEarliestEpochOptions(
+        latestStreams.streams,
+        refreshEpochOptionKeys,
+      );
+    }
   } catch (e) {
     store.error = String(e);
   }
@@ -1430,6 +1484,7 @@ function applyForwarderReaderCountsUpdate(
       return {
         ...reader,
         reads_session: update.reads_session,
+        reads_epoch: update.reads_epoch ?? reader.reads_epoch,
         reads_total: update.reads_total,
         last_read_unix_ms: update.last_read_unix_ms,
         last_seen_secs: update.last_seen_secs,

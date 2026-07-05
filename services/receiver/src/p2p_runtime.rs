@@ -916,9 +916,9 @@ async fn run_discovery_loop(
     loop {
         match fetch_forwarders(&thin).await {
             Ok(entries) => {
-                let map = build_discovered_forwarders(entries, seed.as_ref());
                 let changed = {
                     let mut current = state.forwarders.discovered_forwarders.write().await;
+                    let map = build_discovered_forwarders(entries, seed.as_ref(), &current);
                     if *current == map {
                         false
                     } else {
@@ -1009,9 +1009,15 @@ async fn run_approval_watch_loop(
 /// per-reconcile log spam. The optional `seed` (a pre-validated explicit
 /// forwarder for the loopback/dev path) is added only if the feed did not
 /// already advertise the same endpoint id.
+///
+/// The server feed knows nothing about forwarder epoch history, so per-stream
+/// `epoch_options` learned from a forwarder's P2P catalog
+/// (`store_forwarder_catalog`) are carried over from `previous` instead of
+/// being wiped on every discovery refresh.
 fn build_discovered_forwarders(
     entries: Vec<announcer_push::ForwarderDiscoveryEntry>,
     seed: Option<&ForwarderPeerConfig>,
+    previous: &DiscoveredForwarders,
 ) -> DiscoveredForwarders {
     let mut map = DiscoveredForwarders::new();
     for entry in entries {
@@ -1028,10 +1034,19 @@ fn build_discovered_forwarders(
             .iter()
             .filter_map(|addr| addr.parse::<SocketAddr>().ok())
             .collect::<Vec<_>>();
+        let previous_streams = previous
+            .get(&entry.endpoint_id)
+            .map(|forwarder| forwarder.streams.as_slice())
+            .unwrap_or_default();
         let streams = entry
             .streams
             .into_iter()
             .map(|stream| DiscoveredStream {
+                epoch_options: previous_streams
+                    .iter()
+                    .find(|previous| previous.stream_id == stream.stream_id)
+                    .map(|previous| previous.epoch_options.clone())
+                    .unwrap_or_default(),
                 stream_id: stream.stream_id,
                 epoch: stream.epoch,
                 next_seq: stream.next_seq,
@@ -3845,7 +3860,7 @@ mod tests {
             },
         ];
 
-        let map = build_discovered_forwarders(entries, None);
+        let map = build_discovered_forwarders(entries, None, &DiscoveredForwarders::new());
 
         // Only the valid entry survives; the malformed id is dropped here, once.
         assert_eq!(map.len(), 1);
@@ -3875,7 +3890,7 @@ mod tests {
         };
 
         // Seed is inserted when the feed does not advertise it.
-        let map = build_discovered_forwarders(vec![], Some(&seed));
+        let map = build_discovered_forwarders(vec![], Some(&seed), &DiscoveredForwarders::new());
         assert_eq!(map.len(), 1);
         assert_eq!(
             map.get(&seed_id).unwrap().direct_addrs,
@@ -3889,10 +3904,73 @@ mod tests {
             direct_addrs: vec!["10.0.0.1:8000".to_owned()],
             streams: vec![],
         }];
-        let map = build_discovered_forwarders(entries, Some(&seed));
+        let map = build_discovered_forwarders(entries, Some(&seed), &DiscoveredForwarders::new());
         assert_eq!(map.len(), 1);
         let fwd = map.get(&seed_id).unwrap();
         assert_eq!(fwd.display_name.as_deref(), Some("Discovered"));
         assert_eq!(fwd.direct_addrs, vec!["10.0.0.1:8000".parse().unwrap()]);
+    }
+
+    #[test]
+    fn build_discovered_forwarders_preserves_catalog_epoch_options() {
+        use crate::announcer_push::{ForwarderDiscoveryEntry, ForwarderDiscoveryStream};
+        use crate::control_api::DiscoveredEpochSummary;
+
+        let endpoint_id = endpoint_id_for_seed([9u8; 32]);
+        let entry = || ForwarderDiscoveryEntry {
+            endpoint_id: endpoint_id.clone(),
+            display_name: Some("Start".to_owned()),
+            direct_addrs: vec!["127.0.0.1:5000".to_owned()],
+            streams: vec![
+                ForwarderDiscoveryStream {
+                    stream_id: "reader-a".to_owned(),
+                    epoch: 2,
+                    next_seq: 9,
+                },
+                ForwarderDiscoveryStream {
+                    stream_id: "reader-b".to_owned(),
+                    epoch: 1,
+                    next_seq: 1,
+                },
+            ],
+        };
+
+        // First refresh: nothing known yet, options are empty.
+        let map = build_discovered_forwarders(vec![entry()], None, &DiscoveredForwarders::new());
+        assert!(
+            map.get(&endpoint_id).unwrap().streams[0]
+                .epoch_options
+                .is_empty()
+        );
+
+        // A P2P session then stores catalog epoch summaries for reader-a.
+        let mut enriched = map.clone();
+        enriched.get_mut(&endpoint_id).unwrap().streams[0].epoch_options = vec![
+            DiscoveredEpochSummary {
+                stream_epoch: 2,
+                created_unix_ms: Some(2_000),
+            },
+            DiscoveredEpochSummary {
+                stream_epoch: 1,
+                created_unix_ms: Some(1_000),
+            },
+        ];
+
+        // The next discovery refresh must carry the catalog-learned options
+        // over instead of wiping them back to empty.
+        let refreshed = build_discovered_forwarders(vec![entry()], None, &enriched);
+        let forwarder = refreshed.get(&endpoint_id).expect("forwarder present");
+        assert_eq!(
+            forwarder.streams[0].epoch_options,
+            enriched.get(&endpoint_id).unwrap().streams[0].epoch_options,
+        );
+        assert!(forwarder.streams[1].epoch_options.is_empty());
+        assert_eq!(refreshed, enriched);
+
+        // A stream the server no longer advertises does not resurrect options.
+        let mut without_stream = entry();
+        without_stream.streams.truncate(1);
+        let refreshed = build_discovered_forwarders(vec![without_stream], None, &enriched);
+        assert_eq!(refreshed.get(&endpoint_id).unwrap().streams.len(), 1);
     }
 }

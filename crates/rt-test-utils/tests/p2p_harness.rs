@@ -40,6 +40,7 @@ async fn run_harness_self_test() {
             network_addr: "10.0.0.1:10000".to_owned(),
             reader_connected: true,
             hardware_reader_id: "R1".to_owned(),
+            epoch_summaries: Vec::new(),
         }],
     };
     let subscribe_ok = SubscribeOk {
@@ -179,6 +180,7 @@ async fn p2p_harness_data_fault_drop_outbound_suppresses_subscribe_response() {
                 network_addr: "10.0.0.2:10000".to_owned(),
                 reader_connected: true,
                 hardware_reader_id: "R2".to_owned(),
+                epoch_summaries: Vec::new(),
             }],
         },
         subscribe_ok: SubscribeOk {
@@ -276,6 +278,7 @@ async fn run_partition_ack_test() {
                 network_addr: "10.0.0.3:10000".to_owned(),
                 reader_connected: true,
                 hardware_reader_id: "R3".to_owned(),
+                epoch_summaries: Vec::new(),
             }],
         },
         subscribe_ok: SubscribeOk {

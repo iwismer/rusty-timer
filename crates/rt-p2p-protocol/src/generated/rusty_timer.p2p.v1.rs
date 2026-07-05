@@ -47,6 +47,14 @@ pub struct HelloOk {
     #[prost(uint64, tag = "6")]
     pub catalog_generation: u64,
 }
+/// A forwarder-known epoch for a stream.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct StreamEpochSummary {
+    #[prost(uint64, tag = "1")]
+    pub epoch: u64,
+    #[prost(int64, optional, tag = "2")]
+    pub created_unix_ms: ::core::option::Option<i64>,
+}
 /// A single stream advertised in the catalog.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StreamEntry {
@@ -61,6 +69,9 @@ pub struct StreamEntry {
     pub reader_connected: bool,
     #[prost(string, tag = "5")]
     pub hardware_reader_id: ::prost::alloc::string::String,
+    /// Forwarder-known epochs, newest first. Useful before the receiver has subscribed and persisted reads locally.
+    #[prost(message, repeated, tag = "6")]
+    pub epoch_summaries: ::prost::alloc::vec::Vec<StreamEpochSummary>,
 }
 /// Snapshot of all streams the forwarder exposes.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -153,6 +164,9 @@ pub struct ReaderStatus {
     /// Forwarder-authoritative current epoch creation time, in unix milliseconds.
     #[prost(int64, optional, tag = "10")]
     pub current_epoch_created_unix_ms: ::core::option::Option<i64>,
+    /// Forwarder-authoritative durable reads in the current epoch for this stream.
+    #[prost(int64, optional, tag = "11")]
+    pub reads_epoch: ::core::option::Option<i64>,
 }
 /// Static descriptive information about a reader.
 #[derive(Clone, PartialEq, ::prost::Message)]

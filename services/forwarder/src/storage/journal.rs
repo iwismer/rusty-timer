@@ -83,6 +83,12 @@ pub struct CurrentEpochMetadata {
     pub created_unix_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpochSummary {
+    pub epoch: i64,
+    pub created_unix_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct JournalEvent {
     pub id: i64,
@@ -763,6 +769,10 @@ impl Journal {
         current_epoch_metadata(&self.conn, stream_key)
     }
 
+    pub fn epoch_summaries(&self, stream_key: &str) -> Result<Vec<EpochSummary>, JournalError> {
+        epoch_summaries(&self.conn, stream_key)
+    }
+
     /// Whether the journal has any stream state for `stream_id`.
     ///
     /// Startup restore uses this to detect journal loss for configured reader
@@ -1073,6 +1083,22 @@ fn current_epoch(conn: &Connection, stream_key: &str) -> Result<i64, JournalErro
         |row| row.get(0),
     )
     .map_err(Into::into)
+}
+
+fn epoch_summaries(conn: &Connection, stream_key: &str) -> Result<Vec<EpochSummary>, JournalError> {
+    let mut stmt = conn.prepare(
+        "SELECT epoch, created_unix_ms
+         FROM stream_epochs
+         WHERE stream_id = ?1
+         ORDER BY epoch DESC",
+    )?;
+    let rows = stmt.query_map(params![stream_key], |row| {
+        Ok(EpochSummary {
+            epoch: row.get(0)?,
+            created_unix_ms: row.get(1)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 fn current_epoch_metadata(

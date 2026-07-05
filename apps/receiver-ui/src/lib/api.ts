@@ -34,6 +34,11 @@ export interface DataStats {
   resolvable_chips: number;
 }
 
+export interface StreamEpochOption {
+  stream_epoch: number;
+  created_unix_ms?: number | null;
+}
+
 export interface StreamEntry {
   // Canonical P2P stream identity (always present).
   forwarder_endpoint_id: string;
@@ -55,7 +60,9 @@ export interface StreamEntry {
   reader_connected?: boolean | null;
   display_alias?: string | null;
   stream_epoch?: number | null;
+  epoch_options?: StreamEpochOption[];
   current_epoch_name?: string | null;
+  current_epoch_created_unix_ms?: number | null;
   reads_total?: number | null;
   reads_epoch?: number | null;
   cursor_epoch?: number | null;
@@ -184,6 +191,7 @@ export interface ReaderLiveStatus {
   state: string;
   last_read_unix_ms: number | null;
   reads_session?: number | null;
+  reads_epoch?: number | null;
   reads_total?: number | null;
   last_seen_secs?: number | null;
   current_epoch?: number | null;
@@ -274,6 +282,7 @@ export interface ReplayTargetEpochOption {
   stream_epoch: number;
   name: string | null;
   first_seen_at: string | null;
+  created_unix_ms?: number | null;
   race_names: string[];
 }
 
@@ -304,6 +313,7 @@ export interface ForwarderReaderCountsUpdate {
   forwarder_id: string;
   stream_id: string;
   reads_session: number;
+  reads_epoch: number | null;
   reads_total: number;
   last_read_unix_ms: number | null;
   last_seen_secs: number | null;

@@ -55,7 +55,7 @@ pub use generated::{
     ControlC2F, ControlF2C, DataC2F, DataF2C, DataSubscribe, DownloadProgress, EventBatch,
     GapNotice, Hello, HelloOk, Ping, Pong, ProtocolError as WireProtocolError, ReadRecord,
     ReaderControlRequest, ReaderControlResponse, ReaderInfo, ReaderStatus, RestartRequest,
-    RestartResponse, StreamCatalog, StreamEntry, StreamEpochStarted, SubscribeMode, SubscribeOk,
-    SyncClock, UpsStatus, control_c2f, control_f2c, data_c2f, data_f2c,
+    RestartResponse, StreamCatalog, StreamEntry, StreamEpochStarted, StreamEpochSummary,
+    SubscribeMode, SubscribeOk, SyncClock, UpsStatus, control_c2f, control_f2c, data_c2f, data_f2c,
 };
 pub use negotiate::negotiate;

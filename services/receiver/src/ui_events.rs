@@ -12,6 +12,7 @@ pub struct ForwarderReaderCounts {
     pub stream_id: String,
     pub reads_session: u64,
     pub reads_total: i64,
+    pub reads_epoch: Option<i64>,
     pub last_read_unix_ms: Option<i64>,
     pub last_seen_secs: Option<u64>,
 }
@@ -199,6 +200,7 @@ mod tests {
             stream_id: "192.168.1.10:10000".to_owned(),
             reads_session: 12,
             reads_total: 345,
+            reads_epoch: Some(40),
             last_read_unix_ms: Some(1_711_929_600_000),
             last_seen_secs: Some(3),
         });

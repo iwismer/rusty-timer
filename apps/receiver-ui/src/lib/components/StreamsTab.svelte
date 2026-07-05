@@ -581,7 +581,7 @@
                           selectedTargetedEpochValue(stream)}
                         <select
                           data-testid="targeted-epoch-{key}"
-                          class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-36 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
+                          class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-72 max-w-full focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
                           value={selectedTargeted}
                           onchange={(e) => {
                             e.stopPropagation();
@@ -637,7 +637,7 @@
                           />
                           <select
                             data-testid="earliest-epoch-{key}"
-                            class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-36 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
+                            class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-72 max-w-full focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
                             value={selectedEarliest}
                             onchange={(e) => {
                               e.stopPropagation();

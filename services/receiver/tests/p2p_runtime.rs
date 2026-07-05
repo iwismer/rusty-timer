@@ -60,6 +60,7 @@ fn catalog() -> StreamCatalog {
             network_addr: "10.0.0.1:10000".to_owned(),
             reader_connected: true,
             hardware_reader_id: "R1".to_owned(),
+            epoch_summaries: Vec::new(),
         }],
     }
 }
@@ -254,6 +255,7 @@ async fn colliding_wire_stream_ids_are_isolated_by_forwarder_endpoint() {
                         stream_id: STREAM_ID.to_owned(),
                         epoch: 1,
                         next_seq: 3,
+                        epoch_options: Vec::new(),
                     }],
                 },
             );
@@ -266,6 +268,7 @@ async fn colliding_wire_stream_ids_are_isolated_by_forwarder_endpoint() {
                         stream_id: STREAM_ID.to_owned(),
                         epoch: 1,
                         next_seq: 3,
+                        epoch_options: Vec::new(),
                     }],
                 },
             );
@@ -1529,6 +1532,7 @@ async fn discovered_streams_appear_as_unsubscribed_then_subscribed_dedup() {
                 stream_id: "reader-a".to_owned(),
                 epoch: 2,
                 next_seq: 5,
+                epoch_options: Vec::new(),
             }],
         },
     );
@@ -1595,6 +1599,7 @@ async fn discovered_forwarder_is_dialed_and_persists_events() {
                     stream_id: STREAM_ID.to_owned(),
                     epoch: 1,
                     next_seq: 3,
+                    epoch_options: Vec::new(),
                 }],
             },
         );

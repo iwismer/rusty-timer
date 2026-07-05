@@ -1157,6 +1157,7 @@ mod tests {
                 stream_id: "ip".to_owned(),
                 reads_session: 0,
                 reads_total: 0,
+                reads_epoch: None,
                 last_read_unix_ms: None,
                 last_seen_secs: None,
             }),

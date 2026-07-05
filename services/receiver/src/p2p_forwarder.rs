@@ -194,6 +194,10 @@ async fn run_forwarder_connection(
         match session {
             Ok(session) => {
                 next_delay = backoff.initial;
+                reporter
+                    .app_state()
+                    .store_forwarder_catalog(&endpoint_id, &session.catalog)
+                    .await;
                 run_connected_forwarder(
                     &endpoint_id,
                     session,
@@ -1609,6 +1613,7 @@ mod tests {
                     current_epoch_name: None,
                     current_epoch: None,
                     current_epoch_created_unix_ms: None,
+                    reads_epoch: None,
                 })),
             },
         ];

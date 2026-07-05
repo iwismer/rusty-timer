@@ -37,7 +37,7 @@ use crate::status_store::{
 };
 use crate::storage::journal::Journal;
 use rt_iroh::{EndpointAddr, EndpointBuilder, EndpointId, RelayMode, SecretKey};
-use rt_p2p_protocol::{StreamCatalog, StreamEntry};
+use rt_p2p_protocol::{StreamCatalog, StreamEntry, StreamEpochSummary};
 use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -151,11 +151,33 @@ pub async fn start_forwarder_p2p(
     // returned delta receiver is handed to the catalog task so no state change
     // between snapshot and task startup can be missed.
     let (status_rx, status_snapshot) = status_feed.subscribe_and_snapshot().await;
+    let epoch_summaries = {
+        let journal = journal.lock().await;
+        reader_streams
+            .iter()
+            .map(|stream| {
+                Ok((
+                    stream.clone(),
+                    journal
+                        .epoch_summaries(stream)?
+                        .into_iter()
+                        .map(|summary| {
+                            Ok(StreamEpochSummary {
+                                epoch: u64::try_from(summary.epoch)?,
+                                created_unix_ms: summary.created_unix_ms,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, TryFromIntError>>()?,
+                ))
+            })
+            .collect::<Result<std::collections::HashMap<_, _>, P2pStartError>>()?
+    };
     let (catalog, catalog_task) = LiveReaderCatalog::start(
         reader_streams,
         status_feed.clone(),
         &status_snapshot,
         status_rx,
+        &epoch_summaries,
     );
     let catalog = Arc::new(catalog);
     let endpoint = P2pEndpoint::bind_with_builder(
@@ -312,6 +334,7 @@ impl LiveReaderCatalog {
         feed: ForwarderStatusFeed,
         snapshot: &ForwarderStatusSnapshot,
         status_rx: broadcast::Receiver<ForwarderStatusEvent>,
+        epoch_summaries: &std::collections::HashMap<String, Vec<StreamEpochSummary>>,
     ) -> (Self, JoinHandle<()>) {
         let initial = StreamCatalog {
             generation: 1,
@@ -323,6 +346,7 @@ impl LiveReaderCatalog {
                     network_addr: stream.clone(),
                     reader_connected: snapshot_reader_connected(snapshot, stream),
                     hardware_reader_id: stream.clone(),
+                    epoch_summaries: epoch_summaries.get(stream).cloned().unwrap_or_default(),
                 })
                 .collect(),
         };
@@ -357,11 +381,7 @@ async fn run_catalog_updates(
     loop {
         match status_rx.recv().await {
             Ok(ForwarderStatusEvent::ReaderStatus { stream_id, status }) => {
-                apply_reader_connectivity(
-                    &tx,
-                    &stream_id,
-                    status.state == ReaderConnectionState::Connected,
-                );
+                apply_reader_status(&tx, &stream_id, &status);
             }
             Ok(_) => {}
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -375,11 +395,7 @@ async fn run_catalog_updates(
                 let (new_rx, snapshot) = feed.subscribe_and_snapshot().await;
                 status_rx = new_rx;
                 for (stream_id, status) in &snapshot.readers {
-                    apply_reader_connectivity(
-                        &tx,
-                        stream_id,
-                        status.state == ReaderConnectionState::Connected,
-                    );
+                    apply_reader_status(&tx, stream_id, status);
                 }
             }
             Err(broadcast::error::RecvError::Closed) => break,
@@ -387,10 +403,13 @@ async fn run_catalog_updates(
     }
 }
 
-/// Sets `reader_connected` for the entry matching `stream_id`, bumping the
-/// catalog generation only on an actual change. Events for unknown streams or
-/// with unchanged connectivity are no-ops (no generation bump).
-fn apply_reader_connectivity(tx: &watch::Sender<StreamCatalog>, stream_id: &str, connected: bool) {
+/// Applies reader status to the catalog, bumping the generation only when the
+/// advertised connectivity or epoch list actually changes.
+fn apply_reader_status(
+    tx: &watch::Sender<StreamCatalog>,
+    stream_id: &str,
+    status: &crate::status_store::ReaderStatus,
+) {
     tx.send_if_modified(|catalog| {
         let Some(entry) = catalog
             .entries
@@ -399,12 +418,33 @@ fn apply_reader_connectivity(tx: &watch::Sender<StreamCatalog>, stream_id: &str,
         else {
             return false;
         };
-        if entry.reader_connected == connected {
-            return false;
+        let mut changed = false;
+        let connected = status.state == ReaderConnectionState::Connected;
+        if entry.reader_connected != connected {
+            entry.reader_connected = connected;
+            changed = true;
         }
-        entry.reader_connected = connected;
-        catalog.generation += 1;
-        true
+        if let Some(epoch) = status
+            .current_epoch
+            .and_then(|epoch| u64::try_from(epoch).ok())
+            && !entry
+                .epoch_summaries
+                .iter()
+                .any(|summary| summary.epoch == epoch)
+        {
+            entry.epoch_summaries.insert(
+                0,
+                StreamEpochSummary {
+                    epoch,
+                    created_unix_ms: status.current_epoch_created_unix_ms,
+                },
+            );
+            changed = true;
+        }
+        if changed {
+            catalog.generation += 1;
+        }
+        changed
     });
 }
 

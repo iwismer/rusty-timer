@@ -4,7 +4,8 @@ use prost::Message;
 use rt_p2p_protocol::{
     ConfigGetRequest, ConfigGetResponse, ConfigSetRequest, ConfigSetResponse, ControlC2F,
     ControlF2C, DownloadProgress, Hello, ReadRecord, ReaderControlRequest, ReaderControlResponse,
-    ReaderInfo, RestartRequest, RestartResponse, WireProtocolError, control_c2f, control_f2c,
+    ReaderInfo, RestartRequest, RestartResponse, StreamCatalog, StreamEntry, StreamEpochSummary,
+    WireProtocolError, control_c2f, control_f2c,
 };
 
 // A stream_id is opaque bytes on the wire; this test uses a 16-byte sample.
@@ -51,6 +52,37 @@ fn hello_round_trips() {
     original.encode(&mut buf).expect("encode Hello");
 
     let decoded = Hello::decode(buf.as_slice()).expect("decode Hello");
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn stream_catalog_with_epoch_summaries_round_trips() {
+    let original = StreamCatalog {
+        generation: 8,
+        entries: vec![StreamEntry {
+            stream_id: STREAM_ID.to_vec(),
+            display_name: "Finish".to_owned(),
+            network_addr: "10.0.0.1:10000".to_owned(),
+            reader_connected: true,
+            hardware_reader_id: "R1".to_owned(),
+            epoch_summaries: vec![
+                StreamEpochSummary {
+                    epoch: 2,
+                    created_unix_ms: Some(1_783_238_640_000),
+                },
+                StreamEpochSummary {
+                    epoch: 1,
+                    created_unix_ms: Some(1_783_235_000_000),
+                },
+            ],
+        }],
+    };
+
+    let mut buf = Vec::new();
+    original.encode(&mut buf).expect("encode StreamCatalog");
+
+    let decoded = StreamCatalog::decode(buf.as_slice()).expect("decode StreamCatalog");
 
     assert_eq!(decoded, original);
 }

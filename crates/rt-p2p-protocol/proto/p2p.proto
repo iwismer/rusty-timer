@@ -46,6 +46,12 @@ message HelloOk {
   uint64 catalog_generation = 6;
 }
 
+// A forwarder-known epoch for a stream.
+message StreamEpochSummary {
+  uint64 epoch = 1;
+  optional int64 created_unix_ms = 2;
+}
+
 // A single stream advertised in the catalog.
 message StreamEntry {
   // Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
@@ -54,6 +60,8 @@ message StreamEntry {
   string network_addr = 3;
   bool reader_connected = 4;
   string hardware_reader_id = 5;
+  // Forwarder-known epochs, newest first. Useful before the receiver has subscribed and persisted reads locally.
+  repeated StreamEpochSummary epoch_summaries = 6;
 }
 
 // Snapshot of all streams the forwarder exposes.
@@ -119,6 +127,8 @@ message ReaderStatus {
   optional int64 current_epoch = 9;
   // Forwarder-authoritative current epoch creation time, in unix milliseconds.
   optional int64 current_epoch_created_unix_ms = 10;
+  // Forwarder-authoritative durable reads in the current epoch for this stream.
+  optional int64 reads_epoch = 11;
 }
 
 // Static descriptive information about a reader.

@@ -397,6 +397,7 @@ fn reader_status_event(stream_id: &str, status: &ReaderStatus) -> ControlEvent {
         current_epoch_name: status.current_epoch_name.clone(),
         current_epoch: status.current_epoch,
         current_epoch_created_unix_ms: status.current_epoch_created_unix_ms,
+        reads_epoch: Some(status.reads_epoch),
     })
 }
 

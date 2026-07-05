@@ -354,6 +354,11 @@ impl StatusServer {
         self.store.set_reader_total(reader_ip, total).await;
     }
 
+    /// Seed a reader's current-epoch read count from durable journal state.
+    pub async fn set_reader_epoch_reads(&self, reader_ip: &str, count: i64) {
+        self.store.set_reader_epoch_reads(reader_ip, count).await;
+    }
+
     pub async fn set_reader_epoch_metadata(
         &self,
         reader_ip: &str,
@@ -735,6 +740,7 @@ struct ReaderStatusJson {
     state: String,
     reads_session: u64,
     reads_total: i64,
+    reads_epoch: i64,
     last_seen_secs: Option<u64>,
     local_port: u16,
     current_epoch: Option<i64>,
@@ -775,6 +781,7 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
                 state_str.to_owned(),
                 r.reads_since_restart,
                 r.reads_total,
+                r.reads_epoch,
                 r.last_seen.map(|t| t.elapsed().as_secs()),
                 r.local_port,
                 r.current_epoch_name.clone(),
@@ -791,6 +798,7 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
         state,
         reads_session,
         reads_total,
+        reads_epoch,
         last_seen_secs,
         local_port,
         current_epoch_name,
@@ -803,6 +811,7 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
             state,
             reads_session,
             reads_total,
+            reads_epoch,
             last_seen_secs,
             local_port,
             current_epoch: epoch.map(|metadata| metadata.epoch),
@@ -1510,6 +1519,10 @@ async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
     match result {
         Ok(metadata) => {
             if let Some(reader) = state.subsystem.lock().await.readers.get_mut(&reader_ip) {
+                if reader.current_epoch.is_some_and(|e| e != metadata.epoch) {
+                    // Epoch changed: the new epoch starts with zero reads.
+                    reader.reads_epoch = 0;
+                }
                 reader.current_epoch = Some(metadata.epoch);
                 reader.current_epoch_created_unix_ms = metadata.created_unix_ms;
                 reader.current_epoch_name = None;
@@ -1520,6 +1533,7 @@ async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
                         state: (&reader.state).into(),
                         reads_session: reader.reads_since_restart,
                         reads_total: reader.reads_total,
+                        reads_epoch: reader.reads_epoch,
                         last_seen_secs: reader.last_seen.map(|t| t.elapsed().as_secs()),
                         local_port: reader.local_port,
                         current_epoch_name: None,
@@ -1586,6 +1600,7 @@ async fn set_current_epoch_name_handler<J: JournalAccess + Send + 'static>(
             state: (&reader.state).into(),
             reads_session: reader.reads_since_restart,
             reads_total: reader.reads_total,
+            reads_epoch: reader.reads_epoch,
             last_seen_secs: reader.last_seen.map(|t| t.elapsed().as_secs()),
             local_port: reader.local_port,
             current_epoch_name: reader.current_epoch_name.clone(),
@@ -4714,6 +4729,7 @@ target = "192.168.1.100:10000"
                     last_seen: Some(Instant::now()),
                     reads_since_restart: 2,
                     reads_total: 42,
+                    reads_epoch: 7,
                     local_port: 10_001,
                     current_epoch: None,
                     current_epoch_created_unix_ms: None,

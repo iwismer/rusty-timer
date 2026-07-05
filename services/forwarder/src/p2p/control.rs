@@ -1029,6 +1029,7 @@ mod tests {
                 network_addr: "10.0.0.5:10000".to_string(),
                 reader_connected: true,
                 hardware_reader_id: "RDR-1".to_string(),
+                epoch_summaries: Vec::new(),
             }],
         }
     }
@@ -2233,6 +2234,7 @@ mod tests {
                 current_epoch_name: None,
                 current_epoch: None,
                 current_epoch_created_unix_ms: None,
+                reads_epoch: None,
             }))
             .await
             .expect("control event receiver alive");

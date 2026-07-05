@@ -744,6 +744,7 @@ mod tests {
                 network_addr: "10.0.0.1:10000".to_owned(),
                 reader_connected: true,
                 hardware_reader_id: "R1".to_owned(),
+                epoch_summaries: Vec::new(),
             }],
         }
     }

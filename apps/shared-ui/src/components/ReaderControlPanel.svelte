@@ -49,6 +49,7 @@
     readerStateLabel = undefined,
     showHeader = true,
     readsSession = null,
+    readsEpoch = null,
     readsTotal = null,
     lastSeenDisplay = undefined,
     localPortLabel = 'Local port',
@@ -90,6 +91,8 @@
     showHeader?: boolean;
     /** Reads seen this session; row hidden when null. */
     readsSession?: number | null;
+    /** Reads recorded in the current epoch; entry hidden when null. */
+    readsEpoch?: number | null;
     /** Total reads seen; row hidden when null. */
     readsTotal?: number | null;
     /** Pre-formatted "last seen" string (e.g. "5s ago"); hidden when undefined. */
@@ -168,6 +171,7 @@
   let showEpochRow = $derived(onSetEpochName !== undefined || onAdvanceEpoch !== undefined);
   let showSummaryRow = $derived(
     readsSession != null ||
+      readsEpoch != null ||
       readsTotal != null ||
       localPortValue !== undefined ||
       lastSeenDisplay !== undefined ||
@@ -365,6 +369,18 @@
             <span class="font-mono text-text-primary">{readsSession.toLocaleString()}</span>
             {#if onOpenHelpModal}<HelpTip
                 fieldKey="reads_session"
+                sectionKey="reader_live"
+                context={helpContext}
+                onOpenModal={openHelp}
+              />{/if}
+          </div>
+        {/if}
+        {#if readsEpoch != null}
+          <div class="inline-flex items-baseline gap-1">
+            <span class="text-text-muted">Reads (epoch):</span>
+            <span class="font-mono text-text-primary">{readsEpoch.toLocaleString()}</span>
+            {#if onOpenHelpModal}<HelpTip
+                fieldKey="reads_epoch"
                 sectionKey="reader_live"
                 context={helpContext}
                 onOpenModal={openHelp}

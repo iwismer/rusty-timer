@@ -720,6 +720,7 @@
                 readerInfo={readerInfoMap[reader.ip] ?? null}
                 readerState={reader.state}
                 readsSession={reader.reads_session}
+                readsEpoch={reader.reads_epoch}
                 readsTotal={reader.reads_total}
                 localPortLabel="Local Port"
                 localPortValue={String(reader.local_port)}
