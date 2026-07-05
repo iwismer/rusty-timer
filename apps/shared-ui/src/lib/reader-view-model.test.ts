@@ -13,6 +13,9 @@ import {
   parseWallClock,
   formatHardwareCode,
   formatEpochCreatedAt,
+  formatEpochName,
+  normalizeEpochNameDraft,
+  advanceEpochWithOptionalName,
 } from "./reader-view-model";
 
 describe("formatHardwareCode", () => {
@@ -55,6 +58,58 @@ describe("formatEpochCreatedAt", () => {
     expect(
       formatEpochCreatedAt(Date.UTC(2026, 6, 5, 7, 57), "en-US", "UTC"),
     ).toBe("Jul 5, 2026, 7:57 AM");
+  });
+});
+
+describe("formatEpochName", () => {
+  it("returns unnamed for null/undefined/blank names", () => {
+    expect(formatEpochName(null)).toBe("unnamed");
+    expect(formatEpochName(undefined)).toBe("unnamed");
+    expect(formatEpochName("")).toBe("unnamed");
+    expect(formatEpochName("   ")).toBe("unnamed");
+  });
+
+  it("returns trimmed epoch names", () => {
+    expect(formatEpochName(" Race 1 ")).toBe("Race 1");
+  });
+});
+
+describe("normalizeEpochNameDraft", () => {
+  it("returns null for blank drafts", () => {
+    expect(normalizeEpochNameDraft("")).toBeNull();
+    expect(normalizeEpochNameDraft("   ")).toBeNull();
+  });
+
+  it("returns a trimmed name for non-blank drafts", () => {
+    expect(normalizeEpochNameDraft(" Race 2 ")).toBe("Race 2");
+  });
+});
+
+describe("advanceEpochWithOptionalName", () => {
+  it("advances without naming when the draft is blank", async () => {
+    const calls: string[] = [];
+
+    const result = await advanceEpochWithOptionalName(
+      "   ",
+      async () => calls.push("advance"),
+      async (name) => calls.push(`name:${name}`),
+    );
+
+    expect(result).toBe("advanced");
+    expect(calls).toEqual(["advance"]);
+  });
+
+  it("advances first and then names the new epoch from the draft", async () => {
+    const calls: string[] = [];
+
+    const result = await advanceEpochWithOptionalName(
+      " Race 2 ",
+      async () => calls.push("advance"),
+      async (name) => calls.push(`name:${name}`),
+    );
+
+    expect(result).toBe("advanced_and_named");
+    expect(calls).toEqual(["advance", "name:Race 2"]);
   });
 });
 

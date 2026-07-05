@@ -24,6 +24,28 @@ export function formatEpochCreatedAt(
   }).format(new Date(unixMs));
 }
 
+export function formatEpochName(name: string | null | undefined): string {
+  return normalizeEpochNameDraft(name ?? "") ?? "unnamed";
+}
+
+export function normalizeEpochNameDraft(draft: string): string | null {
+  return draft.trim() || null;
+}
+
+export async function advanceEpochWithOptionalName(
+  draftName: string,
+  onAdvanceEpoch: () => Promise<void>,
+  onSetEpochName?: (name: string) => Promise<void>,
+): Promise<"advanced" | "advanced_and_named"> {
+  const name = normalizeEpochNameDraft(draftName);
+  await onAdvanceEpoch();
+  if (name !== null && onSetEpochName) {
+    await onSetEpochName(name);
+    return "advanced_and_named";
+  }
+  return "advanced";
+}
+
 export function readerControlDisabled(
   state: "connected" | "connecting" | "disconnected",
   busy: boolean | null | undefined,

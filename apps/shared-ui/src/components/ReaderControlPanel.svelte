@@ -7,6 +7,9 @@
     formatClockDrift,
     formatHardwareCode,
     formatEpochCreatedAt,
+    formatEpochName,
+    normalizeEpochNameDraft,
+    advanceEpochWithOptionalName,
     driftColorClass,
     computeDownloadPercent,
     readerControlDisabled,
@@ -296,7 +299,7 @@
 
   async function handleSaveEpochName() {
     if (!onSetEpochName) return;
-    const name = epochNameDraft.trim() || null;
+    const name = normalizeEpochNameDraft(epochNameDraft);
     await wrap(async () => {
       await onSetEpochName!(name);
       if (name === null) epochNameDraft = "";
@@ -309,9 +312,20 @@
 
   async function handleAdvanceEpoch() {
     if (!onAdvanceEpoch) return;
+    const draft = epochNameDraft;
     await wrap(async () => {
-      await onAdvanceEpoch!();
-      setFeedback({ kind: "ok", message: "Advanced to next epoch" });
+      const result = await advanceEpochWithOptionalName(
+        draft,
+        onAdvanceEpoch!,
+        onSetEpochName,
+      );
+      setFeedback({
+        kind: "ok",
+        message:
+          result === "advanced"
+            ? "Advanced to next epoch"
+            : "Advanced to next epoch and saved name",
+      });
     }, "Advance Epoch");
   }
 
@@ -455,8 +469,13 @@
                 onOpenModal={openHelp}
               />{/if}
             <span class="font-mono text-text-primary">
-              {#if currentEpoch != null}#{currentEpoch}{:else}—{/if}{#if currentEpochName}
-                — {currentEpochName}{/if}
+              {#if currentEpoch != null}#{currentEpoch}{:else}—{/if}
+            </span>
+          </span>
+          <span>
+            Name:
+            <span class="font-mono text-text-primary">
+              {formatEpochName(currentEpochName)}
             </span>
           </span>
           <span>
@@ -475,7 +494,7 @@
       <div class="flex items-center gap-2 flex-wrap">
         {#if onSetEpochName}
           <span class="text-xs text-text-muted"
-            >Epoch Name:{#if onOpenHelpModal}<HelpTip
+            >New Epoch Name:{#if onOpenHelpModal}<HelpTip
                 fieldKey="epoch_name"
                 sectionKey="reader_live"
                 context={helpContext}
