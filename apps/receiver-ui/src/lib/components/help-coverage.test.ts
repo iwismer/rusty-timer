@@ -82,7 +82,6 @@ describe("receiver UI help coverage", () => {
       "event_type",
       "earliest_epoch",
       "announce",
-      "replay",
       "subscribed",
       "subscribe_all",
     ]);

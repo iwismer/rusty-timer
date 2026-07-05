@@ -475,9 +475,8 @@ describe("receiver updater store", () => {
 
     expect(store.modeDraft).toBe("live");
     expect(store.raceIdDraft).toBe("");
-    expect(store.targetedEpochInputs).toEqual({});
     expect(store.savedModePayload).toBe(
-      JSON.stringify({ mode: "live", streams: [], earliest_epochs: [] }),
+      JSON.stringify({ mode: "live", streams: [] }),
     );
   });
 
@@ -493,10 +492,8 @@ describe("receiver updater store", () => {
     initStore();
     await flushAsyncWork();
 
-    store.modeDraft = "targeted_replay";
-    store.targetedEpochInputs = {
-      "fwd-1/10.0.0.1:10000": "12",
-    };
+    store.modeDraft = "race";
+    store.raceIdDraft = "22222222-2222-2222-2222-222222222222";
     markModeEdited();
 
     apiMocks.getMode.mockRejectedValueOnce(new Error("no mode configured"));
@@ -505,9 +502,8 @@ describe("receiver updater store", () => {
 
     expect(store.modeDraft).toBe("live");
     expect(store.raceIdDraft).toBe("");
-    expect(store.targetedEpochInputs).toEqual({});
     expect(store.savedModePayload).toBe(
-      JSON.stringify({ mode: "live", streams: [], earliest_epochs: [] }),
+      JSON.stringify({ mode: "live", streams: [] }),
     );
   });
 
@@ -1717,8 +1713,8 @@ describe("canonical-only stream identity", () => {
     expect(payload.mode).toBe("live");
     if (payload.mode !== "live") throw new Error("unreachable");
     // Only the stream with display metadata is representable in the compatibility payload.
-    expect(payload.earliest_epochs).toEqual([
-      { forwarder_id: "fwd-1", reader_ip: "10.0.0.1:10000", earliest_epoch: 3 },
+    expect(payload.streams).toEqual([
+      { forwarder_id: "fwd-1", reader_ip: "10.0.0.1:10000" },
     ]);
   });
 });

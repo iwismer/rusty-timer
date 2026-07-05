@@ -67,6 +67,10 @@ export interface StreamEntry {
   reads_epoch?: number | null;
   cursor_epoch?: number | null;
   cursor_seq?: number | null;
+  /** Data task held fail-closed: the earliest-epoch override is unresolvable. */
+  override_held?: boolean;
+  /** Stored earliest-epoch override for this stream, if any. */
+  earliest_epoch?: number | null;
 }
 
 export interface StreamCountUpdate {
@@ -250,32 +254,14 @@ export interface StreamRef {
   reader_ip: string;
 }
 
-export interface EarliestEpochOverride {
-  forwarder_id: string;
-  reader_ip: string;
-  earliest_epoch: number;
-}
-
-export interface ReplayTarget {
-  forwarder_id: string;
-  reader_ip: string;
-  stream_epoch: number;
-  from_seq?: number;
-}
-
 export type ReceiverMode =
   | {
       mode: "live";
       streams: StreamRef[];
-      earliest_epochs: EarliestEpochOverride[];
     }
   | {
       mode: "race";
       race_id: string;
-    }
-  | {
-      mode: "targeted_replay";
-      targets: ReplayTarget[];
     };
 
 export interface StreamEpochOption {

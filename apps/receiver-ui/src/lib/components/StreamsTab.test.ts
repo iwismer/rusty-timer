@@ -34,7 +34,6 @@ describe("StreamsTab", () => {
     store.earliestEpochLoading = {};
     store.earliestEpochLoadErrors = {};
     store.earliestEpochSaving = {};
-    store.targetedEpochInputs = {};
     vi.stubGlobal(
       "ResizeObserver",
       class {
@@ -252,6 +251,8 @@ describe("StreamsTab", () => {
           reads_epoch: null,
           cursor_epoch: null,
           cursor_seq: null,
+          // Stored earliest-epoch override read back from the backend.
+          earliest_epoch: 7,
         },
       ],
       degraded: false,

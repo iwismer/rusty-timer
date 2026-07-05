@@ -3,30 +3,23 @@ const MIN_TIMEOUT_SECONDS = 1;
 const MAX_TIMEOUT_SECONDS = 255;
 
 export const READ_MODE_OPTIONS = [
-  { value: "raw", label: "Raw" },
-  { value: "event", label: "Event" },
-  { value: "fsls", label: "First/Last Seen" },
+  { value: 'raw', label: 'Raw' },
+  { value: 'event', label: 'Event' },
+  { value: 'fsls', label: 'First/Last Seen' },
 ] as const;
 
-export function shouldShowTimeoutInput(
-  mode: string | null | undefined,
-): boolean {
-  return mode === "event" || mode === "fsls";
+export function shouldShowTimeoutInput(mode: string | null | undefined): boolean {
+  return mode === 'event' || mode === 'fsls';
 }
 
-export function initialTimeoutDraft(
-  current: number | null | undefined,
-): string {
-  if (typeof current === "number" && Number.isFinite(current)) {
+export function initialTimeoutDraft(current: number | null | undefined): string {
+  if (typeof current === 'number' && Number.isFinite(current)) {
     return String(current);
   }
   return String(DEFAULT_TIMEOUT_SECONDS);
 }
 
-export function resolveTimeoutSeconds(
-  draft: string,
-  fallback: number | null | undefined,
-): number {
+export function resolveTimeoutSeconds(draft: string, fallback: number | null | undefined): number {
   const trimmed = draft.trim();
   const parsed = Number.parseInt(trimmed, 10);
 
@@ -34,7 +27,7 @@ export function resolveTimeoutSeconds(
     return clampTimeout(parsed);
   }
 
-  if (typeof fallback === "number" && Number.isFinite(fallback)) {
+  if (typeof fallback === 'number' && Number.isFinite(fallback)) {
     return clampTimeout(fallback);
   }
 

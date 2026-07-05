@@ -1,11 +1,8 @@
-import type { UpdateStatusResponse } from "./update-flow";
+import type { UpdateStatusResponse } from './update-flow';
 
 export interface ConfigApi {
   getConfig(): Promise<ConfigLoadResult>;
-  saveSection(
-    section: string,
-    data: Record<string, unknown>,
-  ): Promise<ConfigSaveResult>;
+  saveSection(section: string, data: Record<string, unknown>): Promise<ConfigSaveResult>;
   restartService(): Promise<ConfigActionResult>;
   restartDevice(): Promise<ConfigActionResult>;
   shutdownDevice(): Promise<ConfigActionResult>;

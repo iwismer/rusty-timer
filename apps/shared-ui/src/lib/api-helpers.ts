@@ -1,35 +1,29 @@
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
-    message: string,
+    message: string
   ) {
     super(message);
-    this.name = "ApiError";
+    this.name = 'ApiError';
   }
 }
 
-export async function apiFetch<T>(
-  path: string,
-  init?: RequestInit,
-): Promise<T> {
+export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(path, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
   });
   if (!resp.ok) {
     const text = await resp.text();
     throw new ApiError(
       resp.status,
-      `API ${init?.method ?? "GET"} ${path} -> ${resp.status}: ${text}`,
+      `API ${init?.method ?? 'GET'} ${path} -> ${resp.status}: ${text}`
     );
   }
   if (resp.status === 204) return undefined as unknown as T;
   try {
     return await resp.json();
   } catch {
-    throw new ApiError(
-      resp.status,
-      `API ${init?.method ?? "GET"} ${path} returned invalid JSON`,
-    );
+    throw new ApiError(resp.status, `API ${init?.method ?? 'GET'} ${path} returned invalid JSON`);
   }
 }

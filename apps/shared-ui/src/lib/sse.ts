@@ -8,7 +8,7 @@ export interface SseHandle {
 export function createSSE(
   url: string,
   handlers: Record<string, EventHandler>,
-  onConnection?: (connected: boolean) => void,
+  onConnection?: (connected: boolean) => void
 ): SseHandle {
   const eventSource = new EventSource(url);
   let fallbackTimer: ReturnType<typeof setTimeout> | null = null;

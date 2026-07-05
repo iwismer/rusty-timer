@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 class MockEventSource {
   static lastInstance: MockEventSource | null = null;
@@ -37,12 +37,12 @@ class MockEventSource {
   }
 }
 
-describe("createSSE", () => {
+describe('createSSE', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.useFakeTimers();
     MockEventSource.lastInstance = null;
-    vi.stubGlobal("EventSource", MockEventSource as unknown as typeof EventSource);
+    vi.stubGlobal('EventSource', MockEventSource as unknown as typeof EventSource);
   });
 
   afterEach(() => {
@@ -50,19 +50,19 @@ describe("createSSE", () => {
     vi.unstubAllGlobals();
   });
 
-  it("dispatches named events to handlers", async () => {
-    const { createSSE } = await import("./sse");
+  it('dispatches named events to handlers', async () => {
+    const { createSSE } = await import('./sse');
     const handler = vi.fn();
-    createSSE("/api/v1/events", { my_event: handler });
+    createSSE('/api/v1/events', { my_event: handler });
 
-    MockEventSource.lastInstance!.emit("my_event", { key: "value" });
-    expect(handler).toHaveBeenCalledWith({ key: "value" });
+    MockEventSource.lastInstance!.emit('my_event', { key: 'value' });
+    expect(handler).toHaveBeenCalledWith({ key: 'value' });
   });
 
-  it("calls onConnection(true) on open", async () => {
-    const { createSSE } = await import("./sse");
+  it('calls onConnection(true) on open', async () => {
+    const { createSSE } = await import('./sse');
     const onConnection = vi.fn();
-    createSSE("/api/v1/events", {}, onConnection);
+    createSSE('/api/v1/events', {}, onConnection);
 
     const es = MockEventSource.lastInstance!;
     es.readyState = MockEventSource.OPEN;
@@ -70,10 +70,10 @@ describe("createSSE", () => {
     expect(onConnection).toHaveBeenCalledWith(true);
   });
 
-  it("signals disconnect immediately when readyState is CLOSED", async () => {
-    const { createSSE } = await import("./sse");
+  it('signals disconnect immediately when readyState is CLOSED', async () => {
+    const { createSSE } = await import('./sse');
     const onConnection = vi.fn();
-    createSSE("/api/v1/events", {}, onConnection);
+    createSSE('/api/v1/events', {}, onConnection);
 
     const es = MockEventSource.lastInstance!;
     es.readyState = MockEventSource.CLOSED;
@@ -81,10 +81,10 @@ describe("createSSE", () => {
     expect(onConnection).toHaveBeenCalledWith(false);
   });
 
-  it("does not signal disconnect immediately when readyState is CONNECTING", async () => {
-    const { createSSE } = await import("./sse");
+  it('does not signal disconnect immediately when readyState is CONNECTING', async () => {
+    const { createSSE } = await import('./sse');
     const onConnection = vi.fn();
-    createSSE("/api/v1/events", {}, onConnection);
+    createSSE('/api/v1/events', {}, onConnection);
 
     const es = MockEventSource.lastInstance!;
     es.readyState = MockEventSource.CONNECTING;
@@ -92,10 +92,10 @@ describe("createSSE", () => {
     expect(onConnection).not.toHaveBeenCalled();
   });
 
-  it("signals disconnect after 10s fallback when readyState stays CONNECTING", async () => {
-    const { createSSE } = await import("./sse");
+  it('signals disconnect after 10s fallback when readyState stays CONNECTING', async () => {
+    const { createSSE } = await import('./sse');
     const onConnection = vi.fn();
-    createSSE("/api/v1/events", {}, onConnection);
+    createSSE('/api/v1/events', {}, onConnection);
 
     const es = MockEventSource.lastInstance!;
     es.readyState = MockEventSource.CONNECTING;
@@ -106,10 +106,10 @@ describe("createSSE", () => {
     expect(onConnection).toHaveBeenCalledWith(false);
   });
 
-  it("cancels fallback timer when onopen fires before 10s", async () => {
-    const { createSSE } = await import("./sse");
+  it('cancels fallback timer when onopen fires before 10s', async () => {
+    const { createSSE } = await import('./sse');
     const onConnection = vi.fn();
-    createSSE("/api/v1/events", {}, onConnection);
+    createSSE('/api/v1/events', {}, onConnection);
 
     const es = MockEventSource.lastInstance!;
     es.readyState = MockEventSource.CONNECTING;
@@ -125,10 +125,10 @@ describe("createSSE", () => {
     expect(onConnection).toHaveBeenCalledWith(true);
   });
 
-  it("does not start multiple fallback timers on repeated errors", async () => {
-    const { createSSE } = await import("./sse");
+  it('does not start multiple fallback timers on repeated errors', async () => {
+    const { createSSE } = await import('./sse');
     const onConnection = vi.fn();
-    createSSE("/api/v1/events", {}, onConnection);
+    createSSE('/api/v1/events', {}, onConnection);
 
     const es = MockEventSource.lastInstance!;
     es.readyState = MockEventSource.CONNECTING;
@@ -141,17 +141,17 @@ describe("createSSE", () => {
     expect(onConnection).toHaveBeenCalledWith(false);
   });
 
-  it("does not crash on malformed JSON events", async () => {
-    const { createSSE } = await import("./sse");
+  it('does not crash on malformed JSON events', async () => {
+    const { createSSE } = await import('./sse');
     const handler = vi.fn();
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    createSSE("/api/v1/events", { my_event: handler });
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    createSSE('/api/v1/events', { my_event: handler });
 
     const es = MockEventSource.lastInstance!;
     // Emit raw malformed JSON — not via .emit() which stringifies
-    const listeners = (es as any).listeners.get("my_event") ?? [];
+    const listeners = (es as any).listeners.get('my_event') ?? [];
     for (const l of listeners) {
-      l({ data: "not valid json{{{" });
+      l({ data: 'not valid json{{{' });
     }
 
     expect(handler).not.toHaveBeenCalled();
@@ -159,27 +159,27 @@ describe("createSSE", () => {
     consoleSpy.mockRestore();
   });
 
-  it("logs handler errors differently from parse errors", async () => {
-    const { createSSE } = await import("./sse");
+  it('logs handler errors differently from parse errors', async () => {
+    const { createSSE } = await import('./sse');
     const handler = vi.fn().mockImplementation(() => {
-      throw new TypeError("Cannot read properties of undefined");
+      throw new TypeError('Cannot read properties of undefined');
     });
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    createSSE("/api/v1/events", { my_event: handler });
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    createSSE('/api/v1/events', { my_event: handler });
 
     const es = MockEventSource.lastInstance!;
-    es.emit("my_event", { key: "value" });
+    es.emit('my_event', { key: 'value' });
 
-    expect(handler).toHaveBeenCalledWith({ key: "value" });
+    expect(handler).toHaveBeenCalledWith({ key: 'value' });
     expect(consoleSpy).toHaveBeenCalledTimes(1);
     expect(consoleSpy.mock.calls[0][0]).toBe('SSE handler error for "my_event":');
     consoleSpy.mockRestore();
   });
 
-  it("cleans up fallback timer on destroy", async () => {
-    const { createSSE } = await import("./sse");
+  it('cleans up fallback timer on destroy', async () => {
+    const { createSSE } = await import('./sse');
     const onConnection = vi.fn();
-    const handle = createSSE("/api/v1/events", {}, onConnection);
+    const handle = createSSE('/api/v1/events', {}, onConnection);
 
     const es = MockEventSource.lastInstance!;
     es.readyState = MockEventSource.CONNECTING;

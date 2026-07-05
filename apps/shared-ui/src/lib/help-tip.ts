@@ -8,14 +8,12 @@ export function computePopoverStyle(
   buttonRect: { top: number; bottom: number; left: number; right: number },
   viewportWidth: number,
   viewportHeight: number,
-  popoverHeight: number = POPOVER_HEIGHT,
+  popoverHeight: number = POPOVER_HEIGHT
 ): string {
   const spaceBelow = viewportHeight - buttonRect.bottom;
   const showAbove = spaceBelow < popoverHeight + GAP && buttonRect.top > popoverHeight + GAP;
 
-  const top = showAbove
-    ? buttonRect.top - popoverHeight - GAP
-    : buttonRect.bottom + GAP;
+  const top = showAbove ? buttonRect.top - popoverHeight - GAP : buttonRect.bottom + GAP;
 
   // Align left edge with button, but clamp so it doesn't overflow the viewport
   let left = buttonRect.left;
