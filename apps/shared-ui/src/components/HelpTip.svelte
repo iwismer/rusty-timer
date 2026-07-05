@@ -1,17 +1,17 @@
 <script module lang="ts">
-  export const HELP_OPEN_MODAL_KEY = "help-open-modal";
+  export const HELP_OPEN_MODAL_KEY = 'help-open-modal';
 </script>
 
 <script lang="ts">
-  import { getContext, hasContext, onDestroy } from "svelte";
-  import { getField } from "../lib/help/index";
-  import type { HelpContextName } from "../lib/help/help-types";
-  import { computePopoverStyle } from "../lib/help-tip";
+  import { getContext, hasContext, onDestroy } from 'svelte';
+  import { getField } from '../lib/help/index';
+  import type { HelpContextName } from '../lib/help/help-types';
+  import { computePopoverStyle } from '../lib/help-tip';
 
   let {
     fieldKey,
     sectionKey,
-    context = "forwarder" as HelpContextName,
+    context = 'forwarder' as HelpContextName,
     onOpenModal = undefined as ((fieldKey: string) => void) | undefined,
   }: {
     fieldKey: string;
@@ -30,14 +30,14 @@
   $effect(() => {
     if (!field) {
       console.warn(
-        `[HelpTip] No help found for field="${fieldKey}" section="${sectionKey}" context="${context}". Check for typos.`,
+        `[HelpTip] No help found for field="${fieldKey}" section="${sectionKey}" context="${context}". Check for typos.`
       );
     }
   });
 
   let btnEl: HTMLButtonElement | undefined = $state();
   let showingPopover = $state(false);
-  let popoverStyle = $state("");
+  let popoverStyle = $state('');
   let showTimer: ReturnType<typeof setTimeout> | undefined;
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -82,7 +82,7 @@
       contextOpenHelp(fieldKey);
     } else {
       console.warn(
-        `[HelpTip] No modal handler for field="${fieldKey}". Ensure HelpTip is inside a Card with helpSection, or pass onOpenModal.`,
+        `[HelpTip] No modal handler for field="${fieldKey}". Ensure HelpTip is inside a Card with helpSection, or pass onOpenModal.`
       );
     }
   }
@@ -93,7 +93,7 @@
   });
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter") {
+    if (e.key === 'Enter') {
       e.preventDefault();
       handleClick();
     }
@@ -112,12 +112,12 @@
       onkeydown={handleKeydown}
       class="inline-flex items-center justify-center w-4 h-4 rounded-full border border-border text-text-muted hover:text-accent hover:border-accent focus:text-accent focus:border-accent text-[10px] font-bold cursor-pointer bg-transparent transition-colors"
       aria-label="Help for {field.label}"
-      type="button"
-    >?</button>
+      type="button">?</button
+    >
 
     {#if showingPopover}
       <div
-        class="fixed z-50 w-72 p-3 rounded-lg border border-border bg-surface-1 shadow-lg text-sm"
+        class="fixed z-50 w-72 p-3 rounded-lg border border-border bg-surface-1 shadow-lg text-sm whitespace-normal break-words"
         style={popoverStyle}
         role="tooltip"
         onmouseenter={cancelHide}

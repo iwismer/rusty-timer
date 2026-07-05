@@ -255,12 +255,6 @@
                   context="receiver"
                   onOpenModal={openHelp}
                 />
-                <HelpTip
-                  fieldKey="status_indicator"
-                  sectionKey="streams"
-                  context="receiver"
-                  onOpenModal={openHelp}
-                />
               </span>
             </th>
             {#if showLastReadCol()}

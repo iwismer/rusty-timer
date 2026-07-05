@@ -62,7 +62,6 @@ describe("receiver UI help coverage", () => {
     const source = readComponent("StreamsTab");
     expectHelpTips(source, [
       "stream_identity",
-      "status_indicator",
       "last_read",
       "reads",
       "local_port",
@@ -76,6 +75,18 @@ describe("receiver UI help coverage", () => {
       "subscribe_all",
     ]);
     expect(source).toContain("onOpenModal={openHelp}");
+  });
+
+  it("does not render duplicate help icons in the Stream column header", () => {
+    const source = readComponent("StreamsTab");
+    const streamIdentityIndex = source.indexOf('fieldKey="stream_identity"');
+    const lastReadIndex = source.indexOf('fieldKey="last_read"');
+    const streamHeader = source.slice(streamIdentityIndex, lastReadIndex);
+
+    expect(streamIdentityIndex).toBeGreaterThanOrEqual(0);
+    expect(lastReadIndex).toBeGreaterThan(streamIdentityIndex);
+    expect(streamHeader.match(/<HelpTip/g) ?? []).toHaveLength(1);
+    expect(streamHeader).not.toContain('fieldKey="status_indicator"');
   });
 
   it("wires announcer fields and stats to help", () => {
