@@ -5,6 +5,7 @@
     confirmUpdateInstall,
     store,
   } from "$lib/store.svelte";
+  import { btnPrimary } from "$lib/ui-classes";
 
   let dialogRef: HTMLDivElement | undefined = $state(undefined);
 
@@ -90,7 +91,7 @@
         </button>
         <button
           type="button"
-          class="rounded-md border-none bg-accent px-3 py-1.5 text-sm font-medium text-white cursor-pointer hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+          class={btnPrimary}
           onclick={() => void confirmUpdateInstall()}
           disabled={store.updateState.busy}
         >

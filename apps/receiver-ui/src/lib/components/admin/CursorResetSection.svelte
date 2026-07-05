@@ -8,6 +8,7 @@
   } from "$lib/admin-actions.svelte";
 
   const btnWarn = buttonClass("warn", "xs");
+  const btnWarnSm = buttonClass("warn", "sm");
 
   let {
     actions,
@@ -158,7 +159,7 @@
               <button
                 onclick={() => actions.resetCursor(stream)}
                 disabled={actions.inFlightKeys.has(key)}
-                class="px-2.5 py-1 text-xs font-medium rounded-md text-status-warn border border-status-warn-border bg-status-warn-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
+                class={btnWarn}
                 aria-label={"Reset cursor for " + streamLabel(stream)}
               >
                 {actions.inFlightKeys.has(key)
@@ -179,7 +180,7 @@
             "reset-all-cursors",
           )}
         disabled={actions.inFlightAction === "reset-all-cursors"}
-        class="px-3 py-1.5 text-xs font-medium rounded-md text-status-warn border border-status-warn-border bg-status-warn-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
+        class={btnWarnSm}
       >
         {actions.inFlightAction === "reset-all-cursors"
           ? "Resetting..."

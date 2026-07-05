@@ -116,7 +116,7 @@
                 onclick={() => actions.savePort(sub)}
                 disabled={!actions.isPortDirty(sub) ||
                   actions.inFlightKeys.has(portKey)}
-                class="px-2.5 py-1 text-xs font-medium rounded-md text-text-primary border border-border bg-surface-2 cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
+                class={btnNeutral}
               >
                 {actions.inFlightKeys.has(portKey) ? "Saving..." : "Save"}
               </button>

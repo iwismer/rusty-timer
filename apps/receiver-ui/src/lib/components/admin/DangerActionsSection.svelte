@@ -4,9 +4,11 @@
   import { type AdminActions } from "$lib/admin-actions.svelte";
 
   const btnWarn = buttonClass("warn", "xs");
+  const btnWarnSm = buttonClass("warn", "sm");
   const btnDanger = buttonClass("danger", "sm");
   const btnDangerConfirm = buttonClass("danger-solid", "sm");
   const btnNeutral = buttonClass("secondary", "xs");
+  const btnSecondary = buttonClass("secondary", "sm");
 
   let {
     actions,
@@ -241,7 +243,7 @@
         )}
       disabled={actions.inFlightAction === "purge-subs" ||
         actions.subscriptions.length === 0}
-      class="px-3 py-1.5 text-xs font-medium rounded-md text-status-warn border border-status-warn-border bg-status-warn-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
+      class={btnWarnSm}
     >
       {actions.inFlightAction === "purge-subs"
         ? "Purging..."
@@ -268,7 +270,7 @@
           "reset-profile",
         )}
       disabled={actions.inFlightAction === "reset-profile"}
-      class="px-3 py-1.5 text-xs font-medium rounded-md text-status-warn border border-status-warn-border bg-status-warn-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
+      class={btnWarnSm}
     >
       {actions.inFlightAction === "reset-profile"
         ? "Resetting..."
@@ -294,7 +296,7 @@
         <button
           onclick={handleFactoryReset}
           disabled={actions.inFlightAction === "factory-reset"}
-          class="px-3 py-1.5 text-xs font-medium rounded-md text-white bg-status-err border border-status-err cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
+          class={btnDangerConfirm}
         >
           {actions.inFlightAction === "factory-reset"
             ? "Resetting..."
@@ -302,16 +304,13 @@
         </button>
         <button
           onclick={() => (confirmingFactoryReset = false)}
-          class="px-3 py-1.5 text-xs font-medium rounded-md text-text-secondary border border-border bg-surface-2 cursor-pointer hover:opacity-80"
+          class={btnSecondary}
         >
           Cancel
         </button>
       </div>
     {:else}
-      <button
-        onclick={() => (confirmingFactoryReset = true)}
-        class="px-3 py-1.5 text-xs font-medium rounded-md text-status-err border border-status-err bg-transparent cursor-pointer hover:opacity-80"
-      >
+      <button onclick={() => (confirmingFactoryReset = true)} class={btnDanger}>
         Factory Reset...
       </button>
     {/if}
