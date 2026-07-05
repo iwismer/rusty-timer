@@ -76,17 +76,22 @@ struct PruneCandidate {
     forced: bool,
 }
 
-/// A read event retrieved from the journal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Metadata for the currently open epoch of a stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentEpochMetadata {
     pub epoch: i64,
     pub created_unix_ms: Option<i64>,
+    pub start_seq: i64,
+    pub name: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpochSummary {
     pub epoch: i64,
     pub created_unix_ms: Option<i64>,
+    pub start_seq: i64,
+    pub end_seq: Option<i64>,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -769,6 +774,31 @@ impl Journal {
         current_epoch_metadata(&self.conn, stream_key)
     }
 
+    /// Set (or clear) the name of the currently open epoch.
+    ///
+    /// Errors with `InvalidData` when the stream has no open epoch (unknown
+    /// stream), so callers can surface a not-found rather than silently
+    /// succeeding. Returns the updated current epoch metadata.
+    pub fn set_epoch_name(
+        &mut self,
+        stream_key: &str,
+        name: Option<&str>,
+    ) -> Result<CurrentEpochMetadata, JournalError> {
+        let changed = self.conn.execute(
+            "UPDATE stream_epochs
+             SET name = ?2
+             WHERE stream_id = ?1 AND end_seq IS NULL",
+            params![stream_key, name],
+        )?;
+        if changed == 0 {
+            return Err(JournalError::InvalidData(format!(
+                "stream {stream_key} has no open epoch to name"
+            )));
+        }
+        self.current_epoch_metadata(stream_key)?
+            .ok_or_else(|| JournalError::InvalidData(format!("stream {stream_key} not found")))
+    }
+
     pub fn epoch_summaries(&self, stream_key: &str) -> Result<Vec<EpochSummary>, JournalError> {
         epoch_summaries(&self.conn, stream_key)
     }
@@ -1087,7 +1117,7 @@ fn current_epoch(conn: &Connection, stream_key: &str) -> Result<i64, JournalErro
 
 fn epoch_summaries(conn: &Connection, stream_key: &str) -> Result<Vec<EpochSummary>, JournalError> {
     let mut stmt = conn.prepare(
-        "SELECT epoch, created_unix_ms
+        "SELECT epoch, created_unix_ms, start_seq, end_seq, name
          FROM stream_epochs
          WHERE stream_id = ?1
          ORDER BY epoch DESC",
@@ -1096,6 +1126,9 @@ fn epoch_summaries(conn: &Connection, stream_key: &str) -> Result<Vec<EpochSumma
         Ok(EpochSummary {
             epoch: row.get(0)?,
             created_unix_ms: row.get(1)?,
+            start_seq: row.get(2)?,
+            end_seq: row.get(3)?,
+            name: row.get(4)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1106,7 +1139,7 @@ fn current_epoch_metadata(
     stream_key: &str,
 ) -> Result<Option<CurrentEpochMetadata>, JournalError> {
     conn.query_row(
-        "SELECT epoch, created_unix_ms
+        "SELECT epoch, created_unix_ms, start_seq, name
          FROM stream_epochs
          WHERE stream_id = ?1
          ORDER BY epoch DESC
@@ -1116,6 +1149,8 @@ fn current_epoch_metadata(
             Ok(CurrentEpochMetadata {
                 epoch: row.get(0)?,
                 created_unix_ms: row.get(1)?,
+                start_seq: row.get(2)?,
+                name: row.get(3)?,
             })
         },
     )
@@ -1217,6 +1252,88 @@ mod tests {
             reset.created_unix_ms >= initial.created_unix_ms,
             "new epoch should have a creation timestamp at least as new as the initial epoch"
         );
+    }
+
+    #[test]
+    fn current_epoch_metadata_carries_start_seq_and_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("journal.db");
+        let mut journal = Journal::open(&path).expect("open write journal");
+        journal
+            .ensure_stream_state("stream-a", 1)
+            .expect("ensure stream");
+
+        let initial = journal
+            .current_epoch_metadata("stream-a")
+            .expect("current epoch metadata")
+            .expect("stream has metadata");
+        assert_eq!(initial.epoch, 1);
+        assert_eq!(initial.start_seq, 1, "initial epoch starts at seq 1");
+        assert_eq!(initial.name, None, "initial epoch is unnamed");
+    }
+
+    #[test]
+    fn set_epoch_name_persists_and_clears() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("journal.db");
+        let mut journal = Journal::open(&path).expect("open write journal");
+        journal
+            .ensure_stream_state("stream-a", 1)
+            .expect("ensure stream");
+
+        let named = journal
+            .set_epoch_name("stream-a", Some("Race 1"))
+            .expect("set epoch name");
+        assert_eq!(named.name.as_deref(), Some("Race 1"));
+
+        // The name survives a full journal re-open.
+        drop(journal);
+        let mut journal = Journal::open(&path).expect("re-open write journal");
+        let reopened = journal
+            .current_epoch_metadata("stream-a")
+            .expect("current epoch metadata")
+            .expect("stream has metadata");
+        assert_eq!(reopened.name.as_deref(), Some("Race 1"));
+
+        let cleared = journal
+            .set_epoch_name("stream-a", None)
+            .expect("clear epoch name");
+        assert_eq!(cleared.name, None);
+
+        // Unknown stream: no open epoch row -> error, not silent success.
+        assert!(journal.set_epoch_name("missing", Some("x")).is_err());
+    }
+
+    #[test]
+    fn epoch_summaries_carry_seq_range_and_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("journal.db");
+        let mut journal = Journal::open(&path).expect("open write journal");
+        journal
+            .ensure_stream_state("stream-a", 1)
+            .expect("ensure stream");
+        journal
+            .set_epoch_name("stream-a", Some("Race 1"))
+            .expect("name epoch 1");
+        journal
+            .append_read("stream-a", None, b"one", "RAW")
+            .expect("append read 1");
+        journal
+            .append_read("stream-a", None, b"two", "RAW")
+            .expect("append read 2");
+        journal.bump_epoch("stream-a", 2).expect("bump epoch");
+
+        let summaries = journal.epoch_summaries("stream-a").expect("summaries");
+        assert_eq!(summaries.len(), 2);
+        // Newest first.
+        assert_eq!(summaries[0].epoch, 2);
+        assert_eq!(summaries[0].start_seq, 3);
+        assert_eq!(summaries[0].end_seq, None, "open epoch has no end");
+        assert_eq!(summaries[0].name, None);
+        assert_eq!(summaries[1].epoch, 1);
+        assert_eq!(summaries[1].start_seq, 1);
+        assert_eq!(summaries[1].end_seq, Some(2));
+        assert_eq!(summaries[1].name.as_deref(), Some("Race 1"));
     }
 
     #[test]

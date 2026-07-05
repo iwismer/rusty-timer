@@ -814,8 +814,10 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
             reads_epoch,
             last_seen_secs,
             local_port,
-            current_epoch: epoch.map(|metadata| metadata.epoch),
-            current_epoch_created_unix_ms: epoch.and_then(|metadata| metadata.created_unix_ms),
+            current_epoch: epoch.as_ref().map(|metadata| metadata.epoch),
+            current_epoch_created_unix_ms: epoch
+                .as_ref()
+                .and_then(|metadata| metadata.created_unix_ms),
             current_epoch_name,
             reader_info,
         });

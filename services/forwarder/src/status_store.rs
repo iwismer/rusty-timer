@@ -1229,6 +1229,8 @@ mod tests {
                 crate::storage::journal::CurrentEpochMetadata {
                     epoch: 4,
                     created_unix_ms: Some(1_783_238_640_000),
+                    start_seq: 1,
+                    name: None,
                 },
             )
             .await;
@@ -1271,6 +1273,8 @@ mod tests {
                 crate::storage::journal::CurrentEpochMetadata {
                     epoch: 4,
                     created_unix_ms: None,
+                    start_seq: 1,
+                    name: None,
                 },
             )
             .await;
@@ -1296,6 +1300,8 @@ mod tests {
                 crate::storage::journal::CurrentEpochMetadata {
                     epoch: 4,
                     created_unix_ms: None,
+                    start_seq: 1,
+                    name: None,
                 },
             )
             .await;
@@ -1306,6 +1312,8 @@ mod tests {
                 crate::storage::journal::CurrentEpochMetadata {
                     epoch: 5,
                     created_unix_ms: None,
+                    start_seq: 1,
+                    name: None,
                 },
             )
             .await;

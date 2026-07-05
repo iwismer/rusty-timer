@@ -165,7 +165,7 @@ async fn dispatch_action(
                     EpochResetError::Storage(message) => message,
                 })?;
             service
-                .set_current_epoch_metadata(reader_key, metadata)
+                .set_current_epoch_metadata(reader_key, metadata.clone())
                 .await;
             Ok(DispatchOutcome {
                 current_epoch: Some(metadata.epoch),

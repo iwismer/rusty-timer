@@ -640,6 +640,8 @@ mod tests {
                 crate::storage::journal::CurrentEpochMetadata {
                     epoch: 3,
                     created_unix_ms: Some(1_783_238_640_000),
+                    start_seq: 1,
+                    name: None,
                 },
             )
             .await;

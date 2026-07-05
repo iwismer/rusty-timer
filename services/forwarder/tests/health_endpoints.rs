@@ -761,6 +761,8 @@ async fn status_page_does_not_query_journal_for_totals() {
             Ok(forwarder::storage::journal::CurrentEpochMetadata {
                 epoch: 1,
                 created_unix_ms: Some(1),
+                start_seq: 1,
+                name: None,
             })
         }
 
