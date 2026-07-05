@@ -56,7 +56,6 @@ use crate::announcer_push::{
     self, AnnouncerPushClient, AnnouncerPushError, ParticipantResolver, ResolvedParticipant,
     ServerAnnouncerClient,
 };
-use crate::cache::StreamKey;
 use crate::control_api::ConnectionState;
 use crate::control_api::{
     AppState, DiscoveredForwarder, DiscoveredForwarders, DiscoveredStream,
@@ -67,7 +66,7 @@ use crate::local_proxy::LocalProxy;
 use crate::p2p_forwarder::{ForwarderConnection, ForwarderDataStream};
 use crate::p2p_session::{BackoffConfig, DurableBatch, SessionStatusReporter};
 use crate::ports::{default_port, reader_addr_if_port_mappable};
-use crate::projection::StreamProjection;
+use crate::projection::{StreamProjection, UiStreamDisplay};
 use crate::stream_key::LocalStreamKey;
 use crate::ui_events::ReceiverUiEvent;
 
@@ -1347,11 +1346,11 @@ async fn start_stream_worker(
     // the server may not carry legacy `(forwarder_id, reader_ip)` metadata, but
     // stream IDs that are reader network addresses can still drive the existing
     // UI count/last-read/metrics model without storing fabricated metadata.
-    if let Some(ui_key) = ui_stream_key(sub) {
+    if let Some(display) = ui_stream_display(sub) {
         tasks.push(tokio::spawn(run_ui_projection_worker(
             Arc::clone(state),
             local_stream_key.clone(),
-            ui_key,
+            display,
             hint_tx.subscribe(),
             shutdown_rx.clone(),
         )));
@@ -1409,15 +1408,19 @@ fn ui_reader_ip(sub: &StreamSubscription) -> Option<String> {
     })
 }
 
-/// Resolve the compatibility stream key used by existing UI count, last-read,
-/// and metrics events.
-fn ui_stream_key(sub: &StreamSubscription) -> Option<StreamKey> {
+/// Resolve the legacy display metadata carried on UI count, last-read, and
+/// metrics payloads. Display only: caches are keyed by the composite
+/// [`LocalStreamKey`], never by this pair (two forwarders can share it).
+fn ui_stream_display(sub: &StreamSubscription) -> Option<UiStreamDisplay> {
     let reader_ip = ui_reader_ip(sub)?;
     let forwarder_id = sub
         .forwarder_id
         .clone()
         .unwrap_or_else(|| sub.forwarder_endpoint_id.clone());
-    Some(StreamKey::new(forwarder_id, reader_ip))
+    Some(UiStreamDisplay {
+        forwarder_id,
+        reader_ip,
+    })
 }
 
 /// Resolve the local TCP port for a subscription: explicit override first, then
@@ -1435,13 +1438,13 @@ const UI_PROJECTION_EMIT_INTERVAL: Duration = Duration::from_millis(250);
 async fn run_ui_projection_worker(
     state: Arc<AppState>,
     local_stream_key: LocalStreamKey,
-    ui_key: StreamKey,
+    display: UiStreamDisplay,
     mut hint_rx: broadcast::Receiver<DurableBatch>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     // One-time O(N) seed from the durable store; the hot path below never
     // touches the DB.
-    let mut proj = rebuild_stream_projection(&state, local_stream_key.as_str(), &ui_key)
+    let mut proj = rebuild_stream_projection(&state, &local_stream_key)
         .await
         .unwrap_or_default();
     let mut dirty = proj.total > 0;
@@ -1486,7 +1489,7 @@ async fn run_ui_projection_worker(
             _ = tick.tick() => {
                 if needs_rebuild
                     && let Some(rebuilt) =
-                        rebuild_stream_projection(&state, local_stream_key.as_str(), &ui_key).await
+                        rebuild_stream_projection(&state, &local_stream_key).await
                 {
                     proj = rebuilt;
                     // The rebuild replaced the shared counts wholesale;
@@ -1498,9 +1501,9 @@ async fn run_ui_projection_worker(
                     continue;
                 }
                 for (epoch, seqs) in pending_counts.drain() {
-                    state.ui.stream_counts.record_batch(&ui_key, epoch, seqs);
+                    state.ui.stream_counts.record_batch(&local_stream_key, epoch, seqs);
                 }
-                emit_stream_projection(&state, &local_stream_key, &ui_key, &proj).await;
+                emit_stream_projection(&state, &local_stream_key, &display, &proj).await;
                 dirty = false;
             }
         }
@@ -1513,9 +1516,9 @@ async fn run_ui_projection_worker(
 /// worker keeps its current state and retries on the next overflow).
 async fn rebuild_stream_projection(
     state: &Arc<AppState>,
-    stream_id: &str,
-    ui_key: &StreamKey,
+    local_stream_key: &LocalStreamKey,
 ) -> Option<StreamProjection> {
+    let stream_id = local_stream_key.as_str();
     let stream_id_owned = stream_id.to_owned();
     let rows = match state
         .storage
@@ -1558,7 +1561,7 @@ async fn rebuild_stream_projection(
     }
 
     state.ui.stream_counts.seed_from_epoch_summaries(
-        ui_key,
+        local_stream_key,
         rows.iter().map(|row| (row.epoch, row.count, row.max_seq)),
     );
     Some(StreamProjection::seed_from_summary(
@@ -1578,13 +1581,13 @@ async fn rebuild_stream_projection(
 async fn emit_stream_projection(
     state: &Arc<AppState>,
     local_stream_key: &LocalStreamKey,
-    ui_key: &StreamKey,
+    display: &UiStreamDisplay,
     proj: &StreamProjection,
 ) {
     let (reads_total, reads_epoch) = state
         .ui
         .stream_counts
-        .get(ui_key)
+        .get(local_stream_key)
         .map_or((proj.total, proj.epoch_count), |counts| {
             (counts.total, counts.epoch)
         });
@@ -1603,8 +1606,8 @@ async fn emit_stream_projection(
             })
         };
         Some(crate::ui_events::LastRead {
-            forwarder_id: ui_key.forwarder_id.clone(),
-            reader_ip: ui_key.reader_ip.clone(),
+            forwarder_id: display.forwarder_id.clone(),
+            reader_ip: display.reader_ip.clone(),
             chip_id,
             timestamp: crate::ui_events::unix_ms_to_rfc3339(proj.max_received_unix_ms)
                 .unwrap_or_else(|| proj.max_received_unix_ms.to_string()),
@@ -1618,7 +1621,7 @@ async fn emit_stream_projection(
         None
     };
 
-    let metrics = proj.metrics(ui_key, now_unix_ms());
+    let metrics = proj.metrics(local_stream_key, display, now_unix_ms());
     state.cache_stream_metrics(&metrics).await;
 
     let mut buffer = state
@@ -1634,8 +1637,8 @@ async fn emit_stream_projection(
         crate::ui_events::StreamDelta {
             forwarder_endpoint_id: local_stream_key.endpoint_id().to_owned(),
             stream_id: local_stream_key.wire_stream_id().to_owned(),
-            forwarder_id: ui_key.forwarder_id.clone(),
-            reader_ip: ui_key.reader_ip.clone(),
+            forwarder_id: display.forwarder_id.clone(),
+            reader_ip: display.reader_ip.clone(),
             reads_total,
             reads_epoch,
             metrics,
@@ -2770,16 +2773,15 @@ mod tests {
     #[tokio::test]
     async fn startup_rebuild_seeds_projection_and_stream_counts() {
         let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
-        let stream_id = "rebuild-stream";
+        let local_key = LocalStreamKey::new("endpoint-1", "rebuild-stream");
         {
             let db = state.storage.db.lock().await;
-            insert_chip_event_in_epoch(&db, stream_id, 1, 1, 1_700_000_000_100);
-            insert_chip_event_in_epoch(&db, stream_id, 2, 1, 1_700_000_000_200);
-            insert_chip_event_in_epoch(&db, stream_id, 3, 2, 1_700_000_000_300);
+            insert_chip_event_in_epoch(&db, local_key.as_str(), 1, 1, 1_700_000_000_100);
+            insert_chip_event_in_epoch(&db, local_key.as_str(), 2, 1, 1_700_000_000_200);
+            insert_chip_event_in_epoch(&db, local_key.as_str(), 3, 2, 1_700_000_000_300);
         }
-        let ui_key = StreamKey::new("fwd-1", "10.0.0.1:10000");
 
-        let proj = rebuild_stream_projection(&state, stream_id, &ui_key)
+        let proj = rebuild_stream_projection(&state, &local_key)
             .await
             .expect("rebuild succeeds");
 
@@ -2795,7 +2797,11 @@ mod tests {
         assert_eq!(proj.max_received_unix_ms, 1_700_000_000_300);
 
         // The shared counts cache is seeded so status/UI totals survive restart.
-        let counts = state.ui.stream_counts.get(&ui_key).expect("counts seeded");
+        let counts = state
+            .ui
+            .stream_counts
+            .get(&local_key)
+            .expect("counts seeded");
         assert_eq!(counts.total, 3);
         assert_eq!(counts.epoch, 1);
         assert_eq!(counts.current_epoch, 2);
@@ -2804,13 +2810,13 @@ mod tests {
     #[tokio::test]
     async fn startup_rebuild_with_empty_stream_is_default() {
         let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
-        let ui_key = StreamKey::new("fwd-1", "10.0.0.1:10000");
-        let proj = rebuild_stream_projection(&state, "missing", &ui_key)
+        let local_key = LocalStreamKey::new("endpoint-1", "missing");
+        let proj = rebuild_stream_projection(&state, &local_key)
             .await
             .expect("rebuild succeeds");
         assert_eq!(proj.total, 0);
         assert!(
-            state.ui.stream_counts.get(&ui_key).is_none(),
+            state.ui.stream_counts.get(&local_key).is_none(),
             "an empty stream must not fabricate a counts entry"
         );
     }
@@ -2829,7 +2835,10 @@ mod tests {
         let worker = tokio::spawn(run_ui_projection_worker(
             Arc::clone(state),
             local_stream_key.clone(),
-            StreamKey::new("fwd-1", "10.0.0.1:10000"),
+            UiStreamDisplay {
+                forwarder_id: "fwd-1".to_owned(),
+                reader_ip: "10.0.0.1:10000".to_owned(),
+            },
             hint_rx,
             shutdown_rx,
         ));
@@ -2905,6 +2914,106 @@ mod tests {
         assert_eq!(read.chip_id, "000000012345");
         assert_eq!(read.bib.as_deref(), Some("1488"));
         assert_eq!(read.name, None);
+    }
+
+    /// Two subscriptions on *different* forwarder endpoints can legitimately
+    /// share display identity (same `forwarder_id`, same `reader_ip`). Counts
+    /// and metrics must stay independent — keyed by the composite
+    /// (endpoint id, wire stream id) — instead of merging under the display key.
+    #[tokio::test]
+    async fn identical_display_identity_streams_keep_independent_counts_and_metrics() {
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv".to_owned());
+        let key_a = LocalStreamKey::new("endpoint-a", "10.0.0.9:10000");
+        let key_b = LocalStreamKey::new("endpoint-b", "10.0.0.9:10000");
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (hint_tx_a, hint_rx_a) = broadcast::channel::<DurableBatch>(16);
+        let (hint_tx_b, hint_rx_b) = broadcast::channel::<DurableBatch>(16);
+        let display = UiStreamDisplay {
+            forwarder_id: "fwd-dup".to_owned(),
+            reader_ip: "10.0.0.9:10000".to_owned(),
+        };
+        let worker_a = tokio::spawn(run_ui_projection_worker(
+            Arc::clone(&state),
+            key_a.clone(),
+            display.clone(),
+            hint_rx_a,
+            shutdown_rx.clone(),
+        ));
+        let worker_b = tokio::spawn(run_ui_projection_worker(
+            Arc::clone(&state),
+            key_b.clone(),
+            display,
+            hint_rx_b,
+            shutdown_rx,
+        ));
+
+        hint_tx_a
+            .send(DurableBatch {
+                through_seq: 2,
+                inserted: std::sync::Arc::new(vec![
+                    chip_fact(1, 1_700_000_000_100),
+                    chip_fact(2, 1_700_000_000_200),
+                ]),
+            })
+            .unwrap();
+        hint_tx_b
+            .send(DurableBatch {
+                through_seq: 1,
+                inserted: std::sync::Arc::new(vec![chip_fact(1, 1_700_000_000_300)]),
+            })
+            .unwrap();
+
+        // Both streams must surface their own metrics entry (raw_count 2 and
+        // 1 respectively); a display-keyed cache collapses them into one.
+        let both_metrics_present = poll_async(Duration::from_secs(5), || {
+            let state = Arc::clone(&state);
+            async move {
+                let snapshot = state.get_stream_metrics_snapshot().await;
+                let mut raw_counts: Vec<i64> = snapshot.iter().map(|m| m.raw_count).collect();
+                raw_counts.sort_unstable();
+                raw_counts == [1, 2]
+            }
+        })
+        .await;
+        assert!(
+            both_metrics_present,
+            "metrics cache must keep one entry per composite stream identity: {:?}",
+            state.get_stream_metrics_snapshot().await
+        );
+
+        // Per-stream read counts stay isolated as well: the delta buffer rows
+        // report each stream's own totals, not a merged display-key total.
+        let deltas_isolated = poll_async(Duration::from_secs(5), || {
+            let state = Arc::clone(&state);
+            let key_a = key_a.clone();
+            let key_b = key_b.clone();
+            async move {
+                let buffer = state.ui.stream_delta_buffer.lock().unwrap();
+                let a = buffer.get(&(
+                    key_a.endpoint_id().to_owned(),
+                    key_a.wire_stream_id().to_owned(),
+                ));
+                let b = buffer.get(&(
+                    key_b.endpoint_id().to_owned(),
+                    key_b.wire_stream_id().to_owned(),
+                ));
+                matches!((a, b), (Some(a), Some(b)) if a.reads_total == 2 && b.reads_total == 1)
+            }
+        })
+        .await;
+        assert!(
+            deltas_isolated,
+            "sibling stream deltas must keep independent read counts"
+        );
+
+        // The shared counts cache itself is keyed by composite identity.
+        assert_eq!(state.ui.stream_counts.get(&key_a).unwrap().total, 2);
+        assert_eq!(state.ui.stream_counts.get(&key_b).unwrap().total, 1);
+
+        let _ = shutdown_tx.send(true);
+        let _ = worker_a.await;
+        let _ = worker_b.await;
     }
 
     #[test]

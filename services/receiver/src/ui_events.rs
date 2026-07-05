@@ -28,8 +28,13 @@ pub struct LastRead {
     pub division: Option<String>,
 }
 
+/// Per-stream metrics for the UI. Identified by the composite
+/// (`forwarder_endpoint_id`, wire `stream_id`); `forwarder_id`/`reader_ip`
+/// are display metadata only and may collide across forwarders.
 #[derive(Clone, Debug, Serialize)]
 pub struct StreamMetricsPayload {
+    pub forwarder_endpoint_id: String,
+    pub stream_id: String,
     pub forwarder_id: String,
     pub reader_ip: String,
     pub raw_count: i64,
@@ -42,25 +47,6 @@ pub struct StreamMetricsPayload {
     pub unique_chips: i64,
     pub epoch_last_received_at: Option<String>,
     pub epoch_lag_ms: Option<u64>,
-}
-
-impl StreamMetricsPayload {
-    pub fn from_ws(msg: &rt_domain::ReceiverStreamMetrics) -> Self {
-        Self {
-            forwarder_id: msg.forwarder_id.clone(),
-            reader_ip: msg.reader_ip.clone(),
-            raw_count: msg.raw_count,
-            dedup_count: msg.dedup_count,
-            retransmit_count: msg.retransmit_count,
-            lag_ms: msg.lag_ms,
-            epoch_raw_count: msg.epoch_raw_count,
-            epoch_dedup_count: msg.epoch_dedup_count,
-            epoch_retransmit_count: msg.epoch_retransmit_count,
-            unique_chips: msg.unique_chips,
-            epoch_last_received_at: msg.epoch_last_received_at.clone(),
-            epoch_lag_ms: msg.epoch_lag_ms,
-        }
-    }
 }
 
 /// Format a unix-millisecond timestamp as RFC 3339, or `None` when out of
@@ -267,6 +253,8 @@ mod tests {
     #[test]
     fn stream_deltas_serialize_wire_composite_identity() {
         let metrics = StreamMetricsPayload {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: "wire-stream".to_owned(),
             forwarder_id: "display-fwd".to_owned(),
             reader_ip: "10.0.0.1:10000".to_owned(),
             raw_count: 3,
@@ -299,6 +287,11 @@ mod tests {
         assert_eq!(json["updates"][0]["stream_id"], "wire-stream");
         assert_eq!(json["updates"][0]["forwarder_id"], "display-fwd");
         assert_eq!(json["updates"][0]["reader_ip"], "10.0.0.1:10000");
+        assert_eq!(
+            json["updates"][0]["metrics"]["forwarder_endpoint_id"],
+            "endpoint-1"
+        );
+        assert_eq!(json["updates"][0]["metrics"]["stream_id"], "wire-stream");
     }
 
     #[test]

@@ -63,8 +63,8 @@ export interface StreamEntry {
 }
 
 export interface StreamCountUpdate {
-  forwarder_id: string;
-  reader_ip: string;
+  forwarder_endpoint_id: string;
+  stream_id: string;
   reads_total: number;
   reads_epoch: number;
 }
@@ -79,6 +79,10 @@ export interface LastRead {
 }
 
 export interface StreamMetrics {
+  /** Composite stream identity (canonical cache key). */
+  forwarder_endpoint_id: string;
+  stream_id: string;
+  /** Display metadata only — may collide across forwarders. */
   forwarder_id: string;
   reader_ip: string;
   raw_count: number;

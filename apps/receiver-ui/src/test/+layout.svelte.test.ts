@@ -15,6 +15,8 @@ const apiMocks = vi.hoisted(() => ({
   getStreams: vi.fn().mockResolvedValue({
     streams: [
       {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "10.0.0.1:10000",
         forwarder_id: "fwd-1",
         reader_ip: "10.0.0.1:10000",
         subscribed: true,
@@ -159,6 +161,8 @@ describe("receiver layout SSE updates", () => {
         reads_total: 15,
         reads_epoch: 3,
         metrics: {
+          forwarder_endpoint_id: "endpoint-1",
+          stream_id: "10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           raw_count: 15,
@@ -199,6 +203,8 @@ describe("receiver layout SSE updates", () => {
   it("merges cached stream metrics into store on initial load", async () => {
     apiMocks.getStreamMetrics.mockResolvedValueOnce([
       {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-10.0.0.1:10000",
         forwarder_id: "fwd-1",
         reader_ip: "10.0.0.1:10000",
         raw_count: 50,
@@ -217,7 +223,7 @@ describe("receiver layout SSE updates", () => {
     render(Layout);
 
     await waitFor(() => {
-      const entry = store.streamMetrics.get("fwd-1/10.0.0.1:10000");
+      const entry = store.streamMetrics.get("endpoint-1/stream-10.0.0.1:10000");
       expect(entry).toBeTruthy();
       expect(entry?.raw_count).toBe(50);
       expect(entry?.unique_chips).toBe(10);

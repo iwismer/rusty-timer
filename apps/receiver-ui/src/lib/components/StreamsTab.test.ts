@@ -10,7 +10,7 @@ const apiMocks = vi.hoisted(() => ({
 vi.mock("$lib/api", () => apiMocks);
 
 import StreamsTab from "./StreamsTab.svelte";
-import { store, streamKey } from "$lib/store.svelte";
+import { store, streamIdentity } from "$lib/store.svelte";
 
 describe("StreamsTab", () => {
   afterEach(() => {
@@ -57,7 +57,10 @@ describe("StreamsTab", () => {
       },
     });
 
-    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const key = streamIdentity({
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
+    });
     store.modeDraft = "live";
     store.error = null;
     store.dbfEnabled = false;
@@ -124,11 +127,16 @@ describe("StreamsTab", () => {
   });
 
   it("shows metrics in expanded row when available", async () => {
-    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const key = streamIdentity({
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
+    });
     store.streamMetrics = new Map([
       [
         key,
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           raw_count: 1500,
@@ -203,7 +211,10 @@ describe("StreamsTab", () => {
   });
 
   it("renders a bib-only last read as an unknown participant with bib", () => {
-    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const key = streamIdentity({
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
+    });
     store.lastReads = new Map([
       [
         key,

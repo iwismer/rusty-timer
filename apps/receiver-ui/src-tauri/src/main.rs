@@ -1174,6 +1174,8 @@ mod tests {
                     reads_total: 0,
                     reads_epoch: 0,
                     metrics: StreamMetricsPayload {
+                        forwarder_endpoint_id: "e".to_owned(),
+                        stream_id: "s".to_owned(),
                         forwarder_id: "f".to_owned(),
                         reader_ip: "ip".to_owned(),
                         raw_count: 0,

@@ -11,8 +11,17 @@
 
 use std::collections::HashSet;
 
-use crate::cache::StreamKey;
 use crate::p2p_session::EventFact;
+use crate::stream_key::LocalStreamKey;
+
+/// Legacy display metadata carried on UI payloads. This is presentation-only:
+/// two forwarders can expose the same `(forwarder_id, reader_ip)` pair, so it
+/// must never key a cache — that is what [`LocalStreamKey`] is for.
+#[derive(Clone, Debug)]
+pub struct UiStreamDisplay {
+    pub forwarder_id: String,
+    pub reader_ip: String,
+}
 
 /// One per-epoch summary row from the startup rebuild query
 /// (`Db::load_stream_projection_summary`).
@@ -98,15 +107,18 @@ impl StreamProjection {
     /// computed at emit time from `now_ms`.
     pub fn metrics(
         &self,
-        ui_key: &StreamKey,
+        local_key: &LocalStreamKey,
+        display: &UiStreamDisplay,
         now_ms: i64,
     ) -> crate::ui_events::StreamMetricsPayload {
         let last_received = (self.max_received_unix_ms > 0).then_some(self.max_received_unix_ms);
         let lag_ms =
             last_received.map(|last| u64::try_from(now_ms.saturating_sub(last)).unwrap_or(0));
         crate::ui_events::StreamMetricsPayload {
-            forwarder_id: ui_key.forwarder_id.clone(),
-            reader_ip: ui_key.reader_ip.clone(),
+            forwarder_endpoint_id: local_key.endpoint_id().to_owned(),
+            stream_id: local_key.wire_stream_id().to_owned(),
+            forwarder_id: display.forwarder_id.clone(),
+            reader_ip: display.reader_ip.clone(),
             raw_count: i64::try_from(self.total).unwrap_or(i64::MAX),
             dedup_count: i64::try_from(self.total).unwrap_or(i64::MAX),
             retransmit_count: 0,
@@ -188,25 +200,43 @@ mod tests {
         assert_eq!(proj.last_chip_id.as_deref(), Some("high"));
     }
 
+    fn display() -> UiStreamDisplay {
+        UiStreamDisplay {
+            forwarder_id: "fwd".to_owned(),
+            reader_ip: "10.0.0.1:10000".to_owned(),
+        }
+    }
+
     #[test]
     fn lag_computed_at_emit_time() {
         let mut proj = StreamProjection::default();
         proj.apply(&fact(1, 1, 1_000, "a"));
         proj.apply(&fact(2, 1, 4_000, "b"));
-        let key = StreamKey::new("fwd", "10.0.0.1:10000");
-        let metrics = proj.metrics(&key, 10_000);
+        let key = LocalStreamKey::new("endpoint-1", "10.0.0.1:10000");
+        let metrics = proj.metrics(&key, &display(), 10_000);
         assert_eq!(metrics.lag_ms, Some(6_000));
         assert_eq!(metrics.epoch_lag_ms, Some(6_000));
         // A later emit with the same projection reflects the new now.
-        let metrics = proj.metrics(&key, 14_000);
+        let metrics = proj.metrics(&key, &display(), 14_000);
         assert_eq!(metrics.lag_ms, Some(10_000));
+    }
+
+    #[test]
+    fn metrics_carry_composite_identity_and_display_metadata() {
+        let proj = StreamProjection::default();
+        let key = LocalStreamKey::new("endpoint-1", "wire-stream");
+        let metrics = proj.metrics(&key, &display(), 10_000);
+        assert_eq!(metrics.forwarder_endpoint_id, "endpoint-1");
+        assert_eq!(metrics.stream_id, "wire-stream");
+        assert_eq!(metrics.forwarder_id, "fwd");
+        assert_eq!(metrics.reader_ip, "10.0.0.1:10000");
     }
 
     #[test]
     fn metrics_with_no_rows_has_no_lag() {
         let proj = StreamProjection::default();
-        let key = StreamKey::new("fwd", "10.0.0.1:10000");
-        let metrics = proj.metrics(&key, 10_000);
+        let key = LocalStreamKey::new("endpoint-1", "10.0.0.1:10000");
+        let metrics = proj.metrics(&key, &display(), 10_000);
         assert_eq!(metrics.lag_ms, None);
         assert_eq!(metrics.epoch_last_received_at, None);
         assert_eq!(metrics.raw_count, 0);

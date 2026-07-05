@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
+use crate::stream_key::LocalStreamKey;
+
 /// Per-stream read counts (in-memory only, lost on restart).
 #[derive(Debug, Clone, Default)]
 pub struct Counts {
@@ -10,10 +12,13 @@ pub struct Counts {
     max_seen_seq_by_epoch: HashMap<i64, i64>,
 }
 
-/// Thread-safe container for per-stream read counts.
+/// Thread-safe container for per-stream read counts, keyed by the composite
+/// receiver-local stream identity ([`LocalStreamKey`]). Display metadata
+/// (`forwarder_id`, `reader_ip`) is not unique across forwarders and must
+/// never key this cache.
 #[derive(Clone)]
 pub struct StreamCounts {
-    inner: Arc<RwLock<HashMap<StreamKey, Counts>>>,
+    inner: Arc<RwLock<HashMap<LocalStreamKey, Counts>>>,
 }
 
 impl StreamCounts {
@@ -24,12 +29,12 @@ impl StreamCounts {
     }
 
     /// Record one observed sequence number for a given stream/epoch.
-    pub fn record(&self, key: &StreamKey, stream_epoch: i64, seq: i64) {
+    pub fn record(&self, key: &LocalStreamKey, stream_epoch: i64, seq: i64) {
         self.record_batch(key, stream_epoch, std::iter::once(seq));
     }
 
     /// Record a batch of observed sequence numbers for a given stream/epoch.
-    pub fn record_batch<I>(&self, key: &StreamKey, stream_epoch: i64, seqs: I)
+    pub fn record_batch<I>(&self, key: &LocalStreamKey, stream_epoch: i64, seqs: I)
     where
         I: IntoIterator<Item = i64>,
     {
@@ -80,7 +85,7 @@ impl StreamCounts {
     /// rebuild. Mirrors the cumulative `record_batch` semantics: totals span
     /// epochs, the epoch counter tracks the highest epoch, and per-epoch max
     /// seqs are seeded so subsequent `record_batch` calls dedup correctly.
-    pub fn seed_from_epoch_summaries<I>(&self, key: &StreamKey, rows: I)
+    pub fn seed_from_epoch_summaries<I>(&self, key: &LocalStreamKey, rows: I)
     where
         I: IntoIterator<Item = (i64, u64, i64)>,
     {
@@ -109,15 +114,15 @@ impl StreamCounts {
         self.inner.write().unwrap().insert(key.clone(), counts);
     }
 
-    pub fn get(&self, key: &StreamKey) -> Option<Counts> {
+    pub fn get(&self, key: &LocalStreamKey) -> Option<Counts> {
         self.inner.read().unwrap().get(key).cloned()
     }
 
-    pub fn snapshot(&self) -> HashMap<StreamKey, Counts> {
+    pub fn snapshot(&self) -> HashMap<LocalStreamKey, Counts> {
         self.inner.read().unwrap().clone()
     }
 
-    pub fn retain_keys(&self, keep: &HashSet<StreamKey>) {
+    pub fn retain_keys(&self, keep: &HashSet<LocalStreamKey>) {
         self.inner.write().unwrap().retain(|k, _| keep.contains(k));
     }
 }
@@ -128,26 +133,13 @@ impl Default for StreamCounts {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct StreamKey {
-    pub forwarder_id: String,
-    pub reader_ip: String,
-}
-impl StreamKey {
-    pub fn new(f: impl Into<String>, i: impl Into<String>) -> Self {
-        Self {
-            forwarder_id: f.into(),
-            reader_ip: i.into(),
-        }
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn stream_counts_record_counts_first_observed_seq_once() {
         let sc = StreamCounts::new();
-        let k = StreamKey::new("f", "i");
+        let k = LocalStreamKey::new("f", "i");
         sc.record(&k, 1, 5);
         let c = sc.get(&k).unwrap();
         assert_eq!(c.total, 1);
@@ -157,7 +149,7 @@ mod tests {
     #[test]
     fn stream_counts_epoch_resets_on_advance() {
         let sc = StreamCounts::new();
-        let k = StreamKey::new("f", "i");
+        let k = LocalStreamKey::new("f", "i");
         sc.record(&k, 1, 10);
         sc.record(&k, 2, 3);
         let c = sc.get(&k).unwrap();
@@ -168,12 +160,12 @@ mod tests {
     #[test]
     fn stream_counts_get_returns_none_for_unknown() {
         let sc = StreamCounts::new();
-        assert!(sc.get(&StreamKey::new("x", "y")).is_none());
+        assert!(sc.get(&LocalStreamKey::new("x", "y")).is_none());
     }
     #[test]
     fn stream_counts_stale_epoch_does_not_change_epoch_counter() {
         let sc = StreamCounts::new();
-        let k = StreamKey::new("f", "i");
+        let k = LocalStreamKey::new("f", "i");
         sc.record(&k, 10, 4);
         sc.record(&k, 9, 7);
         let c = sc.get(&k).unwrap();
@@ -184,7 +176,7 @@ mod tests {
     #[test]
     fn stream_counts_same_epoch_accumulates_only_new_unique_seqs() {
         let sc = StreamCounts::new();
-        let k = StreamKey::new("f", "i");
+        let k = LocalStreamKey::new("f", "i");
         sc.record(&k, 3, 2);
         sc.record(&k, 3, 5);
         let c = sc.get(&k).unwrap();
@@ -195,7 +187,7 @@ mod tests {
     #[test]
     fn stream_counts_duplicate_seq_is_idempotent() {
         let sc = StreamCounts::new();
-        let k = StreamKey::new("f", "i");
+        let k = LocalStreamKey::new("f", "i");
         sc.record(&k, 4, 9);
         sc.record(&k, 4, 9);
         let c = sc.get(&k).unwrap();
@@ -208,7 +200,7 @@ mod tests {
         // Restart-shaped rebuild: the seeded snapshot must equal the counts a
         // live fold over the same rows would have produced.
         let live = StreamCounts::new();
-        let k = StreamKey::new("f", "i");
+        let k = LocalStreamKey::new("f", "i");
         live.record_batch(&k, 1, [1, 2]);
         live.record_batch(&k, 2, [3, 4, 5]);
         let live_counts = live.get(&k).unwrap();
@@ -231,7 +223,7 @@ mod tests {
     #[test]
     fn seed_from_epoch_summaries_replaces_previous_counts() {
         let sc = StreamCounts::new();
-        let k = StreamKey::new("f", "i");
+        let k = LocalStreamKey::new("f", "i");
         sc.record_batch(&k, 1, [1, 2, 3]);
         // A rebuild (e.g. after hint-channel overflow) replaces, not adds.
         sc.seed_from_epoch_summaries(&k, [(1, 3, 3), (2, 1, 4)]);
@@ -244,8 +236,8 @@ mod tests {
     #[test]
     fn stream_counts_retain_keys_prunes_removed_streams() {
         let sc = StreamCounts::new();
-        let keep = StreamKey::new("f1", "10.0.0.1");
-        let drop = StreamKey::new("f2", "10.0.0.2");
+        let keep = LocalStreamKey::new("f1", "10.0.0.1");
+        let drop = LocalStreamKey::new("f2", "10.0.0.2");
         sc.record(&keep, 1, 1);
         sc.record(&drop, 1, 1);
 

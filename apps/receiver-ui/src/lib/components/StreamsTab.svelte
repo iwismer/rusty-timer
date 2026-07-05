@@ -4,7 +4,6 @@
   import { resizeWidth } from "$lib/actions/resizeWidth";
   import {
     store,
-    streamKey,
     streamIdentity,
     streamHasRecentActivity,
     streamIsOptimisticallySubscribing,
@@ -95,16 +94,9 @@
     if (!expandedKey) return;
 
     const key = expandedKey;
-    // streamMetrics is legacy (forwarder_id, reader_ip)-keyed; resolve the
-    // expanded stream's legacy key for the lookup while keying timeSinceLastRead
-    // by the canonical identity used everywhere else in this component.
-    const expandedStream = store.streams?.streams.find(
-      (s) => streamIdentity(s) === key,
-    );
-    const metricsKey = expandedStream
-      ? streamKey(expandedStream.forwarder_id, expandedStream.reader_ip)
-      : key;
-    const metrics = store.streamMetrics.get(metricsKey);
+    // streamMetrics is keyed by the same canonical stream identity as
+    // expandedKey and timeSinceLastRead.
+    const metrics = store.streamMetrics.get(key);
 
     if (!metrics?.epoch_last_received_at) {
       timeSinceLastRead = {
@@ -248,10 +240,6 @@
         <tbody>
           {#each store.streams.streams as stream (streamIdentity(stream))}
             {@const key = streamIdentity(stream)}
-            {@const legacyKey = streamKey(
-              stream.forwarder_id,
-              stream.reader_ip,
-            )}
             {@const primaryLabel = streamPrimaryLabel(stream)}
             {@const secondaryLabel = streamSecondaryLabel(stream)}
             {@const displayStatus = deriveStreamDisplayStatus(stream, {
@@ -327,7 +315,7 @@
                 <td
                   class="w-full max-w-0 py-2 px-2 text-left text-text-muted font-mono truncate"
                 >
-                  {formatLastRead(legacyKey)}
+                  {formatLastRead(key)}
                 </td>
               {/if}
               <td
@@ -345,7 +333,7 @@
             </tr>
 
             {#if expandedKey === key}
-              {@const metrics = store.streamMetrics.get(legacyKey)}
+              {@const metrics = store.streamMetrics.get(key)}
               <tr>
                 <td colspan={showLastReadCol() ? 4 : 3} class="p-0">
                   <div class="bg-surface-1 px-4 py-3 border-b border-border">

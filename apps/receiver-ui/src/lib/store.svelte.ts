@@ -67,7 +67,9 @@ export const store = $state({
   connections: null as ConnectionsResponse | null,
   error: null as string | null,
 
-  // Streams
+  // Streams. The per-stream maps below are keyed by canonical
+  // `streamIdentity(...)` (forwarder_endpoint_id/stream_id), never by legacy
+  // display metadata, which can collide across forwarders.
   streams: null as StreamsResponse | null,
   lastReads: new Map<string, LastRead>(),
   streamMetrics: new Map<string, api.StreamMetrics>(),
@@ -399,10 +401,7 @@ function captureConcreteEpochs(
   const result = new Map(existing);
   for (const stream of streams) {
     if (stream.stream_epoch != null) {
-      result.set(
-        streamKey(stream.forwarder_id, stream.reader_ip),
-        stream.stream_epoch,
-      );
+      result.set(streamIdentity(stream), stream.stream_epoch);
     }
   }
   return result;
@@ -414,7 +413,7 @@ function nextConcreteEpochs(
 ): Map<string, number> {
   const next = new Map<string, number>();
   for (const stream of streams) {
-    const key = streamKey(stream.forwarder_id, stream.reader_ip);
+    const key = streamIdentity(stream);
     if (stream.stream_epoch != null) {
       next.set(key, stream.stream_epoch);
     } else {
@@ -795,21 +794,15 @@ function applyStreamCountUpdates(updates: StreamCountUpdate[]): boolean {
   if (updates.length === 0) return false;
   if (!store.streams) return true;
 
-  const knownKeys = new Set(
-    store.streams.streams.map((s) => streamKey(s.forwarder_id, s.reader_ip)),
-  );
-  const updatesByKey = new Map(
-    updates.map((u) => [streamKey(u.forwarder_id, u.reader_ip), u]),
-  );
-  const hasUnknown = updates.some(
-    (u) => !knownKeys.has(streamKey(u.forwarder_id, u.reader_ip)),
-  );
+  const knownKeys = new Set(store.streams.streams.map(streamIdentity));
+  const updatesByKey = new Map(updates.map((u) => [streamIdentity(u), u]));
+  const hasUnknown = updates.some((u) => !knownKeys.has(streamIdentity(u)));
 
   store.streams = {
     ...store.streams,
     streams: store.streams.streams.map((s) => {
       if (!s.subscribed) return s;
-      const u = updatesByKey.get(streamKey(s.forwarder_id, s.reader_ip));
+      const u = updatesByKey.get(streamIdentity(s));
       if (!u) return s;
       return { ...s, reads_total: u.reads_total, reads_epoch: u.reads_epoch };
     }),
@@ -881,7 +874,7 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
     if (nextMetrics.length > 0) {
       const merged = new Map(store.streamMetrics);
       for (const m of nextMetrics) {
-        merged.set(streamKey(m.forwarder_id, m.reader_ip), m);
+        merged.set(streamIdentity(m), m);
       }
       store.streamMetrics = merged;
     }
@@ -1530,10 +1523,7 @@ export function initStore(): void {
     onStreamsSnapshot: (s) => {
       const previousStreams = store.streams?.streams ?? [];
       const previousEpochByKey = new Map(
-        previousStreams.map((st) => [
-          streamKey(st.forwarder_id, st.reader_ip),
-          st.stream_epoch,
-        ]),
+        previousStreams.map((st) => [streamIdentity(st), st.stream_epoch]),
       );
       const previousConcreteEpochByKey = captureConcreteEpochs(
         lastConcreteEpochByKey,
@@ -1548,9 +1538,9 @@ export function initStore(): void {
           continue;
         }
         if (stream.stream_epoch == null) continue;
-        const key = streamKey(stream.forwarder_id, stream.reader_ip);
         const lastKnown =
-          previousEpochByKey.get(key) ?? previousConcreteEpochByKey.get(key);
+          previousEpochByKey.get(identity) ??
+          previousConcreteEpochByKey.get(identity);
         if (lastKnown != null && lastKnown !== stream.stream_epoch) {
           refreshEpochOptionKeys.add(identity);
         }
@@ -1560,20 +1550,19 @@ export function initStore(): void {
       clearSubscriptionPending(s.streams);
       void prefetchEarliestEpochOptions(s.streams, refreshEpochOptionKeys);
       // Prune stale metrics
-      const currentKeys = new Set(
-        s.streams.map((st) => streamKey(st.forwarder_id, st.reader_ip)),
-      );
+      const currentKeys = new Set(s.streams.map(streamIdentity));
       const prunedMetrics = new Map(store.streamMetrics);
       for (const key of prunedMetrics.keys()) {
         if (!currentKeys.has(key)) prunedMetrics.delete(key);
       }
       for (const stream of s.streams) {
         if (stream.stream_epoch == null) continue;
-        const key = streamKey(stream.forwarder_id, stream.reader_ip);
+        const identity = streamIdentity(stream);
         const lastKnown =
-          previousEpochByKey.get(key) ?? previousConcreteEpochByKey.get(key);
+          previousEpochByKey.get(identity) ??
+          previousConcreteEpochByKey.get(identity);
         if (lastKnown != null && lastKnown !== stream.stream_epoch) {
-          prunedMetrics.delete(key);
+          prunedMetrics.delete(identity);
         }
       }
       lastConcreteEpochByKey = nextConcreteEpochs(
@@ -1604,8 +1593,8 @@ export function initStore(): void {
       // same as the legacy per-stream counts event).
       const needsResync = applyStreamCountUpdates(
         updates.map((u) => ({
-          forwarder_id: u.forwarder_id,
-          reader_ip: u.reader_ip,
+          forwarder_endpoint_id: u.forwarder_endpoint_id,
+          stream_id: u.stream_id,
           reads_total: u.reads_total,
           reads_epoch: u.reads_epoch,
         })),
@@ -1617,11 +1606,12 @@ export function initStore(): void {
       }
       if (store.streams) clearSubscriptionPending(store.streams.streams);
       if (needsResync) void loadAll();
-      // Metrics + last read, keyed.
+      // Metrics + last read, keyed by canonical stream identity so streams
+      // that share legacy display metadata never clobber each other.
       const nextMetrics = new Map(store.streamMetrics);
       const nextReads = new Map(store.lastReads);
       for (const u of updates) {
-        const key = streamKey(u.forwarder_id, u.reader_ip);
+        const key = streamIdentity(u);
         nextMetrics.set(key, u.metrics);
         if (u.last_read) {
           nextReads.set(key, {

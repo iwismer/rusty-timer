@@ -150,6 +150,8 @@ function testStream(overrides: Record<string, unknown> = {}) {
 
 function testMetrics(overrides: Record<string, unknown> = {}) {
   return {
+    forwarder_endpoint_id: "endpoint-a",
+    stream_id: "stream-a",
     forwarder_id: "fwd-1",
     reader_ip: "10.0.0.1:10000",
     raw_count: 1,
@@ -275,6 +277,27 @@ describe("receiver updater store", () => {
       ).toBe(false);
       expect(streamHasRecentActivity(streamA, now)).toBe(true);
       expect(streamHasRecentActivity(streamB, now)).toBe(false);
+
+      // Read counts stay isolated: only the delta's own stream is patched,
+      // never a sibling that shares legacy (forwarder_id, reader_ip).
+      const rows = store.streams?.streams ?? [];
+      const rowA = rows.find(
+        (s) => streamIdentity(s) === streamIdentity(streamA),
+      );
+      const rowB = rows.find(
+        (s) => streamIdentity(s) === streamIdentity(streamB),
+      );
+      expect(rowA?.reads_total).toBe(1);
+      expect(rowA?.reads_epoch).toBe(1);
+      expect(rowB?.reads_total).toBeUndefined();
+      expect(rowB?.reads_epoch).toBeUndefined();
+
+      // Metrics are keyed by canonical identity, not the shared display key.
+      expect(store.streamMetrics.has(streamIdentity(streamA))).toBe(true);
+      expect(store.streamMetrics.has(streamIdentity(streamB))).toBe(false);
+      expect(
+        store.streamMetrics.has(streamKey("fwd-1", "10.0.0.1:10000")),
+      ).toBe(false);
     } finally {
       dateNow.mockRestore();
     }
@@ -608,7 +631,7 @@ describe("receiver updater store", () => {
 
   it("clears cached metrics for a stream when a snapshot reports a newer epoch", async () => {
     const sseState = mockSseInitWithCallbacks();
-    const { initStore, store, streamKey } = await import("./store.svelte");
+    const { initStore, store, streamIdentity } = await import("./store.svelte");
 
     initStore();
     await flushAsyncWork();
@@ -616,11 +639,16 @@ describe("receiver updater store", () => {
     const callbacks = sseState.callbacks;
     expect(callbacks).toBeDefined();
 
-    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const key = streamIdentity({
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
+    });
     store.streamMetrics = new Map([
       [
         key,
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           raw_count: 10,
@@ -673,7 +701,7 @@ describe("receiver updater store", () => {
 
   it("preserves cached metrics for a stream when the snapshot keeps the same epoch", async () => {
     const sseState = mockSseInitWithCallbacks();
-    const { initStore, store, streamKey } = await import("./store.svelte");
+    const { initStore, store, streamIdentity } = await import("./store.svelte");
 
     initStore();
     await flushAsyncWork();
@@ -681,8 +709,13 @@ describe("receiver updater store", () => {
     const callbacks = sseState.callbacks;
     expect(callbacks).toBeDefined();
 
-    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const key = streamIdentity({
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
+    });
     const metrics = {
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
       forwarder_id: "fwd-1",
       reader_ip: "10.0.0.1:10000",
       raw_count: 10,
@@ -785,7 +818,7 @@ describe("receiver updater store", () => {
 
   it("onStreamsSnapshot keeps metrics for newly appearing streams", async () => {
     const sseState = mockSseInitWithCallbacks();
-    const { initStore, store, streamKey } = await import("./store.svelte");
+    const { initStore, store, streamIdentity } = await import("./store.svelte");
 
     initStore();
     await flushAsyncWork();
@@ -794,8 +827,13 @@ describe("receiver updater store", () => {
     expect(callbacks).toBeDefined();
 
     // Pre-populate metrics for a stream (simulates metrics arriving before snapshot)
-    const key = streamKey("fwd-new", "10.0.0.1:10000");
+    const key = streamIdentity({
+      forwarder_endpoint_id: "fwd-new",
+      stream_id: "stream-10.0.0.1:10000",
+    });
     const metrics = {
+      forwarder_endpoint_id: "fwd-new",
+      stream_id: "stream-10.0.0.1:10000",
       forwarder_id: "fwd-new",
       reader_ip: "10.0.0.1:10000",
       raw_count: 100,
@@ -816,6 +854,8 @@ describe("receiver updater store", () => {
     callbacks?.onStreamsSnapshot({
       streams: [
         {
+          forwarder_endpoint_id: "fwd-new",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-new",
           reader_ip: "10.0.0.1:10000",
           stream_epoch: undefined,
@@ -831,7 +871,7 @@ describe("receiver updater store", () => {
 
   it("onStreamsSnapshot keeps metrics when previous epoch was undefined", async () => {
     const sseState = mockSseInitWithCallbacks();
-    const { initStore, store, streamKey } = await import("./store.svelte");
+    const { initStore, store, streamIdentity } = await import("./store.svelte");
 
     initStore();
     await flushAsyncWork();
@@ -839,8 +879,13 @@ describe("receiver updater store", () => {
     const callbacks = sseState.callbacks;
     expect(callbacks).toBeDefined();
 
-    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const key = streamIdentity({
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
+    });
     const metrics = {
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
       forwarder_id: "fwd-1",
       reader_ip: "10.0.0.1:10000",
       raw_count: 0,
@@ -895,7 +940,7 @@ describe("receiver updater store", () => {
 
   it("onStreamsSnapshot clears metrics after reconnect when the concrete epoch changed", async () => {
     const sseState = mockSseInitWithCallbacks();
-    const { initStore, store, streamKey } = await import("./store.svelte");
+    const { initStore, store, streamIdentity } = await import("./store.svelte");
 
     initStore();
     await flushAsyncWork();
@@ -903,8 +948,13 @@ describe("receiver updater store", () => {
     const callbacks = sseState.callbacks;
     expect(callbacks).toBeDefined();
 
-    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const key = streamIdentity({
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
+    });
     const metrics = {
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
       forwarder_id: "fwd-1",
       reader_ip: "10.0.0.1:10000",
       raw_count: 12,
@@ -974,7 +1024,7 @@ describe("receiver updater store", () => {
 
   it("onStreamsSnapshot keeps metrics through multiple consecutive undefined-epoch snapshots", async () => {
     const sseState = mockSseInitWithCallbacks();
-    const { initStore, store, streamKey } = await import("./store.svelte");
+    const { initStore, store, streamIdentity } = await import("./store.svelte");
 
     initStore();
     await flushAsyncWork();
@@ -982,8 +1032,13 @@ describe("receiver updater store", () => {
     const callbacks = sseState.callbacks;
     expect(callbacks).toBeDefined();
 
-    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const key = streamIdentity({
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
+    });
     const metrics = {
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
       forwarder_id: "fwd-1",
       reader_ip: "10.0.0.1:10000",
       raw_count: 5,
@@ -1018,6 +1073,8 @@ describe("receiver updater store", () => {
     callbacks?.onStreamsSnapshot({
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           stream_epoch: undefined,
@@ -1032,6 +1089,8 @@ describe("receiver updater store", () => {
     callbacks?.onStreamsSnapshot({
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           stream_epoch: undefined,
@@ -1063,7 +1122,7 @@ describe("receiver updater store", () => {
 
   it("onStreamsSnapshot clears metrics for stream that disappears and reappears with new epoch", async () => {
     const sseState = mockSseInitWithCallbacks();
-    const { initStore, store, streamKey } = await import("./store.svelte");
+    const { initStore, store, streamIdentity } = await import("./store.svelte");
 
     initStore();
     await flushAsyncWork();
@@ -1071,8 +1130,13 @@ describe("receiver updater store", () => {
     const callbacks = sseState.callbacks;
     expect(callbacks).toBeDefined();
 
-    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const key = streamIdentity({
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
+    });
     const metrics = {
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
       forwarder_id: "fwd-1",
       reader_ip: "10.0.0.1:10000",
       raw_count: 10,
@@ -1115,7 +1179,7 @@ describe("receiver updater store", () => {
 
   it("onStreamsSnapshot handles null epoch same as undefined", async () => {
     const sseState = mockSseInitWithCallbacks();
-    const { initStore, store, streamKey } = await import("./store.svelte");
+    const { initStore, store, streamIdentity } = await import("./store.svelte");
 
     initStore();
     await flushAsyncWork();
@@ -1123,8 +1187,13 @@ describe("receiver updater store", () => {
     const callbacks = sseState.callbacks;
     expect(callbacks).toBeDefined();
 
-    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const key = streamIdentity({
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
+    });
     const metrics = {
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
       forwarder_id: "fwd-1",
       reader_ip: "10.0.0.1:10000",
       raw_count: 0,
@@ -1145,6 +1214,8 @@ describe("receiver updater store", () => {
     callbacks?.onStreamsSnapshot({
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           stream_epoch: null,
@@ -1159,7 +1230,7 @@ describe("receiver updater store", () => {
 
   it("onStreamsSnapshot prunes only the stream whose epoch changed in a multi-stream snapshot", async () => {
     const sseState = mockSseInitWithCallbacks();
-    const { initStore, store, streamKey } = await import("./store.svelte");
+    const { initStore, store, streamIdentity } = await import("./store.svelte");
 
     initStore();
     await flushAsyncWork();
@@ -1167,9 +1238,17 @@ describe("receiver updater store", () => {
     const callbacks = sseState.callbacks;
     expect(callbacks).toBeDefined();
 
-    const keyA = streamKey("fwd-1", "10.0.0.1:10000");
-    const keyB = streamKey("fwd-2", "10.0.0.2:10000");
+    const keyA = streamIdentity({
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
+    });
+    const keyB = streamIdentity({
+      forwarder_endpoint_id: "fwd-2",
+      stream_id: "stream-10.0.0.2:10000",
+    });
     const metricsA = {
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
       forwarder_id: "fwd-1",
       reader_ip: "10.0.0.1:10000",
       raw_count: 5,
@@ -1184,6 +1263,8 @@ describe("receiver updater store", () => {
       unique_chips: 3,
     };
     const metricsB = {
+      forwarder_endpoint_id: "fwd-2",
+      stream_id: "stream-10.0.0.2:10000",
       forwarder_id: "fwd-2",
       reader_ip: "10.0.0.2:10000",
       raw_count: 20,
@@ -1259,7 +1340,7 @@ describe("receiver updater store", () => {
 
   it("keeps cached metrics across resync until replacement data arrives", async () => {
     const sseState = mockSseInitWithCallbacks();
-    const { initStore, store, streamKey } = await import("./store.svelte");
+    const { initStore, store, streamIdentity } = await import("./store.svelte");
 
     initStore();
     await flushAsyncWork();
@@ -1267,8 +1348,13 @@ describe("receiver updater store", () => {
     const callbacks = sseState.callbacks;
     expect(callbacks).toBeDefined();
 
-    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const key = streamIdentity({
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
+    });
     const metrics = {
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
       forwarder_id: "fwd-1",
       reader_ip: "10.0.0.1:10000",
       raw_count: 10,

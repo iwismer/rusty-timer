@@ -368,7 +368,13 @@ pub struct UiState {
         Arc<StdMutex<HashMap<(String, String), crate::ui_events::StreamDelta>>>,
     pub logger: Arc<rt_ui_log::UiLogger<ReceiverUiEvent>>,
     pub ui_tx: broadcast::Sender<ReceiverUiEvent>,
+    /// Per-stream read counts keyed by the composite receiver-local stream
+    /// identity (`LocalStreamKey`).
     pub stream_counts: crate::cache::StreamCounts,
+    /// Latest per-stream metrics payloads keyed by
+    /// `(forwarder_endpoint_id, wire_stream_id)`. Display metadata
+    /// (`forwarder_id`, `reader_ip`) can collide across forwarders and must
+    /// never key this cache.
     pub stream_metrics_cache:
         Arc<RwLock<HashMap<(String, String), crate::ui_events::StreamMetricsPayload>>>,
 }
@@ -686,7 +692,10 @@ impl AppState {
     }
 
     pub async fn cache_stream_metrics(&self, payload: &crate::ui_events::StreamMetricsPayload) {
-        let key = (payload.forwarder_id.clone(), payload.reader_ip.clone());
+        let key = (
+            payload.forwarder_endpoint_id.clone(),
+            payload.stream_id.clone(),
+        );
         self.ui
             .stream_metrics_cache
             .write()
@@ -1502,14 +1511,8 @@ impl AppState {
                     .as_deref()
                     .and_then(crate::ports::default_port)
             });
-            let counts = display_forwarder_id
-                .as_deref()
-                .zip(display_reader_ip.as_deref())
-                .and_then(|(forwarder_id, reader_ip)| {
-                    let sk = crate::cache::StreamKey::new(forwarder_id, reader_ip);
-                    counts_snapshot.get(&sk)
-                });
             let local_stream_key = LocalStreamKey::new(&sub.forwarder_endpoint_id, &sub.stream_id);
+            let counts = counts_snapshot.get(&local_stream_key);
             let cursor = cursor_map.get(local_stream_key.as_str());
             let discovered_stream = discovered_streams
                 .get(&(sub.forwarder_endpoint_id.as_str(), sub.stream_id.as_str()));
@@ -2376,6 +2379,8 @@ mod tests {
         };
 
         let metrics = StreamMetricsPayload {
+            forwarder_endpoint_id: "e".to_owned(),
+            stream_id: "s".to_owned(),
             forwarder_id: "f".to_owned(),
             reader_ip: "ip".to_owned(),
             raw_count: 0,

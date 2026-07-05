@@ -23,7 +23,7 @@ pub mod runtime;
 pub mod stream_key;
 pub mod ui_events;
 pub mod writer;
-pub use cache::{StreamCounts, StreamKey};
+pub use cache::StreamCounts;
 pub use db::{Db, DbError, DbResult, EventType, Profile};
 pub use error::ReceiverError;
 pub use ui_events::ReceiverUiEvent;
