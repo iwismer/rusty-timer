@@ -3,6 +3,7 @@
   import {
     AlertBanner,
     Card,
+    HelpTip,
     StatusBadge,
     buttonClass,
     inputClass,
@@ -328,13 +329,22 @@
     />
   {/if}
 
-  <Card title="Token management">
+  <Card
+    title="Token management"
+    helpSection="sbc_token_management"
+    helpContext="server"
+  >
     <div class="space-y-5">
       <div class="grid gap-3 md:grid-cols-[1fr_1fr_auto_auto] md:items-end">
         <label class="block">
-          <span class="block text-xs font-medium text-text-muted mb-1"
-            >Display name</span
-          >
+          <span class="block text-xs font-medium text-text-muted mb-1">
+            Display name
+            <HelpTip
+              fieldKey="display_name"
+              sectionKey="sbc_token_management"
+              context="server"
+            />
+          </span>
           <input
             class={inputClass}
             bind:value={createDisplayName}
@@ -342,9 +352,14 @@
           />
         </label>
         <label class="block">
-          <span class="block text-xs font-medium text-text-muted mb-1"
-            >Manual token (optional)</span
-          >
+          <span class="block text-xs font-medium text-text-muted mb-1">
+            Manual token (optional)
+            <HelpTip
+              fieldKey="manual_token"
+              sectionKey="sbc_token_management"
+              context="server"
+            />
+          </span>
           <input
             class={inputClass}
             bind:value={manualToken}
@@ -353,22 +368,36 @@
             autocomplete="off"
           />
         </label>
-        <button
-          type="button"
-          class={buttonClass("primary", "md")}
-          disabled={tokenBusy != null}
-          onclick={() => void createToken(false)}
-        >
-          {tokenBusy === "generate" ? "Generating…" : "Generate token"}
-        </button>
-        <button
-          type="button"
-          class={buttonClass("secondary", "md")}
-          disabled={tokenBusy != null}
-          onclick={() => void createToken(true)}
-        >
-          {tokenBusy === "manual" ? "Adding…" : "Add manual token"}
-        </button>
+        <div class="flex items-center gap-2">
+          <button
+            type="button"
+            class={buttonClass("primary", "md")}
+            disabled={tokenBusy != null}
+            onclick={() => void createToken(false)}
+          >
+            {tokenBusy === "generate" ? "Generating…" : "Generate token"}
+          </button>
+          <HelpTip
+            fieldKey="generate_token"
+            sectionKey="sbc_token_management"
+            context="server"
+          />
+        </div>
+        <div class="flex items-center gap-2">
+          <button
+            type="button"
+            class={buttonClass("secondary", "md")}
+            disabled={tokenBusy != null}
+            onclick={() => void createToken(true)}
+          >
+            {tokenBusy === "manual" ? "Adding…" : "Add manual token"}
+          </button>
+          <HelpTip
+            fieldKey="add_manual_token"
+            sectionKey="sbc_token_management"
+            context="server"
+          />
+        </div>
       </div>
 
       {#if createdToken}
@@ -379,6 +408,11 @@
             <div>
               <p class="text-sm font-semibold text-status-warn m-0">
                 One-time token
+                <HelpTip
+                  fieldKey="one_time_token"
+                  sectionKey="sbc_token_management"
+                  context="server"
+                />
               </p>
               <p class="text-xs text-status-warn mt-1 mb-0">
                 This secret is shown only once. Existing token rows show
@@ -390,6 +424,11 @@
               class="rounded-md border border-status-warn-border bg-surface-1 px-3 py-1.5 text-xs font-medium text-status-warn"
               onclick={useCreatedToken}>Use in setup form</button
             >
+            <HelpTip
+              fieldKey="use_in_setup_form"
+              sectionKey="sbc_token_management"
+              context="server"
+            />
           </div>
           <pre
             class="mt-3 overflow-x-auto rounded bg-surface-1 p-3 text-xs text-text-primary"><code
@@ -477,6 +516,11 @@
                       >
                         {tokenBusy === token.token_id ? "Revoking…" : "Revoke"}
                       </button>
+                      <HelpTip
+                        fieldKey="revoke_token"
+                        sectionKey="sbc_token_management"
+                        context="server"
+                      />
                     {:else}
                       <span class="text-xs text-text-muted">—</span>
                     {/if}
@@ -491,24 +535,43 @@
   </Card>
 
   <div class="grid gap-6 lg:grid-cols-2">
-    <Card title="Device identity">
+    <Card
+      title="Device identity"
+      helpSection="sbc_device_identity"
+      helpContext="server"
+    >
       <div class="space-y-4">
         <label class="block">
-          <span class="block text-xs font-medium text-text-muted mb-1"
-            >Hostname</span
-          >
+          <span class="block text-xs font-medium text-text-muted mb-1">
+            Hostname
+            <HelpTip
+              fieldKey="hostname"
+              sectionKey="sbc_device_identity"
+              context="server"
+            />
+          </span>
           <input class={inputClass} bind:value={form.hostname} />
         </label>
         <label class="block">
-          <span class="block text-xs font-medium text-text-muted mb-1"
-            >SSH admin username</span
-          >
+          <span class="block text-xs font-medium text-text-muted mb-1">
+            SSH admin username
+            <HelpTip
+              fieldKey="admin_username"
+              sectionKey="sbc_device_identity"
+              context="server"
+            />
+          </span>
           <input class={inputClass} bind:value={form.adminUsername} />
         </label>
         <label class="block">
-          <span class="block text-xs font-medium text-text-muted mb-1"
-            >SSH public key</span
-          >
+          <span class="block text-xs font-medium text-text-muted mb-1">
+            SSH public key
+            <HelpTip
+              fieldKey="ssh_public_key"
+              sectionKey="sbc_device_identity"
+              context="server"
+            />
+          </span>
           <textarea
             class="min-h-24 {inputClass}"
             bind:value={form.sshPublicKey}
@@ -518,12 +581,21 @@
       </div>
     </Card>
 
-    <Card title="Network configuration">
+    <Card
+      title="Network configuration"
+      helpSection="sbc_network"
+      helpContext="server"
+    >
       <div class="space-y-4">
         <label class="block">
-          <span class="block text-xs font-medium text-text-muted mb-1"
-            >Static IPv4/CIDR</span
-          >
+          <span class="block text-xs font-medium text-text-muted mb-1">
+            Static IPv4/CIDR
+            <HelpTip
+              fieldKey="static_ipv4_cidr"
+              sectionKey="sbc_network"
+              context="server"
+            />
+          </span>
           <input
             class={inputClass}
             bind:value={form.staticIpv4Cidr}
@@ -531,9 +603,14 @@
           />
         </label>
         <label class="block">
-          <span class="block text-xs font-medium text-text-muted mb-1"
-            >Default gateway</span
-          >
+          <span class="block text-xs font-medium text-text-muted mb-1">
+            Default gateway
+            <HelpTip
+              fieldKey="gateway"
+              sectionKey="sbc_network"
+              context="server"
+            />
+          </span>
           <input
             class={inputClass}
             bind:value={form.gateway}
@@ -541,9 +618,14 @@
           />
         </label>
         <label class="block">
-          <span class="block text-xs font-medium text-text-muted mb-1"
-            >DNS servers</span
-          >
+          <span class="block text-xs font-medium text-text-muted mb-1">
+            DNS servers
+            <HelpTip
+              fieldKey="dns_servers"
+              sectionKey="sbc_network"
+              context="server"
+            />
+          </span>
           <input
             class={inputClass}
             bind:value={form.dnsServers}
@@ -553,19 +635,34 @@
         <label class="flex items-center gap-2 text-sm text-text-primary">
           <input type="checkbox" bind:checked={form.wifiEnabled} />
           Enable Wi-Fi fallback
+          <HelpTip
+            fieldKey="wifi_enabled"
+            sectionKey="sbc_network"
+            context="server"
+          />
         </label>
         {#if form.wifiEnabled}
           <div class="grid gap-3 md:grid-cols-3">
             <label class="block md:col-span-2">
-              <span class="block text-xs font-medium text-text-muted mb-1"
-                >Wi-Fi SSID</span
-              >
+              <span class="block text-xs font-medium text-text-muted mb-1">
+                Wi-Fi SSID
+                <HelpTip
+                  fieldKey="wifi_ssid"
+                  sectionKey="sbc_network"
+                  context="server"
+                />
+              </span>
               <input class={inputClass} bind:value={form.wifiSsid} />
             </label>
             <label class="block">
-              <span class="block text-xs font-medium text-text-muted mb-1"
-                >Country</span
-              >
+              <span class="block text-xs font-medium text-text-muted mb-1">
+                Country
+                <HelpTip
+                  fieldKey="wifi_country"
+                  sectionKey="sbc_network"
+                  context="server"
+                />
+              </span>
               <input
                 class={inputClass}
                 bind:value={form.wifiCountry}
@@ -574,9 +671,14 @@
             </label>
           </div>
           <label class="block">
-            <span class="block text-xs font-medium text-text-muted mb-1"
-              >Wi-Fi password</span
-            >
+            <span class="block text-xs font-medium text-text-muted mb-1">
+              Wi-Fi password
+              <HelpTip
+                fieldKey="wifi_password"
+                sectionKey="sbc_network"
+                context="server"
+              />
+            </span>
             <input
               class={inputClass}
               bind:value={form.wifiPassword}
@@ -591,12 +693,21 @@
   </div>
 
   <div class="grid gap-6 lg:grid-cols-2">
-    <Card title="Forwarder setup">
+    <Card
+      title="Forwarder setup"
+      helpSection="sbc_forwarder_setup"
+      helpContext="server"
+    >
       <div class="space-y-4">
         <label class="block">
-          <span class="block text-xs font-medium text-text-muted mb-1"
-            >Server URL</span
-          >
+          <span class="block text-xs font-medium text-text-muted mb-1">
+            Server URL
+            <HelpTip
+              fieldKey="server_url"
+              sectionKey="sbc_forwarder_setup"
+              context="server"
+            />
+          </span>
           <input
             class={inputClass}
             bind:value={form.serverUrl}
@@ -604,9 +715,14 @@
           />
         </label>
         <label class="block">
-          <span class="block text-xs font-medium text-text-muted mb-1"
-            >Auth token</span
-          >
+          <span class="block text-xs font-medium text-text-muted mb-1">
+            Auth token
+            <HelpTip
+              fieldKey="auth_token"
+              sectionKey="sbc_forwarder_setup"
+              context="server"
+            />
+          </span>
           <input
             class={inputClass}
             bind:value={form.authToken}
@@ -615,9 +731,14 @@
           />
         </label>
         <label class="block">
-          <span class="block text-xs font-medium text-text-muted mb-1"
-            >Display name</span
-          >
+          <span class="block text-xs font-medium text-text-muted mb-1">
+            Display name
+            <HelpTip
+              fieldKey="display_name"
+              sectionKey="sbc_forwarder_setup"
+              context="server"
+            />
+          </span>
           <input
             class={inputClass}
             bind:value={form.displayName}
@@ -625,9 +746,14 @@
           />
         </label>
         <label class="block">
-          <span class="block text-xs font-medium text-text-muted mb-1"
-            >Reader targets</span
-          >
+          <span class="block text-xs font-medium text-text-muted mb-1">
+            Reader targets
+            <HelpTip
+              fieldKey="reader_targets"
+              sectionKey="sbc_forwarder_setup"
+              context="server"
+            />
+          </span>
           <textarea
             class="min-h-24 {inputClass}"
             bind:value={form.readerTargets}
@@ -640,12 +766,17 @@
       </div>
     </Card>
 
-    <Card title="Advanced">
+    <Card title="Advanced" helpSection="sbc_advanced" helpContext="server">
       <div class="space-y-4">
         <label class="block">
-          <span class="block text-xs font-medium text-text-muted mb-1"
-            >Status HTTP bind</span
-          >
+          <span class="block text-xs font-medium text-text-muted mb-1">
+            Status HTTP bind
+            <HelpTip
+              fieldKey="status_bind"
+              sectionKey="sbc_advanced"
+              context="server"
+            />
+          </span>
           <input
             class={inputClass}
             bind:value={form.statusBind}
@@ -653,36 +784,71 @@
           />
         </label>
         <label class="block">
-          <span class="block text-xs font-medium text-text-muted mb-1"
-            >Setup script URL</span
-          >
+          <span class="block text-xs font-medium text-text-muted mb-1">
+            Setup script URL
+            <HelpTip
+              fieldKey="setup_script_url"
+              sectionKey="sbc_advanced"
+              context="server"
+            />
+          </span>
           <input class={inputClass} bind:value={form.setupScriptUrl} />
         </label>
         <label class="flex items-center gap-2 text-sm text-text-primary">
           <input type="checkbox" bind:checked={form.upsEnabled} />
           Enable UPS HAT support
+          <HelpTip
+            fieldKey="ups_enabled"
+            sectionKey="sbc_advanced"
+            context="server"
+          />
         </label>
       </div>
     </Card>
   </div>
 
-  <Card title="Download actions">
+  <Card
+    title="Download actions"
+    helpSection="sbc_download_actions"
+    helpContext="server"
+  >
     <div class="flex flex-wrap items-center gap-3">
-      <button
-        type="button"
-        class={buttonClass("primary", "md")}
-        onclick={downloadUserData}>Download user-data</button
-      >
-      <button
-        type="button"
-        class={buttonClass("primary", "md")}
-        onclick={downloadNetworkConfig}>Download network-config</button
-      >
-      <button
-        type="button"
-        class={buttonClass("secondary", "md")}
-        onclick={saveAndNextDevice}>Save &amp; Next Device</button
-      >
+      <div class="flex items-center gap-2">
+        <button
+          type="button"
+          class={buttonClass("primary", "md")}
+          onclick={downloadUserData}>Download user-data</button
+        >
+        <HelpTip
+          fieldKey="download_user_data"
+          sectionKey="sbc_download_actions"
+          context="server"
+        />
+      </div>
+      <div class="flex items-center gap-2">
+        <button
+          type="button"
+          class={buttonClass("primary", "md")}
+          onclick={downloadNetworkConfig}>Download network-config</button
+        >
+        <HelpTip
+          fieldKey="download_network_config"
+          sectionKey="sbc_download_actions"
+          context="server"
+        />
+      </div>
+      <div class="flex items-center gap-2">
+        <button
+          type="button"
+          class={buttonClass("secondary", "md")}
+          onclick={saveAndNextDevice}>Save &amp; Next Device</button
+        >
+        <HelpTip
+          fieldKey="save_next_device"
+          sectionKey="sbc_download_actions"
+          context="server"
+        />
+      </div>
     </div>
     <p class="mt-3 text-xs text-text-muted mb-0">
       Save &amp; Next Device stores non-secret preferences only, clears the auth

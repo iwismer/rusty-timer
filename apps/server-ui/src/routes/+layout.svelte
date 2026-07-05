@@ -35,6 +35,7 @@
         { href: "/admin", label: "Admin", active: currentPath === "/admin" },
       ]}
       actions={[{ href: "/announcer", label: "Announcer Feed" }]}
+      helpContext="server"
     />
 
     <main class="grow">

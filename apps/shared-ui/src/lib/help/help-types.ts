@@ -18,7 +18,7 @@ export type SectionHelp = {
 };
 
 export type HelpContext = Record<string, SectionHelp>;
-export type HelpContextName = "forwarder" | "receiver" | "receiver-admin";
+export type HelpContextName = "forwarder" | "receiver" | "receiver-admin" | "server";
 
 export type HelpSearchResult = {
   context: HelpContextName;

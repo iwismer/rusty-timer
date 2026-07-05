@@ -93,16 +93,16 @@
   {/if}
 
   <div class="grid gap-4 sm:grid-cols-3">
-    <Card>
+    <Card helpSection="server_status" helpContext="server">
       <StatCard
         label="Announcer generation"
         value={status?.announcer_source_generation ?? "—"}
       />
     </Card>
-    <Card>
+    <Card helpSection="server_status" helpContext="server">
       <StatCard label="Finishers" value={status?.finisher_count ?? "—"} />
     </Card>
-    <Card>
+    <Card helpSection="server_status" helpContext="server">
       <StatCard
         label="Registered devices"
         value={status?.devices.length ?? "—"}
@@ -110,7 +110,11 @@
     </Card>
   </div>
 
-  <Card title="Connected forwarders and stream catalogs">
+  <Card
+    title="Connected forwarders and stream catalogs"
+    helpSection="stream_catalogs"
+    helpContext="server"
+  >
     {#if !status}
       <p class="text-sm text-text-muted m-0">Loading forwarders…</p>
     {:else if status.forwarders.length === 0 && status.forwarder_streams.length === 0}
@@ -187,7 +191,11 @@
     {/if}
   </Card>
 
-  <Card title="Registered devices">
+  <Card
+    title="Registered devices"
+    helpSection="registered_devices"
+    helpContext="server"
+  >
     {#if !status}
       <p class="text-sm text-text-muted m-0">Loading devices…</p>
     {:else if status.devices.length === 0}

@@ -1,10 +1,10 @@
 <script lang="ts">
-  import type { Snippet } from "svelte";
-  import { setContext } from "svelte";
-  import { resolveHeaderBgClass } from "../lib/card-logic";
-  import type { HelpContextName } from "../lib/help/help-types";
-  import HelpDialog from "./HelpDialog.svelte";
-  import { HELP_OPEN_MODAL_KEY } from "./HelpTip.svelte";
+  import type { Snippet } from 'svelte';
+  import { setContext } from 'svelte';
+  import { resolveHeaderBgClass } from '../lib/card-logic';
+  import type { HelpContextName } from '../lib/help/help-types';
+  import HelpDialog from './HelpDialog.svelte';
+  import { HELP_OPEN_MODAL_KEY } from './HelpTip.svelte';
 
   let {
     title = undefined,
@@ -18,7 +18,7 @@
     title?: string;
     headerBg?: boolean;
     /** Set to "ok", "warn", or "err" to show a colored border */
-    borderStatus?: "ok" | "warn" | "err";
+    borderStatus?: 'ok' | 'warn' | 'err';
     helpSection?: string;
     helpContext?: HelpContextName;
     header?: Snippet;
@@ -26,12 +26,12 @@
   } = $props();
 
   const borderMap: Record<string, string> = {
-    ok: "border-status-ok-border",
-    warn: "border-status-warn-border",
-    err: "border-status-err-border",
+    ok: 'border-status-ok-border',
+    warn: 'border-status-warn-border',
+    err: 'border-status-err-border',
   };
 
-  let borderClass = $derived(borderStatus ? borderMap[borderStatus] : "border-border");
+  let borderClass = $derived(borderStatus ? borderMap[borderStatus] : 'border-border');
   let headerBgClass = $derived(resolveHeaderBgClass(borderStatus, headerBg));
 
   let helpDialogOpen = $state(false);
@@ -58,14 +58,14 @@
   }
 </script>
 
-<section class="overflow-hidden rounded-lg bg-surface-1 border {borderClass}">
-  {#if title || header || helpSection}
+<section class="relative overflow-hidden rounded-lg bg-surface-1 border {borderClass}">
+  {#if title || header}
     <div
       class="px-4 py-3 border-b border-border flex flex-wrap items-center gap-3 rounded-t-lg {headerBgClass}"
     >
       {#if header}
         {@render header()}
-      {:else}
+      {:else if title}
         <h2 class="text-sm font-semibold text-text-primary">{title}</h2>
       {/if}
       {#if helpSection && helpContext}
@@ -73,10 +73,17 @@
           onclick={() => openHelp()}
           class="ml-auto inline-flex items-center justify-center w-5 h-5 rounded-full border border-border text-text-muted hover:text-accent hover:border-accent text-xs font-bold cursor-pointer bg-transparent transition-colors"
           aria-label="Help for {title ?? helpSection}"
-          type="button"
-        >?</button>
+          type="button">?</button
+        >
       {/if}
     </div>
+  {:else if helpSection && helpContext}
+    <button
+      onclick={() => openHelp()}
+      class="absolute right-4 top-4 inline-flex items-center justify-center w-5 h-5 rounded-full border border-border text-text-muted hover:text-accent hover:border-accent text-xs font-bold cursor-pointer bg-transparent transition-colors"
+      aria-label="Help for {helpSection}"
+      type="button">?</button
+    >
   {/if}
   <div class="p-4">
     {#if children}

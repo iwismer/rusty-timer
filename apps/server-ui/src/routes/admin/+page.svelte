@@ -3,6 +3,7 @@
   import {
     AlertBanner,
     Card,
+    HelpTip,
     StatusBadge,
     buttonClass,
     inputClass,
@@ -229,7 +230,11 @@
     />
   {/if}
 
-  <Card title="Receiver enrollment tokens">
+  <Card
+    title="Receiver enrollment tokens"
+    helpSection="receiver_tokens"
+    helpContext="server"
+  >
     <div class="space-y-5">
       <p class="text-sm text-text-muted m-0">
         Create a one-time enrollment token for a receiver, then enter it (with
@@ -239,9 +244,14 @@
 
       <div class="grid gap-3 md:grid-cols-[1fr_1fr_auto_auto] md:items-end">
         <label class="block">
-          <span class="block text-xs font-medium text-text-muted mb-1"
-            >Display name</span
-          >
+          <span class="block text-xs font-medium text-text-muted mb-1">
+            Display name
+            <HelpTip
+              fieldKey="display_name"
+              sectionKey="receiver_tokens"
+              context="server"
+            />
+          </span>
           <input
             class={inputClass}
             bind:value={createDisplayName}
@@ -249,9 +259,14 @@
           />
         </label>
         <label class="block">
-          <span class="block text-xs font-medium text-text-muted mb-1"
-            >Manual token (optional)</span
-          >
+          <span class="block text-xs font-medium text-text-muted mb-1">
+            Manual token (optional)
+            <HelpTip
+              fieldKey="manual_token"
+              sectionKey="receiver_tokens"
+              context="server"
+            />
+          </span>
           <input
             class={inputClass}
             bind:value={manualToken}
@@ -260,22 +275,36 @@
             autocomplete="off"
           />
         </label>
-        <button
-          type="button"
-          class={buttonClass("primary", "md")}
-          disabled={tokenBusy != null}
-          onclick={() => void createToken(false)}
-        >
-          {tokenBusy === "generate" ? "Generating\u2026" : "Generate token"}
-        </button>
-        <button
-          type="button"
-          class={buttonClass("secondary", "md")}
-          disabled={tokenBusy != null}
-          onclick={() => void createToken(true)}
-        >
-          {tokenBusy === "manual" ? "Adding\u2026" : "Add manual token"}
-        </button>
+        <div class="flex items-center gap-2">
+          <button
+            type="button"
+            class={buttonClass("primary", "md")}
+            disabled={tokenBusy != null}
+            onclick={() => void createToken(false)}
+          >
+            {tokenBusy === "generate" ? "Generating\u2026" : "Generate token"}
+          </button>
+          <HelpTip
+            fieldKey="generate_token"
+            sectionKey="receiver_tokens"
+            context="server"
+          />
+        </div>
+        <div class="flex items-center gap-2">
+          <button
+            type="button"
+            class={buttonClass("secondary", "md")}
+            disabled={tokenBusy != null}
+            onclick={() => void createToken(true)}
+          >
+            {tokenBusy === "manual" ? "Adding\u2026" : "Add manual token"}
+          </button>
+          <HelpTip
+            fieldKey="add_manual_token"
+            sectionKey="receiver_tokens"
+            context="server"
+          />
+        </div>
       </div>
 
       {#if createdToken}
@@ -286,6 +315,11 @@
             <div>
               <p class="text-sm font-semibold text-status-warn m-0">
                 One-time token
+                <HelpTip
+                  fieldKey="one_time_token"
+                  sectionKey="receiver_tokens"
+                  context="server"
+                />
               </p>
               <p class="text-xs text-status-warn mt-1 mb-0">
                 This secret is shown only once. Existing token rows show
@@ -380,16 +414,23 @@
                   >
                   <td class={tableCellClass()}>
                     {#if token.status !== "revoked"}
-                      <button
-                        type="button"
-                        class={buttonClass("danger-soft", "xs")}
-                        disabled={tokenBusy != null}
-                        onclick={() => void revokeToken(token)}
-                      >
-                        {tokenBusy === token.token_id
-                          ? "Revoking\u2026"
-                          : "Revoke"}
-                      </button>
+                      <div class="flex items-center gap-2">
+                        <button
+                          type="button"
+                          class={buttonClass("danger-soft", "xs")}
+                          disabled={tokenBusy != null}
+                          onclick={() => void revokeToken(token)}
+                        >
+                          {tokenBusy === token.token_id
+                            ? "Revoking\u2026"
+                            : "Revoke"}
+                        </button>
+                        <HelpTip
+                          fieldKey="revoke_token"
+                          sectionKey="receiver_tokens"
+                          context="server"
+                        />
+                      </div>
                     {:else}
                       <span class="text-xs text-text-muted">—</span>
                     {/if}
@@ -403,7 +444,11 @@
     </div>
   </Card>
 
-  <Card title="Pending devices">
+  <Card
+    title="Pending devices"
+    helpSection="device_approval"
+    helpContext="server"
+  >
     {#if !status}
       <p class="text-sm text-text-muted m-0">Loading devices…</p>
     {:else if pendingDevices.length === 0}
@@ -423,6 +468,11 @@
             <div>
               <p class="text-sm font-semibold text-text-primary m-0">
                 {displayName(device)}
+                <HelpTip
+                  fieldKey="pending_device"
+                  sectionKey="device_approval"
+                  context="server"
+                />
               </p>
               <p class="text-xs text-text-muted mt-1 mb-0">
                 {displayKind(device)}
@@ -431,20 +481,31 @@
                 {device.endpoint_id}
               </p>
             </div>
-            <button
-              type="submit"
-              class={buttonClass("primary", "md")}
-              disabled={busyEndpoint === device.endpoint_id}
-            >
-              {busyEndpoint === device.endpoint_id ? "Approving…" : "Approve"}
-            </button>
+            <div class="flex items-center justify-end gap-2">
+              <button
+                type="submit"
+                class={buttonClass("primary", "md")}
+                disabled={busyEndpoint === device.endpoint_id}
+              >
+                {busyEndpoint === device.endpoint_id ? "Approving…" : "Approve"}
+              </button>
+              <HelpTip
+                fieldKey="approve_device"
+                sectionKey="device_approval"
+                context="server"
+              />
+            </div>
           </form>
         {/each}
       </div>
     {/if}
   </Card>
 
-  <Card title="Approved devices">
+  <Card
+    title="Approved devices"
+    helpSection="device_approval"
+    helpContext="server"
+  >
     {#if !status}
       <p class="text-sm text-text-muted m-0">Loading devices…</p>
     {:else if activeDevices.length === 0}
@@ -455,6 +516,11 @@
           <div class="rounded-md border border-border bg-surface-2 p-4">
             <p class="text-sm font-semibold text-text-primary m-0">
               {displayName(device)}
+              <HelpTip
+                fieldKey="approved_device"
+                sectionKey="device_approval"
+                context="server"
+              />
             </p>
             <p class="text-xs text-text-muted mt-1 mb-0">
               {displayKind(device)}
