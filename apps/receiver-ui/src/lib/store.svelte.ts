@@ -137,11 +137,10 @@ export const store = $state({
   modeDraft: "live" as ReceiverMode["mode"],
   raceIdDraft: "",
   earliestEpochInputs: {} as Record<string, string>,
-  earliestEpochOptions: {} as Record<string, api.ReplayTargetEpochOption[]>,
+  streamEpochOptions: {} as Record<string, api.StreamEpochOption[]>,
   earliestEpochLoading: {} as Record<string, boolean>,
   earliestEpochLoadErrors: {} as Record<string, string>,
   earliestEpochSaving: {} as Record<string, boolean>,
-  targetedEpochInputs: {} as Record<string, string>,
   modeBusy: false,
   modeApplyQueued: false,
   savedModePayload: null as string | null,
@@ -297,10 +296,6 @@ export function setRaceIdDraft(value: string): void {
   store.raceIdDraft = value;
 }
 
-export function setTargetedEpochInputs(value: Record<string, string>): void {
-  store.targetedEpochInputs = value;
-}
-
 // --------------- Helpers ---------------
 
 export function streamKey(
@@ -451,23 +446,8 @@ export function parseNonNegativeInt(raw: unknown): number | null {
   return !Number.isSafeInteger(parsed) || parsed < 0 ? null : parsed;
 }
 
-export function isApiReturnedEpoch(key: string, epoch: number): boolean {
-  return (store.earliestEpochOptions[key] ?? []).some(
-    (option) => option.stream_epoch === epoch,
-  );
-}
-
-export function parseApiReturnedEpoch(
-  key: string,
-  raw: unknown,
-): number | null {
-  const parsed = parseNonNegativeInt(raw);
-  if (parsed === null) return null;
-  return isApiReturnedEpoch(key, parsed) ? parsed : null;
-}
-
 export function formatEarliestEpochOption(
-  option: api.ReplayTargetEpochOption,
+  option: api.StreamEpochOption,
 ): string {
   const name = option.name?.trim() || "unnamed";
   const timestamp =
@@ -481,61 +461,11 @@ export function formatEarliestEpochOption(
 
 export function selectedEarliestEpochValue(stream: api.StreamEntry): string {
   const key = streamIdentity(stream);
+  // An in-flight local edit wins; otherwise the stored override read back
+  // from the streams response. Empty string = no override (all data).
   const configured = store.earliestEpochInputs[key];
-  const options = store.earliestEpochOptions[key] ?? [];
-
-  if (
-    configured &&
-    options.some((option) => String(option.stream_epoch) === configured)
-  ) {
-    return configured;
-  }
-  if (options.length === 0) return "";
-  if (
-    stream.stream_epoch != null &&
-    options.some((option) => option.stream_epoch === stream.stream_epoch)
-  ) {
-    return String(stream.stream_epoch);
-  }
-  const newest = options.reduce(
-    (max, option) => Math.max(max, option.stream_epoch),
-    options[0]?.stream_epoch ?? 0,
-  );
-  return String(newest);
-}
-
-export function selectedTargetedEpochValue(stream: api.StreamEntry): string {
-  const key = streamIdentity(stream);
-  const configured = parseApiReturnedEpoch(key, store.targetedEpochInputs[key]);
-  const options = store.earliestEpochOptions[key] ?? [];
-
-  if (configured !== null) return String(configured);
-  if (options.length === 0) return "";
-  if (
-    stream.stream_epoch != null &&
-    isApiReturnedEpoch(key, stream.stream_epoch)
-  ) {
-    return String(stream.stream_epoch);
-  }
-  const newest = options.reduce(
-    (max, option) => Math.max(max, option.stream_epoch),
-    options[0]?.stream_epoch ?? 0,
-  );
-  return String(newest);
-}
-
-export function resolveReplayTargetEpoch(
-  stream: api.StreamEntry,
-): number | null {
-  const key = streamIdentity(stream);
-  const configured = parseApiReturnedEpoch(key, store.targetedEpochInputs[key]);
-  if (configured !== null) return configured;
-  const selected = parseApiReturnedEpoch(
-    key,
-    selectedTargetedEpochValue(stream),
-  );
-  if (selected !== null) return selected;
-  return parseNonNegativeInt(stream.stream_epoch);
+  if (configured !== undefined) return configured;
+  return stream.earliest_epoch != null ? String(stream.earliest_epoch) : "";
 }
 
 function compareStreamRefs(
@@ -550,35 +480,10 @@ export function modePayload(): ReceiverMode {
   if (store.modeDraft === "race") {
     return { mode: "race", race_id: store.raceIdDraft.trim() };
   }
-  // The input maps are keyed by canonical stream identity. The compatibility
-  // `ReceiverMode` payload is keyed by (forwarder_id, reader_ip), so resolve
-  // each input back to its stream and only emit streams that still carry real
-  // legacy metadata (canonical-only streams are not representable here).
-  const byIdentity = streamsByIdentity();
-  if (store.modeDraft === "targeted_replay") {
-    const targets = Object.entries(store.targetedEpochInputs)
-      .map(([key, value]) => {
-        const stream = byIdentity.get(key);
-        const stream_epoch = parseApiReturnedEpoch(key, value);
-        if (
-          !stream ||
-          stream.forwarder_id == null ||
-          stream.reader_ip == null ||
-          stream_epoch === null
-        )
-          return null;
-        return {
-          forwarder_id: stream.forwarder_id,
-          reader_ip: stream.reader_ip,
-          stream_epoch,
-        };
-      })
-      .filter((t): t is api.ReplayTarget => t !== null);
-    return { mode: "targeted_replay", targets };
-  }
   // Compatibility live mode is keyed by (forwarder_id, reader_ip); only include
   // streams that expose real display metadata rather than fabricating refs from
-  // canonical identifiers.
+  // canonical identifiers. Earliest-epoch overrides are stored canonically via
+  // put_earliest_epoch and no longer ride on the mode payload.
   const liveStreams: api.StreamRef[] = (store.streams?.streams ?? [])
     .filter(
       (s): s is api.StreamEntry & { forwarder_id: string; reader_ip: string } =>
@@ -588,80 +493,20 @@ export function modePayload(): ReceiverMode {
       forwarder_id: s.forwarder_id,
       reader_ip: s.reader_ip,
     }));
-  const earliest_epochs = Object.entries(store.earliestEpochInputs)
-    .map(([key, value]) => {
-      const stream = byIdentity.get(key);
-      const earliest_epoch = parseNonNegativeInt(value);
-      if (
-        !stream ||
-        stream.forwarder_id == null ||
-        stream.reader_ip == null ||
-        earliest_epoch === null
-      )
-        return null;
-      return {
-        forwarder_id: stream.forwarder_id,
-        reader_ip: stream.reader_ip,
-        earliest_epoch,
-      };
-    })
-    .filter(
-      (
-        r,
-      ): r is {
-        forwarder_id: string;
-        reader_ip: string;
-        earliest_epoch: number;
-      } => r !== null,
-    );
-  return { mode: "live", streams: liveStreams, earliest_epochs };
+  return { mode: "live", streams: liveStreams };
 }
 
 export function modeSignature(mode: ReceiverMode): string {
   if (mode.mode === "race") {
     return JSON.stringify({ mode: "race", race_id: mode.race_id.trim() });
   }
-  if (mode.mode === "targeted_replay") {
-    const targets = [...mode.targets]
-      .map((t) => ({
-        forwarder_id: t.forwarder_id,
-        reader_ip: t.reader_ip,
-        stream_epoch: t.stream_epoch,
-      }))
-      .sort((a, b) => {
-        const sc = compareStreamRefs(a, b);
-        return sc !== 0 ? sc : a.stream_epoch - b.stream_epoch;
-      });
-    return JSON.stringify({ mode: "targeted_replay", targets });
-  }
-  const liveMode = mode as {
-    streams?: api.StreamRef[];
-    earliest_epochs?: api.EarliestEpochOverride[];
-  };
-  const sortedStreams = [...(liveMode.streams ?? [])]
+  const sortedStreams = [...(mode.streams ?? [])]
     .map((s) => ({
       forwarder_id: s.forwarder_id,
       reader_ip: s.reader_ip,
     }))
     .sort(compareStreamRefs);
-  const earliestEpochRows = Array.isArray(liveMode.earliest_epochs)
-    ? liveMode.earliest_epochs
-    : [];
-  const sorted = [...earliestEpochRows]
-    .map((r) => ({
-      forwarder_id: r.forwarder_id,
-      reader_ip: r.reader_ip,
-      earliest_epoch: r.earliest_epoch,
-    }))
-    .sort((a, b) => {
-      const sc = compareStreamRefs(a, b);
-      return sc !== 0 ? sc : a.earliest_epoch - b.earliest_epoch;
-    });
-  return JSON.stringify({
-    mode: "live",
-    streams: sortedStreams,
-    earliest_epochs: sorted,
-  });
+  return JSON.stringify({ mode: "live", streams: sortedStreams });
 }
 
 export function getModeDirty(): boolean {
@@ -684,7 +529,7 @@ export async function prefetchEarliestEpochOptions(
     const key = streamIdentity(stream);
     const forceRefresh = forceRefreshKeys.has(key);
     if (
-      (!forceRefresh && store.earliestEpochOptions[key]) ||
+      (!forceRefresh && store.streamEpochOptions[key]) ||
       store.earliestEpochLoading[key]
     )
       return;
@@ -696,56 +541,30 @@ export async function prefetchEarliestEpochOptions(
     };
 
     try {
-      // Replay-target epochs are looked up by canonical stream_id, matching
-      // how the P2P data plane persists received events. When the durable
-      // store has no events yet, fall back to the advertised current epoch so
-      // the controls do not show "No epochs available".
-      const response = await api.getReplayTargetEpochs({
+      // The backend merges forwarder-advertised epochs (names, creation
+      // times, selectability) with locally received epochs; the response is
+      // already sorted newest-first. Fall back to the stream's advertised
+      // current epoch when nothing is known yet so the controls do not show
+      // "No epochs available".
+      const response = await api.getStreamEpochs({
         forwarder_endpoint_id: stream.forwarder_endpoint_id,
         stream_id: stream.stream_id,
       });
-      const currentEpochName = stream.current_epoch_name?.trim() || null;
-      const byEpoch = new Map<number, api.ReplayTargetEpochOption>();
-      for (const option of response.epochs) {
-        byEpoch.set(option.stream_epoch, option);
+      let epochs = response.epochs;
+      if (epochs.length === 0 && stream.stream_epoch != null) {
+        epochs = [
+          {
+            stream_epoch: stream.stream_epoch,
+            name: stream.current_epoch_name?.trim() || null,
+            first_seen_at: null,
+            created_unix_ms: stream.current_epoch_created_unix_ms ?? null,
+            selectable: true,
+          },
+        ];
       }
-      const advertisedOptions = [...(stream.epoch_options ?? [])];
-      if (
-        stream.stream_epoch != null &&
-        !advertisedOptions.some(
-          (option) => option.stream_epoch === stream.stream_epoch,
-        )
-      ) {
-        advertisedOptions.unshift({
-          stream_epoch: stream.stream_epoch,
-          created_unix_ms: stream.current_epoch_created_unix_ms ?? null,
-        });
-      }
-      for (const option of advertisedOptions) {
-        const existing = byEpoch.get(option.stream_epoch);
-        const isCurrent = option.stream_epoch === stream.stream_epoch;
-        byEpoch.set(option.stream_epoch, {
-          stream_epoch: option.stream_epoch,
-          name: existing?.name?.trim()
-            ? existing.name
-            : isCurrent
-              ? currentEpochName
-              : null,
-          first_seen_at: existing?.first_seen_at ?? null,
-          created_unix_ms: isCurrent
-            ? (stream.current_epoch_created_unix_ms ??
-              option.created_unix_ms ??
-              existing?.created_unix_ms ??
-              null)
-            : (option.created_unix_ms ?? existing?.created_unix_ms ?? null),
-          race_names: existing?.race_names ?? [],
-        });
-      }
-      store.earliestEpochOptions = {
-        ...store.earliestEpochOptions,
-        [key]: [...byEpoch.values()].sort(
-          (a, b) => b.stream_epoch - a.stream_epoch,
-        ),
+      store.streamEpochOptions = {
+        ...store.streamEpochOptions,
+        [key]: epochs,
       };
     } catch (e) {
       store.earliestEpochLoadErrors = {
@@ -764,52 +583,18 @@ export async function prefetchEarliestEpochOptions(
 
 function hydrateMode(mode: ReceiverMode): void {
   store.modeDraft = mode.mode;
-  // Saved modes are keyed by legacy (forwarder_id, reader_ip); translate to
-  // canonical stream identity using the current stream list so the input maps
-  // stay canonical-keyed. When the matching stream is not currently known we
-  // fall back to the legacy streamKey rather than dropping the override.
-  const identityForLegacyRef = (
-    forwarder_id: string,
-    reader_ip: string,
-  ): string => {
-    const stream = (store.streams?.streams ?? []).find(
-      (s) => s.forwarder_id === forwarder_id && s.reader_ip === reader_ip,
-    );
-    return stream ? streamIdentity(stream) : streamKey(forwarder_id, reader_ip);
-  };
-  if (mode.mode === "live") {
-    const rows = Array.isArray(mode.earliest_epochs)
-      ? mode.earliest_epochs
-      : [];
-    store.earliestEpochInputs = Object.fromEntries(
-      rows.map((r) => [
-        identityForLegacyRef(r.forwarder_id, r.reader_ip),
-        String(r.earliest_epoch),
-      ]),
-    );
-    store.raceIdDraft = "";
-    store.targetedEpochInputs = {};
-    return;
-  }
-  if (mode.mode === "race") {
-    store.raceIdDraft = mode.race_id;
-    store.targetedEpochInputs = {};
-    return;
-  }
-  store.targetedEpochInputs = Object.fromEntries(
-    mode.targets.map((t) => [
-      identityForLegacyRef(t.forwarder_id, t.reader_ip),
-      String(t.stream_epoch),
-    ]),
-  );
+  // Earliest-epoch overrides read back on the streams response
+  // (StreamEntry.earliest_epoch); local edits in earliestEpochInputs are
+  // cleared so hydration reflects persisted state.
+  store.earliestEpochInputs = {};
+  store.raceIdDraft = mode.mode === "race" ? mode.race_id : "";
 }
 
 function resetHydratedMode(): void {
-  hydrateMode({ mode: "live", streams: [], earliest_epochs: [] });
+  hydrateMode({ mode: "live", streams: [] });
   store.savedModePayload = JSON.stringify({
     mode: "live",
     streams: [],
-    earliest_epochs: [],
   });
   store.modeEditedSinceHydration = false;
   modeHydrationVersion += 1;
@@ -1020,25 +805,35 @@ export async function changeEarliestEpoch(
   const key = streamIdentity(stream);
   if (store.earliestEpochSaving[key]) return;
 
-  const parsed = parseNonNegativeInt(rawValue);
-  if (parsed === null) {
-    store.error = "Earliest epoch must be a non-negative integer.";
+  // Empty selection clears the override (deliver all available data). Note
+  // that clearing never re-fetches data already skipped by a previous
+  // override: the receiver's cursor jump is durable.
+  const clearing = rawValue.trim() === "";
+  const parsed = clearing ? null : parseNonNegativeInt(rawValue);
+  if (!clearing && (parsed === null || parsed < 1)) {
+    store.error = "Earliest epoch must be a positive integer.";
     return;
   }
 
   store.earliestEpochSaving = { ...store.earliestEpochSaving, [key]: true };
   try {
     store.error = null;
-    await api.putEarliestEpoch({
-      forwarder_endpoint_id: stream.forwarder_endpoint_id,
-      stream_id: stream.stream_id,
-      earliest_epoch: parsed,
-    });
+    if (clearing) {
+      await api.resetEarliestEpoch({
+        forwarder_endpoint_id: stream.forwarder_endpoint_id,
+        stream_id: stream.stream_id,
+      });
+    } else {
+      await api.putEarliestEpoch({
+        forwarder_endpoint_id: stream.forwarder_endpoint_id,
+        stream_id: stream.stream_id,
+        earliest_epoch: parsed!,
+      });
+    }
     store.earliestEpochInputs = {
       ...store.earliestEpochInputs,
-      [key]: String(parsed),
+      [key]: clearing ? "" : String(parsed),
     };
-    markModeEdited();
   } catch (e) {
     store.error = String(e);
   } finally {
@@ -1149,73 +944,6 @@ export async function updateStreamEventType(
     store.error = String(e);
   } finally {
     store.streamEventTypeBusy = { ...store.streamEventTypeBusy, [key]: false };
-  }
-}
-
-export async function replayStream(stream: api.StreamEntry): Promise<void> {
-  const parsed = resolveReplayTargetEpoch(stream);
-  if (parsed === null) {
-    store.error = "Select a valid target epoch before replaying.";
-    return;
-  }
-  // Targeted replay still uses display metadata keyed by (forwarder_id, reader_ip).
-  const { forwarder_id, reader_ip } = stream;
-  if (forwarder_id == null || reader_ip == null) {
-    store.error = "Stream is missing legacy metadata required for replay.";
-    return;
-  }
-  try {
-    store.error = null;
-    const payload: ReceiverMode = {
-      mode: "targeted_replay",
-      targets: [
-        {
-          forwarder_id,
-          reader_ip,
-          stream_epoch: parsed,
-        },
-      ],
-    };
-    await api.putMode(payload);
-    modeMutationVersion += 1;
-    store.modeDraft = "targeted_replay";
-    store.savedModePayload = modeSignature(payload);
-    store.modeEditedSinceHydration = false;
-  } catch (e) {
-    store.error = String(e);
-  }
-}
-
-export async function replayAll(): Promise<void> {
-  const targets = (store.streams?.streams ?? [])
-    .map((s) => {
-      const epoch = resolveReplayTargetEpoch(s);
-      if (epoch === null) return null;
-      const { forwarder_id, reader_ip } = s;
-      if (forwarder_id == null || reader_ip == null) return null;
-      return {
-        forwarder_id,
-        reader_ip,
-        stream_epoch: epoch,
-      };
-    })
-    .filter((t): t is api.ReplayTarget => t !== null);
-
-  if (targets.length === 0) {
-    store.error =
-      "Select at least one valid target epoch before replaying all.";
-    return;
-  }
-  try {
-    store.error = null;
-    const payload: ReceiverMode = { mode: "targeted_replay", targets };
-    await api.putMode(payload);
-    modeMutationVersion += 1;
-    store.modeDraft = "targeted_replay";
-    store.savedModePayload = modeSignature(payload);
-    store.modeEditedSinceHydration = false;
-  } catch (e) {
-    store.error = String(e);
   }
 }
 

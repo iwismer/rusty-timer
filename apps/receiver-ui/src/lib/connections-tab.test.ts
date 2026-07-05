@@ -507,15 +507,14 @@ describe("ConnectionsTab", () => {
 
     await fireEvent.click(screen.getByText("Advance Epoch"));
 
+    // Advance carries the draft name in a single atomic command; no separate
+    // set-name call follows.
     expect(mockState.readerAdvanceEpoch).toHaveBeenCalledWith(
-      "endpoint-live",
-      "10.0.0.1:10000",
-    );
-    expect(mockState.readerSetEpochName).toHaveBeenLastCalledWith(
       "endpoint-live",
       "10.0.0.1:10000",
       "Lap 2",
     );
+    expect(mockState.readerSetEpochName).toHaveBeenCalledTimes(1);
     expect(mockState.refreshStreamsAndEpochOptions).toHaveBeenLastCalledWith([
       {
         forwarder_endpoint_id: "endpoint-live",

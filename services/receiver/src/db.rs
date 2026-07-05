@@ -366,7 +366,16 @@ impl Db {
         let Some(raw_json) = self.load_receiver_mode_json_raw()? else {
             return Ok(None);
         };
-        Ok(Some(serde_json::from_str::<ReceiverMode>(&raw_json)?))
+        match serde_json::from_str::<ReceiverMode>(&raw_json) {
+            Ok(mode) => Ok(Some(mode)),
+            Err(error) => {
+                // A stored mode from a removed variant (e.g. the old
+                // targeted_replay) must not brick startup: fall back to the
+                // default (Live) by reporting no stored mode.
+                tracing::warn!(%error, "stored receiver mode is unreadable; falling back to default");
+                Ok(None)
+            }
+        }
     }
 
     pub fn save_receiver_mode(&self, mode: &ReceiverMode) -> DbResult<()> {
@@ -1425,6 +1434,27 @@ impl Db {
         Ok(())
     }
 
+    /// Delete one stream's locally received data: received events, gap
+    /// markers, cursor, retention watermark, and announcer fence — in one
+    /// transaction. Subscriptions and earliest-epoch overrides are
+    /// deliberately preserved: the epoch-replay recovery recipe (set a From
+    /// epoch override, reset local stream data, reconnect the consumer)
+    /// depends on them surviving the reset.
+    pub fn reset_stream_data(&mut self, stream_id: &str) -> DbResult<()> {
+        let tx = self.conn.transaction()?;
+        for sql in [
+            "DELETE FROM received_events WHERE stream_id = ?1",
+            "DELETE FROM gap_markers WHERE stream_id = ?1",
+            "DELETE FROM cursors WHERE stream_id = ?1",
+            "DELETE FROM retention WHERE stream_id = ?1",
+            "DELETE FROM announcer_source_fence WHERE stream_id = ?1",
+        ] {
+            tx.execute(sql, rusqlite::params![stream_id])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn clear_data(&mut self) -> DbResult<()> {
         let tx = self.conn.transaction()?;
         tx.execute_batch("DELETE FROM cursors")?;
@@ -2153,10 +2183,7 @@ mod tests {
         let mut db = Db::open_in_memory().unwrap();
         db.save_profile("https://example.com", "tok", "check-and-download", None)
             .unwrap();
-        let mode = ReceiverMode::Live {
-            streams: vec![],
-            earliest_epochs: vec![],
-        };
+        let mode = ReceiverMode::Live { streams: vec![] };
         db.save_receiver_mode(&mode).unwrap();
 
         let loaded = db.load_receiver_mode().unwrap().unwrap();
@@ -2164,21 +2191,22 @@ mod tests {
     }
 
     #[test]
-    fn targeted_replay_mode_round_trips_with_targets() {
+    fn stored_targeted_replay_mode_falls_back_to_default() {
+        // A mode persisted by an old build (the removed targeted_replay
+        // variant) must load as "no stored mode" rather than erroring.
         let mut db = Db::open_in_memory().unwrap();
         db.save_profile("https://example.com", "tok", "check-and-download", None)
             .unwrap();
-        let targeted = ReceiverMode::TargetedReplay {
-            targets: vec![rt_domain::ReplayTarget {
-                forwarder_id: "f1".to_owned(),
-                reader_ip: "10.0.0.1".to_owned(),
-                stream_epoch: 3,
-                from_seq: 1,
-            }],
-        };
+        db.conn
+            .execute(
+                "UPDATE profile SET receiver_mode_json = ?1",
+                rusqlite::params![
+                    r#"{"mode":"targeted_replay","targets":[{"forwarder_id":"f1","reader_ip":"10.0.0.1","stream_epoch":3,"from_seq":1}]}"#
+                ],
+            )
+            .unwrap();
 
-        db.save_receiver_mode(&targeted).unwrap();
-        assert_eq!(db.load_receiver_mode().unwrap().unwrap(), targeted);
+        assert_eq!(db.load_receiver_mode().unwrap(), None);
     }
 
     #[test]
@@ -2493,6 +2521,50 @@ mod tests {
             db.accept_announcer_generation(stream_id, 3).unwrap(),
             AnnouncerGenerationAcceptance::Current { generation: 3 }
         );
+    }
+
+    #[test]
+    fn reset_stream_data_scopes_to_one_stream_and_preserves_config() {
+        let mut db = Db::open_in_memory().unwrap();
+        let target = LocalStreamKey::new("endpoint-1", "10.0.0.1:10000");
+        let other = LocalStreamKey::new("endpoint-2", "10.0.0.2:10000");
+        for (key, seq) in [(&target, 1_i64), (&other, 5_i64)] {
+            db.insert_received_event(&ReceivedEventInsert {
+                stream_id: key.as_str(),
+                seq,
+                epoch: 1,
+                raw_frame: b"raw",
+                read_kind: "live",
+                reader_timestamp: None,
+                received_unix_ms: 1,
+                dbf_delivered_unix_ms: None,
+                chip_id: None,
+            })
+            .unwrap();
+            db.jump_stream_cursor(key.as_str(), seq).unwrap();
+        }
+        db.replace_stream_subscriptions(&[crate::db::StreamSubscription {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: "10.0.0.1:10000".to_owned(),
+            local_port_override: None,
+            event_type: EventType::Finish,
+            forwarder_id: None,
+            reader_ip: None,
+        }])
+        .unwrap();
+        db.save_stream_earliest_epoch("endpoint-1", "10.0.0.1:10000", 2)
+            .unwrap();
+
+        db.reset_stream_data(target.as_str()).unwrap();
+
+        // The target stream's data is gone; the other stream is untouched.
+        assert!(db.load_received_events(target.as_str()).unwrap().is_empty());
+        assert_eq!(db.load_stream_cursor(target.as_str()).unwrap(), 0);
+        assert_eq!(db.load_received_events(other.as_str()).unwrap().len(), 1);
+        assert_eq!(db.load_stream_cursor(other.as_str()).unwrap(), 5);
+        // Subscription and override survive (the recovery recipe needs them).
+        assert_eq!(db.load_stream_subscriptions().unwrap().len(), 1);
+        assert_eq!(db.load_stream_earliest_epochs().unwrap().len(), 1);
     }
 
     #[test]

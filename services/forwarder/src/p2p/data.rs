@@ -10,8 +10,7 @@ use std::sync::Arc;
 
 use rt_iroh::{Connection, RecvStream, SendStream};
 use rt_p2p_protocol::{
-    Ack, DataC2F, DataF2C, EventBatch, ReadRecord, StreamEpochStarted, SubscribeMode, SubscribeOk,
-    data_c2f, data_f2c,
+    Ack, DataC2F, DataF2C, EventBatch, ReadRecord, SubscribeMode, SubscribeOk, data_c2f, data_f2c,
 };
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
@@ -205,7 +204,6 @@ async fn serve_data_stream(
     let wake_registry = { journal.lock().await.wake_registry() };
     let mut wake = wake_registry.subscribe(&stream_key);
     let replay = ReplayEngine::new();
-    let mut last_epoch: Option<u64> = None;
     let mut caught_up_sent_at: Option<i64> = None;
     let mut ack_rx_open = true;
 
@@ -282,23 +280,6 @@ async fn serve_data_stream(
 
         caught_up_sent_at = None;
         for segment in split_segments(&batch.records, latest_at_open) {
-            let epoch = u64_from_i64(segment[0].stream_epoch)?;
-            if last_epoch != Some(epoch) {
-                write_frame(
-                    &mut send,
-                    &DataF2C {
-                        msg: Some(data_f2c::Msg::StreamEpochStarted(StreamEpochStarted {
-                            stream_id: stream_id.clone(),
-                            epoch,
-                            start_seq: u64_from_i64(segment[0].seq)?,
-                            reason: "epoch_started".to_owned(),
-                        })),
-                    },
-                )
-                .await?;
-                last_epoch = Some(epoch);
-            }
-
             let records = segment
                 .iter()
                 .map(|event| to_read_record(event, &stream_id))
@@ -421,7 +402,7 @@ fn to_read_record(event: &JournalEvent, stream_id: &[u8]) -> Result<ReadRecord, 
     Ok(ReadRecord {
         stream_id: stream_id.to_vec(),
         seq: u64_from_i64(event.seq)?,
-        epoch: u64_from_i64(event.stream_epoch)?,
+        epoch: event.stream_epoch,
         raw_frame: event.raw_frame.clone(),
         read_kind: event.read_type.clone(),
         reader_timestamp: event
@@ -630,22 +611,16 @@ mod tests {
     }
 
     async fn read_batch(recv: &mut rt_iroh::RecvStream) -> TestResult<EventBatch> {
-        loop {
-            match read_next(recv).await?.msg {
-                Some(data_f2c::Msg::EventBatch(batch)) => return Ok(batch),
-                Some(data_f2c::Msg::StreamEpochStarted(_)) => {}
-                other => return Err(format!("expected EventBatch, got {other:?}").into()),
-            }
+        match read_next(recv).await?.msg {
+            Some(data_f2c::Msg::EventBatch(batch)) => Ok(batch),
+            other => Err(format!("expected EventBatch, got {other:?}").into()),
         }
     }
 
     async fn read_caught_up(recv: &mut rt_iroh::RecvStream) -> TestResult<CaughtUp> {
-        loop {
-            match read_next(recv).await?.msg {
-                Some(data_f2c::Msg::CaughtUp(caught_up)) => return Ok(caught_up),
-                Some(data_f2c::Msg::StreamEpochStarted(_)) => {}
-                other => return Err(format!("expected CaughtUp, got {other:?}").into()),
-            }
+        match read_next(recv).await?.msg {
+            Some(data_f2c::Msg::CaughtUp(caught_up)) => Ok(caught_up),
+            other => Err(format!("expected CaughtUp, got {other:?}").into()),
         }
     }
 
@@ -804,7 +779,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn epoch_started_precedes_new_epoch_events() -> TestResult {
+    async fn records_carry_their_epoch_across_an_advance() -> TestResult {
         let harness = start_harness(DataConfig {
             max_events_per_batch: 1,
             ..DataConfig::default()
@@ -814,43 +789,19 @@ mod tests {
             let mut journal = harness.journal.lock().await;
             journal.ensure_stream_state(&stream_key(), 1)?;
             journal.append_read(&stream_key(), None, b"epoch-1", "chip")?;
-            journal.bump_epoch(&stream_key(), 2)?;
+            journal.advance_epoch(&stream_key(), None)?;
             journal.append_read(&stream_key(), None, b"epoch-2", "chip")?;
         }
 
         let (_send, mut recv, _ok) = open_subscription(&harness, 0).await?;
-        match read_next(&mut recv).await?.msg {
-            Some(data_f2c::Msg::StreamEpochStarted(started)) => {
-                assert_eq!(started.epoch, 1);
-                assert_eq!(started.start_seq, 1);
-            }
-            other => {
-                return Err(
-                    format!("expected StreamEpochStarted for epoch 1, got {other:?}").into(),
-                );
-            }
-        }
-        let first = match read_next(&mut recv).await?.msg {
-            Some(data_f2c::Msg::EventBatch(batch)) => batch,
-            other => return Err(format!("expected first EventBatch, got {other:?}").into()),
-        };
+        // Epoch metadata travels per-record: consecutive batches spanning an
+        // epoch advance carry their own epoch ids, with no separate notice.
+        let first = read_batch(&mut recv).await?;
+        assert_eq!(first.records[0].seq, 1);
         assert_eq!(first.records[0].epoch, 1);
 
-        match read_next(&mut recv).await?.msg {
-            Some(data_f2c::Msg::StreamEpochStarted(started)) => {
-                assert_eq!(started.epoch, 2);
-                assert_eq!(started.start_seq, 2);
-            }
-            other => {
-                return Err(
-                    format!("expected StreamEpochStarted for epoch 2, got {other:?}").into(),
-                );
-            }
-        }
-        let second = match read_next(&mut recv).await?.msg {
-            Some(data_f2c::Msg::EventBatch(batch)) => batch,
-            other => return Err(format!("expected second EventBatch, got {other:?}").into()),
-        };
+        let second = read_batch(&mut recv).await?;
+        assert_eq!(second.records[0].seq, 2);
         assert_eq!(second.records[0].epoch, 2);
         Ok(())
     }

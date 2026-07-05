@@ -36,7 +36,7 @@ use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
 /// Protocol minor version this forwarder speaks for the P2P transport.
-pub(crate) const PROTOCOL_MINOR: u32 = 1;
+pub(crate) const PROTOCOL_MINOR: u32 = rt_p2p_protocol::PROTOCOL_MINOR;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -2234,6 +2234,7 @@ mod tests {
                 current_epoch_name: None,
                 current_epoch: None,
                 current_epoch_created_unix_ms: None,
+                current_epoch_start_seq: None,
                 reads_epoch: None,
             }))
             .await

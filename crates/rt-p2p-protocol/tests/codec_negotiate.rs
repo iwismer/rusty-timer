@@ -102,6 +102,35 @@ fn garbage_is_decode_error() {
 }
 
 #[test]
+fn old_minor_peer_refuses_to_pair_with_current_minor_in_both_directions() {
+    // A peer still speaking minor 1 (pre epoch-metadata protocol) must fail
+    // negotiation against the current PROTOCOL_MINOR, whichever side is old.
+    let old = Hello {
+        min_minor: 1,
+        max_minor: 1,
+        capabilities: vec!["data".to_owned()],
+        max_frame_bytes: 0,
+        catalog_generation: 0,
+    };
+    let current = Hello {
+        min_minor: rt_p2p_protocol::PROTOCOL_MINOR,
+        max_minor: rt_p2p_protocol::PROTOCOL_MINOR,
+        capabilities: vec!["data".to_owned()],
+        max_frame_bytes: 0,
+        catalog_generation: 0,
+    };
+
+    assert!(
+        negotiate(&old, &current).is_err(),
+        "old client vs current server must refuse to pair"
+    );
+    assert!(
+        negotiate(&current, &old).is_err(),
+        "current client vs old server must refuse to pair"
+    );
+}
+
+#[test]
 fn negotiate_picks_min_minor_and_capability_intersection() {
     let client = Hello {
         min_minor: 1,

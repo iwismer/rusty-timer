@@ -616,12 +616,13 @@
                               stream_id: reader.stream_id,
                             },
                           )}
-                        onAdvanceEpoch={() =>
+                        onAdvanceEpoch={(name) =>
                           runReaderCommand(
                             () =>
                               readerAdvanceEpoch(
                                 forwarder.endpoint_id,
                                 reader.stream_id,
+                                name,
                               ),
                             {
                               forwarder_endpoint_id: forwarder.endpoint_id,

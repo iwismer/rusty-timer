@@ -67,6 +67,18 @@ export interface StreamEntry {
   reads_epoch?: number | null;
   cursor_epoch?: number | null;
   cursor_seq?: number | null;
+  /** Data task held fail-closed: the earliest-epoch override is unresolvable. */
+  override_held?: boolean;
+  /** Stored earliest-epoch override for this stream, if any. */
+  earliest_epoch?: number | null;
+  /** Terminal data-subscription failure on the live connection, if any. */
+  failure?: StreamFailure | null;
+}
+
+export interface StreamFailure {
+  reason: string;
+  seq?: number | null;
+  unix_ms: number;
 }
 
 export interface StreamCountUpdate {
@@ -250,44 +262,27 @@ export interface StreamRef {
   reader_ip: string;
 }
 
-export interface EarliestEpochOverride {
-  forwarder_id: string;
-  reader_ip: string;
-  earliest_epoch: number;
-}
-
-export interface ReplayTarget {
-  forwarder_id: string;
-  reader_ip: string;
-  stream_epoch: number;
-  from_seq?: number;
-}
-
 export type ReceiverMode =
   | {
       mode: "live";
       streams: StreamRef[];
-      earliest_epochs: EarliestEpochOverride[];
     }
   | {
       mode: "race";
       race_id: string;
-    }
-  | {
-      mode: "targeted_replay";
-      targets: ReplayTarget[];
     };
 
-export interface ReplayTargetEpochOption {
+export interface StreamEpochOption {
   stream_epoch: number;
   name: string | null;
   first_seen_at: string | null;
   created_unix_ms?: number | null;
-  race_names: string[];
+  /** Whether this epoch can be selected as an earliest-epoch override. */
+  selectable: boolean;
 }
 
-export interface ReplayTargetEpochsResponse {
-  epochs: ReplayTargetEpochOption[];
+export interface StreamEpochsResponse {
+  epochs: StreamEpochOption[];
 }
 
 // --------------- Forwarder types ---------------
@@ -525,10 +520,12 @@ export async function readerSetEpochName(
 export async function readerAdvanceEpoch(
   endpointId: string,
   streamId: string,
+  name: string | null,
 ): Promise<ReaderControlResult> {
   return invoke<ReaderControlResult>("reader_advance_epoch", {
     endpointId,
     streamId,
+    name,
   });
 }
 
@@ -638,11 +635,11 @@ export async function putEarliestEpoch(
   await invoke("put_earliest_epoch", { body });
 }
 
-export async function getReplayTargetEpochs(stream: {
+export async function getStreamEpochs(stream: {
   forwarder_endpoint_id: string;
   stream_id: string;
-}): Promise<ReplayTargetEpochsResponse> {
-  return invoke<ReplayTargetEpochsResponse>("get_replay_target_epochs", {
+}): Promise<StreamEpochsResponse> {
+  return invoke<StreamEpochsResponse>("get_stream_epochs", {
     forwarderEndpointId: stream.forwarder_endpoint_id,
     streamId: stream.stream_id,
   });
@@ -653,6 +650,18 @@ export async function resetStreamCursor(stream: {
   stream_id: string;
 }): Promise<void> {
   await invoke("admin_reset_cursor", {
+    body: {
+      forwarder_endpoint_id: stream.forwarder_endpoint_id,
+      stream_id: stream.stream_id,
+    },
+  });
+}
+
+export async function resetStreamData(stream: {
+  forwarder_endpoint_id: string;
+  stream_id: string;
+}): Promise<void> {
+  await invoke("admin_reset_stream_data", {
     body: {
       forwarder_endpoint_id: stream.forwarder_endpoint_id,
       stream_id: stream.stream_id,

@@ -16,13 +16,8 @@
     setStreamAnnouncerPublish,
     updateStreamEventType,
     changeEarliestEpoch,
-    replayStream,
-    replayAll,
     selectedEarliestEpochValue,
-    selectedTargetedEpochValue,
     formatEarliestEpochOption,
-    setTargetedEpochInputs,
-    markModeEdited,
     openHelp,
   } from "$lib/store.svelte";
   import type { StreamEntry } from "$lib/api";
@@ -199,39 +194,22 @@
     </div>
   {/if}
 
-  {#if store.modeDraft === "targeted_replay" || store.streams?.streams.some((stream) => !stream.subscribed)}
+  {#if store.streams?.streams.some((stream) => !stream.subscribed)}
     <div class="flex justify-end gap-2 px-4 py-2 border-b border-border">
-      {#if store.streams?.streams.some((stream) => !stream.subscribed)}
-        <button
-          data-testid="subscribe-all-btn"
-          class={btnPrimary}
-          onclick={() => void subscribeAllAvailable()}
-          disabled={store.streamActionBusy}
-        >
-          Subscribe All
-        </button>
-        <HelpTip
-          fieldKey="subscribe_all"
-          sectionKey="streams"
-          context="receiver"
-          onOpenModal={openHelp}
-        />
-      {/if}
-      {#if store.modeDraft === "targeted_replay"}
-        <button
-          data-testid="replay-all-btn"
-          class={btnSecondary}
-          onclick={() => void replayAll()}
-        >
-          Replay All
-        </button>
-        <HelpTip
-          fieldKey="replay"
-          sectionKey="streams"
-          context="receiver"
-          onOpenModal={openHelp}
-        />
-      {/if}
+      <button
+        data-testid="subscribe-all-btn"
+        class={btnPrimary}
+        onclick={() => void subscribeAllAvailable()}
+        disabled={store.streamActionBusy}
+      >
+        Subscribe All
+      </button>
+      <HelpTip
+        fieldKey="subscribe_all"
+        sectionKey="streams"
+        context="receiver"
+        onOpenModal={openHelp}
+      />
     </div>
   {/if}
 
@@ -336,6 +314,15 @@
                       >
                         {primaryLabel}
                       </span>
+                      {#if stream.failure}
+                        <span
+                          data-testid="stream-halted-{key}"
+                          class="rounded border border-status-err-border bg-status-err-bg px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-status-err"
+                          title={`Stream halted: ${stream.failure.reason}${stream.failure.seq != null ? ` (seq ${stream.failure.seq})` : ""} — see the operator runbook. Delivery stays stopped until the receiver reconnects or the subscription changes.`}
+                        >
+                          halted
+                        </span>
+                      {/if}
                       {#if !stream.subscribed}
                         <span
                           class="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-muted"
@@ -575,56 +562,8 @@
                         />
                       {/if}
 
-                      {#if stream.subscribed && store.modeDraft === "targeted_replay"}
-                        {@const options = store.earliestEpochOptions[key] ?? []}
-                        {@const selectedTargeted =
-                          selectedTargetedEpochValue(stream)}
-                        <select
-                          data-testid="targeted-epoch-{key}"
-                          class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-72 max-w-full focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
-                          value={selectedTargeted}
-                          onchange={(e) => {
-                            e.stopPropagation();
-                            setTargetedEpochInputs({
-                              ...store.targetedEpochInputs,
-                              [key]: e.currentTarget.value,
-                            });
-                            markModeEdited();
-                          }}
-                          onclick={(e) => e.stopPropagation()}
-                        >
-                          {#if store.earliestEpochLoading[key]}
-                            <option value="">Loading epochs...</option>
-                          {:else if store.earliestEpochLoadErrors[key]}
-                            <option value="">Epochs unavailable</option>
-                          {:else if options.length === 0}
-                            <option value="">No epochs available</option>
-                          {:else}
-                            {#each options as option}
-                              <option value={String(option.stream_epoch)}>
-                                {formatEarliestEpochOption(option)}
-                              </option>
-                            {/each}
-                          {/if}
-                        </select>
-                        <button
-                          data-testid="replay-stream-{key}"
-                          class="{btnPrimary} !px-2.5 !py-1 !text-xs"
-                          onclick={(e) => {
-                            e.stopPropagation();
-                            void replayStream(stream);
-                          }}
-                        >
-                          Replay
-                        </button>
-                        <HelpTip
-                          fieldKey="replay"
-                          sectionKey="streams"
-                          context="receiver"
-                          onOpenModal={openHelp}
-                        />
-                      {:else if store.modeDraft !== "targeted_replay"}
-                        {@const options = store.earliestEpochOptions[key] ?? []}
+                      {#if store.modeDraft !== "race"}
+                        {@const options = store.streamEpochOptions[key] ?? []}
                         {@const selectedEarliest =
                           selectedEarliestEpochValue(stream)}
                         <label class="text-xs text-text-secondary mr-1">
@@ -647,8 +586,7 @@
                               );
                             }}
                             onclick={(e) => e.stopPropagation()}
-                            disabled={store.modeDraft === "race" ||
-                              store.earliestEpochSaving[key]}
+                            disabled={store.earliestEpochSaving[key]}
                           >
                             {#if store.earliestEpochLoading[key]}
                               <option value="">Loading epochs...</option>
@@ -657,14 +595,34 @@
                             {:else if options.length === 0}
                               <option value="">No epochs available</option>
                             {:else}
+                              <option value="">All available data</option>
                               {#each options as option}
-                                <option value={String(option.stream_epoch)}>
-                                  {formatEarliestEpochOption(option)}
+                                <!-- Local-only epochs (no longer advertised by
+                                     the forwarder) cannot resolve an override
+                                     (fail-closed) and are not selectable. -->
+                                <option
+                                  value={String(option.stream_epoch)}
+                                  disabled={!option.selectable}
+                                >
+                                  {formatEarliestEpochOption(
+                                    option,
+                                  )}{option.selectable
+                                    ? ""
+                                    : " (no longer available on forwarder)"}
                                 </option>
                               {/each}
                             {/if}
                           </select>
                         </label>
+                        {#if stream.override_held}
+                          <span
+                            data-testid="override-held-{key}"
+                            class="text-xs text-status-warn"
+                            title="The selected earliest epoch is not advertised by the forwarder. No data flows until it becomes available or the override is cleared."
+                          >
+                            paused: epoch unavailable
+                          </span>
+                        {/if}
                       {/if}
 
                       <button

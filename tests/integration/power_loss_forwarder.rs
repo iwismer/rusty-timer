@@ -100,7 +100,7 @@ fn power_loss_events_survive_abrupt_drop() {
     // Phase 2: Re-open after simulated restart.
     {
         let j = Journal::open(&path).unwrap();
-        let unacked = j.unacked_events("10.100.100.1", 1, 0).unwrap();
+        let unacked = j.read_events_after("10.100.100.1", 0, usize::MAX).unwrap();
         assert_eq!(
             unacked.len(),
             5,
@@ -141,19 +141,19 @@ fn power_loss_ack_cursor_survives_abrupt_drop() {
                 .unwrap();
         }
         // Ack through seq 3.
-        j.update_ack_cursor("10.100.100.2", 1, 3).unwrap();
+        j.update_receiver_stream_cursor("test-receiver", "10.100.100.2", 3)
+            .unwrap();
         // Abrupt drop here.
     }
 
     // Phase 2: Restart — ack cursor must be at seq=3.
     {
         let j = Journal::open(&path).unwrap();
-        let (acked_epoch, acked_seq) = j.ack_cursor("10.100.100.2").unwrap();
-        assert_eq!(acked_epoch, 1, "acked epoch must survive restart");
+        let acked_seq = j.min_acked_through_seq("10.100.100.2").unwrap();
         assert_eq!(acked_seq, 3, "acked seq must be at 3 after restart");
 
         // Only seq 4 and 5 must be in the unacked backlog.
-        let unacked = j.unacked_events("10.100.100.2", 1, 3).unwrap();
+        let unacked = j.read_events_after("10.100.100.2", 3, usize::MAX).unwrap();
         assert_eq!(
             unacked.len(),
             2,
@@ -197,7 +197,8 @@ fn power_loss_restart_replays_all_unacked_events() {
             .unwrap();
         }
         // Ack through seq 2.
-        j.update_ack_cursor("10.100.100.3", 1, 2).unwrap();
+        j.update_receiver_stream_cursor("test-receiver", "10.100.100.3", 2)
+            .unwrap();
         // Kill.
     }
 
@@ -207,7 +208,7 @@ fn power_loss_restart_replays_all_unacked_events() {
         let j = Journal::open(&path).unwrap();
 
         // Server tells forwarder "I have up to seq 2"; forwarder replays from seq 3.
-        let replay_backlog = j.unacked_events("10.100.100.3", 1, 2).unwrap();
+        let replay_backlog = j.read_events_after("10.100.100.3", 2, usize::MAX).unwrap();
         assert_eq!(
             replay_backlog.len(),
             4,
@@ -241,7 +242,8 @@ fn power_loss_multiple_streams_independent_recovery() {
             j.insert_event("10.100.100.4", 1, seq, None, b"s1_line", "RAW")
                 .unwrap();
         }
-        j.update_ack_cursor("10.100.100.4", 1, 3).unwrap();
+        j.update_receiver_stream_cursor("test-receiver", "10.100.100.4", 3)
+            .unwrap();
 
         // Stream 2: 3 events, none acked.
         for _ in 0..3 {
@@ -257,12 +259,12 @@ fn power_loss_multiple_streams_independent_recovery() {
         let j = Journal::open(&path).unwrap();
 
         // Stream 1: only seq 4 should be unacked.
-        let s1_unacked = j.unacked_events("10.100.100.4", 1, 3).unwrap();
+        let s1_unacked = j.read_events_after("10.100.100.4", 3, usize::MAX).unwrap();
         assert_eq!(s1_unacked.len(), 1, "stream 1 should have 1 unacked event");
         assert_eq!(s1_unacked[0].seq, 4);
 
         // Stream 2: all 3 events should be unacked.
-        let s2_unacked = j.unacked_events("10.100.100.5", 1, 0).unwrap();
+        let s2_unacked = j.read_events_after("10.100.100.5", 0, usize::MAX).unwrap();
         assert_eq!(
             s2_unacked.len(),
             3,

@@ -54,6 +54,8 @@ pub struct ReaderStatus {
     pub current_epoch: Option<i64>,
     /// The current epoch creation time, in unix milliseconds, if available.
     pub current_epoch_created_unix_ms: Option<i64>,
+    /// The first seq recorded in the current epoch, if available.
+    pub current_epoch_start_seq: Option<i64>,
     /// The name of the current epoch, if any.
     pub current_epoch_name: Option<String>,
     /// Control protocol info (firmware, clock, etc.) — populated on connect.
@@ -1037,6 +1039,7 @@ impl StatusStore {
                     local_port: *local_port,
                     current_epoch: None,
                     current_epoch_created_unix_ms: None,
+                    current_epoch_start_seq: None,
                     current_epoch_name: None,
                     reader_info: None,
                 });
@@ -1067,53 +1070,27 @@ impl StatusStore {
         self.publish_display_state().await;
     }
 
-    /// Seed a reader's current epoch metadata from durable journal state.
-    pub async fn set_reader_epoch_metadata(
+    /// Apply journal-authoritative current-epoch metadata to a reader's
+    /// status.
+    ///
+    /// The single epoch-transition path shared by startup seeding and the HTTP
+    /// and P2P adapters (which persist to the journal first and then apply the
+    /// returned metadata here). Returns `false` when the reader is unknown.
+    pub async fn apply_epoch_metadata(
         &self,
         reader_ip: &str,
         metadata: crate::storage::journal::CurrentEpochMetadata,
-    ) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            if let Some(r) = ss.readers.get_mut(reader_ip) {
-                if r.current_epoch.is_some_and(|e| e != metadata.epoch) {
-                    // Epoch changed: the new epoch starts with zero reads.
-                    r.reads_epoch = 0;
-                }
-                r.current_epoch = Some(metadata.epoch);
-                r.current_epoch_created_unix_ms = metadata.created_unix_ms;
-                let _ = self
-                    .status_event_tx
-                    .send(ForwarderStatusEvent::ReaderStatus {
-                        stream_id: reader_ip.to_owned(),
-                        status: r.clone(),
-                    });
-            }
-        }
+    ) -> bool {
+        let applied = apply_epoch_metadata_to_subsystem(
+            &self.subsystem,
+            &self.ui_tx,
+            &self.status_event_tx,
+            reader_ip,
+            metadata,
+        )
+        .await;
         self.publish_display_state().await;
-    }
-
-    /// Set the current epoch name for a reader and broadcast a ReaderUpdated SSE event.
-    pub async fn set_reader_epoch_name(&self, reader_ip: &str, name: Option<String>) {
-        {
-            let mut ss = self.subsystem.lock().await;
-            if let Some(r) = ss.readers.get_mut(reader_ip) {
-                r.current_epoch_name = name;
-                let _ = self
-                    .ui_tx
-                    .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
-                        ip: reader_ip.to_owned(),
-                        state: (&r.state).into(),
-                        reads_session: r.reads_since_restart,
-                        reads_total: r.reads_total,
-                        reads_epoch: r.reads_epoch,
-                        last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
-                        local_port: r.local_port,
-                        current_epoch_name: r.current_epoch_name.clone(),
-                    });
-            }
-        }
-        self.publish_display_state().await;
+        applied
     }
 
     /// Update a reader's connection state.
@@ -1186,6 +1163,49 @@ impl StatusStore {
     }
 }
 
+/// Shared implementation of the epoch transition applied to a reader's status.
+///
+/// Zeroes `reads_epoch` only when the epoch id changes, sets the epoch id,
+/// creation time, and name from the (journal-authoritative) metadata, and
+/// broadcasts both the local `ReaderUpdated` SSE event and the P2P
+/// `ReaderStatus` delta under the subsystem lock. Returns `false` when the
+/// reader is unknown.
+pub(crate) async fn apply_epoch_metadata_to_subsystem(
+    subsystem: &Arc<Mutex<SubsystemStatus>>,
+    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
+    status_event_tx: &broadcast::Sender<ForwarderStatusEvent>,
+    reader_ip: &str,
+    metadata: crate::storage::journal::CurrentEpochMetadata,
+) -> bool {
+    let mut ss = subsystem.lock().await;
+    let Some(r) = ss.readers.get_mut(reader_ip) else {
+        return false;
+    };
+    if r.current_epoch.is_some_and(|e| e != metadata.epoch) {
+        // Epoch changed: the new epoch starts with zero reads.
+        r.reads_epoch = 0;
+    }
+    r.current_epoch = Some(metadata.epoch);
+    r.current_epoch_created_unix_ms = metadata.created_unix_ms;
+    r.current_epoch_start_seq = Some(metadata.start_seq);
+    r.current_epoch_name = metadata.name;
+    let _ = ui_tx.send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
+        ip: reader_ip.to_owned(),
+        state: (&r.state).into(),
+        reads_session: r.reads_since_restart,
+        reads_total: r.reads_total,
+        reads_epoch: r.reads_epoch,
+        last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+        local_port: r.local_port,
+        current_epoch_name: r.current_epoch_name.clone(),
+    });
+    let _ = status_event_tx.send(ForwarderStatusEvent::ReaderStatus {
+        stream_id: reader_ip.to_owned(),
+        status: r.clone(),
+    });
+    true
+}
+
 pub(crate) async fn mark_restart_needed_and_emit(
     subsystem: &Arc<Mutex<SubsystemStatus>>,
     ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
@@ -1218,17 +1238,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_reader_epoch_metadata_updates_control_snapshot() {
+    async fn apply_epoch_metadata_updates_control_snapshot() {
         let store = StatusStore::new(SubsystemStatus::ready());
         store.init_readers(&[("reader-a".to_owned(), 10_001)]).await;
 
         let (mut status_rx, _snapshot) = store.status_feed().subscribe_and_snapshot().await;
         store
-            .set_reader_epoch_metadata(
+            .apply_epoch_metadata(
                 "reader-a",
                 crate::storage::journal::CurrentEpochMetadata {
                     epoch: 4,
                     created_unix_ms: Some(1_783_238_640_000),
+                    start_seq: 1,
+                    name: None,
                 },
             )
             .await;
@@ -1260,17 +1282,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_epoch_metadata_is_journal_authoritative_for_names() {
+        let store = StatusStore::new(SubsystemStatus::ready());
+        store.init_readers(&[("reader-a".to_owned(), 10_001)]).await;
+
+        // Metadata with a name sets the name.
+        let applied = store
+            .apply_epoch_metadata(
+                "reader-a",
+                crate::storage::journal::CurrentEpochMetadata {
+                    epoch: 4,
+                    created_unix_ms: None,
+                    start_seq: 1,
+                    name: Some("Race 1".to_owned()),
+                },
+            )
+            .await;
+        assert!(applied);
+
+        let (_rx, snapshot) = store.status_feed().subscribe_and_snapshot().await;
+        let (_stream_id, status) = snapshot
+            .readers
+            .iter()
+            .find(|(stream_id, _)| stream_id == "reader-a")
+            .expect("reader status should be present");
+        assert_eq!(status.current_epoch_name.as_deref(), Some("Race 1"));
+
+        // Re-applying the SAME epoch with no name clears it (journal is
+        // authoritative; no stale in-memory name survives).
+        store
+            .apply_epoch_metadata(
+                "reader-a",
+                crate::storage::journal::CurrentEpochMetadata {
+                    epoch: 4,
+                    created_unix_ms: None,
+                    start_seq: 1,
+                    name: None,
+                },
+            )
+            .await;
+        let (_rx, snapshot) = store.status_feed().subscribe_and_snapshot().await;
+        let (_stream_id, status) = snapshot
+            .readers
+            .iter()
+            .find(|(stream_id, _)| stream_id == "reader-a")
+            .expect("reader status should be present");
+        assert_eq!(status.current_epoch_name, None);
+
+        // Unknown reader reports not-applied.
+        let applied = store
+            .apply_epoch_metadata(
+                "missing",
+                crate::storage::journal::CurrentEpochMetadata {
+                    epoch: 1,
+                    created_unix_ms: None,
+                    start_seq: 1,
+                    name: None,
+                },
+            )
+            .await;
+        assert!(!applied);
+    }
+
+    #[tokio::test]
     async fn reads_epoch_seeds_increments_and_resets_on_epoch_change() {
         let store = StatusStore::new(SubsystemStatus::ready());
         store.init_readers(&[("reader-a".to_owned(), 10_001)]).await;
 
         // Startup: seed epoch metadata, then the durable epoch read count.
         store
-            .set_reader_epoch_metadata(
+            .apply_epoch_metadata(
                 "reader-a",
                 crate::storage::journal::CurrentEpochMetadata {
                     epoch: 4,
                     created_unix_ms: None,
+                    start_seq: 1,
+                    name: None,
                 },
             )
             .await;
@@ -1291,21 +1378,25 @@ mod tests {
 
         // Re-seeding the SAME epoch must not reset the counter.
         store
-            .set_reader_epoch_metadata(
+            .apply_epoch_metadata(
                 "reader-a",
                 crate::storage::journal::CurrentEpochMetadata {
                     epoch: 4,
                     created_unix_ms: None,
+                    start_seq: 1,
+                    name: None,
                 },
             )
             .await;
         // Advancing to a NEW epoch resets the counter to zero.
         store
-            .set_reader_epoch_metadata(
+            .apply_epoch_metadata(
                 "reader-a",
                 crate::storage::journal::CurrentEpochMetadata {
                     epoch: 5,
                     created_unix_ms: None,
+                    start_seq: 1,
+                    name: None,
                 },
             )
             .await;

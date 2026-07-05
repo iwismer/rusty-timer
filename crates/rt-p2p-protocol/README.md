@@ -67,4 +67,9 @@ It overwrites `src/generated/rusty_timer.p2p.v1.rs`. Then review the diff, run
 `cargo fmt`, and commit the regenerated file together with the proto change. The
 normal build never performs this step and never needs `protoc`.
 
+Note: prost-build 0.14 emits the envelope structs as `ControlC2f`/`ControlF2c`/
+`DataC2f`/`DataF2c`; this crate keeps the established `ControlC2F`/`ControlF2C`/
+`DataC2F`/`DataF2C` names. After regenerating, rename those four identifiers in
+the generated file (a plain find/replace) before committing.
+
 [`prost`]: https://docs.rs/prost

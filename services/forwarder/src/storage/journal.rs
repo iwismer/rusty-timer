@@ -11,8 +11,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const COMPAT_RECEIVER_ID: &str = "__forwarder_server__";
-
 /// Maximum number of candidate rows collected (and deleted) in a single
 /// `prune_retention` transaction, per prune category.
 ///
@@ -76,17 +74,22 @@ struct PruneCandidate {
     forced: bool,
 }
 
-/// A read event retrieved from the journal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Metadata for the currently open epoch of a stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentEpochMetadata {
     pub epoch: i64,
     pub created_unix_ms: Option<i64>,
+    pub start_seq: i64,
+    pub name: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpochSummary {
     pub epoch: i64,
     pub created_unix_ms: Option<i64>,
+    pub start_seq: i64,
+    pub end_seq: Option<i64>,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -408,22 +411,22 @@ impl Journal {
         Ok((epoch, seq))
     }
 
-    /// Bump the stream epoch without deleting prior events.
+    /// Advance the stream to the next epoch, optionally naming it, in one
+    /// transaction.
     ///
-    /// Closes the current open epoch and opens `new_epoch`. The new epoch must
-    /// be strictly greater than the current epoch; otherwise an error is
-    /// returned rather than silently ignoring the conflict. Both the close and
-    /// open run in a single transaction.
-    pub fn bump_epoch(&mut self, stream_key: &str, new_epoch: i64) -> Result<(), JournalError> {
-        let current = self.current_epoch(stream_key)?;
-        if new_epoch <= current {
-            return Err(JournalError::InvalidData(format!(
-                "new epoch {new_epoch} must be greater than current epoch {current}"
-            )));
-        }
+    /// Closes the open epoch and opens `current + 1` with `start_seq` at the
+    /// stream's next seq and reason `'advance'`. Returns the new current epoch
+    /// metadata. Errors when the stream is unknown.
+    pub fn advance_epoch(
+        &mut self,
+        stream_key: &str,
+        name: Option<&str>,
+    ) -> Result<CurrentEpochMetadata, JournalError> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = current_epoch(&tx, stream_key)?;
+        let new_epoch = current + 1;
         let start_seq = next_seq(&tx, stream_key)?;
         tx.execute(
             "UPDATE stream_epochs
@@ -433,12 +436,13 @@ impl Journal {
         )?;
         tx.execute(
             "INSERT INTO stream_epochs
-                 (stream_id, epoch, start_seq, end_seq, reason, created_unix_ms)
-             VALUES (?1, ?2, ?3, NULL, 'reset', ?4)",
-            params![stream_key, new_epoch, start_seq, unix_ms()],
+                 (stream_id, epoch, start_seq, end_seq, reason, created_unix_ms, name)
+             VALUES (?1, ?2, ?3, NULL, 'advance', ?4, ?5)",
+            params![stream_key, new_epoch, start_seq, unix_ms(), name],
         )?;
         tx.commit()?;
-        Ok(())
+        self.current_epoch_metadata(stream_key)?
+            .ok_or_else(|| JournalError::InvalidData(format!("stream {stream_key} not found")))
     }
 
     /// Return the current epoch and next sequence number for a stream.
@@ -484,17 +488,6 @@ impl Journal {
         Ok(())
     }
 
-    /// Update the compatibility ack cursor for the default server receiver.
-    pub fn update_ack_cursor(
-        &mut self,
-        stream_key: &str,
-        _acked_epoch: i64,
-        acked_through_seq: i64,
-    ) -> Result<(), JournalError> {
-        self.ensure_compat_receiver()?;
-        self.update_receiver_stream_cursor(COMPAT_RECEIVER_ID, stream_key, acked_through_seq)
-    }
-
     /// Update a receiver's cumulative ack cursor for a stream.
     pub fn update_receiver_stream_cursor(
         &mut self,
@@ -533,39 +526,19 @@ impl Journal {
         Ok(())
     }
 
-    /// Return the compatibility `(acked_epoch, acked_through_seq)` cursor.
-    pub fn ack_cursor(&self, stream_key: &str) -> Result<(i64, i64), JournalError> {
-        let acked_seq = self
-            .conn
+    /// Return the lowest cumulative ack cursor across all receivers for a
+    /// stream (`0` when no receiver has acked anything). Events at or below
+    /// this seq have been acked by every known receiver.
+    pub fn min_acked_through_seq(&self, stream_key: &str) -> Result<i64, JournalError> {
+        self.conn
             .query_row(
-                "SELECT acked_through_seq
+                "SELECT COALESCE(MIN(acked_through_seq), 0)
                  FROM receiver_stream_cursors
-                 WHERE endpoint_id = ?1 AND stream_id = ?2",
-                params![COMPAT_RECEIVER_ID, stream_key],
-                |row| row.get::<_, i64>(0),
+                 WHERE stream_id = ?1",
+                params![stream_key],
+                |row| row.get(0),
             )
-            .optional()?
-            .unwrap_or(0);
-
-        if acked_seq == 0 {
-            return Ok((0, 0));
-        }
-
-        let acked_epoch = self
-            .conn
-            .query_row(
-                "SELECT epoch
-                 FROM events
-                 WHERE stream_id = ?1 AND seq <= ?2
-                 ORDER BY seq DESC
-                 LIMIT 1",
-                params![stream_key, acked_seq],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-
-        Ok((acked_epoch, acked_seq))
+            .map_err(Into::into)
     }
 
     pub fn latest_committed_seq(&self, stream_key: &str) -> Result<i64, JournalError> {
@@ -579,24 +552,6 @@ impl Journal {
         max: usize,
     ) -> Result<Vec<JournalEvent>, JournalError> {
         read_events_after(&self.conn, stream_key, after_seq, max)
-    }
-
-    /// Return all unacked events for a stream epoch after `after_seq`.
-    pub fn unacked_events(
-        &self,
-        stream_key: &str,
-        stream_epoch: i64,
-        after_seq: i64,
-    ) -> Result<Vec<JournalEvent>, JournalError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT rowid, stream_id, epoch, seq, reader_timestamp, raw_frame, read_kind,
-                    CAST(received_unix_ms AS TEXT)
-             FROM events
-             WHERE stream_id = ?1 AND epoch = ?2 AND seq > ?3
-             ORDER BY seq ASC",
-        )?;
-        let rows = stmt.query_map(params![stream_key, stream_epoch, after_seq], map_event)?;
-        collect_events(rows)
     }
 
     /// Count events for a `(stream_key, stream_epoch)` pair.
@@ -632,9 +587,10 @@ impl Journal {
             .map_err(Into::into)
     }
 
-    /// Delete up to `limit` acked events for `stream_key`.
+    /// Delete up to `limit` events for `stream_key` that every known receiver
+    /// has acked.
     pub fn prune_acked(&mut self, stream_key: &str, limit: i64) -> Result<i64, JournalError> {
-        let (_, acked_seq) = self.ack_cursor(stream_key)?;
+        let acked_seq = self.min_acked_through_seq(stream_key)?;
         let deleted = self.conn.execute(
             "DELETE FROM events
              WHERE rowid IN (
@@ -769,6 +725,31 @@ impl Journal {
         current_epoch_metadata(&self.conn, stream_key)
     }
 
+    /// Set (or clear) the name of the currently open epoch.
+    ///
+    /// Errors with `InvalidData` when the stream has no open epoch (unknown
+    /// stream), so callers can surface a not-found rather than silently
+    /// succeeding. Returns the updated current epoch metadata.
+    pub fn set_epoch_name(
+        &mut self,
+        stream_key: &str,
+        name: Option<&str>,
+    ) -> Result<CurrentEpochMetadata, JournalError> {
+        let changed = self.conn.execute(
+            "UPDATE stream_epochs
+             SET name = ?2
+             WHERE stream_id = ?1 AND end_seq IS NULL",
+            params![stream_key, name],
+        )?;
+        if changed == 0 {
+            return Err(JournalError::InvalidData(format!(
+                "stream {stream_key} has no open epoch to name"
+            )));
+        }
+        self.current_epoch_metadata(stream_key)?
+            .ok_or_else(|| JournalError::InvalidData(format!("stream {stream_key} not found")))
+    }
+
     pub fn epoch_summaries(&self, stream_key: &str) -> Result<Vec<EpochSummary>, JournalError> {
         epoch_summaries(&self.conn, stream_key)
     }
@@ -785,15 +766,6 @@ impl Journal {
                 |row| row.get(0),
             )
             .map_err(Into::into)
-    }
-
-    fn ensure_compat_receiver(&mut self) -> Result<(), JournalError> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO receivers (endpoint_id, display_name, approved_unix_ms)
-             VALUES (?1, 'Forwarder server', ?2)",
-            params![COMPAT_RECEIVER_ID, unix_ms()],
-        )?;
-        Ok(())
     }
 }
 
@@ -1087,7 +1059,7 @@ fn current_epoch(conn: &Connection, stream_key: &str) -> Result<i64, JournalErro
 
 fn epoch_summaries(conn: &Connection, stream_key: &str) -> Result<Vec<EpochSummary>, JournalError> {
     let mut stmt = conn.prepare(
-        "SELECT epoch, created_unix_ms
+        "SELECT epoch, created_unix_ms, start_seq, end_seq, name
          FROM stream_epochs
          WHERE stream_id = ?1
          ORDER BY epoch DESC",
@@ -1096,6 +1068,9 @@ fn epoch_summaries(conn: &Connection, stream_key: &str) -> Result<Vec<EpochSumma
         Ok(EpochSummary {
             epoch: row.get(0)?,
             created_unix_ms: row.get(1)?,
+            start_seq: row.get(2)?,
+            end_seq: row.get(3)?,
+            name: row.get(4)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1106,7 +1081,7 @@ fn current_epoch_metadata(
     stream_key: &str,
 ) -> Result<Option<CurrentEpochMetadata>, JournalError> {
     conn.query_row(
-        "SELECT epoch, created_unix_ms
+        "SELECT epoch, created_unix_ms, start_seq, name
          FROM stream_epochs
          WHERE stream_id = ?1
          ORDER BY epoch DESC
@@ -1116,6 +1091,8 @@ fn current_epoch_metadata(
             Ok(CurrentEpochMetadata {
                 epoch: row.get(0)?,
                 created_unix_ms: row.get(1)?,
+                start_seq: row.get(2)?,
+                name: row.get(3)?,
             })
         },
     )
@@ -1207,7 +1184,9 @@ mod tests {
             "initial epoch should record when it was created"
         );
 
-        journal.bump_epoch("stream-a", 8).expect("bump epoch");
+        journal
+            .advance_epoch("stream-a", None)
+            .expect("advance epoch");
         let reset = journal
             .current_epoch_metadata("stream-a")
             .expect("current epoch metadata")
@@ -1217,6 +1196,145 @@ mod tests {
             reset.created_unix_ms >= initial.created_unix_ms,
             "new epoch should have a creation timestamp at least as new as the initial epoch"
         );
+    }
+
+    #[test]
+    fn current_epoch_metadata_carries_start_seq_and_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("journal.db");
+        let mut journal = Journal::open(&path).expect("open write journal");
+        journal
+            .ensure_stream_state("stream-a", 1)
+            .expect("ensure stream");
+
+        let initial = journal
+            .current_epoch_metadata("stream-a")
+            .expect("current epoch metadata")
+            .expect("stream has metadata");
+        assert_eq!(initial.epoch, 1);
+        assert_eq!(initial.start_seq, 1, "initial epoch starts at seq 1");
+        assert_eq!(initial.name, None, "initial epoch is unnamed");
+    }
+
+    #[test]
+    fn set_epoch_name_persists_and_clears() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("journal.db");
+        let mut journal = Journal::open(&path).expect("open write journal");
+        journal
+            .ensure_stream_state("stream-a", 1)
+            .expect("ensure stream");
+
+        let named = journal
+            .set_epoch_name("stream-a", Some("Race 1"))
+            .expect("set epoch name");
+        assert_eq!(named.name.as_deref(), Some("Race 1"));
+
+        // The name survives a full journal re-open.
+        drop(journal);
+        let mut journal = Journal::open(&path).expect("re-open write journal");
+        let reopened = journal
+            .current_epoch_metadata("stream-a")
+            .expect("current epoch metadata")
+            .expect("stream has metadata");
+        assert_eq!(reopened.name.as_deref(), Some("Race 1"));
+
+        let cleared = journal
+            .set_epoch_name("stream-a", None)
+            .expect("clear epoch name");
+        assert_eq!(cleared.name, None);
+
+        // Unknown stream: no open epoch row -> error, not silent success.
+        assert!(journal.set_epoch_name("missing", Some("x")).is_err());
+    }
+
+    #[test]
+    fn epoch_summaries_carry_seq_range_and_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("journal.db");
+        let mut journal = Journal::open(&path).expect("open write journal");
+        journal
+            .ensure_stream_state("stream-a", 1)
+            .expect("ensure stream");
+        journal
+            .set_epoch_name("stream-a", Some("Race 1"))
+            .expect("name epoch 1");
+        journal
+            .append_read("stream-a", None, b"one", "RAW")
+            .expect("append read 1");
+        journal
+            .append_read("stream-a", None, b"two", "RAW")
+            .expect("append read 2");
+        journal
+            .advance_epoch("stream-a", None)
+            .expect("advance epoch");
+
+        let summaries = journal.epoch_summaries("stream-a").expect("summaries");
+        assert_eq!(summaries.len(), 2);
+        // Newest first.
+        assert_eq!(summaries[0].epoch, 2);
+        assert_eq!(summaries[0].start_seq, 3);
+        assert_eq!(summaries[0].end_seq, None, "open epoch has no end");
+        assert_eq!(summaries[0].name, None);
+        assert_eq!(summaries[1].epoch, 1);
+        assert_eq!(summaries[1].start_seq, 1);
+        assert_eq!(summaries[1].end_seq, Some(2));
+        assert_eq!(summaries[1].name.as_deref(), Some("Race 1"));
+    }
+
+    #[test]
+    fn advance_epoch_is_atomic_and_names_the_new_epoch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("journal.db");
+        let mut journal = Journal::open(&path).expect("open write journal");
+        journal
+            .ensure_stream_state("stream-a", 1)
+            .expect("ensure stream");
+        journal
+            .set_epoch_name("stream-a", Some("Race 1"))
+            .expect("name epoch 1");
+        journal
+            .append_read("stream-a", None, b"one", "RAW")
+            .expect("append read");
+
+        let advanced = journal
+            .advance_epoch("stream-a", Some("Race 2"))
+            .expect("advance epoch");
+        assert_eq!(advanced.epoch, 2);
+        assert_eq!(advanced.start_seq, 2, "new epoch starts at next seq");
+        assert_eq!(advanced.name.as_deref(), Some("Race 2"));
+
+        let summaries = journal.epoch_summaries("stream-a").expect("summaries");
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].epoch, 2);
+        assert_eq!(summaries[0].name.as_deref(), Some("Race 2"));
+        assert_eq!(
+            summaries[1].name.as_deref(),
+            Some("Race 1"),
+            "old epoch keeps its own name"
+        );
+        assert_eq!(summaries[1].end_seq, Some(1), "old epoch closed");
+
+        // reason column records 'advance'.
+        let reason: String = journal
+            .conn
+            .query_row(
+                "SELECT reason FROM stream_epochs WHERE stream_id = 'stream-a' AND epoch = 2",
+                [],
+                |row| row.get(0),
+            )
+            .expect("reason");
+        assert_eq!(reason, "advance");
+
+        // Advancing without a name opens an unnamed epoch.
+        let unnamed = journal
+            .advance_epoch("stream-a", None)
+            .expect("advance unnamed");
+        assert_eq!(unnamed.epoch, 3);
+        assert_eq!(unnamed.name, None);
+
+        // Unknown stream errors.
+        assert!(journal.advance_epoch("missing", None).is_err());
     }
 
     #[test]

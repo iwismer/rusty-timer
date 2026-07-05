@@ -207,7 +207,7 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
         "put_earliest_epoch" => {
             ok(control_api::put_earliest_epoch(state, arg(args, "body")?).await?)
         }
-        "get_replay_target_epochs" => ok(control_api::get_replay_target_epochs(
+        "get_stream_epochs" => ok(control_api::get_stream_epochs(
             state,
             arg(args, "forwarder_endpoint_id")?,
             arg(args, "stream_id")?,
@@ -262,6 +262,7 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
             state,
             arg(args, "endpoint_id")?,
             arg(args, "stream_id")?,
+            arg(args, "name")?,
         )
         .await?),
         "reader_set_read_mode" => ok(control_api::reader_set_read_mode(
@@ -324,6 +325,9 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
         "admin_reset_all_cursors" => ok(control_api::admin_reset_all_cursors(state).await?),
         "admin_reset_earliest_epoch" => {
             ok(control_api::admin_reset_earliest_epoch(state, arg(args, "body")?).await?)
+        }
+        "admin_reset_stream_data" => {
+            ok(control_api::admin_reset_stream_data(state, arg(args, "body")?).await?)
         }
         "admin_reset_all_earliest_epochs" => {
             ok(control_api::admin_reset_all_earliest_epochs(state).await?)

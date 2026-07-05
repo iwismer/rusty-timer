@@ -2,7 +2,6 @@
 
 use super::{ReaderControlFuture, ReaderControlHandler};
 use crate::reader_control_service::{ReaderControlService, domain_read_mode_to_native};
-use crate::status_http::{EpochResetError, JournalAccess};
 use rt_p2p_protocol::{ReaderControlRequest, ReaderControlResponse};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -147,30 +146,37 @@ async fn dispatch_action(
             .reconnect(reader_key)
             .await
             .map(|()| DispatchOutcome::default()),
-        rt_domain::ReaderControlAction::SetEpochName { name } => service
-            .set_epoch_name(reader_key, name.clone())
-            .await
-            .map(|info| DispatchOutcome {
-                reader_info: Some(crate::reader_control_service::native_info_to_domain(&info)),
-                current_epoch_name: Some(name.unwrap_or_default()),
-                ..DispatchOutcome::default()
-            }),
-        rt_domain::ReaderControlAction::AdvanceEpoch => {
+        rt_domain::ReaderControlAction::SetEpochName { name } => {
+            // Persist to the journal first; the returned metadata is the
+            // authoritative state applied to the in-memory status.
             let metadata = journal
                 .lock()
                 .await
-                .reset_epoch(reader_key)
-                .map_err(|e| match e {
-                    EpochResetError::NotFound => "stream not found".to_owned(),
-                    EpochResetError::Storage(message) => message,
-                })?;
+                .set_epoch_name(reader_key, name.as_deref())
+                .map_err(|e| e.to_string())?;
             service
-                .set_current_epoch_metadata(reader_key, metadata)
+                .apply_epoch_metadata(reader_key, metadata.clone())
                 .await;
             Ok(DispatchOutcome {
                 current_epoch: Some(metadata.epoch),
                 current_epoch_created_unix_ms: metadata.created_unix_ms,
-                current_epoch_name: Some(String::new()),
+                current_epoch_name: metadata.name,
+                ..DispatchOutcome::default()
+            })
+        }
+        rt_domain::ReaderControlAction::AdvanceEpoch { name } => {
+            let metadata = journal
+                .lock()
+                .await
+                .advance_epoch(reader_key, name.as_deref())
+                .map_err(|e| e.to_string())?;
+            service
+                .apply_epoch_metadata(reader_key, metadata.clone())
+                .await;
+            Ok(DispatchOutcome {
+                current_epoch: Some(metadata.epoch),
+                current_epoch_created_unix_ms: metadata.created_unix_ms,
+                current_epoch_name: metadata.name,
                 ..DispatchOutcome::default()
             })
         }
@@ -214,12 +220,11 @@ pub(crate) fn request_to_action(
         "refresh" => Ok(rt_domain::ReaderControlAction::Refresh),
         "reconnect" => Ok(rt_domain::ReaderControlAction::Reconnect),
         "set_epoch_name" => Ok(rt_domain::ReaderControlAction::SetEpochName {
-            name: request
-                .epoch_name
-                .clone()
-                .filter(|name| !name.trim().is_empty()),
+            name: crate::status_http::normalize_epoch_name(request.epoch_name.as_deref())?,
         }),
-        "advance_epoch" => Ok(rt_domain::ReaderControlAction::AdvanceEpoch),
+        "advance_epoch" => Ok(rt_domain::ReaderControlAction::AdvanceEpoch {
+            name: crate::status_http::normalize_epoch_name(request.epoch_name.as_deref())?,
+        }),
         other => Err(format!("unsupported reader control command: {other}")),
     }
 }
@@ -389,7 +394,27 @@ mod tests {
     fn advance_epoch_maps_to_action() {
         assert_eq!(
             request_to_action(&base_request("advance_epoch")).expect("advance epoch action"),
-            rt_domain::ReaderControlAction::AdvanceEpoch
+            rt_domain::ReaderControlAction::AdvanceEpoch { name: None }
+        );
+
+        let request = ReaderControlRequest {
+            epoch_name: Some("  Race 2  ".to_owned()),
+            ..base_request("advance_epoch")
+        };
+        assert_eq!(
+            request_to_action(&request).expect("advance epoch with name"),
+            rt_domain::ReaderControlAction::AdvanceEpoch {
+                name: Some("Race 2".to_owned())
+            }
+        );
+
+        let request = ReaderControlRequest {
+            epoch_name: Some("x".repeat(65)),
+            ..base_request("advance_epoch")
+        };
+        assert_eq!(
+            request_to_action(&request).expect_err("overlong name rejected"),
+            "name must be at most 64 characters"
         );
     }
 

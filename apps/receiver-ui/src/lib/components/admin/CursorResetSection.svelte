@@ -81,6 +81,25 @@
                 context="receiver-admin"
                 onOpenModal={openHelp}
               />
+              <button
+                data-testid="reset-stream-data-{key}"
+                onclick={() => actions.resetStreamData(stream)}
+                disabled={actions.inFlightKeys.has(`stream-data-${key}`)}
+                class={btnWarn}
+                aria-label={"Reset stream data for " + streamLabel(stream)}
+              >
+                {actions.inFlightKeys.has(`stream-data-${key}`)
+                  ? "Resetting..."
+                  : actions.confirmingStreamDataKey === `stream-data-${key}`
+                    ? "Confirm Reset Data"
+                    : "Reset Stream Data"}
+              </button>
+              <HelpTip
+                fieldKey="reset_stream_data"
+                sectionKey="cursor_reset"
+                context="receiver-admin"
+                onOpenModal={openHelp}
+              />
             </td>
           </tr>
         {/each}
@@ -165,6 +184,19 @@
                 {actions.inFlightKeys.has(key)
                   ? "Resetting..."
                   : "Reset Cursor"}
+              </button>
+              <button
+                data-testid="reset-stream-data-{key}"
+                onclick={() => actions.resetStreamData(stream)}
+                disabled={actions.inFlightKeys.has(`stream-data-${key}`)}
+                class={btnWarn}
+                aria-label={"Reset stream data for " + streamLabel(stream)}
+              >
+                {actions.inFlightKeys.has(`stream-data-${key}`)
+                  ? "Resetting..."
+                  : actions.confirmingStreamDataKey === `stream-data-${key}`
+                    ? "Confirm Reset Data"
+                    : "Reset Stream Data"}
               </button>
             </td>
           </tr>

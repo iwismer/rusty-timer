@@ -1,5 +1,5 @@
 use receiver::stream_key::LocalStreamKey;
-use rt_domain::{ReceiverMode, ReplayTarget};
+use rt_domain::ReceiverMode;
 use rusqlite::Connection;
 use std::path::Path;
 
@@ -68,24 +68,6 @@ fn receiver_mode_persists_via_receiver_db() {
             race_id: "race-1".to_owned()
         })
     );
-}
-
-#[test]
-fn targeted_replay_mode_round_trips_with_targets() {
-    let mut db = receiver::db::Db::open_in_memory().unwrap();
-    db.save_profile("https://persist.example", "tok", "check-and-download", None)
-        .unwrap();
-    let mode = ReceiverMode::TargetedReplay {
-        targets: vec![ReplayTarget {
-            forwarder_id: "f1".to_owned(),
-            reader_ip: "10.0.0.1".to_owned(),
-            stream_epoch: 9,
-            from_seq: 1,
-        }],
-    };
-    db.save_receiver_mode(&mode).unwrap();
-
-    assert_eq!(db.load_receiver_mode().unwrap(), Some(mode));
 }
 
 #[test]

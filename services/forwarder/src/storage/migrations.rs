@@ -1,7 +1,7 @@
 use crate::storage::journal::JournalError;
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 pub fn migrate(conn: &Connection) -> Result<(), JournalError> {
     apply_pragmas(conn)?;
@@ -25,16 +25,25 @@ pub fn migrate(conn: &Connection) -> Result<(), JournalError> {
         }
         1 => {
             conn.execute_batch(&format!(
-                "BEGIN IMMEDIATE;\n{}\n{}\nPRAGMA user_version = {};\nCOMMIT;",
+                "BEGIN IMMEDIATE;\n{}\n{}\n{}\nPRAGMA user_version = {};\nCOMMIT;",
                 retention_index_sql(),
                 epoch_created_sql(),
+                epoch_name_sql(),
                 SCHEMA_VERSION
             ))?;
         }
         2 => {
             conn.execute_batch(&format!(
-                "BEGIN IMMEDIATE;\n{}\nPRAGMA user_version = {};\nCOMMIT;",
+                "BEGIN IMMEDIATE;\n{}\n{}\nPRAGMA user_version = {};\nCOMMIT;",
                 epoch_created_sql(),
+                epoch_name_sql(),
+                SCHEMA_VERSION
+            ))?;
+        }
+        3 => {
+            conn.execute_batch(&format!(
+                "BEGIN IMMEDIATE;\n{}\nPRAGMA user_version = {};\nCOMMIT;",
+                epoch_name_sql(),
                 SCHEMA_VERSION
             ))?;
         }
@@ -66,6 +75,10 @@ fn retention_index_sql() -> &'static str {
 
 fn epoch_created_sql() -> &'static str {
     "ALTER TABLE stream_epochs ADD COLUMN created_unix_ms INTEGER;"
+}
+
+fn epoch_name_sql() -> &'static str {
+    "ALTER TABLE stream_epochs ADD COLUMN name TEXT;"
 }
 
 fn user_version(conn: &Connection) -> Result<u32, JournalError> {

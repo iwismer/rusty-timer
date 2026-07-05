@@ -39,7 +39,7 @@ const apiMocks = vi.hoisted(() => ({
     streams: [],
     earliest_epochs: [],
   }),
-  getReplayTargetEpochs: vi.fn().mockResolvedValue({ epochs: [] }),
+  getStreamEpochs: vi.fn().mockResolvedValue({ epochs: [] }),
   checkForUpdate: vi.fn().mockResolvedValue({ status: "up_to_date" }),
   downloadUpdate: vi.fn().mockResolvedValue({ status: "downloaded" }),
   applyUpdate: vi.fn().mockResolvedValue(undefined),
@@ -475,9 +475,8 @@ describe("receiver updater store", () => {
 
     expect(store.modeDraft).toBe("live");
     expect(store.raceIdDraft).toBe("");
-    expect(store.targetedEpochInputs).toEqual({});
     expect(store.savedModePayload).toBe(
-      JSON.stringify({ mode: "live", streams: [], earliest_epochs: [] }),
+      JSON.stringify({ mode: "live", streams: [] }),
     );
   });
 
@@ -493,10 +492,8 @@ describe("receiver updater store", () => {
     initStore();
     await flushAsyncWork();
 
-    store.modeDraft = "targeted_replay";
-    store.targetedEpochInputs = {
-      "fwd-1/10.0.0.1:10000": "12",
-    };
+    store.modeDraft = "race";
+    store.raceIdDraft = "22222222-2222-2222-2222-222222222222";
     markModeEdited();
 
     apiMocks.getMode.mockRejectedValueOnce(new Error("no mode configured"));
@@ -505,9 +502,8 @@ describe("receiver updater store", () => {
 
     expect(store.modeDraft).toBe("live");
     expect(store.raceIdDraft).toBe("");
-    expect(store.targetedEpochInputs).toEqual({});
     expect(store.savedModePayload).toBe(
-      JSON.stringify({ mode: "live", streams: [], earliest_epochs: [] }),
+      JSON.stringify({ mode: "live", streams: [] }),
     );
   });
 
@@ -787,17 +783,22 @@ describe("receiver updater store", () => {
     };
     const key = streamIdentity(previousStream);
     const options = [
-      { stream_epoch: 2, name: "Finish", first_seen_at: null, race_names: [] },
-      { stream_epoch: 1, name: "Start", first_seen_at: null, race_names: [] },
+      {
+        stream_epoch: 2,
+        name: "Finish",
+        first_seen_at: null,
+        selectable: true,
+      },
+      { stream_epoch: 1, name: "Start", first_seen_at: null, selectable: true },
     ];
     store.streams = {
       streams: [previousStream],
       degraded: false,
       upstream_error: null,
     };
-    store.earliestEpochOptions = { [key]: options };
+    store.streamEpochOptions = { [key]: options };
     store.earliestEpochLoading = {};
-    apiMocks.getReplayTargetEpochs.mockClear();
+    apiMocks.getStreamEpochs.mockClear();
 
     callbacks?.onStreamsSnapshot({
       streams: [
@@ -811,8 +812,8 @@ describe("receiver updater store", () => {
     });
     await flushAsyncWork();
 
-    expect(apiMocks.getReplayTargetEpochs).not.toHaveBeenCalled();
-    expect(store.earliestEpochOptions[key]).toEqual(options);
+    expect(apiMocks.getStreamEpochs).not.toHaveBeenCalled();
+    expect(store.streamEpochOptions[key]).toEqual(options);
     expect(store.earliestEpochLoading[key]).toBeUndefined();
   });
 
@@ -1546,12 +1547,12 @@ describe("canonical-only stream identity", () => {
     // (legacy streamKey would collapse both to "/").
     expect(streamIdentity(streamA)).not.toBe(streamIdentity(streamB));
 
-    store.earliestEpochOptions = {
+    store.streamEpochOptions = {
       [streamIdentity(streamA)]: [
-        { stream_epoch: 5, name: null, first_seen_at: null, race_names: [] },
+        { stream_epoch: 5, name: null, first_seen_at: null, selectable: true },
       ],
       [streamIdentity(streamB)]: [
-        { stream_epoch: 9, name: null, first_seen_at: null, race_names: [] },
+        { stream_epoch: 9, name: null, first_seen_at: null, selectable: true },
       ],
     };
     store.earliestEpochInputs = {
@@ -1574,7 +1575,7 @@ describe("canonical-only stream identity", () => {
         name: "Race Morning",
         first_seen_at: firstSeen,
         created_unix_ms: created,
-        race_names: [],
+        selectable: true,
       }),
     ).toBe(`#2 — Race Morning — ${new Date(created).toLocaleString()}`);
     expect(
@@ -1582,24 +1583,32 @@ describe("canonical-only stream identity", () => {
         stream_epoch: 1,
         name: "  ",
         first_seen_at: firstSeen,
-        race_names: [],
+        selectable: true,
       }),
     ).toBe(`#1 — unnamed — first read ${new Date(firstSeen).toLocaleString()}`);
   });
 
-  it("adds the live current epoch to dropdown options when only older epochs are stored", async () => {
+  it("uses backend-merged epochs as-is (names and selectability come from the receiver)", async () => {
     const { store, streamIdentity, prefetchEarliestEpochOptions } =
       await import("./store.svelte");
 
-    store.earliestEpochOptions = {};
+    store.streamEpochOptions = {};
     store.earliestEpochLoading = {};
-    apiMocks.getReplayTargetEpochs.mockResolvedValueOnce({
+    apiMocks.getStreamEpochs.mockResolvedValueOnce({
       epochs: [
+        {
+          stream_epoch: 2,
+          name: "Race Morning",
+          first_seen_at: null,
+          created_unix_ms: 1_783_238_640_000,
+          selectable: true,
+        },
         {
           stream_epoch: 1,
           name: null,
           first_seen_at: "2026-07-05T09:40:00.000Z",
-          race_names: [],
+          created_unix_ms: null,
+          selectable: false,
         },
       ],
     });
@@ -1616,113 +1625,20 @@ describe("canonical-only stream identity", () => {
 
     await prefetchEarliestEpochOptions([stream]);
 
-    expect(store.earliestEpochOptions[streamIdentity(stream)]).toEqual([
+    expect(store.streamEpochOptions[streamIdentity(stream)]).toEqual([
       {
         stream_epoch: 2,
         name: "Race Morning",
         first_seen_at: null,
         created_unix_ms: 1_783_238_640_000,
-        race_names: [],
+        selectable: true,
       },
       {
         stream_epoch: 1,
         name: null,
         first_seen_at: "2026-07-05T09:40:00.000Z",
-        race_names: [],
-      },
-    ]);
-  });
-
-  it("uses live current epoch metadata for matching epoch dropdown options", async () => {
-    const { store, streamIdentity, prefetchEarliestEpochOptions } =
-      await import("./store.svelte");
-
-    store.earliestEpochOptions = {};
-    store.earliestEpochLoading = {};
-    apiMocks.getReplayTargetEpochs.mockResolvedValueOnce({
-      epochs: [
-        {
-          stream_epoch: 12,
-          name: null,
-          first_seen_at: "2026-07-05T09:51:11.314Z",
-          race_names: [],
-        },
-        {
-          stream_epoch: 11,
-          name: "Warmup",
-          first_seen_at: "2026-07-05T09:40:00.000Z",
-          race_names: [],
-        },
-      ],
-    });
-
-    const stream = {
-      forwarder_endpoint_id: "endpoint-1",
-      stream_id: "11111111-1111-1111-1111-111111111111",
-      subscribed: true,
-      local_port: null,
-      stream_epoch: 12,
-      current_epoch_name: "Race Morning",
-      current_epoch_created_unix_ms: 1_783_238_640_000,
-    };
-
-    await prefetchEarliestEpochOptions([stream]);
-
-    expect(store.earliestEpochOptions[streamIdentity(stream)]).toEqual([
-      {
-        stream_epoch: 12,
-        name: "Race Morning",
-        first_seen_at: "2026-07-05T09:51:11.314Z",
-        created_unix_ms: 1_783_238_640_000,
-        race_names: [],
-      },
-      {
-        stream_epoch: 11,
-        name: "Warmup",
-        first_seen_at: "2026-07-05T09:40:00.000Z",
-        race_names: [],
-      },
-    ]);
-  });
-
-  it("merges forwarder-advertised historical epochs into dropdown options", async () => {
-    const { store, streamIdentity, prefetchEarliestEpochOptions } =
-      await import("./store.svelte");
-
-    store.earliestEpochOptions = {};
-    store.earliestEpochLoading = {};
-    apiMocks.getReplayTargetEpochs.mockResolvedValueOnce({ epochs: [] });
-
-    const stream = {
-      forwarder_endpoint_id: "endpoint-1",
-      stream_id: "11111111-1111-1111-1111-111111111111",
-      subscribed: true,
-      local_port: null,
-      stream_epoch: 2,
-      current_epoch_name: "Race Morning",
-      current_epoch_created_unix_ms: 1_783_238_640_000,
-      epoch_options: [
-        { stream_epoch: 2, created_unix_ms: 1_783_238_640_000 },
-        { stream_epoch: 1, created_unix_ms: 1_783_235_000_000 },
-      ],
-    };
-
-    await prefetchEarliestEpochOptions([stream]);
-
-    expect(store.earliestEpochOptions[streamIdentity(stream)]).toEqual([
-      {
-        stream_epoch: 2,
-        name: "Race Morning",
-        first_seen_at: null,
-        created_unix_ms: 1_783_238_640_000,
-        race_names: [],
-      },
-      {
-        stream_epoch: 1,
-        name: null,
-        first_seen_at: null,
-        created_unix_ms: 1_783_235_000_000,
-        race_names: [],
+        created_unix_ms: null,
+        selectable: false,
       },
     ]);
   });
@@ -1731,9 +1647,9 @@ describe("canonical-only stream identity", () => {
     const { store, streamIdentity, prefetchEarliestEpochOptions } =
       await import("./store.svelte");
 
-    store.earliestEpochOptions = {};
+    store.streamEpochOptions = {};
     store.earliestEpochLoading = {};
-    apiMocks.getReplayTargetEpochs.mockResolvedValueOnce({ epochs: [] });
+    apiMocks.getStreamEpochs.mockResolvedValueOnce({ epochs: [] });
 
     const stream = {
       forwarder_endpoint_id: "endpoint-1",
@@ -1747,17 +1663,17 @@ describe("canonical-only stream identity", () => {
 
     await prefetchEarliestEpochOptions([stream]);
 
-    expect(apiMocks.getReplayTargetEpochs).toHaveBeenCalledWith({
+    expect(apiMocks.getStreamEpochs).toHaveBeenCalledWith({
       forwarder_endpoint_id: "endpoint-1",
       stream_id: "11111111-1111-1111-1111-111111111111",
     });
-    expect(store.earliestEpochOptions[streamIdentity(stream)]).toEqual([
+    expect(store.streamEpochOptions[streamIdentity(stream)]).toEqual([
       {
         stream_epoch: 12,
         name: "Race Morning",
         first_seen_at: null,
         created_unix_ms: 1_783_238_640_000,
-        race_names: [],
+        selectable: true,
       },
     ]);
   });
@@ -1797,8 +1713,8 @@ describe("canonical-only stream identity", () => {
     expect(payload.mode).toBe("live");
     if (payload.mode !== "live") throw new Error("unreachable");
     // Only the stream with display metadata is representable in the compatibility payload.
-    expect(payload.earliest_epochs).toEqual([
-      { forwarder_id: "fwd-1", reader_ip: "10.0.0.1:10000", earliest_epoch: 3 },
+    expect(payload.streams).toEqual([
+      { forwarder_id: "fwd-1", reader_ip: "10.0.0.1:10000" },
     ]);
   });
 });

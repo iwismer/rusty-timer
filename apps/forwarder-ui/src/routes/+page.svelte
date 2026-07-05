@@ -186,8 +186,8 @@
   // Reader control handlers. These throw on failure so the shared
   // ReaderControlPanel can surface the error via its own feedback banner;
   // success feedback is likewise rendered by the panel.
-  async function handleResetEpoch(readerIp: string) {
-    await api.resetEpoch(readerIp);
+  async function handleAdvanceEpoch(readerIp: string, name: string | null) {
+    await api.advanceEpoch(readerIp, name);
     await loadAll();
   }
 
@@ -744,7 +744,7 @@
                 onOpenHelpModal={openReaderHelp}
                 onSetEpochName={(name) =>
                   handleSetCurrentEpochName(reader.ip, name)}
-                onAdvanceEpoch={() => handleResetEpoch(reader.ip)}
+                onAdvanceEpoch={(name) => handleAdvanceEpoch(reader.ip, name)}
                 onSyncClock={() => handleSyncClock(reader.ip)}
                 onSetReadMode={(mode, timeout) =>
                   handleSetReadMode(reader.ip, mode, timeout)}

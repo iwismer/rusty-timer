@@ -178,7 +178,7 @@ describe("api client", () => {
     await readerGetInfo("endpoint-1", "stream-a");
     await readerSyncClock("endpoint-1", "stream-a");
     await readerSetEpochName("endpoint-1", "stream-a", "Race 1");
-    await readerAdvanceEpoch("endpoint-1", "stream-a");
+    await readerAdvanceEpoch("endpoint-1", "stream-a", "Race 2");
     await readerSetReadMode("endpoint-1", "stream-a", "event", 7);
     await readerSetTto("endpoint-1", "stream-a", true);
     await readerSetRecording("endpoint-1", "stream-a", false);
@@ -204,6 +204,7 @@ describe("api client", () => {
     expect(mockInvoke).toHaveBeenNthCalledWith(4, "reader_advance_epoch", {
       endpointId: "endpoint-1",
       streamId: "stream-a",
+      name: "Race 2",
     });
     expect(mockInvoke).toHaveBeenNthCalledWith(5, "reader_set_read_mode", {
       endpointId: "endpoint-1",
@@ -331,8 +332,8 @@ describe("api client", () => {
     });
   });
 
-  it("getReplayTargetEpochs calls command with stream params", async () => {
-    const { getReplayTargetEpochs } = await import("./api");
+  it("getStreamEpochs calls command with stream params", async () => {
+    const { getStreamEpochs } = await import("./api");
     mockInvoke.mockResolvedValue({
       epochs: [
         {
@@ -344,12 +345,12 @@ describe("api client", () => {
       ],
     });
 
-    const result = await getReplayTargetEpochs({
+    const result = await getStreamEpochs({
       forwarder_endpoint_id: "endpoint-1",
       stream_id: "10.0.0.1:10000",
     });
 
-    expect(mockInvoke).toHaveBeenCalledWith("get_replay_target_epochs", {
+    expect(mockInvoke).toHaveBeenCalledWith("get_stream_epochs", {
       forwarderEndpointId: "endpoint-1",
       streamId: "10.0.0.1:10000",
     });

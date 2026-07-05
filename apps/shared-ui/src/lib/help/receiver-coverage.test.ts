@@ -28,7 +28,6 @@ describe('receiver help coverage', () => {
       'stream_metrics',
       'event_type',
       'announce',
-      'replay',
       'subscribe_all',
     ]);
 

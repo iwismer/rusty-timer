@@ -64,6 +64,8 @@ export class AdminActions {
   loadError = $state<string | null>(null);
   inFlightKeys = $state<Set<string>>(new Set());
   inFlightAction = $state<string | null>(null);
+  // Reset Stream Data confirm-on-second-click state (destructive action).
+  confirmingStreamDataKey = $state<string | null>(null);
   feedback = $state<{ message: string; ok: boolean } | null>(null);
   // Port editing state: keyed by canonical "forwarder_endpoint_id/stream_id"
   portEdits = $state<Map<string, string>>(new Map());
@@ -111,6 +113,39 @@ export class AdminActions {
     } catch {
       this.setFeedback(
         `Failed to reset cursor for ${streamLabel(stream)}.`,
+        false,
+      );
+    } finally {
+      const next = new Set(this.inFlightKeys);
+      next.delete(key);
+      this.inFlightKeys = next;
+    }
+  }
+
+  // --- Local stream data reset (per-stream, destructive) ---
+  async resetStreamData(stream: api.StreamEntry) {
+    const key = `stream-data-${streamKey(stream)}`;
+    if (this.confirmingStreamDataKey !== key) {
+      this.confirmingStreamDataKey = key;
+      return;
+    }
+    this.confirmingStreamDataKey = null;
+    this.inFlightKeys = new Set(this.inFlightKeys).add(key);
+    this.feedback = null;
+    try {
+      await api.resetStreamData({
+        forwarder_endpoint_id: stream.forwarder_endpoint_id,
+        stream_id: stream.stream_id,
+      });
+      this.setFeedback(
+        `Local stream data reset for ${streamLabel(stream)}.`,
+        true,
+      );
+      await this.loadAll();
+      await this.#afterMutate?.();
+    } catch {
+      this.setFeedback(
+        `Failed to reset local stream data for ${streamLabel(stream)}.`,
         false,
       );
     } finally {

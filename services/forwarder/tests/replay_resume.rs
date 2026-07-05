@@ -34,11 +34,12 @@ fn replay_starts_after_ack_cursor() {
     }
 
     // Ack through seq 3
-    j.update_ack_cursor("192.168.2.10", 1, 3).unwrap();
+    j.update_receiver_stream_cursor("test-receiver", "192.168.2.10", 3)
+        .unwrap();
 
     // Replay from the durable ack cursor should return events 4 and 5
     let engine = ReplayEngine::new();
-    let (_epoch, acked_seq) = j.ack_cursor("192.168.2.10").unwrap();
+    let acked_seq = j.min_acked_through_seq("192.168.2.10").unwrap();
     let batch = engine
         .read_after(&j, "192.168.2.10", acked_seq, 100)
         .unwrap();
@@ -62,10 +63,11 @@ fn replay_returns_empty_when_fully_acked() {
     }
 
     // Ack through seq 3 (all events acked)
-    j.update_ack_cursor("192.168.2.20", 1, 3).unwrap();
+    j.update_receiver_stream_cursor("test-receiver", "192.168.2.20", 3)
+        .unwrap();
 
     let engine = ReplayEngine::new();
-    let (_epoch, acked_seq) = j.ack_cursor("192.168.2.20").unwrap();
+    let acked_seq = j.min_acked_through_seq("192.168.2.20").unwrap();
     let batch = engine
         .read_after(&j, "192.168.2.20", acked_seq, 100)
         .unwrap();
@@ -91,7 +93,7 @@ fn replay_includes_old_epoch_unacked_events() {
     }
 
     // Bump to epoch 2 WITHOUT acking epoch 1
-    j.bump_epoch("192.168.2.30", 2).unwrap();
+    j.advance_epoch("192.168.2.30", None).unwrap();
 
     // Write 2 events in epoch 2
     for _ in 1..=2 {
@@ -101,7 +103,7 @@ fn replay_includes_old_epoch_unacked_events() {
     }
 
     let engine = ReplayEngine::new();
-    let (_epoch, acked_seq) = j.ack_cursor("192.168.2.30").unwrap();
+    let acked_seq = j.min_acked_through_seq("192.168.2.30").unwrap();
     let batch = engine
         .read_after(&j, "192.168.2.30", acked_seq, 100)
         .unwrap();
@@ -133,11 +135,12 @@ fn replay_cursor_advances_after_ack() {
     }
 
     // Ack seq 2
-    j.update_ack_cursor("192.168.2.40", 1, 2).unwrap();
+    j.update_receiver_stream_cursor("test-receiver", "192.168.2.40", 2)
+        .unwrap();
 
     // Only seq 3 should be pending
     let engine = ReplayEngine::new();
-    let (_epoch, acked_seq) = j.ack_cursor("192.168.2.40").unwrap();
+    let acked_seq = j.min_acked_through_seq("192.168.2.40").unwrap();
     let batch = engine
         .read_after(&j, "192.168.2.40", acked_seq, 100)
         .unwrap();
@@ -145,9 +148,10 @@ fn replay_cursor_advances_after_ack() {
     assert_eq!(batch.records[0].seq, 3);
 
     // Now ack seq 3 too
-    j.update_ack_cursor("192.168.2.40", 1, 3).unwrap();
+    j.update_receiver_stream_cursor("test-receiver", "192.168.2.40", 3)
+        .unwrap();
 
-    let (_epoch, acked_seq) = j.ack_cursor("192.168.2.40").unwrap();
+    let acked_seq = j.min_acked_through_seq("192.168.2.40").unwrap();
     let batch = engine
         .read_after(&j, "192.168.2.40", acked_seq, 100)
         .unwrap();
@@ -170,7 +174,7 @@ fn ack_cursor_ignores_stale_lower_seq() {
         j.insert_event("192.168.2.50", 1, seq, None, b"line", "RAW")
             .unwrap();
     }
-    j.bump_epoch("192.168.2.50", 2).unwrap();
+    j.advance_epoch("192.168.2.50", None).unwrap();
     for _ in 6..=10 {
         let seq = j.next_seq("192.168.2.50").unwrap();
         j.insert_event("192.168.2.50", 2, seq, None, b"line", "RAW")
@@ -178,12 +182,14 @@ fn ack_cursor_ignores_stale_lower_seq() {
     }
 
     // Ack through seq 8 (which lands in epoch 2).
-    j.update_ack_cursor("192.168.2.50", 2, 8).unwrap();
-    assert_eq!(j.ack_cursor("192.168.2.50").unwrap(), (2, 8));
+    j.update_receiver_stream_cursor("test-receiver", "192.168.2.50", 8)
+        .unwrap();
+    assert_eq!(j.min_acked_through_seq("192.168.2.50").unwrap(), 8);
 
     // Apply a stale, lower-seq cursor update; this must be ignored.
-    j.update_ack_cursor("192.168.2.50", 1, 3).unwrap();
+    j.update_receiver_stream_cursor("test-receiver", "192.168.2.50", 3)
+        .unwrap();
 
-    let (epoch, seq) = j.ack_cursor("192.168.2.50").unwrap();
-    assert_eq!((epoch, seq), (2, 8), "stale lower-seq ack must be ignored");
+    let seq = j.min_acked_through_seq("192.168.2.50").unwrap();
+    assert_eq!(seq, 8, "stale lower-seq ack must be ignored");
 }

@@ -33,16 +33,13 @@
         disabled={store.modeBusy}
       >
         <option value="live">Live</option>
-        <option value="targeted_replay">Targeted Replay</option>
       </select>
     </label>
 
     <p class="text-xs text-text-muted m-0">
       {#if store.modeDraft === "live"}
-        Live mode includes all available streams automatically and supports
-        earliest-epoch overrides.
-      {:else}
-        Targeted Replay uses per-stream epoch controls in the Streams tab.
+        Live mode includes all available streams automatically. Use the
+        per-stream "From epoch" control in the Streams tab to skip older epochs.
       {/if}
     </p>
   </div>

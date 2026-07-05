@@ -79,6 +79,13 @@ const BOOTSTRAP_RETRY_MAX: Duration = Duration::from_millis(40);
 pub struct P2pRuntime {
     endpoint: P2pEndpoint,
     tasks: Vec<JoinHandle<()>>,
+    /// Signals the catalog-push loop to make one final registry push and
+    /// acknowledge, so a graceful shutdown lands the freshest epoch/next_seq
+    /// high-water on the server. `None` when no server is configured.
+    catalog_shutdown: Option<(
+        tokio::sync::watch::Sender<bool>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
 }
 
 impl P2pRuntime {
@@ -94,7 +101,20 @@ impl P2pRuntime {
     }
 
     /// Closes the endpoint and aborts background P2P tasks.
+    ///
+    /// When a server is configured, a final catalog push runs first (bounded
+    /// at 5s) so the registry restore high-water covers everything journaled
+    /// this session.
     pub async fn shutdown(mut self) {
+        if let Some((shutdown_tx, done_rx)) = self.catalog_shutdown.take() {
+            let _ = shutdown_tx.send(true);
+            if tokio::time::timeout(Duration::from_secs(5), done_rx)
+                .await
+                .is_err()
+            {
+                tracing::warn!("final forwarder catalog push did not complete within 5s");
+            }
+        }
         self.endpoint.endpoint().close().await;
         for task in &self.tasks {
             task.abort();
@@ -151,6 +171,10 @@ pub async fn start_forwarder_p2p(
     // returned delta receiver is handed to the catalog task so no state change
     // between snapshot and task startup can be missed.
     let (status_rx, status_snapshot) = status_feed.subscribe_and_snapshot().await;
+    // A second feed handle for the server catalog-push task (out-of-cadence
+    // pushes on epoch advances), cloned before `status_feed` moves into the
+    // endpoint below.
+    let server_status_feed = status_feed.clone();
     let epoch_summaries = {
         let journal = journal.lock().await;
         reader_streams
@@ -163,8 +187,11 @@ pub async fn start_forwarder_p2p(
                         .into_iter()
                         .map(|summary| {
                             Ok(StreamEpochSummary {
-                                epoch: u64::try_from(summary.epoch)?,
+                                epoch: summary.epoch,
                                 created_unix_ms: summary.created_unix_ms,
+                                start_seq: u64::try_from(summary.start_seq)?,
+                                end_seq: summary.end_seq.map(u64::try_from).transpose()?,
+                                name: summary.name,
                             })
                         })
                         .collect::<Result<Vec<_>, TryFromIntError>>()?,
@@ -198,10 +225,14 @@ pub async fn start_forwarder_p2p(
         catalog_task,
     ];
 
+    let mut catalog_shutdown = None;
     if let Some((base_url, voucher)) = server_credentials(config)? {
         let request_timeout = Duration::from_secs(config.allowlist_request_timeout_secs);
         let poll_interval = Duration::from_secs(config.allowlist_poll_interval_secs);
         let endpoint_id = endpoint.endpoint_id().to_string();
+        let (catalog_shutdown_tx, catalog_shutdown_rx) = tokio::sync::watch::channel(false);
+        let (catalog_done_tx, catalog_done_rx) = tokio::sync::oneshot::channel();
+        catalog_shutdown = Some((catalog_shutdown_tx, catalog_done_rx));
 
         // Resolve the minted per-device token (load persisted, else bootstrap
         // via the voucher) BEFORE starting any server-facing task, so every
@@ -265,6 +296,8 @@ pub async fn start_forwarder_p2p(
                 device_token.clone(),
                 request_timeout,
             );
+            let (server_status_rx, _server_status_snapshot) =
+                server_status_feed.subscribe_and_snapshot().await;
             tokio::join!(
                 run_allowlist_push_subscription(
                     allow_list_client.clone(),
@@ -279,12 +312,19 @@ pub async fn start_forwarder_p2p(
                     server_journal,
                     reader_streams,
                     DEFAULT_FORWARDER_CATALOG_PUSH_INTERVAL,
+                    server_status_rx,
+                    catalog_shutdown_rx,
+                    catalog_done_tx,
                 ),
             );
         }));
     }
 
-    Ok(Some(P2pRuntime { endpoint, tasks }))
+    Ok(Some(P2pRuntime {
+        endpoint,
+        tasks,
+        catalog_shutdown,
+    }))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -424,22 +464,42 @@ fn apply_reader_status(
             entry.reader_connected = connected;
             changed = true;
         }
-        if let Some(epoch) = status
-            .current_epoch
-            .and_then(|epoch| u64::try_from(epoch).ok())
-            && !entry
+        if let Some(epoch) = status.current_epoch {
+            if let Some(summary) = entry
                 .epoch_summaries
-                .iter()
-                .any(|summary| summary.epoch == epoch)
-        {
-            entry.epoch_summaries.insert(
-                0,
-                StreamEpochSummary {
-                    epoch,
-                    created_unix_ms: status.current_epoch_created_unix_ms,
-                },
-            );
-            changed = true;
+                .iter_mut()
+                .find(|summary| summary.epoch == epoch)
+            {
+                // Known epoch: keep its advertised name in sync so receivers
+                // connecting later see name edits.
+                if summary.name != status.current_epoch_name {
+                    summary.name = status.current_epoch_name.clone();
+                    changed = true;
+                }
+            } else {
+                let start_seq = status
+                    .current_epoch_start_seq
+                    .and_then(|seq| u64::try_from(seq).ok())
+                    .unwrap_or_default();
+                // The previously-open head epoch is now closed by this advance.
+                if let Some(head) = entry.epoch_summaries.first_mut()
+                    && head.end_seq.is_none()
+                    && start_seq > 0
+                {
+                    head.end_seq = Some(start_seq - 1);
+                }
+                entry.epoch_summaries.insert(
+                    0,
+                    StreamEpochSummary {
+                        epoch,
+                        created_unix_ms: status.current_epoch_created_unix_ms,
+                        start_seq,
+                        end_seq: None,
+                        name: status.current_epoch_name.clone(),
+                    },
+                );
+                changed = true;
+            }
         }
         if changed {
             catalog.generation += 1;
@@ -614,6 +674,28 @@ fn write_device_token(path: &Path, token: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// Whether a reader-status event carries an epoch change that warrants an
+/// out-of-cadence catalog push.
+///
+/// The first observation of a stream's epoch seeds the map WITHOUT pushing
+/// (startup status seeding would otherwise trigger a burst of redundant
+/// pushes right after the initial push); only a subsequent different epoch
+/// reports a change.
+fn epoch_changed_for_push(
+    last_epochs: &mut std::collections::HashMap<String, i64>,
+    stream_id: &str,
+    current_epoch: Option<i64>,
+) -> bool {
+    let Some(epoch) = current_epoch else {
+        return false;
+    };
+    match last_epochs.insert(stream_id.to_owned(), epoch) {
+        Some(previous) => previous != epoch,
+        None => false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_forwarder_catalog_distribution(
     client: ServerCatalogClient,
     endpoint: P2pEndpoint,
@@ -621,6 +703,9 @@ async fn run_forwarder_catalog_distribution(
     journal: Arc<Mutex<Journal>>,
     reader_streams: Vec<String>,
     push_interval: Duration,
+    mut status_rx: broadcast::Receiver<ForwarderStatusEvent>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    done_tx: tokio::sync::oneshot::Sender<()>,
 ) {
     push_forwarder_catalog_once(
         &client,
@@ -640,16 +725,52 @@ async fn run_forwarder_catalog_distribution(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     ticker.tick().await;
 
+    // Last-seen current epoch per stream, for out-of-cadence pushes on epoch
+    // advances. Registry-restore staleness scales with the push interval, so
+    // an advance must reach the server immediately, not up to a tick later.
+    let mut last_epochs = std::collections::HashMap::new();
+
     loop {
-        ticker.tick().await;
-        push_forwarder_catalog_once(
-            &client,
-            &endpoint,
-            display_name.as_deref(),
-            Arc::clone(&journal),
-            &reader_streams,
-        )
-        .await;
+        let push_now = tokio::select! {
+            biased;
+            changed = shutdown_rx.changed() => {
+                // Final push on graceful shutdown so the registry high-water
+                // reflects everything journaled this session.
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    push_forwarder_catalog_once(
+                        &client,
+                        &endpoint,
+                        display_name.as_deref(),
+                        Arc::clone(&journal),
+                        &reader_streams,
+                    )
+                    .await;
+                    let _ = done_tx.send(());
+                    return;
+                }
+                false
+            }
+            event = status_rx.recv() => match event {
+                Ok(ForwarderStatusEvent::ReaderStatus { stream_id, status }) => {
+                    epoch_changed_for_push(&mut last_epochs, &stream_id, status.current_epoch)
+                }
+                Ok(_) => false,
+                // Lagged: we may have missed an epoch change; push to be safe.
+                Err(broadcast::error::RecvError::Lagged(_)) => true,
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
+            _ = ticker.tick() => true,
+        };
+        if push_now {
+            push_forwarder_catalog_once(
+                &client,
+                &endpoint,
+                display_name.as_deref(),
+                Arc::clone(&journal),
+                &reader_streams,
+            )
+            .await;
+        }
     }
 }
 
@@ -736,6 +857,41 @@ fn decode_seed(seed: &str) -> Result<[u8; 32], P2pStartError> {
             u8::from_str_radix(hex, 16).map_err(|_| P2pStartError::InvalidSecretKeySeed)?;
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod epoch_push_tests {
+    use super::epoch_changed_for_push;
+    use std::collections::HashMap;
+
+    #[test]
+    fn first_observation_seeds_without_pushing() {
+        let mut last = HashMap::new();
+        assert!(!epoch_changed_for_push(&mut last, "reader-a", Some(3)));
+        assert!(!epoch_changed_for_push(&mut last, "reader-b", Some(1)));
+    }
+
+    #[test]
+    fn same_epoch_does_not_push_and_advance_pushes() {
+        let mut last = HashMap::new();
+        assert!(!epoch_changed_for_push(&mut last, "reader-a", Some(3)));
+        assert!(!epoch_changed_for_push(&mut last, "reader-a", Some(3)));
+        assert!(
+            epoch_changed_for_push(&mut last, "reader-a", Some(4)),
+            "an epoch advance must trigger an out-of-cadence push"
+        );
+        assert!(!epoch_changed_for_push(&mut last, "reader-a", Some(4)));
+    }
+
+    #[test]
+    fn missing_epoch_never_pushes() {
+        let mut last = HashMap::new();
+        assert!(!epoch_changed_for_push(&mut last, "reader-a", None));
+        assert!(!epoch_changed_for_push(&mut last, "reader-a", Some(2)));
+        assert!(!epoch_changed_for_push(&mut last, "reader-a", None));
+        // The tracked epoch survives a None in between.
+        assert!(!epoch_changed_for_push(&mut last, "reader-a", Some(2)));
+    }
 }
 
 #[cfg(test)]

@@ -36,7 +36,8 @@ fn disk_watermark_acked_pruned_first() {
     }
 
     // Ack through seq 7.
-    j.update_ack_cursor("10.200.200.1", 1, 7).unwrap();
+    j.update_receiver_stream_cursor("test-receiver", "10.200.200.1", 7)
+        .unwrap();
 
     // Prune 5 records (all should be acked).
     let pruned = j.prune_acked("10.200.200.1", 5).unwrap();
@@ -44,7 +45,7 @@ fn disk_watermark_acked_pruned_first() {
 
     // Verify acked 8, 9, 10 unacked are still present (events 6, 7 acked but not yet pruned).
     // And events 8, 9, 10 (unacked) should still be there.
-    let unacked_after = j.unacked_events("10.200.200.1", 1, 7).unwrap();
+    let unacked_after = j.read_events_after("10.200.200.1", 7, usize::MAX).unwrap();
     assert_eq!(
         unacked_after.len(),
         3,
@@ -74,14 +75,15 @@ fn disk_watermark_unacked_preserved_while_acked_available() {
     }
 
     // Ack through seq 4.
-    j.update_ack_cursor("10.200.200.2", 1, 4).unwrap();
+    j.update_receiver_stream_cursor("test-receiver", "10.200.200.2", 4)
+        .unwrap();
 
     // Prune all 4 acked records.
     let pruned = j.prune_acked("10.200.200.2", 4).unwrap();
     assert_eq!(pruned, 4, "should prune all 4 acked records");
 
     // All 4 unacked (seq 5-8) must still be present.
-    let unacked = j.unacked_events("10.200.200.2", 1, 4).unwrap();
+    let unacked = j.read_events_after("10.200.200.2", 4, usize::MAX).unwrap();
     assert_eq!(
         unacked.len(),
         4,
@@ -121,7 +123,8 @@ fn disk_watermark_total_count_decreases_after_prune() {
     assert_eq!(total_before, 12, "should have 12 events before pruning");
 
     // Ack through seq 9.
-    j.update_ack_cursor("10.200.200.3", 1, 9).unwrap();
+    j.update_receiver_stream_cursor("test-receiver", "10.200.200.3", 9)
+        .unwrap();
 
     // Prune 9 acked records.
     let pruned = j.prune_acked("10.200.200.3", 9).unwrap();
@@ -154,14 +157,15 @@ fn disk_watermark_prune_limit_not_exceeded() {
     }
 
     // Ack only through seq 2.
-    j.update_ack_cursor("10.200.200.4", 1, 2).unwrap();
+    j.update_receiver_stream_cursor("test-receiver", "10.200.200.4", 2)
+        .unwrap();
 
     // Try to prune 100 (more than the 2 acked).
     let pruned = j.prune_acked("10.200.200.4", 100).unwrap();
     assert_eq!(pruned, 2, "should only prune 2 acked records, not 100");
 
     // Unacked events (seq 3, 4, 5) must still be present.
-    let unacked = j.unacked_events("10.200.200.4", 1, 2).unwrap();
+    let unacked = j.read_events_after("10.200.200.4", 2, usize::MAX).unwrap();
     assert_eq!(unacked.len(), 3, "3 unacked events must remain");
 }
 
@@ -184,7 +188,8 @@ fn disk_watermark_streams_pruned_independently() {
         j.insert_event("10.200.200.5", 1, seq, None, b"stream_a", "RAW")
             .unwrap();
     }
-    j.update_ack_cursor("10.200.200.5", 1, 5).unwrap();
+    j.update_receiver_stream_cursor("test-receiver", "10.200.200.5", 5)
+        .unwrap();
 
     // Stream B: 4 events, none acked.
     for _ in 0..4 {
@@ -208,7 +213,7 @@ fn disk_watermark_streams_pruned_independently() {
     );
 
     // Stream B must still have all 4 events.
-    let b_unacked = j.unacked_events("10.200.200.6", 1, 0).unwrap();
+    let b_unacked = j.read_events_after("10.200.200.6", 0, usize::MAX).unwrap();
     assert_eq!(
         b_unacked.len(),
         4,
@@ -263,7 +268,8 @@ fn disk_watermark_prune_cycle_simulation() {
         j.insert_event("10.200.200.8", 1, seq, None, b"cycle_line", "RAW")
             .unwrap();
     }
-    j.update_ack_cursor("10.200.200.8", 1, 10).unwrap();
+    j.update_receiver_stream_cursor("test-receiver", "10.200.200.8", 10)
+        .unwrap();
     let pruned_r1 = j.prune_acked("10.200.200.8", 10).unwrap();
     assert_eq!(pruned_r1, 10, "round 1: should prune 10 acked events");
     assert_eq!(
@@ -279,7 +285,8 @@ fn disk_watermark_prune_cycle_simulation() {
             .unwrap();
     }
     assert_eq!(j.total_event_count().unwrap(), 15);
-    j.update_ack_cursor("10.200.200.8", 1, 15).unwrap();
+    j.update_receiver_stream_cursor("test-receiver", "10.200.200.8", 15)
+        .unwrap();
     let pruned_r2 = j.prune_acked("10.200.200.8", 5).unwrap();
     assert_eq!(pruned_r2, 5, "round 2: should prune 5 more acked events");
     assert_eq!(
@@ -289,7 +296,7 @@ fn disk_watermark_prune_cycle_simulation() {
     );
 
     // Verify the remaining 10 events are unacked (seq 16-25).
-    let remaining = j.unacked_events("10.200.200.8", 1, 15).unwrap();
+    let remaining = j.read_events_after("10.200.200.8", 15, usize::MAX).unwrap();
     assert_eq!(
         remaining.len(),
         10,

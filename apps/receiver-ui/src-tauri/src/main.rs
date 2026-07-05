@@ -378,12 +378,12 @@ async fn put_earliest_epoch(
 }
 
 #[tauri::command]
-async fn get_replay_target_epochs(
+async fn get_stream_epochs(
     state: State<'_, Arc<AppState>>,
     forwarder_endpoint_id: String,
     stream_id: String,
-) -> CmdResult<control_api::ReplayTargetEpochsResponse> {
-    control_api::get_replay_target_epochs(&state, forwarder_endpoint_id, stream_id)
+) -> CmdResult<control_api::StreamEpochsResponse> {
+    control_api::get_stream_epochs(&state, forwarder_endpoint_id, stream_id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -523,8 +523,9 @@ async fn reader_advance_epoch(
     state: State<'_, Arc<AppState>>,
     endpoint_id: String,
     stream_id: String,
+    name: Option<String>,
 ) -> CmdResult<control_api::ReaderControlResult> {
-    control_api::reader_advance_epoch(&state, endpoint_id, stream_id)
+    control_api::reader_advance_epoch(&state, endpoint_id, stream_id, name)
         .await
         .map_err(|e| e.to_string())
 }
@@ -654,6 +655,16 @@ async fn admin_reset_earliest_epoch(
     body: control_api::StreamRef,
 ) -> CmdResult<()> {
     control_api::admin_reset_earliest_epoch(&state, body)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn admin_reset_stream_data(
+    state: State<'_, Arc<AppState>>,
+    body: control_api::StreamRef,
+) -> CmdResult<()> {
+    control_api::admin_reset_stream_data(&state, body)
         .await
         .map_err(|e| e.to_string())
 }

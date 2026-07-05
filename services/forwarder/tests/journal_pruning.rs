@@ -64,9 +64,9 @@ fn set_received_unix_ms(path: &PathBuf, stream_key: &str, seq: i64, received_uni
     .expect("set received_unix_ms");
 }
 
-fn remaining_seqs(journal: &Journal, stream_key: &str, epoch: i64) -> Vec<i64> {
+fn remaining_seqs(journal: &Journal, stream_key: &str) -> Vec<i64> {
     journal
-        .unacked_events(stream_key, epoch, 0)
+        .read_events_after(stream_key, 0, usize::MAX)
         .expect("events")
         .into_iter()
         .map(|event| event.seq)
@@ -116,7 +116,7 @@ fn prune_acked_removes_acked_events() {
 
     // Ack through seq 3
     journal
-        .update_ack_cursor(stream_key, epoch, 3)
+        .update_receiver_stream_cursor("test-receiver", stream_key, 3)
         .expect("update ack cursor");
 
     // Prune up to 500 acked events
@@ -132,7 +132,7 @@ fn prune_acked_removes_acked_events() {
 
     // Verify that the remaining events are seq 4 and 5
     let remaining = journal
-        .unacked_events(stream_key, epoch, 0)
+        .read_events_after(stream_key, 0, usize::MAX)
         .expect("unacked events");
     assert_eq!(remaining.len(), 2);
     assert_eq!(remaining[0].seq, 4);
@@ -157,7 +157,7 @@ fn prune_acked_respects_limit() {
 
     // Ack all 10
     journal
-        .update_ack_cursor(stream_key, epoch, 10)
+        .update_receiver_stream_cursor("test-receiver", stream_key, 10)
         .expect("update ack cursor");
 
     // Prune with a limit of 3
@@ -222,7 +222,7 @@ fn prune_acked_removes_older_epoch_events() {
 
     // Bump to epoch 2 and insert 2 more events. Seq is stream-wide and does
     // not reset, so epoch 2 events are seq 4 and 5.
-    journal.bump_epoch(stream_key, 2).expect("bump epoch");
+    journal.advance_epoch(stream_key, None).expect("bump epoch");
     for seq in 4..=5 {
         insert_event(&mut journal, stream_key, 2, seq);
     }
@@ -232,7 +232,7 @@ fn prune_acked_removes_older_epoch_events() {
     // Ack through seq 4 — this covers all of epoch 1 (seq 1-3) and seq 4 of
     // epoch 2.
     journal
-        .update_ack_cursor(stream_key, 2, 4)
+        .update_receiver_stream_cursor("test-receiver", stream_key, 4)
         .expect("update ack cursor");
 
     let deleted = journal.prune_acked(stream_key, 500).expect("prune acked");
@@ -244,7 +244,7 @@ fn prune_acked_removes_older_epoch_events() {
     // Only epoch 2, seq 5 should remain
     assert_eq!(journal.event_count(stream_key).unwrap(), 1);
     let remaining = journal
-        .unacked_events(stream_key, 2, 0)
+        .read_events_after(stream_key, 0, usize::MAX)
         .expect("unacked events");
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].seq, 5);
@@ -271,7 +271,7 @@ fn ack_then_prune_cycle_clears_journal() {
 
     // Simulate: ack cursor update followed by prune (as done in main.rs P2P loop)
     journal
-        .update_ack_cursor(stream_key, epoch, 10)
+        .update_receiver_stream_cursor("test-receiver", stream_key, 10)
         .expect("update ack cursor");
     let deleted = journal.prune_acked(stream_key, 500).expect("prune acked");
 
@@ -302,7 +302,7 @@ fn next_seq_continues_above_pruned_range() {
         insert_event(&mut journal, stream_key, epoch, seq);
     }
     journal
-        .update_ack_cursor(stream_key, epoch, 5)
+        .update_receiver_stream_cursor("test-receiver", stream_key, 5)
         .expect("update ack cursor");
     let deleted = journal.prune_acked(stream_key, 500).expect("prune acked");
     assert_eq!(deleted, 5, "all 5 events pruned");
@@ -322,7 +322,7 @@ fn next_seq_continues_above_pruned_range() {
     // Insert at seq 6, ack/prune again, and confirm it keeps climbing.
     insert_event(&mut journal, stream_key, epoch, next);
     journal
-        .update_ack_cursor(stream_key, epoch, next)
+        .update_receiver_stream_cursor("test-receiver", stream_key, next)
         .expect("update ack cursor");
     journal.prune_acked(stream_key, 500).expect("prune acked");
     assert_eq!(
@@ -345,14 +345,16 @@ fn rule1_age_floor_protects() {
     }
     set_received_unix_ms(&path, stream_key, 1, now - 8 * 24 * 60 * 60 * 1000);
     set_received_unix_ms(&path, stream_key, 2, now - 6 * 24 * 60 * 60 * 1000);
-    journal.update_ack_cursor(stream_key, epoch, 2).unwrap();
+    journal
+        .update_receiver_stream_cursor("test-receiver", stream_key, 2)
+        .unwrap();
 
     let stats = journal
         .prune_retention(&test_policy(1_000_000), retention_context(now))
         .expect("prune retention");
 
     assert_eq!(stats.acked_deleted, 1);
-    assert_eq!(remaining_seqs(&journal, stream_key, epoch), vec![2]);
+    assert_eq!(remaining_seqs(&journal, stream_key), vec![2]);
     let retention = journal.retention_state(stream_key).unwrap();
     assert_eq!(retention.earliest_available_seq, 2);
     assert_eq!(retention.forced_gap_count, 0);
@@ -370,14 +372,16 @@ fn rule2_prunes_acked_old() {
         insert_event(&mut journal, stream_key, epoch, seq);
         set_received_unix_ms(&path, stream_key, seq, 0);
     }
-    journal.update_ack_cursor(stream_key, epoch, 2).unwrap();
+    journal
+        .update_receiver_stream_cursor("test-receiver", stream_key, 2)
+        .unwrap();
 
     let stats = journal
         .prune_retention(&test_policy(1_000_000), retention_context(now))
         .expect("prune retention");
 
     assert_eq!(stats.acked_deleted, 2);
-    assert_eq!(remaining_seqs(&journal, stream_key, epoch), vec![3]);
+    assert_eq!(remaining_seqs(&journal, stream_key), vec![3]);
     let retention = journal.retention_state(stream_key).unwrap();
     assert_eq!(retention.earliest_available_seq, 3);
     assert_eq!(retention.forced_gap_count, 0);
@@ -403,7 +407,7 @@ fn rule3_hard_cap_prunes_unacked() {
         .expect("prune retention");
 
     assert_eq!(stats.hard_cap_deleted, 1);
-    assert_eq!(remaining_seqs(&journal, stream_key, epoch), vec![2]);
+    assert_eq!(remaining_seqs(&journal, stream_key), vec![2]);
     let retention = journal.retention_state(stream_key).unwrap();
     assert_eq!(retention.earliest_available_seq, 2);
     assert_eq!(retention.forced_gap_count, 1);
@@ -428,7 +432,7 @@ fn rule4_storage_emergency() {
         .expect("prune retention");
 
     assert_eq!(stats.emergency_deleted, 2);
-    assert_eq!(remaining_seqs(&journal, stream_key, epoch), vec![3, 4, 5]);
+    assert_eq!(remaining_seqs(&journal, stream_key), vec![3, 4, 5]);
     let retention = journal.retention_state(stream_key).unwrap();
     assert_eq!(retention.earliest_available_seq, 3);
     assert_eq!(retention.forced_gap_count, 2);
@@ -463,7 +467,7 @@ fn forced_prune_preserves_high_water_with_newer_low_seq() {
         stats.hard_cap_deleted, 0,
         "non-prefix forced deletion of seq 2 must not occur while seq 1 remains"
     );
-    assert_eq!(remaining_seqs(&journal, stream_key, epoch), vec![1, 2]);
+    assert_eq!(remaining_seqs(&journal, stream_key), vec![1, 2]);
     let retention = journal.retention_state(stream_key).unwrap();
     assert_eq!(retention.earliest_available_seq, 1);
     assert_eq!(
@@ -479,7 +483,7 @@ fn forced_prune_preserves_high_water_with_newer_low_seq() {
         .prune_retention(&test_policy(1_000_000), retention_context(now))
         .expect("prune retention again");
     assert_eq!(stats.hard_cap_deleted, 2);
-    assert!(remaining_seqs(&journal, stream_key, epoch).is_empty());
+    assert!(remaining_seqs(&journal, stream_key).is_empty());
     assert_eq!(
         journal.next_seq(stream_key).unwrap(),
         3,
@@ -500,7 +504,9 @@ fn prune_retention_bounds_batch_size() {
 
     journal.ensure_stream_state(stream_key, epoch).unwrap();
     insert_old_events_bulk(&path, stream_key, epoch, total);
-    journal.update_ack_cursor(stream_key, epoch, total).unwrap();
+    journal
+        .update_receiver_stream_cursor("test-receiver", stream_key, total)
+        .unwrap();
     assert_eq!(journal.event_count(stream_key).unwrap(), total);
 
     let stats = journal

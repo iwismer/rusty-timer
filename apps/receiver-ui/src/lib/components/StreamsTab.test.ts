@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const apiMocks = vi.hoisted(() => ({
   getStreams: vi.fn(),
   putSubscriptions: vi.fn(),
-  getReplayTargetEpochs: vi.fn().mockResolvedValue({ epochs: [] }),
+  getStreamEpochs: vi.fn().mockResolvedValue({ epochs: [] }),
 }));
 
 vi.mock("$lib/api", () => apiMocks);
@@ -30,11 +30,10 @@ describe("StreamsTab", () => {
     store.streamSubscriptionPendingSince = {};
     store.streamActivityAt = new Map();
     store.streamEventTypeBusy = {};
-    store.earliestEpochOptions = {};
+    store.streamEpochOptions = {};
     store.earliestEpochLoading = {};
     store.earliestEpochLoadErrors = {};
     store.earliestEpochSaving = {};
-    store.targetedEpochInputs = {};
     vi.stubGlobal(
       "ResizeObserver",
       class {
@@ -252,6 +251,8 @@ describe("StreamsTab", () => {
           reads_epoch: null,
           cursor_epoch: null,
           cursor_seq: null,
+          // Stored earliest-epoch override read back from the backend.
+          earliest_epoch: 7,
         },
       ],
       degraded: false,
@@ -267,13 +268,13 @@ describe("StreamsTab", () => {
     expect(screen.getByText("Available")).toBeInTheDocument();
     expect(screen.getAllByText("—").length).toBeGreaterThan(0);
 
-    store.earliestEpochOptions = {
+    store.streamEpochOptions = {
       "endpoint-abc/reader-finish-1": [
         {
           stream_epoch: 7,
           name: null,
           first_seen_at: null,
-          race_names: [],
+          selectable: true,
         },
       ],
     };

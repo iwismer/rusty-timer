@@ -184,7 +184,7 @@ pub(crate) fn assemble_forwarder_connection_statuses(
             available_count: discovered_forwarder.map_or(0, |forwarder| forwarder.streams.len()),
             readers: sorted_reader_statuses(&live_status, local_ports, &endpoint_id),
             ups: live_status.ups,
-            failed_stream_ids: live_status.failed_streams.into_iter().collect(),
+            failed_stream_ids: live_status.failed_streams.into_keys().collect(),
             restart_needed: None,
             remote_config_available: config_endpoints.contains(&endpoint_id),
             reader_control_available: reader_control_endpoints.contains(&endpoint_id),
@@ -490,12 +490,13 @@ pub async fn reader_advance_epoch(
     state: &AppState,
     endpoint_id: String,
     stream_id: String,
+    name: Option<String>,
 ) -> Result<ReaderControlResult, ReceiverError> {
     reader_control_command(
         state,
         endpoint_id,
         stream_id,
-        rt_domain::ReaderControlAction::AdvanceEpoch,
+        rt_domain::ReaderControlAction::AdvanceEpoch { name },
     )
     .await
 }

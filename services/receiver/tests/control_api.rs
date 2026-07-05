@@ -98,7 +98,6 @@ async fn mode_endpoints_round_trip() {
                 forwarder_id: "f1".to_owned(),
                 reader_ip: "10.0.0.1:10000".to_owned(),
             }],
-            earliest_epochs: vec![],
         },
     )
     .await
@@ -115,14 +114,8 @@ async fn mode_endpoints_round_trip() {
 #[tokio::test]
 async fn put_mode_requires_profile() {
     let state = setup();
-    let result = control_api::put_mode(
-        &state,
-        rt_domain::ReceiverMode::Live {
-            streams: vec![],
-            earliest_epochs: vec![],
-        },
-    )
-    .await;
+    let result =
+        control_api::put_mode(&state, rt_domain::ReceiverMode::Live { streams: vec![] }).await;
     assert!(result.is_err());
 }
 

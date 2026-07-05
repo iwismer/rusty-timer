@@ -13,7 +13,7 @@ use rt_p2p_protocol::{
     ReaderStatus, RestartResponse, StreamCatalog, UpsStatus,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -32,10 +32,16 @@ pub type ChipLookup = HashMap<String, HashMap<String, ChipEntry>>;
 
 /// One stream a discovered forwarder exposes, learned from the server
 /// `GET /forwarders` discovery feed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiscoveredEpochSummary {
     pub stream_epoch: i64,
     pub created_unix_ms: Option<i64>,
+    /// First seq recorded in this epoch, from the forwarder catalog. `None`
+    /// when the forwarder did not advertise a usable value; such an epoch
+    /// cannot be resolved to an earliest-epoch override floor.
+    pub start_seq: Option<i64>,
+    /// Operator label for the epoch, if any.
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,11 +184,16 @@ pub(crate) struct ForwarderLiveStatus {
     readers: HashMap<String, ReaderLiveStatus>,
     pub(crate) ups: Option<UpsStatusPayload>,
     /// Wire stream ids whose data subscription failed terminally on the live
-    /// connection (protocol/data-integrity error). Set by
-    /// [`AppState::mark_forwarder_stream_failed`]; cleared on control
+    /// connection (protocol/data-integrity error), with the failure detail.
+    /// Set by [`AppState::mark_forwarder_stream_failed`]; cleared on control
     /// disconnect (the whole live status is dropped) or on a subscription
     /// config change ([`AppState::clear_forwarder_stream_failed`]).
-    pub(crate) failed_streams: BTreeSet<String>,
+    pub(crate) failed_streams: BTreeMap<String, StreamFailure>,
+    /// Wire stream ids whose data task is held fail-closed because their
+    /// earliest-epoch override cannot be resolved against the connection's
+    /// catalog. Cleared when the override resolves, is removed, or the
+    /// control connection drops (whole live status dropped).
+    pub(crate) override_held_streams: BTreeSet<String>,
 }
 
 const FORWARDER_PENDING_GRACE: Duration = Duration::from_secs(5);
@@ -251,24 +262,41 @@ pub(crate) fn validate_stream_identity(
 
 fn merge_epoch_options(
     discovered_stream: Option<&DiscoveredStream>,
-    current_epoch: Option<i64>,
-    current_epoch_created_unix_ms: Option<i64>,
+    live_reader: Option<&ReaderLiveStatus>,
 ) -> Vec<DiscoveredEpochSummary> {
     let mut options = Vec::new();
-    if let Some(epoch) = current_epoch.filter(|epoch| *epoch > 0) {
+    if let Some(reader) = live_reader
+        && let Some(epoch) = reader.current_epoch.filter(|epoch| *epoch > 0)
+    {
         options.push(DiscoveredEpochSummary {
             stream_epoch: epoch,
-            created_unix_ms: current_epoch_created_unix_ms,
+            created_unix_ms: reader.current_epoch_created_unix_ms,
+            start_seq: reader.current_epoch_start_seq.filter(|seq| *seq >= 1),
+            name: reader.current_epoch_name.clone(),
         });
     }
     if let Some(stream) = discovered_stream {
         for option in &stream.epoch_options {
-            if option.stream_epoch > 0
-                && !options
-                    .iter()
-                    .any(|existing| existing.stream_epoch == option.stream_epoch)
+            if option.stream_epoch <= 0 {
+                continue;
+            }
+            if let Some(existing) = options
+                .iter_mut()
+                .find(|existing| existing.stream_epoch == option.stream_epoch)
             {
-                options.push(*option);
+                // The live status entry wins where populated; the catalog
+                // fills the gaps (e.g. start_seq before a status delta).
+                if existing.start_seq.is_none() {
+                    existing.start_seq = option.start_seq;
+                }
+                if existing.created_unix_ms.is_none() {
+                    existing.created_unix_ms = option.created_unix_ms;
+                }
+                if existing.name.is_none() {
+                    existing.name = option.name.clone();
+                }
+            } else {
+                options.push(option.clone());
             }
         }
         if stream.epoch > 0
@@ -279,10 +307,12 @@ fn merge_epoch_options(
             options.push(DiscoveredEpochSummary {
                 stream_epoch: stream.epoch,
                 created_unix_ms: None,
+                start_seq: None,
+                name: None,
             });
         }
     }
-    options.sort_by(|left, right| right.stream_epoch.cmp(&left.stream_epoch));
+    options.sort_by_key(|option| std::cmp::Reverse(option.stream_epoch));
     options
 }
 
@@ -887,11 +917,28 @@ impl AppState {
                 let epoch_options = entry
                     .epoch_summaries
                     .iter()
-                    .filter_map(|summary| {
-                        Some(DiscoveredEpochSummary {
-                            stream_epoch: i64::try_from(summary.epoch).ok()?,
+                    .map(|summary| {
+                        // The wire start_seq is uint64 while the floor math is
+                        // i64: reject 0 and > i64::MAX values so an invalid
+                        // advertisement can never resolve an override.
+                        let start_seq = i64::try_from(summary.start_seq)
+                            .ok()
+                            .filter(|seq| *seq >= 1);
+                        if start_seq.is_none() {
+                            warn!(
+                                %endpoint_id,
+                                %stream_id,
+                                epoch = summary.epoch,
+                                advertised_start_seq = summary.start_seq,
+                                "forwarder advertised epoch summary with invalid start_seq"
+                            );
+                        }
+                        DiscoveredEpochSummary {
+                            stream_epoch: summary.epoch,
                             created_unix_ms: summary.created_unix_ms,
-                        })
+                            start_seq,
+                            name: summary.name.clone(),
+                        }
                     })
                     .collect::<Vec<_>>();
                 let existing = existing.get(&stream_id);
@@ -982,6 +1029,7 @@ impl AppState {
             last_seen_secs: status.last_seen_secs,
             current_epoch: status.current_epoch,
             current_epoch_created_unix_ms: status.current_epoch_created_unix_ms,
+            current_epoch_start_seq: status.current_epoch_start_seq,
             current_epoch_name: status.current_epoch_name,
             hardware_reader_id: None,
             firmware_version: None,
@@ -1023,14 +1071,6 @@ impl AppState {
         current_epoch_created_unix_ms: Option<i64>,
         current_epoch_name: Option<String>,
     ) {
-        let current_epoch_name = current_epoch_name.map(|name| {
-            let trimmed = name.trim().to_owned();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
-        });
         let mut live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
         let live_status = live_statuses.entry(endpoint_id.to_owned()).or_default();
         live_status
@@ -1040,14 +1080,19 @@ impl AppState {
                 if current_epoch.is_some() {
                     if reader.current_epoch.is_some() && reader.current_epoch != current_epoch {
                         // Epoch changed: the new epoch starts with zero reads
-                        // until the next authoritative status delta arrives.
+                        // until the next authoritative status delta arrives,
+                        // and the previous epoch's start_seq no longer applies.
                         reader.reads_epoch = Some(0);
+                        reader.current_epoch_start_seq = None;
                     }
                     reader.current_epoch = current_epoch;
                     reader.current_epoch_created_unix_ms = current_epoch_created_unix_ms;
-                }
-                if let Some(name) = &current_epoch_name {
-                    reader.current_epoch_name = name.clone();
+                    // The wire name is authoritative whenever epoch info is
+                    // present: absent means the epoch has no name (cleared or
+                    // never set), so a stale cached name must not survive.
+                    reader.current_epoch_name = current_epoch_name.clone();
+                } else if current_epoch_name.is_some() {
+                    reader.current_epoch_name = current_epoch_name.clone();
                 }
             })
             .or_insert_with(|| ReaderLiveStatus {
@@ -1061,7 +1106,8 @@ impl AppState {
                 last_seen_secs: None,
                 current_epoch,
                 current_epoch_created_unix_ms,
-                current_epoch_name: current_epoch_name.flatten(),
+                current_epoch_start_seq: None,
+                current_epoch_name,
                 hardware_reader_id: None,
                 firmware_version: None,
                 model: None,
@@ -1120,6 +1166,7 @@ impl AppState {
                 last_seen_secs: None,
                 current_epoch: None,
                 current_epoch_created_unix_ms: None,
+                current_epoch_start_seq: None,
                 current_epoch_name: None,
                 hardware_reader_id,
                 firmware_version,
@@ -1177,6 +1224,7 @@ impl AppState {
                 last_seen_secs: None,
                 current_epoch: None,
                 current_epoch_created_unix_ms: None,
+                current_epoch_start_seq: None,
                 current_epoch_name: None,
                 hardware_reader_id: None,
                 firmware_version: None,
@@ -1335,14 +1383,19 @@ impl AppState {
     /// [`crate::p2p_session::P2pSessionError::is_retryable`]). Surfaced through
     /// the connections payload/fingerprint so the UI sees the failed stream via
     /// the existing `ConnectionsChanged` event.
-    pub(crate) async fn mark_forwarder_stream_failed(&self, endpoint_id: &str, stream_id: &str) {
+    pub(crate) async fn mark_forwarder_stream_failed(
+        &self,
+        endpoint_id: &str,
+        stream_id: &str,
+        failure: StreamFailure,
+    ) {
         {
             let mut live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
             live_statuses
                 .entry(endpoint_id.to_owned())
                 .or_default()
                 .failed_streams
-                .insert(stream_id.to_owned());
+                .insert(stream_id.to_owned(), failure);
         }
         self.recompute_aggregate_connection_state().await;
     }
@@ -1355,11 +1408,85 @@ impl AppState {
             let mut live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
             live_statuses
                 .get_mut(endpoint_id)
-                .is_some_and(|status| status.failed_streams.remove(stream_id))
+                .is_some_and(|status| status.failed_streams.remove(stream_id).is_some())
         };
         if removed {
             self.recompute_aggregate_connection_state().await;
         }
+    }
+
+    /// Mark a stream's data task as held by an unresolvable earliest-epoch
+    /// override (fail closed). Returns `true` when the stream was not already
+    /// marked, so the caller can log the transition exactly once.
+    pub(crate) async fn mark_forwarder_stream_override_held(
+        &self,
+        endpoint_id: &str,
+        stream_id: &str,
+    ) -> bool {
+        let inserted = {
+            let mut live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
+            live_statuses
+                .entry(endpoint_id.to_owned())
+                .or_default()
+                .override_held_streams
+                .insert(stream_id.to_owned())
+        };
+        if inserted {
+            self.emit_streams_snapshot().await;
+        }
+        inserted
+    }
+
+    /// Clear a stream's held-override marker (override resolved or removed).
+    pub(crate) async fn clear_forwarder_stream_override_held(
+        &self,
+        endpoint_id: &str,
+        stream_id: &str,
+    ) {
+        let removed = {
+            let mut live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
+            live_statuses
+                .get_mut(endpoint_id)
+                .is_some_and(|status| status.override_held_streams.remove(stream_id))
+        };
+        if removed {
+            self.emit_streams_snapshot().await;
+        }
+    }
+
+    /// Forwarder-advertised epoch options for a stream, merged from the
+    /// discovered catalog and the live reader status (see
+    /// [`merge_epoch_options`]). Used by the earliest-epoch picker.
+    pub(crate) async fn merged_epoch_options(
+        &self,
+        endpoint_id: &str,
+        stream_id: &str,
+    ) -> Vec<DiscoveredEpochSummary> {
+        let discovered = self.forwarders.discovered_forwarders.read().await;
+        let discovered_stream = discovered.get(endpoint_id).and_then(|forwarder| {
+            forwarder
+                .streams
+                .iter()
+                .find(|stream| stream.stream_id == stream_id)
+        });
+        let live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
+        let live_reader = live_statuses
+            .get(endpoint_id)
+            .and_then(|status| status.readers.get(stream_id));
+        merge_epoch_options(discovered_stream, live_reader)
+    }
+
+    /// The live reader's `(current_epoch, current_epoch_start_seq)` pair, used
+    /// as the fallback source when resolving an earliest-epoch override that
+    /// targets the stream's current epoch.
+    pub(crate) fn forwarder_reader_epoch_hint(
+        &self,
+        endpoint_id: &str,
+        stream_id: &str,
+    ) -> Option<(i64, Option<i64>)> {
+        let live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
+        let reader = live_statuses.get(endpoint_id)?.readers.get(stream_id)?;
+        Some((reader.current_epoch?, reader.current_epoch_start_seq))
     }
 
     pub(crate) async fn clear_forwarder_live_status(&self, endpoint_id: &str) {
@@ -1542,7 +1669,7 @@ impl AppState {
                         &endpoint_id,
                     )),
                     ups: live_status.ups,
-                    failed_stream_ids: live_status.failed_streams.into_iter().collect(),
+                    failed_stream_ids: live_status.failed_streams.into_keys().collect(),
                 }
             })
             .collect();
@@ -1671,6 +1798,16 @@ impl AppState {
         };
         let announcer_publish_streams = db.load_announcer_publish_streams().unwrap_or_default();
         let intents = db.load_forwarder_intents().unwrap_or_default();
+        // Earliest-epoch overrides keyed by local stream key: the UI's
+        // read-back path for the "From epoch" control.
+        let earliest_epochs: HashMap<String, i64> = db
+            .load_stream_earliest_epochs()
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| (row.stream_id, row.earliest_epoch))
+                    .collect()
+            })
+            .unwrap_or_default();
         drop(db);
 
         let runtime_statuses = self.forwarders.forwarder_runtime.lock().unwrap().clone();
@@ -1739,8 +1876,17 @@ impl AppState {
             let current_epoch = live_reader.and_then(|reader| reader.current_epoch);
             let current_epoch_created_unix_ms =
                 live_reader.and_then(|reader| reader.current_epoch_created_unix_ms);
+            let override_held = live_statuses
+                .get(&sub.forwarder_endpoint_id)
+                .is_some_and(|status| status.override_held_streams.contains(&sub.stream_id));
+            let failure = live_statuses
+                .get(&sub.forwarder_endpoint_id)
+                .and_then(|status| status.failed_streams.get(&sub.stream_id).cloned());
             let discovered_stream = discovered_pair.map(|(_, stream)| stream);
             streams.push(StreamEntry {
+                override_held,
+                failure,
+                earliest_epoch: earliest_epochs.get(local_stream_key.as_str()).copied(),
                 forwarder_endpoint_id: sub.forwarder_endpoint_id.clone(),
                 stream_id: sub.stream_id.clone(),
                 forwarder_id: display_forwarder_id,
@@ -1756,11 +1902,7 @@ impl AppState {
                     .and_then(|(forwarder, _)| forwarder.display_name.clone()),
                 stream_epoch: current_epoch
                     .or_else(|| discovered_stream.map(|stream| stream.epoch)),
-                epoch_options: merge_epoch_options(
-                    discovered_stream,
-                    current_epoch,
-                    current_epoch_created_unix_ms,
-                ),
+                epoch_options: merge_epoch_options(discovered_stream, live_reader),
                 current_epoch_name: live_reader
                     .and_then(|reader| reader.current_epoch_name.clone()),
                 current_epoch_created_unix_ms,
@@ -1804,7 +1946,17 @@ impl AppState {
                 let current_epoch = live_reader.and_then(|reader| reader.current_epoch);
                 let current_epoch_created_unix_ms =
                     live_reader.and_then(|reader| reader.current_epoch_created_unix_ms);
+                let override_held = live_statuses
+                    .get(endpoint_id)
+                    .is_some_and(|status| status.override_held_streams.contains(&stream.stream_id));
+                let failure = live_statuses
+                    .get(endpoint_id)
+                    .and_then(|status| status.failed_streams.get(&stream.stream_id).cloned());
+                let local_stream_key = LocalStreamKey::new(endpoint_id, &stream.stream_id);
                 streams.push(StreamEntry {
+                    override_held,
+                    failure,
+                    earliest_epoch: earliest_epochs.get(local_stream_key.as_str()).copied(),
                     forwarder_endpoint_id: endpoint_id.clone(),
                     stream_id: stream.stream_id.clone(),
                     forwarder_id: None,
@@ -1818,11 +1970,7 @@ impl AppState {
                     reader_connected,
                     display_alias: forwarder.display_name.clone(),
                     stream_epoch: current_epoch.or(Some(stream.epoch)),
-                    epoch_options: merge_epoch_options(
-                        Some(stream),
-                        current_epoch,
-                        current_epoch_created_unix_ms,
-                    ),
+                    epoch_options: merge_epoch_options(Some(stream), live_reader),
                     current_epoch_name: live_reader
                         .and_then(|reader| reader.current_epoch_name.clone()),
                     current_epoch_created_unix_ms,
@@ -1959,6 +2107,35 @@ pub struct StreamEntry {
     pub cursor_epoch: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor_seq: Option<i64>,
+    /// True while the stream's data task is held fail-closed because its
+    /// earliest-epoch override cannot be resolved against the forwarder's
+    /// advertised epochs. No data flows until the override resolves or is
+    /// cleared.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub override_held: bool,
+    /// The stored earliest-epoch override for this stream, if any. The UI's
+    /// read-back path for the "From epoch" control.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub earliest_epoch: Option<i64>,
+    /// Terminal data-subscription failure on the live connection, if any.
+    /// Present until reconnect or a subscription config change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<StreamFailure>,
+}
+
+/// Detail for a terminally failed stream data subscription, surfaced to the
+/// UI so operators see WHY a stream halted (e.g. conflicting data at a seq —
+/// see the runbook) instead of a silent stall.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct StreamFailure {
+    /// Human-readable failure reason (the terminal session error).
+    pub reason: String,
+    /// The sequence number involved, when the failure is seq-specific
+    /// (conflicting duplicate).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    /// When the failure was recorded, in unix milliseconds.
+    pub unix_ms: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1980,6 +2157,7 @@ pub struct ReaderLiveStatus {
     pub last_seen_secs: Option<u64>,
     pub current_epoch: Option<i64>,
     pub current_epoch_created_unix_ms: Option<i64>,
+    pub current_epoch_start_seq: Option<i64>,
     pub current_epoch_name: Option<String>,
     pub hardware_reader_id: Option<String>,
     pub firmware_version: Option<String>,
@@ -2071,10 +2249,10 @@ macro_rules! receiver_command_list {
             get_streams() -> "StreamsResponse",
             get_stream_metrics() -> "Vec<StreamMetricsPayload>",
             put_earliest_epoch(body: "EarliestEpochRequest") -> "()",
-            get_replay_target_epochs(
+            get_stream_epochs(
                 forwarder_endpoint_id: "String",
                 stream_id: "String"
-            ) -> "ReplayTargetEpochsResponse",
+            ) -> "StreamEpochsResponse",
             get_subscriptions() -> "SubscriptionsBody",
             put_subscriptions(body: "SubscriptionsBody") -> "()",
             get_status() -> "StatusResponse",
@@ -2096,7 +2274,11 @@ macro_rules! receiver_command_list {
                 stream_id: "String",
                 name: "Option<String>"
             ) -> "ReaderControlResult",
-            reader_advance_epoch(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
+            reader_advance_epoch(
+                endpoint_id: "String",
+                stream_id: "String",
+                name: "Option<String>"
+            ) -> "ReaderControlResult",
             reader_set_read_mode(
                 endpoint_id: "String",
                 stream_id: "String",
@@ -2123,6 +2305,7 @@ macro_rules! receiver_command_list {
             admin_reset_cursor(body: "StreamRef") -> "()",
             admin_reset_all_cursors() -> "serde_json::Value",
             admin_reset_earliest_epoch(body: "StreamRef") -> "()",
+            admin_reset_stream_data(body: "StreamRef") -> "()",
             admin_reset_all_earliest_epochs() -> "serde_json::Value",
             admin_purge_subscriptions() -> "serde_json::Value",
             admin_update_port(body: "UpdatePortRequest") -> "()",
@@ -2876,6 +3059,7 @@ mod tests {
                     last_seen_secs: Some(3),
                     current_epoch: Some(9),
                     current_epoch_created_unix_ms: Some(1_783_238_640_000),
+                    current_epoch_start_seq: None,
                     current_epoch_name: Some("Race 1".to_owned()),
                 },
             )
@@ -2894,6 +3078,7 @@ mod tests {
                     last_seen_secs: None,
                     current_epoch: None,
                     current_epoch_created_unix_ms: None,
+                    current_epoch_start_seq: None,
                     current_epoch_name: None,
                 },
             )
@@ -2961,6 +3146,7 @@ mod tests {
                     last_seen_secs: Some(1),
                     current_epoch: Some(10),
                     current_epoch_created_unix_ms: Some(1_783_238_700_000),
+                    current_epoch_start_seq: None,
                     current_epoch_name: Some("Race 2".to_owned()),
                 },
             )
@@ -3075,6 +3261,7 @@ mod tests {
                     last_seen_secs: Some(1),
                     current_epoch: None,
                     current_epoch_created_unix_ms: None,
+                    current_epoch_start_seq: None,
                     current_epoch_name: None,
                 },
             )
@@ -3262,6 +3449,7 @@ mod tests {
                 last_seen_secs: Some(reads_session),
                 current_epoch: None,
                 current_epoch_created_unix_ms: None,
+                current_epoch_start_seq: None,
                 current_epoch_name: None,
             };
 
@@ -3487,7 +3675,12 @@ mod tests {
                 resp,
             } = rx.recv().await.expect("reader command");
             assert_eq!(stream_id, "stream-a");
-            assert_eq!(action, rt_domain::ReaderControlAction::AdvanceEpoch);
+            assert_eq!(
+                action,
+                rt_domain::ReaderControlAction::AdvanceEpoch {
+                    name: Some("Race 2".to_owned())
+                }
+            );
             resp.send(ReaderControlResponse {
                 stream_id: b"stream-a".to_vec(),
                 request_id: "1".to_owned(),
@@ -3501,9 +3694,14 @@ mod tests {
             .expect("send reader response");
         });
 
-        let result = reader_advance_epoch(&state, "endpoint-a".to_owned(), "stream-a".to_owned())
-            .await
-            .expect("reader advance epoch");
+        let result = reader_advance_epoch(
+            &state,
+            "endpoint-a".to_owned(),
+            "stream-a".to_owned(),
+            Some("Race 2".to_owned()),
+        )
+        .await
+        .expect("reader advance epoch");
 
         assert!(result.success);
         assert_eq!(result.current_epoch, Some(5));
@@ -3600,10 +3798,16 @@ mod tests {
                             rt_p2p_protocol::StreamEpochSummary {
                                 epoch: 2,
                                 created_unix_ms: Some(1_783_238_640_000),
+                                start_seq: 42,
+                                end_seq: None,
+                                name: Some("Race 2".to_owned()),
                             },
                             rt_p2p_protocol::StreamEpochSummary {
                                 epoch: 1,
                                 created_unix_ms: Some(1_783_235_000_000),
+                                start_seq: 1,
+                                end_seq: Some(41),
+                                name: None,
                             },
                         ],
                     }],
@@ -3621,12 +3825,115 @@ mod tests {
                 DiscoveredEpochSummary {
                     stream_epoch: 2,
                     created_unix_ms: Some(1_783_238_640_000),
+                    start_seq: Some(42),
+                    name: Some("Race 2".to_owned()),
                 },
                 DiscoveredEpochSummary {
                     stream_epoch: 1,
                     created_unix_ms: Some(1_783_235_000_000),
+                    start_seq: Some(1),
+                    name: None,
                 },
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn epoch_sync_clear_name_is_authoritative_when_epoch_present() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+
+        // A named epoch arrives (e.g. set_epoch_name response).
+        state.store_forwarder_reader_epoch_sync(
+            "endpoint-1",
+            "stream-a",
+            Some(3),
+            Some(1_783_238_640_000),
+            Some("Race 1".to_owned()),
+        );
+        // The name is then cleared: same epoch, absent name. Absent is
+        // authoritative — the cached name must not survive.
+        state.store_forwarder_reader_epoch_sync(
+            "endpoint-1",
+            "stream-a",
+            Some(3),
+            Some(1_783_238_640_000),
+            None,
+        );
+        {
+            let live = state.forwarders.forwarder_live_status.lock().unwrap();
+            let reader = &live["endpoint-1"].readers["stream-a"];
+            assert_eq!(reader.current_epoch, Some(3));
+            assert_eq!(
+                reader.current_epoch_name, None,
+                "cleared name must not persist"
+            );
+        }
+
+        // An epoch advance resets the epoch read counter and drops the stale
+        // start_seq until the next authoritative status frame.
+        state.store_forwarder_reader_epoch_sync(
+            "endpoint-1",
+            "stream-a",
+            Some(4),
+            Some(1_783_238_700_000),
+            Some("Race 2".to_owned()),
+        );
+        {
+            let live = state.forwarders.forwarder_live_status.lock().unwrap();
+            let reader = &live["endpoint-1"].readers["stream-a"];
+            assert_eq!(reader.current_epoch, Some(4));
+            assert_eq!(reader.reads_epoch, Some(0));
+            assert_eq!(reader.current_epoch_start_seq, None);
+            assert_eq!(reader.current_epoch_name.as_deref(), Some("Race 2"));
+        }
+    }
+
+    #[tokio::test]
+    async fn store_forwarder_catalog_rejects_invalid_start_seq_for_overrides() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+
+        state
+            .store_forwarder_catalog(
+                "endpoint-1",
+                &StreamCatalog {
+                    generation: 1,
+                    entries: vec![rt_p2p_protocol::StreamEntry {
+                        stream_id: b"stream-a".to_vec(),
+                        display_name: "Finish".to_owned(),
+                        network_addr: "10.0.0.1:10000".to_owned(),
+                        reader_connected: true,
+                        hardware_reader_id: "R1".to_owned(),
+                        epoch_summaries: vec![
+                            // start_seq 0 (not advertised / invalid).
+                            rt_p2p_protocol::StreamEpochSummary {
+                                epoch: 2,
+                                created_unix_ms: None,
+                                start_seq: 0,
+                                end_seq: None,
+                                name: None,
+                            },
+                            // start_seq beyond i64::MAX.
+                            rt_p2p_protocol::StreamEpochSummary {
+                                epoch: 1,
+                                created_unix_ms: None,
+                                start_seq: u64::MAX,
+                                end_seq: None,
+                                name: None,
+                            },
+                        ],
+                    }],
+                },
+            )
+            .await;
+
+        let response = state.build_streams_response().await;
+        let options = &response.streams[0].epoch_options;
+        assert_eq!(options.len(), 2, "epochs still listed for display");
+        assert!(
+            options.iter().all(|option| option.start_seq.is_none()),
+            "invalid start_seq must never be usable for override resolution"
         );
     }
 
@@ -3714,6 +4021,7 @@ mod tests {
                     last_seen_secs: Some(1),
                     current_epoch: Some(7),
                     current_epoch_created_unix_ms: Some(1_783_238_640_000),
+                    current_epoch_start_seq: None,
                     current_epoch_name: Some("Race Morning".to_owned()),
                 },
             )
@@ -4209,7 +4517,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_replay_target_epochs_uses_local_stream_key() {
+    async fn get_stream_epochs_uses_local_stream_key() {
         let db = Db::open_in_memory().unwrap();
         let local_stream_key = LocalStreamKey::new("endpoint-1", "stream-canonical");
         db.insert_received_event(&ReceivedEventInsert {
@@ -4238,7 +4546,7 @@ mod tests {
         .unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
 
-        let result = get_replay_target_epochs(
+        let result = get_stream_epochs(
             &state,
             "endpoint-1".to_owned(),
             "stream-canonical".to_owned(),
@@ -4251,6 +4559,10 @@ mod tests {
         assert_eq!(
             result.epochs[0].first_seen_at.as_deref(),
             Some("2026-07-05T09:51:11Z")
+        );
+        assert!(
+            !result.epochs[0].selectable,
+            "local-only epochs (not advertised) must not be selectable"
         );
         assert_eq!(result.epochs[1].stream_epoch, 1);
     }
@@ -4267,7 +4579,7 @@ mod tests {
             ("endpoint-1", "  "),
         ] {
             assert_bad_request(
-                get_replay_target_epochs(
+                get_stream_epochs(
                     &state,
                     forwarder_endpoint_id.to_owned(),
                     stream_id.to_owned(),

@@ -86,30 +86,29 @@ describe("normalizeEpochNameDraft", () => {
 });
 
 describe("advanceEpochWithOptionalName", () => {
-  it("advances without naming when the draft is blank", async () => {
-    const calls: string[] = [];
+  it("advances with a null name when the draft is blank", async () => {
+    const calls: (string | null)[] = [];
 
-    const result = await advanceEpochWithOptionalName(
-      "   ",
-      async () => calls.push("advance"),
-      async (name) => calls.push(`name:${name}`),
-    );
+    const result = await advanceEpochWithOptionalName("   ", async (name) => {
+      calls.push(name);
+    });
 
     expect(result).toBe("advanced");
-    expect(calls).toEqual(["advance"]);
+    expect(calls).toEqual([null]);
   });
 
-  it("advances first and then names the new epoch from the draft", async () => {
-    const calls: string[] = [];
+  it("advances and names the new epoch in a single call", async () => {
+    const calls: (string | null)[] = [];
 
     const result = await advanceEpochWithOptionalName(
       " Race 2 ",
-      async () => calls.push("advance"),
-      async (name) => calls.push(`name:${name}`),
+      async (name) => {
+        calls.push(name);
+      },
     );
 
     expect(result).toBe("advanced_and_named");
-    expect(calls).toEqual(["advance", "name:Race 2"]);
+    expect(calls).toEqual(["Race 2"]);
   });
 });
 

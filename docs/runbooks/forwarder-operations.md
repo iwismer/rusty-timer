@@ -83,12 +83,19 @@ re-enrolled.
 
 ## Epoch Operations
 
-An epoch-name update is metadata only. It creates a new stream epoch while the
-same `stream_id` continues and sequence numbers remain monotonic.
+Advancing an epoch is metadata only: the same `stream_id` continues and
+sequence numbers remain monotonic across the advance. Prior epochs and their
+events are kept and remain deliverable.
 
-Use epoch updates for race boundaries, timing point resets, or operator-visible
-labels. Do not create a new `stream_id` unless the journal is lost and the
-forwarder cannot restore the previous `next_seq` and epoch metadata.
+An epoch can be named when advanced (or renamed later); names are persisted in
+the journal and survive restarts. Use epoch advances for race boundaries,
+timing point resets, or operator-visible labels. Do not create a new
+`stream_id` unless the journal is lost and the forwarder cannot restore the
+previous `next_seq` and epoch metadata.
+
+Each epoch advance also pushes the stream catalog to the server immediately
+(in addition to the periodic push), keeping the registry-restore high-water
+fresh.
 
 ## Shutdown
 

@@ -257,11 +257,11 @@ describe("ConfigTab", () => {
     render(ConfigTab);
 
     await fireEvent.change(screen.getByTestId("mode-select"), {
-      target: { value: "targeted_replay" },
+      target: { value: "live" },
     });
     await fireEvent.click(screen.getByTestId("save-mode-btn"));
 
-    expect(mockState.setModeDraft).toHaveBeenCalledWith("targeted_replay");
+    expect(mockState.setModeDraft).toHaveBeenCalledWith("live");
     expect(mockState.markModeEdited).toHaveBeenCalledOnce();
     expect(mockState.applyMode).toHaveBeenCalledOnce();
     expect(mockState.saveProfile).not.toHaveBeenCalled();

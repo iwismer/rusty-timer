@@ -25,17 +25,6 @@ pub struct ReadEvent {
     pub read_type: String,
 }
 
-/// A resume cursor for a single stream/epoch pair.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResumeCursor {
-    pub forwarder_id: String,
-    pub reader_ip: String,
-    #[serde(deserialize_with = "deserialize_non_negative_i64")]
-    pub stream_epoch: i64,
-    #[serde(deserialize_with = "deserialize_non_negative_i64")]
-    pub last_seq: i64,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamRef {
     pub forwarder_id: String,
@@ -43,44 +32,10 @@ pub struct StreamRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReplayTarget {
-    pub forwarder_id: String,
-    pub reader_ip: String,
-    #[serde(deserialize_with = "deserialize_non_negative_i64")]
-    pub stream_epoch: i64,
-    #[serde(
-        default = "default_replay_from_seq",
-        deserialize_with = "deserialize_non_negative_i64"
-    )]
-    pub from_seq: i64,
-}
-
-fn default_replay_from_seq() -> i64 {
-    1
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EarliestEpochOverride {
-    pub forwarder_id: String,
-    pub reader_ip: String,
-    #[serde(deserialize_with = "deserialize_non_negative_i64")]
-    pub earliest_epoch: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum ReceiverMode {
-    Live {
-        streams: Vec<StreamRef>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        earliest_epochs: Vec<EarliestEpochOverride>,
-    },
-    Race {
-        race_id: String,
-    },
-    TargetedReplay {
-        targets: Vec<ReplayTarget>,
-    },
+    Live { streams: Vec<StreamRef> },
+    Race { race_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,7 +134,7 @@ pub enum ReaderControlAction {
     Refresh,
     Reconnect,
     SetEpochName { name: Option<String> },
-    AdvanceEpoch,
+    AdvanceEpoch { name: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

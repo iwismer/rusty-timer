@@ -44,22 +44,17 @@ export const RECEIVER_HELP = {
     fields: {
       mode: {
         label: 'Mode',
-        summary: 'Operating mode: Live or Targeted Replay.',
+        summary: 'Operating mode for stream subscriptions.',
         detailHtml:
-          'The receiver supports two operator-facing modes:' +
-          '<ul>' +
-          '<li><strong>Live</strong>: Auto-subscribes to available streams. New streams are added automatically as forwarders connect. This is the default for standard race timing.</li>' +
-          '<li><strong>Targeted Replay</strong>: Allows per-stream epoch selection for replaying historical data. Use this to re-send timing data to your timing software, for example after a crash.</li>' +
-          '</ul>',
+          '<strong>Live</strong> mode auto-subscribes to available streams. New streams are added automatically as forwarders connect. This is the default for standard race timing.<br><br>' +
+          'To re-send historical data to your timing software (for example after a crash), use the per-stream <strong>From epoch</strong> control together with <strong>Admin &gt; Reset local stream data</strong> — see the Streams tab help.',
         default: 'Live',
-        range: 'Live, Targeted Replay',
-        recommended:
-          'Use Live mode for standard race timing. Switch to Targeted Replay only when you need to re-send historical data.',
+        range: 'Live',
+        recommended: 'Use Live mode for standard race timing.',
       },
     },
     tips: [
       'Use Live mode for standard race timing. It auto-subscribes to all available streams.',
-      'Switch to Targeted Replay to re-send historical data to your timing software after a crash or data loss.',
       'Changing modes takes effect immediately. Active subscriptions may change.',
     ],
     seeAlso: [
@@ -153,10 +148,12 @@ export const RECEIVER_HELP = {
         range: 'Start, Finish',
       },
       earliest_epoch: {
-        label: 'Earliest Epoch Override',
-        summary: 'Skip historical epochs and start receiving from a specific epoch.',
+        label: 'From Epoch',
+        summary: 'Skip older epochs and only fetch reads from a chosen epoch onward.',
         detailHtml:
-          'In Live mode, you can set an earliest-epoch override to skip older data and only receive reads from a specific epoch onward. This is useful when you only care about the current race. Clear the override to receive all available data.',
+          'Sets an earliest-epoch override: the receiver only fetches reads from the chosen epoch onward. The override applies when the stream (re)subscribes; data already received locally is unaffected.<br><br>' +
+          '<strong>Important:</strong> the skip is permanent for this receiver — clearing the override later does <em>not</em> back-fill the skipped reads. If the chosen epoch is no longer available on the forwarder, the stream pauses (shown as “paused: epoch unavailable”) rather than delivering older data; clear the override to resume.<br><br>' +
+          '<strong>Recovery recipe</strong> (re-send one race to your timing software after a crash): set <strong>From epoch</strong> to the race’s epoch, run <strong>Admin &gt; Reset local stream data</strong> for that stream, and reconnect your timing software to the local port. It will receive only the chosen epoch onward.',
       },
       announce: {
         label: 'Announce',
@@ -164,12 +161,6 @@ export const RECEIVER_HELP = {
         detailHtml:
           'When checked, reads from this stream are published to the server announcer board. Announcer publishing must also be turned on globally on the <strong>Announcer</strong> tab for rows to appear.',
         default: 'Off',
-      },
-      replay: {
-        label: 'Replay',
-        summary: "Re-send a stream's data from a chosen epoch.",
-        detailHtml:
-          "In Targeted Replay mode, pick an epoch for a stream and press <strong>Replay</strong> to re-send that data to your timing software on the stream's local port. <strong>Replay All</strong> replays every subscribed stream from its selected epoch. Use this to recover after a timing-software crash or data loss.",
       },
       subscribe_all: {
         label: 'Subscribe All',

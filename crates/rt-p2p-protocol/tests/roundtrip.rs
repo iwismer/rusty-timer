@@ -70,10 +70,16 @@ fn stream_catalog_with_epoch_summaries_round_trips() {
                 StreamEpochSummary {
                     epoch: 2,
                     created_unix_ms: Some(1_783_238_640_000),
+                    start_seq: 42,
+                    end_seq: None,
+                    name: Some("Race 2".to_owned()),
                 },
                 StreamEpochSummary {
                     epoch: 1,
                     created_unix_ms: Some(1_783_235_000_000),
+                    start_seq: 1,
+                    end_seq: Some(41),
+                    name: None,
                 },
             ],
         }],

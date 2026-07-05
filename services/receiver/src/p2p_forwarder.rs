@@ -9,8 +9,8 @@ use rt_iroh::{Endpoint, EndpointAddr, RecvStream, SendStream};
 use rt_p2p_protocol::{
     CAP_READER_CONTROL, CAP_REMOTE_CONFIG, ConfigGetRequest, ConfigGetResponse, ConfigSetRequest,
     ConfigSetResponse, ControlC2F, ControlF2C, Hello, Pong, ReaderControlRequest,
-    ReaderControlResponse, RestartRequest, RestartResponse, SubscribeMode, control_c2f,
-    control_f2c, has_capability,
+    ReaderControlResponse, RestartRequest, RestartResponse, StreamCatalog, SubscribeMode,
+    control_c2f, control_f2c, has_capability,
 };
 use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -32,6 +32,10 @@ pub struct ForwarderDataStream {
     pub local_stream_key: LocalStreamKey,
     pub mode: SubscribeMode,
     pub durable_hint_tx: Option<broadcast::Sender<DurableBatch>>,
+    /// Raw earliest-epoch override for this stream, if any. Resolved to a
+    /// subscribe-time `after_seq` floor at data-task start against the
+    /// connection's catalog (fail closed: unresolvable holds the stream).
+    pub earliest_epoch: Option<i64>,
     /// The subscription config this stream was derived from. Compared to
     /// detect a real subscription config change (which clears a terminal
     /// failure marker); announcer-driven stream-worker rebuilds swap the hint
@@ -257,10 +261,14 @@ async fn run_connected_forwarder(
     // Consecutive panic-exit counts per stream on THIS connection, feeding the
     // panic-respawn cap in `reap_finished_data_task`.
     let mut panic_exits = HashMap::new();
+    // Wire stream ids currently held by an unresolvable earliest-epoch
+    // override on THIS connection (fail closed; see sync_data_tasks).
+    let mut held_overrides = HashSet::new();
 
     let crate::p2p_session::ControlSession {
         connection,
         hello_ok,
+        catalog,
         mut control_send,
         control_recv,
         ..
@@ -322,10 +330,12 @@ async fn run_connected_forwarder(
         &connection,
         writer,
         reporter,
+        &catalog,
         &desired.streams,
         &mut data_tasks,
         &mut failed_streams,
         &mut panic_exits,
+        &mut held_overrides,
     )
     .await;
     synced_generation.store(desired.generation, Ordering::Release);
@@ -382,10 +392,12 @@ async fn run_connected_forwarder(
                     &connection,
                     writer,
                     reporter,
+                    &catalog,
                     &desired.streams,
                     &mut data_tasks,
                     &mut failed_streams,
                     &mut panic_exits,
+                    &mut held_overrides,
                 ).await;
                 synced_generation.store(desired.generation, Ordering::Release);
             }
@@ -445,6 +457,30 @@ async fn run_connected_forwarder(
                 let now = Instant::now();
                 prune_expired_pending_config(&mut pending_config, now);
                 prune_expired_pending_reader(&mut pending_reader, now);
+                // Re-attempt held override streams: a ReaderStatus frame may
+                // have made the override's epoch resolvable since the last
+                // sync (the catalog itself is fixed per connection). Also
+                // reaps finished data tasks between desired-set changes.
+                let desired = desired_rx.borrow().clone();
+                let held_retry_needed = desired.streams.iter().any(|(stream_key, stream)| {
+                    stream.earliest_epoch.is_some()
+                        && !data_tasks.contains_key(stream_key)
+                        && !failed_streams.contains_key(stream_key)
+                });
+                if held_retry_needed {
+                    sync_data_tasks(
+                        endpoint_id,
+                        &connection,
+                        writer,
+                        reporter,
+                        &catalog,
+                        &desired.streams,
+                        &mut data_tasks,
+                        &mut failed_streams,
+                        &mut panic_exits,
+                        &mut held_overrides,
+                    ).await;
+                }
             }
         }
     }
@@ -657,8 +693,9 @@ fn action_to_request(
             request.command = "set_epoch_name".to_owned();
             request.epoch_name = name;
         }
-        rt_domain::ReaderControlAction::AdvanceEpoch => {
-            request.command = "advance_epoch".to_owned()
+        rt_domain::ReaderControlAction::AdvanceEpoch { name } => {
+            request.command = "advance_epoch".to_owned();
+            request.epoch_name = name;
         }
     }
     request
@@ -765,13 +802,162 @@ struct DataTask {
 /// generation changes, and those must not clear a terminal-failure marker.
 /// The stream ids are equal by map key.
 fn stream_config_changed(failed: &ForwarderDataStream, desired: &ForwarderDataStream) -> bool {
-    failed.mode != desired.mode || failed.subscription != desired.subscription
+    failed.mode != desired.mode
+        || failed.subscription != desired.subscription
+        || failed.earliest_epoch != desired.earliest_epoch
+}
+
+/// Outcome of resolving a stream's earliest-epoch override to a subscribe-time
+/// `after_seq` floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverrideResolution {
+    /// No override is set; subscribe from the durable cursor.
+    NoOverride,
+    /// Override resolved: subscribe with at least this `after_seq`.
+    Floor(i64),
+    /// Override set but the epoch is unknown to this connection. Fail closed:
+    /// the data task must NOT start (delivering everything would leak
+    /// pre-override race data).
+    Unresolved,
+}
+
+/// Resolve `earliest_epoch` against the connection's catalog, falling back to
+/// the live reader status for the current epoch. Only start_seq values in
+/// `1..=i64::MAX` are usable; anything else counts as "not advertised".
+fn resolve_override_floor(
+    earliest_epoch: Option<i64>,
+    wire_stream_id: &str,
+    catalog: &StreamCatalog,
+    live_epoch_hint: Option<(i64, Option<i64>)>,
+) -> OverrideResolution {
+    let Some(override_epoch) = earliest_epoch else {
+        return OverrideResolution::NoOverride;
+    };
+    let catalog_start_seq = catalog
+        .entries
+        .iter()
+        .find(|entry| entry.stream_id == wire_stream_id.as_bytes())
+        .and_then(|entry| {
+            entry
+                .epoch_summaries
+                .iter()
+                .find(|summary| summary.epoch == override_epoch)
+        })
+        .and_then(|summary| i64::try_from(summary.start_seq).ok())
+        .filter(|start_seq| *start_seq >= 1);
+    let start_seq = catalog_start_seq.or_else(|| {
+        live_epoch_hint
+            .filter(|(current_epoch, _)| *current_epoch == override_epoch)
+            .and_then(|(_, start_seq)| start_seq)
+            .filter(|start_seq| *start_seq >= 1)
+    });
+    match start_seq {
+        Some(start_seq) => OverrideResolution::Floor(start_seq - 1),
+        None => OverrideResolution::Unresolved,
+    }
 }
 
 /// Consecutive panic exits of one stream's data task on one connection before
 /// the stream is treated as terminally failed (respawn suppressed until
 /// reconnect or subscription config change).
 const MAX_CONSECUTIVE_PANIC_EXITS: u32 = 3;
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::{OverrideResolution, resolve_override_floor};
+    use rt_p2p_protocol::{StreamCatalog, StreamEntry, StreamEpochSummary};
+
+    fn catalog_with(epoch: i64, start_seq: u64) -> StreamCatalog {
+        StreamCatalog {
+            generation: 1,
+            entries: vec![StreamEntry {
+                stream_id: b"10.0.0.1:10000".to_vec(),
+                display_name: "Finish".to_owned(),
+                network_addr: "10.0.0.1:10000".to_owned(),
+                reader_connected: true,
+                hardware_reader_id: "R1".to_owned(),
+                epoch_summaries: vec![StreamEpochSummary {
+                    epoch,
+                    created_unix_ms: None,
+                    start_seq,
+                    end_seq: None,
+                    name: None,
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn no_override_resolves_to_no_override() {
+        assert_eq!(
+            resolve_override_floor(None, "10.0.0.1:10000", &catalog_with(2, 11), None),
+            OverrideResolution::NoOverride
+        );
+    }
+
+    #[test]
+    fn catalog_start_seq_resolves_to_floor() {
+        assert_eq!(
+            resolve_override_floor(Some(2), "10.0.0.1:10000", &catalog_with(2, 11), None),
+            OverrideResolution::Floor(10)
+        );
+    }
+
+    #[test]
+    fn unknown_epoch_is_unresolved_fail_closed() {
+        assert_eq!(
+            resolve_override_floor(Some(5), "10.0.0.1:10000", &catalog_with(2, 11), None),
+            OverrideResolution::Unresolved
+        );
+    }
+
+    #[test]
+    fn invalid_catalog_start_seq_counts_as_not_advertised() {
+        // start_seq 0 and > i64::MAX are unusable; without a live hint the
+        // override stays unresolved.
+        assert_eq!(
+            resolve_override_floor(Some(2), "10.0.0.1:10000", &catalog_with(2, 0), None),
+            OverrideResolution::Unresolved
+        );
+        assert_eq!(
+            resolve_override_floor(Some(2), "10.0.0.1:10000", &catalog_with(2, u64::MAX), None),
+            OverrideResolution::Unresolved
+        );
+    }
+
+    #[test]
+    fn live_current_epoch_hint_resolves_when_catalog_lacks_the_epoch() {
+        assert_eq!(
+            resolve_override_floor(
+                Some(5),
+                "10.0.0.1:10000",
+                &catalog_with(2, 11),
+                Some((5, Some(42))),
+            ),
+            OverrideResolution::Floor(41)
+        );
+        // Hint for a different epoch does not resolve.
+        assert_eq!(
+            resolve_override_floor(
+                Some(5),
+                "10.0.0.1:10000",
+                &catalog_with(2, 11),
+                Some((4, Some(42))),
+            ),
+            OverrideResolution::Unresolved
+        );
+        // Hint without a start_seq does not resolve.
+        assert_eq!(
+            resolve_override_floor(
+                Some(5),
+                "10.0.0.1:10000",
+                &catalog_with(2, 11),
+                Some((5, None)),
+            ),
+            OverrideResolution::Unresolved
+        );
+    }
+}
 
 /// Await a finished data task and classify its result. Clean EOF/disconnect
 /// and retryable transport errors stay respawn-eligible (a later reconcile
@@ -799,9 +985,23 @@ async fn reap_finished_data_task(
         Ok(Err(err)) => {
             panic_exits.remove(stream_key);
             error!(%endpoint_id, stream_id = %task.stream.stream_id, error = %err, "forwarder data subscription failed terminally; suppressing respawn until reconnect or subscription config change");
+            let seq = match &err {
+                crate::p2p_session::P2pSessionError::ConflictingDuplicate { seq, .. } => {
+                    u64::try_from(*seq).ok()
+                }
+                _ => None,
+            };
             reporter
                 .app_state()
-                .mark_forwarder_stream_failed(endpoint_id, &task.stream.stream_id)
+                .mark_forwarder_stream_failed(
+                    endpoint_id,
+                    &task.stream.stream_id,
+                    crate::control_api::StreamFailure {
+                        reason: err.to_string(),
+                        seq,
+                        unix_ms: crate::p2p_session::now_unix_ms(),
+                    },
+                )
                 .await;
             failed.insert(stream_key.to_owned(), task.stream);
         }
@@ -817,7 +1017,15 @@ async fn reap_finished_data_task(
                 error!(%endpoint_id, stream_id = %task.stream.stream_id, %join_error, panics = MAX_CONSECUTIVE_PANIC_EXITS, "forwarder data subscription task panicked repeatedly; treating as terminal and suppressing respawn until reconnect or subscription config change");
                 reporter
                     .app_state()
-                    .mark_forwarder_stream_failed(endpoint_id, &task.stream.stream_id)
+                    .mark_forwarder_stream_failed(
+                        endpoint_id,
+                        &task.stream.stream_id,
+                        crate::control_api::StreamFailure {
+                            reason: format!("data task panicked repeatedly: {join_error}"),
+                            seq: None,
+                            unix_ms: crate::p2p_session::now_unix_ms(),
+                        },
+                    )
                     .await;
                 failed.insert(stream_key.to_owned(), task.stream);
             } else {
@@ -840,10 +1048,12 @@ async fn sync_data_tasks(
     connection: &rt_iroh::Connection,
     writer: &WriterHandle,
     reporter: &Arc<SessionStatusReporter>,
+    catalog: &StreamCatalog,
     desired: &HashMap<String, ForwarderDataStream>,
     tasks: &mut HashMap<String, DataTask>,
     failed: &mut HashMap<String, ForwarderDataStream>,
     panic_exits: &mut HashMap<String, u32>,
+    held: &mut HashSet<String>,
 ) {
     let finished = tasks
         .iter()
@@ -894,6 +1104,24 @@ async fn sync_data_tasks(
     // Drop panic counters for streams no longer desired so an unsubscribe /
     // resubscribe on the same connection starts a fresh count.
     panic_exits.retain(|stream_key, _| desired_ids.contains(stream_key));
+    // Clear held-override markers for streams that were unsubscribed while
+    // held (markers are keyed by wire stream id in the live status).
+    let desired_wire_ids = desired
+        .values()
+        .map(|stream| stream.stream_id.clone())
+        .collect::<HashSet<_>>();
+    let stale_held = held
+        .iter()
+        .filter(|wire_id| !desired_wire_ids.contains(*wire_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    for wire_id in stale_held {
+        reporter
+            .app_state()
+            .clear_forwarder_stream_override_held(endpoint_id, &wire_id)
+            .await;
+        held.remove(&wire_id);
+    }
 
     for (stream_key, stream) in desired {
         if tasks.contains_key(stream_key) {
@@ -912,6 +1140,44 @@ async fn sync_data_tasks(
                 .clear_forwarder_stream_failed(endpoint_id, &stream.stream_id)
                 .await;
         }
+        // Resolve the earliest-epoch override (if any) against this
+        // connection's catalog / live reader status. Fail closed: while an
+        // override is set and unresolvable, the data task is held — never
+        // fall back to delivering everything.
+        let live_epoch_hint = reporter
+            .app_state()
+            .forwarder_reader_epoch_hint(endpoint_id, &stream.stream_id);
+        let min_after_seq = match resolve_override_floor(
+            stream.earliest_epoch,
+            &stream.stream_id,
+            catalog,
+            live_epoch_hint,
+        ) {
+            OverrideResolution::NoOverride => None,
+            OverrideResolution::Floor(floor) => Some(floor),
+            OverrideResolution::Unresolved => {
+                let newly_held = reporter
+                    .app_state()
+                    .mark_forwarder_stream_override_held(endpoint_id, &stream.stream_id)
+                    .await;
+                held.insert(stream.stream_id.clone());
+                if newly_held {
+                    warn!(
+                        %endpoint_id,
+                        stream_id = %stream.stream_id,
+                        earliest_epoch = ?stream.earliest_epoch,
+                        "earliest-epoch override epoch not advertised by forwarder; holding data task (fail closed)"
+                    );
+                }
+                continue;
+            }
+        };
+        if held.remove(&stream.stream_id) {
+            reporter
+                .app_state()
+                .clear_forwarder_stream_override_held(endpoint_id, &stream.stream_id)
+                .await;
+        }
         let task_endpoint_id = endpoint_id.to_owned();
         let connection = connection.clone();
         let writer = writer.clone();
@@ -926,6 +1192,7 @@ async fn sync_data_tasks(
                 &task_stream.local_stream_key,
                 task_stream.mode,
                 task_stream.durable_hint_tx.as_ref(),
+                min_after_seq,
             )
             .await
         });
@@ -1025,8 +1292,8 @@ mod tests {
 
     fn test_hello() -> Hello {
         Hello {
-            min_minor: 1,
-            max_minor: 1,
+            min_minor: rt_p2p_protocol::PROTOCOL_MINOR,
+            max_minor: rt_p2p_protocol::PROTOCOL_MINOR,
             capabilities: vec!["data".to_owned()],
             max_frame_bytes: u32::try_from(MAX_FRAME_BYTES).unwrap(),
             catalog_generation: 0,
@@ -1130,6 +1397,7 @@ mod tests {
 
             let (hint_tx, _hint_rx) = broadcast::channel(16);
             connection.set_desired_streams(vec![ForwarderDataStream {
+                earliest_epoch: None,
                 stream_id: STREAM_ID.to_owned(),
                 local_stream_key: local_stream_key(&endpoint_id),
                 mode: SubscribeMode::Replay,
@@ -1260,6 +1528,7 @@ mod tests {
 
             let (hint_tx, _hint_rx) = broadcast::channel(16);
             connection.set_desired_streams(vec![ForwarderDataStream {
+                earliest_epoch: None,
                 stream_id: STREAM_ID.to_owned(),
                 local_stream_key: local_stream_key(&endpoint_id),
                 mode: SubscribeMode::Replay,
@@ -1358,6 +1627,7 @@ mod tests {
             let (hint_tx, _hint_rx) = broadcast::channel(16);
             let desired = || {
                 vec![ForwarderDataStream {
+                    earliest_epoch: None,
                     stream_id: STREAM_ID.to_owned(),
                     local_stream_key: local_stream_key(&endpoint_id),
                     mode: SubscribeMode::Replay,
@@ -1416,6 +1686,7 @@ mod tests {
             // failure marker or trigger a resubscribe.
             let (rebuilt_hint_tx, _rebuilt_hint_rx) = broadcast::channel(16);
             connection.set_desired_streams(vec![ForwarderDataStream {
+                earliest_epoch: None,
                 stream_id: STREAM_ID.to_owned(),
                 local_stream_key: local_stream_key(&endpoint_id),
                 mode: SubscribeMode::Replay,
@@ -1443,6 +1714,7 @@ mod tests {
                 ..test_subscription(&endpoint_id)
             };
             connection.set_desired_streams(vec![ForwarderDataStream {
+                earliest_epoch: None,
                 stream_id: STREAM_ID.to_owned(),
                 local_stream_key: local_stream_key(&endpoint_id),
                 mode: SubscribeMode::Replay,
@@ -1478,6 +1750,7 @@ mod tests {
         let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
         let endpoint_id = "panic-cap-endpoint";
         let stream = ForwarderDataStream {
+            earliest_epoch: None,
             stream_id: STREAM_ID.to_owned(),
             local_stream_key: local_stream_key(endpoint_id),
             mode: SubscribeMode::Replay,
@@ -1613,6 +1886,7 @@ mod tests {
                     current_epoch_name: None,
                     current_epoch: None,
                     current_epoch_created_unix_ms: None,
+                    current_epoch_start_seq: None,
                     reads_epoch: None,
                 })),
             },
@@ -1726,8 +2000,8 @@ mod tests {
     /// forwarder also advertises it.
     fn remote_config_hello() -> Hello {
         Hello {
-            min_minor: 1,
-            max_minor: 1,
+            min_minor: rt_p2p_protocol::PROTOCOL_MINOR,
+            max_minor: rt_p2p_protocol::PROTOCOL_MINOR,
             capabilities: vec!["data".to_owned(), CAP_REMOTE_CONFIG.to_owned()],
             max_frame_bytes: u32::try_from(MAX_FRAME_BYTES).unwrap(),
             catalog_generation: 0,
@@ -1756,8 +2030,8 @@ mod tests {
 
     fn reader_control_hello() -> Hello {
         Hello {
-            min_minor: 1,
-            max_minor: 1,
+            min_minor: rt_p2p_protocol::PROTOCOL_MINOR,
+            max_minor: rt_p2p_protocol::PROTOCOL_MINOR,
             capabilities: vec!["data".to_owned(), CAP_READER_CONTROL.to_owned()],
             max_frame_bytes: u32::try_from(MAX_FRAME_BYTES).unwrap(),
             catalog_generation: 0,
@@ -2267,6 +2541,7 @@ mod tests {
 
             let (hint_tx, _hint_rx) = broadcast::channel(16);
             connection.set_desired_streams(vec![ForwarderDataStream {
+                earliest_epoch: None,
                 stream_id: STREAM_ID.to_owned(),
                 local_stream_key: local_stream_key(&endpoint_id),
                 mode: SubscribeMode::Replay,

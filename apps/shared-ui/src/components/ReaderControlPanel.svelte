@@ -136,7 +136,7 @@
     /** Set (or clear, with null) the current epoch name. Epoch row renders when provided. */
     onSetEpochName?: (name: string | null) => Promise<void>;
     /** Advance to the next epoch. Epoch row renders when provided. */
-    onAdvanceEpoch?: () => Promise<void>;
+    onAdvanceEpoch?: (name: string | null) => Promise<void>;
     onSyncClock: () => Promise<void>;
     onSetReadMode: (mode: string, timeout: number) => Promise<void>;
     onSetTto: (enabled: boolean) => Promise<void>;
@@ -306,7 +306,7 @@
     if (!onAdvanceEpoch) return;
     const draft = epochNameDraft;
     await wrap(async () => {
-      const result = await advanceEpochWithOptionalName(draft, onAdvanceEpoch!, onSetEpochName);
+      const result = await advanceEpochWithOptionalName(draft, onAdvanceEpoch!);
       setFeedback({
         kind: 'ok',
         message:

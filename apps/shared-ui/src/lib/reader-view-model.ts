@@ -34,16 +34,11 @@ export function normalizeEpochNameDraft(draft: string): string | null {
 
 export async function advanceEpochWithOptionalName(
   draftName: string,
-  onAdvanceEpoch: () => Promise<void>,
-  onSetEpochName?: (name: string) => Promise<void>,
+  onAdvanceEpoch: (name: string | null) => Promise<void>,
 ): Promise<"advanced" | "advanced_and_named"> {
   const name = normalizeEpochNameDraft(draftName);
-  await onAdvanceEpoch();
-  if (name !== null && onSetEpochName) {
-    await onSetEpochName(name);
-    return "advanced_and_named";
-  }
-  return "advanced";
+  await onAdvanceEpoch(name);
+  return name !== null ? "advanced_and_named" : "advanced";
 }
 
 export function readerControlDisabled(
