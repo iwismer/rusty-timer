@@ -74,9 +74,18 @@ export const RECEIVER_HELP = {
     fields: {
       stream_identity: {
         label: 'Stream',
-        summary: 'A stream is identified by its forwarder ID and reader IP address.',
+        summary:
+          'A stream is identified by its forwarder ID and reader IP address; the dot shows its live delivery status.',
         detailHtml:
-          'Each stream represents a unique data feed from a specific reader on a specific forwarder. Streams are identified by the combination of forwarder ID and reader IP. If the forwarder has a display name set, it is shown instead of the ID.',
+          'Each stream represents a unique data feed from a specific reader on a specific forwarder. Streams are identified by the combination of forwarder ID and reader IP. If the forwarder has a display name set, it is shown instead of the ID.<br><br>' +
+          'The dot next to each stream reflects its current state:' +
+          '<ul>' +
+          '<li><strong>Green</strong>: reads are flowing or the stream is healthy.</li>' +
+          '<li><strong>Yellow</strong>: subscribing, waiting for data, or the reader needs attention.</li>' +
+          '<li><strong>Red</strong>: subscribed but not receiving data.</li>' +
+          '<li><strong>Gray</strong>: not subscribed.</li>' +
+          '</ul>' +
+          'A badge such as <strong>Reader down</strong> or <strong>Waiting for data</strong> appears next to the stream name when attention is needed.',
       },
       status_indicator: {
         label: 'Status',

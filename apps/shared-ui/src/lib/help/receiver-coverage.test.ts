@@ -47,6 +47,15 @@ describe('receiver help coverage', () => {
     expectFields(RECEIVER_HELP.status_bar, ['overall_health', 'total_reads', 'identity_version']);
   });
 
+  it('keeps Stream header help combining identity and status details', () => {
+    const field = RECEIVER_HELP.streams.fields.stream_identity;
+
+    expect(field.summary).toMatch(/forwarder.*reader/i);
+    expect(field.summary).toMatch(/status|dot/i);
+    expect(field.detailHtml).toContain('The dot next to each stream');
+    expect(field.detailHtml).toContain('Reader down');
+  });
+
   it('covers receiver Race Director configuration', () => {
     expect(RECEIVER_HELP).toHaveProperty('rd_import');
     expectFields(RECEIVER_HELP.rd_import, [
