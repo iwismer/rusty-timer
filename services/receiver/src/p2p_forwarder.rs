@@ -657,8 +657,9 @@ fn action_to_request(
             request.command = "set_epoch_name".to_owned();
             request.epoch_name = name;
         }
-        rt_domain::ReaderControlAction::AdvanceEpoch => {
-            request.command = "advance_epoch".to_owned()
+        rt_domain::ReaderControlAction::AdvanceEpoch { name } => {
+            request.command = "advance_epoch".to_owned();
+            request.epoch_name = name;
         }
     }
     request

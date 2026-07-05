@@ -2096,7 +2096,11 @@ macro_rules! receiver_command_list {
                 stream_id: "String",
                 name: "Option<String>"
             ) -> "ReaderControlResult",
-            reader_advance_epoch(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
+            reader_advance_epoch(
+                endpoint_id: "String",
+                stream_id: "String",
+                name: "Option<String>"
+            ) -> "ReaderControlResult",
             reader_set_read_mode(
                 endpoint_id: "String",
                 stream_id: "String",
@@ -3487,7 +3491,12 @@ mod tests {
                 resp,
             } = rx.recv().await.expect("reader command");
             assert_eq!(stream_id, "stream-a");
-            assert_eq!(action, rt_domain::ReaderControlAction::AdvanceEpoch);
+            assert_eq!(
+                action,
+                rt_domain::ReaderControlAction::AdvanceEpoch {
+                    name: Some("Race 2".to_owned())
+                }
+            );
             resp.send(ReaderControlResponse {
                 stream_id: b"stream-a".to_vec(),
                 request_id: "1".to_owned(),
@@ -3501,9 +3510,14 @@ mod tests {
             .expect("send reader response");
         });
 
-        let result = reader_advance_epoch(&state, "endpoint-a".to_owned(), "stream-a".to_owned())
-            .await
-            .expect("reader advance epoch");
+        let result = reader_advance_epoch(
+            &state,
+            "endpoint-a".to_owned(),
+            "stream-a".to_owned(),
+            Some("Race 2".to_owned()),
+        )
+        .await
+        .expect("reader advance epoch");
 
         assert!(result.success);
         assert_eq!(result.current_epoch, Some(5));

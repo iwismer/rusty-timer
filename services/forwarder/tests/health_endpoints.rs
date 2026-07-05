@@ -4,7 +4,7 @@
 //! 1. /healthz returns 200
 //! 2. /readyz returns 200 when local subsystems ready (not dependent on P2P)
 //! 3. /readyz returns 503 when subsystems not initialized
-//! 4. POST /api/v1/streams/{reader_ip}/reset-epoch triggers epoch bump
+//! 4. POST /api/v1/streams/{reader_ip}/advance-epoch triggers epoch bump
 //! 5. epoch reset preserves old-epoch unacked events
 //! 6. status page returns HTML with expected content
 //! 7. graceful shutdown handler registered
@@ -210,8 +210,8 @@ async fn epoch_reset_endpoint_returns_200() {
 
     // POST epoch reset
     let (status, _body) =
-        http_post(addr, "/api/v1/streams/192.168.1.5:10000/reset-epoch", "").await;
-    assert_eq!(status, 200, "reset-epoch endpoint must return 200");
+        http_post(addr, "/api/v1/streams/192.168.1.5:10000/advance-epoch", "").await;
+    assert_eq!(status, 200, "advance-epoch endpoint must return 200");
 
     // Verify epoch was bumped
     let mut j = shared_journal.lock().await;
@@ -220,6 +220,60 @@ async fn epoch_reset_endpoint_returns_200() {
         .expect("get epoch failed");
     assert_eq!(epoch, 2, "epoch must have been bumped to 2");
     assert_eq!(next_seq, 1, "next_seq must be reset to 1 after epoch bump");
+}
+
+#[tokio::test]
+async fn advance_epoch_endpoint_names_the_new_epoch() {
+    use forwarder::storage::journal::Journal;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use tokio::sync::Mutex;
+
+    let dir = tempdir().expect("tempdir failed");
+    let mut journal = Journal::open(&dir.path().join("test.sqlite3")).expect("journal open");
+    journal
+        .ensure_stream_state("192.168.1.9:10000", 1)
+        .expect("ensure stream failed");
+    let shared_journal = Arc::new(Mutex::new(journal));
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let server = StatusServer::start_with_journal(cfg, SubsystemStatus::ready(), shared_journal)
+        .await
+        .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, response) = http_post(
+        addr,
+        "/api/v1/streams/192.168.1.9:10000/advance-epoch",
+        r#"{"name":"  Race 2  "}"#,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let body: Value = serde_json::from_str(response_body(&response)).expect("advance JSON");
+    assert_eq!(body["new_epoch"], 2);
+    assert_eq!(body["name"], "Race 2", "name is trimmed and applied");
+
+    // Unnamed advance always serializes name (as null).
+    let (status, response) =
+        http_post(addr, "/api/v1/streams/192.168.1.9:10000/advance-epoch", "").await;
+    assert_eq!(status, 200);
+    let body: Value = serde_json::from_str(response_body(&response)).expect("advance JSON");
+    assert_eq!(body["new_epoch"], 3);
+    assert!(body.get("name").is_some_and(Value::is_null));
+
+    // Overlong names are rejected before any journal write.
+    let long = "x".repeat(65);
+    let (status, _) = http_post(
+        addr,
+        "/api/v1/streams/192.168.1.9:10000/advance-epoch",
+        &format!(r#"{{"name":"{long}"}}"#),
+    )
+    .await;
+    assert_eq!(status, 400, "overlong epoch name must be rejected");
 }
 
 #[tokio::test]
@@ -250,8 +304,12 @@ async fn epoch_reset_endpoint_accepts_percent_encoded_stream_key() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let (status, _body) =
-        http_post(addr, "/api/v1/streams/192.168.1.6%3A10000/reset-epoch", "").await;
+    let (status, _body) = http_post(
+        addr,
+        "/api/v1/streams/192.168.1.6%3A10000/advance-epoch",
+        "",
+    )
+    .await;
     assert_eq!(status, 200, "encoded reset path must return 200");
 
     let mut j = shared_journal.lock().await;
@@ -298,7 +356,7 @@ async fn epoch_reset_preserves_old_epoch_events() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Reset epoch
-    let (status, _) = http_post(addr, "/api/v1/streams/192.168.1.10/reset-epoch", "").await;
+    let (status, _) = http_post(addr, "/api/v1/streams/192.168.1.10/advance-epoch", "").await;
     assert_eq!(status, 200);
 
     // Old-epoch events must still be present in the journal
@@ -328,7 +386,7 @@ async fn epoch_reset_unknown_stream_returns_404() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let (status, _) = http_post(addr, "/api/v1/streams/1.2.3.4/reset-epoch", "").await;
+    let (status, _) = http_post(addr, "/api/v1/streams/1.2.3.4/advance-epoch", "").await;
     assert_eq!(status, 404, "unknown stream must return 404");
 }
 
@@ -594,9 +652,10 @@ async fn set_current_epoch_name_returns_404_for_unknown_reader() {
 struct NoJournalForNameApi;
 
 impl forwarder::status_http::JournalAccess for NoJournalForNameApi {
-    fn reset_epoch(
+    fn advance_epoch(
         &mut self,
         _stream_key: &str,
+        _name: Option<&str>,
     ) -> Result<
         forwarder::storage::journal::CurrentEpochMetadata,
         forwarder::status_http::EpochResetError,
@@ -795,9 +854,10 @@ async fn status_page_does_not_query_journal_for_totals() {
     }
 
     impl JournalAccess for CountingJournal {
-        fn reset_epoch(
+        fn advance_epoch(
             &mut self,
             _stream_key: &str,
+            _name: Option<&str>,
         ) -> Result<forwarder::storage::journal::CurrentEpochMetadata, EpochResetError> {
             Ok(forwarder::storage::journal::CurrentEpochMetadata {
                 epoch: 1,

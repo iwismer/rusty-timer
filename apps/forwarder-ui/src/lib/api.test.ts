@@ -110,13 +110,30 @@ describe("forwarder api client", () => {
     );
   });
 
-  it("resetEpoch calls correct endpoint", async () => {
-    const { resetEpoch } = await import("./api");
-    mockFetch.mockResolvedValue(makeResponse(200, { new_epoch: 2 }));
-    await resetEpoch("192.168.1.10");
+  it("advanceEpoch calls correct endpoint with the optional name", async () => {
+    const { advanceEpoch } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, { new_epoch: 2, name: "Race 2" }),
+    );
+    await advanceEpoch("192.168.1.10", "Race 2");
     expect(mockFetch).toHaveBeenCalledWith(
-      "/api/v1/streams/192.168.1.10/reset-epoch",
-      expect.objectContaining({ method: "POST" }),
+      "/api/v1/streams/192.168.1.10/advance-epoch",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ name: "Race 2" }),
+      }),
+    );
+
+    mockFetch.mockResolvedValue(
+      makeResponse(200, { new_epoch: 3, name: null }),
+    );
+    await advanceEpoch("192.168.1.10", null);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/streams/192.168.1.10/advance-epoch",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ name: null }),
+      }),
     );
   });
 

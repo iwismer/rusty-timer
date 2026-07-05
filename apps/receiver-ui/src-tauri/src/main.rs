@@ -523,8 +523,9 @@ async fn reader_advance_epoch(
     state: State<'_, Arc<AppState>>,
     endpoint_id: String,
     stream_id: String,
+    name: Option<String>,
 ) -> CmdResult<control_api::ReaderControlResult> {
-    control_api::reader_advance_epoch(&state, endpoint_id, stream_id)
+    control_api::reader_advance_epoch(&state, endpoint_id, stream_id, name)
         .await
         .map_err(|e| e.to_string())
 }

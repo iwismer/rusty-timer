@@ -525,10 +525,12 @@ export async function readerSetEpochName(
 export async function readerAdvanceEpoch(
   endpointId: string,
   streamId: string,
+  name: string | null,
 ): Promise<ReaderControlResult> {
   return invoke<ReaderControlResult>("reader_advance_epoch", {
     endpointId,
     streamId,
+    name,
   });
 }
 

@@ -4,8 +4,8 @@
 //! - `GET /healthz`       — always 200 OK (process is running)
 //! - `GET /readyz`        — 200 when local subsystems ready, 503 otherwise
 //! - `GET /api/v1/status`  — current forwarder state as JSON
-//! - `POST /api/v1/streams/{reader_ip}/reset-epoch`
-//!   — bump stream epoch; 200 on success, 404 if unknown
+//! - `POST /api/v1/streams/{reader_ip}/advance-epoch`
+//!   — advance stream epoch with optional name; 200 on success, 404 if unknown
 //! - `PUT /api/v1/streams/{reader_ip}/current-epoch/name`
 //!   — set epoch name for a reader stream
 //! - `GET /api/v1/config` — current config as JSON
@@ -460,17 +460,18 @@ impl StatusServer {
 }
 
 // ---------------------------------------------------------------------------
-// JournalAccess trait (for epoch reset, testable with real Journal or NoJournal)
+// JournalAccess trait (for epoch advance, testable with real Journal or NoJournal)
 // ---------------------------------------------------------------------------
 
-/// Trait that abstracts journal access for the epoch-reset endpoint.
+/// Trait that abstracts journal access for the epoch-advance endpoint.
 pub trait JournalAccess {
-    /// Bump the epoch for `stream_key`.
+    /// Advance the epoch for `stream_key`, optionally naming the new epoch.
     ///
     /// Returns the new current epoch metadata on success, or `Err(NotFound)` if stream unknown.
-    fn reset_epoch(
+    fn advance_epoch(
         &mut self,
         stream_key: &str,
+        name: Option<&str>,
     ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochResetError>;
 
     /// Set (or clear) the name of the currently open epoch for `stream_key`.
@@ -498,25 +499,20 @@ pub enum EpochResetError {
 
 /// Real journal: delegates to `Journal`.
 impl JournalAccess for Journal {
-    fn reset_epoch(
+    fn advance_epoch(
         &mut self,
         stream_key: &str,
+        name: Option<&str>,
     ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochResetError> {
-        // Get current epoch
-        let (current_epoch, _) = self.current_epoch_and_next_seq(stream_key).map_err(|e| {
-            // If query_row returns nothing, rusqlite returns QueryReturnedNoRows
+        Journal::advance_epoch(self, stream_key, name).map_err(|e| {
+            // An unknown stream has no current-epoch row; rusqlite reports
+            // QueryReturnedNoRows for it.
             if e.to_string().contains("returned no rows") {
                 EpochResetError::NotFound
             } else {
                 EpochResetError::Storage(e.to_string())
             }
-        })?;
-        let new_epoch = current_epoch + 1;
-        self.bump_epoch(stream_key, new_epoch)
-            .map_err(|e| EpochResetError::Storage(e.to_string()))?;
-        self.current_epoch_metadata(stream_key)
-            .map_err(|e| EpochResetError::Storage(e.to_string()))?
-            .ok_or(EpochResetError::NotFound)
+        })
     }
 
     fn set_epoch_name(
@@ -542,13 +538,14 @@ impl JournalAccess for Journal {
     }
 }
 
-/// Sentinel "no journal" implementation: every reset returns NotFound.
+/// Sentinel "no journal" implementation: every advance returns NotFound.
 struct NoJournal;
 
 impl JournalAccess for NoJournal {
-    fn reset_epoch(
+    fn advance_epoch(
         &mut self,
         _stream_key: &str,
+        _name: Option<&str>,
     ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochResetError> {
         Err(EpochResetError::NotFound)
     }
@@ -1412,8 +1409,8 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
         .route("/healthz", get(healthz_handler))
         .route("/readyz", get(readyz_handler::<J>))
         .route(
-            "/api/v1/streams/{reader_ip}/reset-epoch",
-            post(reset_epoch_handler::<J>),
+            "/api/v1/streams/{reader_ip}/advance-epoch",
+            post(advance_epoch_handler::<J>),
         )
         .route(
             "/api/v1/streams/{reader_ip}/current-epoch/name",
@@ -1533,11 +1530,61 @@ async fn readyz_handler<J: JournalAccess + Send + 'static>(
     }
 }
 
-async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
+/// Normalize an operator-supplied epoch name.
+///
+/// Trims whitespace; an empty or whitespace-only name means "clear". Names
+/// longer than 64 characters are rejected.
+pub(crate) fn normalize_epoch_name(raw: Option<&str>) -> Result<Option<String>, String> {
+    match raw {
+        None => Ok(None),
+        Some(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else if trimmed.chars().count() > 64 {
+                Err("name must be at most 64 characters".to_owned())
+            } else {
+                Ok(Some(trimmed.to_owned()))
+            }
+        }
+    }
+}
+
+async fn advance_epoch_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(reader_ip): Path<String>,
+    body: Bytes,
 ) -> Response {
-    let result = state.journal.lock().await.reset_epoch(&reader_ip);
+    // The body is optional: absent/empty means an unnamed epoch. When present
+    // it must be a JSON object with an optional `name` (string or null).
+    let raw_name = if body.is_empty() {
+        None
+    } else {
+        let payload = match parse_json_body::<serde_json::Value>(&body) {
+            Ok(value) => value,
+            Err(error) => return text_response(StatusCode::BAD_REQUEST, error),
+        };
+        if let Err((status, message)) = require_object_payload(&payload) {
+            return text_response(status_from_u16_or_internal(status), message);
+        }
+        match payload.get("name") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(name)) => Some(name.clone()),
+            Some(_) => {
+                return text_response(StatusCode::BAD_REQUEST, "name must be a string or null");
+            }
+        }
+    };
+    let name = match normalize_epoch_name(raw_name.as_deref()) {
+        Ok(name) => name,
+        Err(error) => return text_response(StatusCode::BAD_REQUEST, error),
+    };
+
+    let result = state
+        .journal
+        .lock()
+        .await
+        .advance_epoch(&reader_ip, name.as_deref());
     match result {
         Ok(metadata) => {
             state
@@ -1550,6 +1597,7 @@ async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
             let body = serde_json::json!({
                 "new_epoch": metadata.epoch,
                 "created_unix_ms": metadata.created_unix_ms,
+                "name": metadata.name,
             })
             .to_string();
             json_response(StatusCode::OK, body)
@@ -1572,18 +1620,15 @@ async fn set_current_epoch_name_handler<J: JournalAccess + Send + 'static>(
         return text_response(status_from_u16_or_internal(status), message);
     }
 
-    let normalized_name = match payload.get("name") {
+    let raw_name = match payload.get("name") {
         Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(name)) => {
-            let trimmed = name.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_owned())
-            }
-        }
+        Some(serde_json::Value::String(name)) => Some(name.clone()),
         Some(_) => return text_response(StatusCode::BAD_REQUEST, "name must be a string or null"),
         None => return text_response(StatusCode::BAD_REQUEST, "name is required"),
+    };
+    let normalized_name = match normalize_epoch_name(raw_name.as_deref()) {
+        Ok(name) => name,
+        Err(error) => return text_response(StatusCode::BAD_REQUEST, error),
     };
 
     // Persist to the journal first; the returned metadata is the

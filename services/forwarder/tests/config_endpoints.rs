@@ -128,9 +128,10 @@ fn response_body(response: &str) -> &str {
 struct NoopJournal;
 
 impl JournalAccess for NoopJournal {
-    fn reset_epoch(
+    fn advance_epoch(
         &mut self,
         _stream_key: &str,
+        _name: Option<&str>,
     ) -> Result<forwarder::storage::journal::CurrentEpochMetadata, EpochResetError> {
         Err(EpochResetError::NotFound)
     }

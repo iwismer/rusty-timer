@@ -178,7 +178,7 @@ describe("api client", () => {
     await readerGetInfo("endpoint-1", "stream-a");
     await readerSyncClock("endpoint-1", "stream-a");
     await readerSetEpochName("endpoint-1", "stream-a", "Race 1");
-    await readerAdvanceEpoch("endpoint-1", "stream-a");
+    await readerAdvanceEpoch("endpoint-1", "stream-a", "Race 2");
     await readerSetReadMode("endpoint-1", "stream-a", "event", 7);
     await readerSetTto("endpoint-1", "stream-a", true);
     await readerSetRecording("endpoint-1", "stream-a", false);
@@ -204,6 +204,7 @@ describe("api client", () => {
     expect(mockInvoke).toHaveBeenNthCalledWith(4, "reader_advance_epoch", {
       endpointId: "endpoint-1",
       streamId: "stream-a",
+      name: "Race 2",
     });
     expect(mockInvoke).toHaveBeenNthCalledWith(5, "reader_set_read_mode", {
       endpointId: "endpoint-1",

@@ -262,6 +262,7 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
             state,
             arg(args, "endpoint_id")?,
             arg(args, "stream_id")?,
+            arg(args, "name")?,
         )
         .await?),
         "reader_set_read_mode" => ok(control_api::reader_set_read_mode(

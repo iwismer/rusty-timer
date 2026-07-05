@@ -490,12 +490,13 @@ pub async fn reader_advance_epoch(
     state: &AppState,
     endpoint_id: String,
     stream_id: String,
+    name: Option<String>,
 ) -> Result<ReaderControlResult, ReceiverError> {
     reader_control_command(
         state,
         endpoint_id,
         stream_id,
-        rt_domain::ReaderControlAction::AdvanceEpoch,
+        rt_domain::ReaderControlAction::AdvanceEpoch { name },
     )
     .await
 }

@@ -176,11 +176,17 @@ export async function shutdownDevice(): Promise<{
   );
 }
 
-export async function resetEpoch(
+export async function advanceEpoch(
   readerIp: string,
-): Promise<{ new_epoch: number; created_unix_ms?: number | null }> {
-  return apiFetch(`/api/v1/streams/${readerIp}/reset-epoch`, {
+  name: string | null,
+): Promise<{
+  new_epoch: number;
+  created_unix_ms?: number | null;
+  name?: string | null;
+}> {
+  return apiFetch(`/api/v1/streams/${readerIp}/advance-epoch`, {
     method: "POST",
+    body: JSON.stringify({ name }),
   });
 }
 
