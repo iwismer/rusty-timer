@@ -1449,6 +1449,28 @@ impl AppState {
         }
     }
 
+    /// Forwarder-advertised epoch options for a stream, merged from the
+    /// discovered catalog and the live reader status (see
+    /// [`merge_epoch_options`]). Used by the earliest-epoch picker.
+    pub(crate) async fn merged_epoch_options(
+        &self,
+        endpoint_id: &str,
+        stream_id: &str,
+    ) -> Vec<DiscoveredEpochSummary> {
+        let discovered = self.forwarders.discovered_forwarders.read().await;
+        let discovered_stream = discovered.get(endpoint_id).and_then(|forwarder| {
+            forwarder
+                .streams
+                .iter()
+                .find(|stream| stream.stream_id == stream_id)
+        });
+        let live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
+        let live_reader = live_statuses
+            .get(endpoint_id)
+            .and_then(|status| status.readers.get(stream_id));
+        merge_epoch_options(discovered_stream, live_reader)
+    }
+
     /// The live reader's `(current_epoch, current_epoch_start_seq)` pair, used
     /// as the fallback source when resolving an earliest-epoch override that
     /// targets the stream's current epoch.
@@ -2178,10 +2200,10 @@ macro_rules! receiver_command_list {
             get_streams() -> "StreamsResponse",
             get_stream_metrics() -> "Vec<StreamMetricsPayload>",
             put_earliest_epoch(body: "EarliestEpochRequest") -> "()",
-            get_replay_target_epochs(
+            get_stream_epochs(
                 forwarder_endpoint_id: "String",
                 stream_id: "String"
-            ) -> "ReplayTargetEpochsResponse",
+            ) -> "StreamEpochsResponse",
             get_subscriptions() -> "SubscriptionsBody",
             put_subscriptions(body: "SubscriptionsBody") -> "()",
             get_status() -> "StatusResponse",
@@ -4445,7 +4467,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_replay_target_epochs_uses_local_stream_key() {
+    async fn get_stream_epochs_uses_local_stream_key() {
         let db = Db::open_in_memory().unwrap();
         let local_stream_key = LocalStreamKey::new("endpoint-1", "stream-canonical");
         db.insert_received_event(&ReceivedEventInsert {
@@ -4474,7 +4496,7 @@ mod tests {
         .unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
 
-        let result = get_replay_target_epochs(
+        let result = get_stream_epochs(
             &state,
             "endpoint-1".to_owned(),
             "stream-canonical".to_owned(),
@@ -4487,6 +4509,10 @@ mod tests {
         assert_eq!(
             result.epochs[0].first_seen_at.as_deref(),
             Some("2026-07-05T09:51:11Z")
+        );
+        assert!(
+            !result.epochs[0].selectable,
+            "local-only epochs (not advertised) must not be selectable"
         );
         assert_eq!(result.epochs[1].stream_epoch, 1);
     }
@@ -4503,7 +4529,7 @@ mod tests {
             ("endpoint-1", "  "),
         ] {
             assert_bad_request(
-                get_replay_target_epochs(
+                get_stream_epochs(
                     &state,
                     forwarder_endpoint_id.to_owned(),
                     stream_id.to_owned(),

@@ -576,7 +576,7 @@
                       {/if}
 
                       {#if stream.subscribed && store.modeDraft === "targeted_replay"}
-                        {@const options = store.earliestEpochOptions[key] ?? []}
+                        {@const options = store.streamEpochOptions[key] ?? []}
                         {@const selectedTargeted =
                           selectedTargetedEpochValue(stream)}
                         <select
@@ -624,7 +624,7 @@
                           onOpenModal={openHelp}
                         />
                       {:else if store.modeDraft !== "targeted_replay"}
-                        {@const options = store.earliestEpochOptions[key] ?? []}
+                        {@const options = store.streamEpochOptions[key] ?? []}
                         {@const selectedEarliest =
                           selectedEarliestEpochValue(stream)}
                         <label class="text-xs text-text-secondary mr-1">
@@ -658,8 +658,18 @@
                               <option value="">No epochs available</option>
                             {:else}
                               {#each options as option}
-                                <option value={String(option.stream_epoch)}>
-                                  {formatEarliestEpochOption(option)}
+                                <!-- Local-only epochs (no longer advertised by
+                                     the forwarder) cannot resolve an override
+                                     (fail-closed) and are not selectable. -->
+                                <option
+                                  value={String(option.stream_epoch)}
+                                  disabled={!option.selectable}
+                                >
+                                  {formatEarliestEpochOption(
+                                    option,
+                                  )}{option.selectable
+                                    ? ""
+                                    : " (no longer available on forwarder)"}
                                 </option>
                               {/each}
                             {/if}

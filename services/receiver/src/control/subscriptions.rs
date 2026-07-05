@@ -41,17 +41,24 @@ pub struct EarliestEpochRequest {
 }
 
 #[derive(Debug, Serialize)]
-pub struct ReplayTargetEpochOption {
+pub struct StreamEpochOption {
     pub stream_epoch: i64,
+    /// Operator label for the epoch, from the forwarder catalog.
     pub name: Option<String>,
+    /// Earliest reader timestamp of locally received rows in this epoch.
     pub first_seen_at: Option<String>,
     pub created_unix_ms: Option<i64>,
-    pub race_names: Vec<String>,
+    /// Whether this epoch can be selected as an earliest-epoch override: the
+    /// forwarder currently advertises it with a usable start_seq. Local-only
+    /// epochs (durably received but no longer advertised) are listed for
+    /// context but cannot resolve an override (fail-closed) and must not be
+    /// selectable.
+    pub selectable: bool,
 }
 
 #[derive(Debug, Serialize)]
-pub struct ReplayTargetEpochsResponse {
-    pub epochs: Vec<ReplayTargetEpochOption>,
+pub struct StreamEpochsResponse {
+    pub epochs: Vec<StreamEpochOption>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -109,28 +116,52 @@ pub async fn get_streams(state: &AppState) -> StreamsResponse {
     state.build_streams_response().await
 }
 
-pub async fn get_replay_target_epochs(
+/// Epochs known for a stream, for the earliest-epoch picker: the
+/// forwarder-advertised epochs (names, creation times, selectability) merged
+/// with the epochs durably received locally (earliest reader timestamp).
+pub async fn get_stream_epochs(
     state: &AppState,
     forwarder_endpoint_id: String,
     stream_id: String,
-) -> Result<ReplayTargetEpochsResponse, ReceiverError> {
+) -> Result<StreamEpochsResponse, ReceiverError> {
     validate_stream_identity(&forwarder_endpoint_id, &stream_id)?;
+    let advertised = state
+        .merged_epoch_options(&forwarder_endpoint_id, &stream_id)
+        .await;
     let local_stream_key = LocalStreamKey::new(&forwarder_endpoint_id, &stream_id);
-    let db = state.storage.db.lock().await;
-    let rows = db
-        .load_replay_target_epochs(local_stream_key.as_str())
-        .map_err(|e| ReceiverError::Internal(e.to_string()))?;
-    Ok(ReplayTargetEpochsResponse {
-        epochs: rows
-            .into_iter()
-            .map(|(stream_epoch, first_seen_at)| ReplayTargetEpochOption {
+    let rows = {
+        let db = state.storage.db.lock().await;
+        db.load_replay_target_epochs(local_stream_key.as_str())
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?
+    };
+
+    let mut by_epoch = std::collections::BTreeMap::new();
+    for option in advertised {
+        by_epoch.insert(
+            option.stream_epoch,
+            StreamEpochOption {
+                stream_epoch: option.stream_epoch,
+                name: option.name,
+                first_seen_at: None,
+                created_unix_ms: option.created_unix_ms,
+                selectable: option.start_seq.is_some(),
+            },
+        );
+    }
+    for (stream_epoch, first_seen_at) in rows {
+        by_epoch
+            .entry(stream_epoch)
+            .and_modify(|option| option.first_seen_at = first_seen_at.clone())
+            .or_insert(StreamEpochOption {
                 stream_epoch,
                 name: None,
                 first_seen_at,
                 created_unix_ms: None,
-                race_names: Vec::new(),
-            })
-            .collect(),
+                selectable: false,
+            });
+    }
+    Ok(StreamEpochsResponse {
+        epochs: by_epoch.into_values().rev().collect(),
     })
 }
 

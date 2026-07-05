@@ -207,7 +207,7 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
         "put_earliest_epoch" => {
             ok(control_api::put_earliest_epoch(state, arg(args, "body")?).await?)
         }
-        "get_replay_target_epochs" => ok(control_api::get_replay_target_epochs(
+        "get_stream_epochs" => ok(control_api::get_stream_epochs(
             state,
             arg(args, "forwarder_endpoint_id")?,
             arg(args, "stream_id")?,

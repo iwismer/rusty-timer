@@ -278,16 +278,17 @@ export type ReceiverMode =
       targets: ReplayTarget[];
     };
 
-export interface ReplayTargetEpochOption {
+export interface StreamEpochOption {
   stream_epoch: number;
   name: string | null;
   first_seen_at: string | null;
   created_unix_ms?: number | null;
-  race_names: string[];
+  /** Whether this epoch can be selected as an earliest-epoch override. */
+  selectable: boolean;
 }
 
-export interface ReplayTargetEpochsResponse {
-  epochs: ReplayTargetEpochOption[];
+export interface StreamEpochsResponse {
+  epochs: StreamEpochOption[];
 }
 
 // --------------- Forwarder types ---------------
@@ -640,11 +641,11 @@ export async function putEarliestEpoch(
   await invoke("put_earliest_epoch", { body });
 }
 
-export async function getReplayTargetEpochs(stream: {
+export async function getStreamEpochs(stream: {
   forwarder_endpoint_id: string;
   stream_id: string;
-}): Promise<ReplayTargetEpochsResponse> {
-  return invoke<ReplayTargetEpochsResponse>("get_replay_target_epochs", {
+}): Promise<StreamEpochsResponse> {
+  return invoke<StreamEpochsResponse>("get_stream_epochs", {
     forwarderEndpointId: stream.forwarder_endpoint_id,
     streamId: stream.stream_id,
   });

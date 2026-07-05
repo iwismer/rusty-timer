@@ -332,8 +332,8 @@ describe("api client", () => {
     });
   });
 
-  it("getReplayTargetEpochs calls command with stream params", async () => {
-    const { getReplayTargetEpochs } = await import("./api");
+  it("getStreamEpochs calls command with stream params", async () => {
+    const { getStreamEpochs } = await import("./api");
     mockInvoke.mockResolvedValue({
       epochs: [
         {
@@ -345,12 +345,12 @@ describe("api client", () => {
       ],
     });
 
-    const result = await getReplayTargetEpochs({
+    const result = await getStreamEpochs({
       forwarder_endpoint_id: "endpoint-1",
       stream_id: "10.0.0.1:10000",
     });
 
-    expect(mockInvoke).toHaveBeenCalledWith("get_replay_target_epochs", {
+    expect(mockInvoke).toHaveBeenCalledWith("get_stream_epochs", {
       forwarderEndpointId: "endpoint-1",
       streamId: "10.0.0.1:10000",
     });

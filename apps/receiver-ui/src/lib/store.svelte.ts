@@ -137,7 +137,7 @@ export const store = $state({
   modeDraft: "live" as ReceiverMode["mode"],
   raceIdDraft: "",
   earliestEpochInputs: {} as Record<string, string>,
-  earliestEpochOptions: {} as Record<string, api.ReplayTargetEpochOption[]>,
+  streamEpochOptions: {} as Record<string, api.StreamEpochOption[]>,
   earliestEpochLoading: {} as Record<string, boolean>,
   earliestEpochLoadErrors: {} as Record<string, string>,
   earliestEpochSaving: {} as Record<string, boolean>,
@@ -452,7 +452,7 @@ export function parseNonNegativeInt(raw: unknown): number | null {
 }
 
 export function isApiReturnedEpoch(key: string, epoch: number): boolean {
-  return (store.earliestEpochOptions[key] ?? []).some(
+  return (store.streamEpochOptions[key] ?? []).some(
     (option) => option.stream_epoch === epoch,
   );
 }
@@ -467,7 +467,7 @@ export function parseApiReturnedEpoch(
 }
 
 export function formatEarliestEpochOption(
-  option: api.ReplayTargetEpochOption,
+  option: api.StreamEpochOption,
 ): string {
   const name = option.name?.trim() || "unnamed";
   const timestamp =
@@ -482,7 +482,7 @@ export function formatEarliestEpochOption(
 export function selectedEarliestEpochValue(stream: api.StreamEntry): string {
   const key = streamIdentity(stream);
   const configured = store.earliestEpochInputs[key];
-  const options = store.earliestEpochOptions[key] ?? [];
+  const options = store.streamEpochOptions[key] ?? [];
 
   if (
     configured &&
@@ -507,7 +507,7 @@ export function selectedEarliestEpochValue(stream: api.StreamEntry): string {
 export function selectedTargetedEpochValue(stream: api.StreamEntry): string {
   const key = streamIdentity(stream);
   const configured = parseApiReturnedEpoch(key, store.targetedEpochInputs[key]);
-  const options = store.earliestEpochOptions[key] ?? [];
+  const options = store.streamEpochOptions[key] ?? [];
 
   if (configured !== null) return String(configured);
   if (options.length === 0) return "";
@@ -684,7 +684,7 @@ export async function prefetchEarliestEpochOptions(
     const key = streamIdentity(stream);
     const forceRefresh = forceRefreshKeys.has(key);
     if (
-      (!forceRefresh && store.earliestEpochOptions[key]) ||
+      (!forceRefresh && store.streamEpochOptions[key]) ||
       store.earliestEpochLoading[key]
     )
       return;
@@ -696,56 +696,30 @@ export async function prefetchEarliestEpochOptions(
     };
 
     try {
-      // Replay-target epochs are looked up by canonical stream_id, matching
-      // how the P2P data plane persists received events. When the durable
-      // store has no events yet, fall back to the advertised current epoch so
-      // the controls do not show "No epochs available".
-      const response = await api.getReplayTargetEpochs({
+      // The backend merges forwarder-advertised epochs (names, creation
+      // times, selectability) with locally received epochs; the response is
+      // already sorted newest-first. Fall back to the stream's advertised
+      // current epoch when nothing is known yet so the controls do not show
+      // "No epochs available".
+      const response = await api.getStreamEpochs({
         forwarder_endpoint_id: stream.forwarder_endpoint_id,
         stream_id: stream.stream_id,
       });
-      const currentEpochName = stream.current_epoch_name?.trim() || null;
-      const byEpoch = new Map<number, api.ReplayTargetEpochOption>();
-      for (const option of response.epochs) {
-        byEpoch.set(option.stream_epoch, option);
+      let epochs = response.epochs;
+      if (epochs.length === 0 && stream.stream_epoch != null) {
+        epochs = [
+          {
+            stream_epoch: stream.stream_epoch,
+            name: stream.current_epoch_name?.trim() || null,
+            first_seen_at: null,
+            created_unix_ms: stream.current_epoch_created_unix_ms ?? null,
+            selectable: true,
+          },
+        ];
       }
-      const advertisedOptions = [...(stream.epoch_options ?? [])];
-      if (
-        stream.stream_epoch != null &&
-        !advertisedOptions.some(
-          (option) => option.stream_epoch === stream.stream_epoch,
-        )
-      ) {
-        advertisedOptions.unshift({
-          stream_epoch: stream.stream_epoch,
-          created_unix_ms: stream.current_epoch_created_unix_ms ?? null,
-        });
-      }
-      for (const option of advertisedOptions) {
-        const existing = byEpoch.get(option.stream_epoch);
-        const isCurrent = option.stream_epoch === stream.stream_epoch;
-        byEpoch.set(option.stream_epoch, {
-          stream_epoch: option.stream_epoch,
-          name: existing?.name?.trim()
-            ? existing.name
-            : isCurrent
-              ? currentEpochName
-              : null,
-          first_seen_at: existing?.first_seen_at ?? null,
-          created_unix_ms: isCurrent
-            ? (stream.current_epoch_created_unix_ms ??
-              option.created_unix_ms ??
-              existing?.created_unix_ms ??
-              null)
-            : (option.created_unix_ms ?? existing?.created_unix_ms ?? null),
-          race_names: existing?.race_names ?? [],
-        });
-      }
-      store.earliestEpochOptions = {
-        ...store.earliestEpochOptions,
-        [key]: [...byEpoch.values()].sort(
-          (a, b) => b.stream_epoch - a.stream_epoch,
-        ),
+      store.streamEpochOptions = {
+        ...store.streamEpochOptions,
+        [key]: epochs,
       };
     } catch (e) {
       store.earliestEpochLoadErrors = {

@@ -47,7 +47,7 @@ const apiMocks = vi.hoisted(() => ({
     streams: [],
     earliest_epochs: [],
   }),
-  getReplayTargetEpochs: vi.fn().mockResolvedValue({
+  getStreamEpochs: vi.fn().mockResolvedValue({
     epochs: [
       { stream_epoch: 5, name: "Main", first_seen_at: null, race_names: [] },
     ],
