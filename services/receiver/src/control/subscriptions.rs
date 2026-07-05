@@ -221,7 +221,11 @@ pub async fn update_subscription_event_type(
         stream_id,
         body.event_type,
     ) {
-        Ok(true) => Ok(()),
+        Ok(true) => {
+            drop(db);
+            state.notify_subscriptions_changed();
+            Ok(())
+        }
         Ok(false) => Err(ReceiverError::BadRequest(
             "subscription not found".to_owned(),
         )),

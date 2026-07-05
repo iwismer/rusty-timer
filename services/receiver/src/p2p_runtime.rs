@@ -1711,7 +1711,11 @@ async fn run_shared_dbf_worker(state: Arc<AppState>, mut shutdown_rx: watch::Rec
                 // different stream while rows already in the file still carry
                 // the old digit. Reset pass state so this pass regenerates
                 // cross-stream from the persisted indices instead of
-                // appending against a stale file.
+                // appending against a stale file. If the change lands mid-pass
+                // (including an event-type START/FINISH edit), that in-flight
+                // pass may append with the old spec; the next tick observes the
+                // version bump and regenerates the file, so the stale append is
+                // self-healing and accepted.
                 if subscriptions_rx.has_changed().unwrap_or(false) {
                     let _ = subscriptions_rx.borrow_and_update();
                     pass_state = crate::dbf_writer::DbfPassState::default();

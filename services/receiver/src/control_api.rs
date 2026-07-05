@@ -3714,6 +3714,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_subscription_event_type_signals_subscription_change() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        put_subscriptions(
+            &state,
+            SubscriptionsBody {
+                subscriptions: vec![SubscriptionRequest {
+                    forwarder_endpoint_id: "endpoint-1".to_owned(),
+                    stream_id: "stream-1".to_owned(),
+                    local_port_override: None,
+                    event_type: Some(crate::db::EventType::Finish),
+                    forwarder_id: None,
+                    reader_ip: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        let rx = state.subscriptions_rx();
+
+        update_subscription_event_type(
+            &state,
+            "endpoint-1",
+            "stream-1",
+            EventTypeRequest {
+                event_type: crate::db::EventType::Start,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            rx.has_changed().unwrap(),
+            "changing a subscription event type must signal the DBF worker to regenerate"
+        );
+    }
+
+    #[tokio::test]
     async fn put_subscriptions_rejects_blank_stream_identity_fields_without_persisting() {
         let db = Db::open_in_memory().unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
