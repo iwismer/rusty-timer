@@ -186,6 +186,8 @@ export interface ReaderLiveStatus {
   reads_session?: number | null;
   reads_total?: number | null;
   last_seen_secs?: number | null;
+  current_epoch?: number | null;
+  current_epoch_created_unix_ms?: number | null;
   current_epoch_name?: string | null;
   hardware_reader_id: string | null;
   firmware_version: string | null;
@@ -449,6 +451,9 @@ export interface ReaderControlResult {
   success: boolean;
   message: string;
   reader_info: ReaderInfo | null;
+  current_epoch?: number | null;
+  current_epoch_created_unix_ms?: number | null;
+  current_epoch_name?: string | null;
 }
 
 export async function getForwarderConfig(

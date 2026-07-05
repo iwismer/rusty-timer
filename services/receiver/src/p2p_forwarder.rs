@@ -1607,6 +1607,8 @@ mod tests {
                     reads_total: 0,
                     last_seen_secs: None,
                     current_epoch_name: None,
+                    current_epoch: None,
+                    current_epoch_created_unix_ms: None,
                 })),
             },
         ];

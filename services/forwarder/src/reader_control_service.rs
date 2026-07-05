@@ -102,6 +102,36 @@ impl ReaderControlService {
         Ok(status.reader_info.unwrap_or_default())
     }
 
+    pub async fn set_current_epoch_metadata(
+        &self,
+        reader_ip: &str,
+        metadata: crate::storage::journal::CurrentEpochMetadata,
+    ) {
+        let mut ss = self.subsystem.lock().await;
+        if let Some(status) = ss.readers.get_mut(reader_ip) {
+            status.current_epoch = Some(metadata.epoch);
+            status.current_epoch_created_unix_ms = metadata.created_unix_ms;
+            status.current_epoch_name = None;
+            let _ = self
+                .ui_tx
+                .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
+                    ip: reader_ip.to_owned(),
+                    state: (&status.state).into(),
+                    reads_session: status.reads_since_restart,
+                    reads_total: status.reads_total,
+                    last_seen_secs: status.last_seen.map(|t| t.elapsed().as_secs()),
+                    local_port: status.local_port,
+                    current_epoch_name: None,
+                });
+            let _ = self
+                .status_event_tx
+                .send(ForwarderStatusEvent::ReaderStatus {
+                    stream_id: reader_ip.to_owned(),
+                    status: status.clone(),
+                });
+        }
+    }
+
     pub async fn emit_status_refresh(&self, reader_ip: &str) {
         let ss = self.subsystem.lock().await;
         if let Some(status) = ss.readers.get(reader_ip) {
@@ -556,6 +586,69 @@ use tracing::Instrument;
 mod tests {
     use super::*;
     use chrono::{TimeZone, Timelike};
+
+    #[tokio::test]
+    async fn set_current_epoch_metadata_updates_status_and_broadcasts_reader_status() {
+        let subsystem = Arc::new(Mutex::new(crate::status_store::SubsystemStatus::ready()));
+        {
+            let mut ss = subsystem.lock().await;
+            ss.readers.insert(
+                "reader-a".to_owned(),
+                crate::status_store::ReaderStatus {
+                    state: crate::status_store::ReaderConnectionState::Connected,
+                    last_seen: None,
+                    reads_since_restart: 0,
+                    reads_total: 0,
+                    local_port: 10_001,
+                    current_epoch: None,
+                    current_epoch_created_unix_ms: None,
+                    current_epoch_name: None,
+                    reader_info: None,
+                },
+            );
+        }
+        let control_clients = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let download_trackers = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let reconnect_notifies = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let (ui_tx, _) = tokio::sync::broadcast::channel(16);
+        let (status_event_tx, mut status_event_rx) = tokio::sync::broadcast::channel(16);
+        let logger = Arc::new(rt_ui_log::UiLogger::with_buffer(
+            ui_tx.clone(),
+            |entry| crate::ui_events::ForwarderUiEvent::LogEntry { entry },
+            16,
+        ));
+        let service = ReaderControlService::new(
+            subsystem,
+            control_clients,
+            download_trackers,
+            reconnect_notifies,
+            ui_tx,
+            status_event_tx,
+            logger,
+        );
+
+        service
+            .set_current_epoch_metadata(
+                "reader-a",
+                crate::storage::journal::CurrentEpochMetadata {
+                    epoch: 3,
+                    created_unix_ms: Some(1_783_238_640_000),
+                },
+            )
+            .await;
+
+        let event = status_event_rx.recv().await.expect("reader status event");
+        let crate::status_store::ForwarderStatusEvent::ReaderStatus { stream_id, status } = event
+        else {
+            panic!("expected reader status event");
+        };
+        assert_eq!(stream_id, "reader-a");
+        assert_eq!(status.current_epoch, Some(3));
+        assert_eq!(
+            status.current_epoch_created_unix_ms,
+            Some(1_783_238_640_000)
+        );
+    }
 
     #[test]
     fn compute_sync_timing_rounds_to_nearest_boundary_and_delays_send() {

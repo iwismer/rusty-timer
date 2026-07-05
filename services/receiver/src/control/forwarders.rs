@@ -67,6 +67,9 @@ pub struct ReaderControlResult {
     pub success: bool,
     pub message: String,
     pub reader_info: Option<rt_domain::ReaderInfo>,
+    pub current_epoch: Option<i64>,
+    pub current_epoch_created_unix_ms: Option<i64>,
+    pub current_epoch_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -398,12 +401,13 @@ async fn reader_control_command(
         })?),
         None => None,
     };
-    if response.reader_info_json.is_some() {
+    let has_reader_info = response.reader_info_json.is_some();
+    if has_reader_info {
         state.store_forwarder_reader_info_sync(
             &endpoint_id,
             ReaderInfo {
                 stream_id: if response.stream_id.is_empty() {
-                    stream_id.into_bytes()
+                    stream_id.clone().into_bytes()
                 } else {
                     response.stream_id.clone()
                 },
@@ -413,12 +417,29 @@ async fn reader_control_command(
                 reader_info_json: response.reader_info_json.clone(),
             },
         );
+    }
+    let has_epoch_metadata = response.current_epoch.is_some()
+        || response.current_epoch_created_unix_ms.is_some()
+        || response.current_epoch_name.is_some();
+    if has_epoch_metadata {
+        state.store_forwarder_reader_epoch_sync(
+            &endpoint_id,
+            &stream_id,
+            response.current_epoch,
+            response.current_epoch_created_unix_ms,
+            response.current_epoch_name.clone(),
+        );
+    }
+    if has_reader_info || has_epoch_metadata {
         state.recompute_aggregate_connection_state().await;
     }
     Ok(ReaderControlResult {
         success: response.success,
         message: response.message,
         reader_info,
+        current_epoch: response.current_epoch,
+        current_epoch_created_unix_ms: response.current_epoch_created_unix_ms,
+        current_epoch_name: response.current_epoch_name,
     })
 }
 

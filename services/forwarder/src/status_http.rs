@@ -1499,6 +1499,28 @@ async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
     let result = state.journal.lock().await.reset_epoch(&reader_ip);
     match result {
         Ok(metadata) => {
+            if let Some(reader) = state.subsystem.lock().await.readers.get_mut(&reader_ip) {
+                reader.current_epoch = Some(metadata.epoch);
+                reader.current_epoch_created_unix_ms = metadata.created_unix_ms;
+                reader.current_epoch_name = None;
+                let _ = state
+                    .ui_tx
+                    .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
+                        ip: reader_ip.clone(),
+                        state: (&reader.state).into(),
+                        reads_session: reader.reads_since_restart,
+                        reads_total: reader.reads_total,
+                        last_seen_secs: reader.last_seen.map(|t| t.elapsed().as_secs()),
+                        local_port: reader.local_port,
+                        current_epoch_name: None,
+                    });
+                let _ = state
+                    .status_event_tx
+                    .send(ForwarderStatusEvent::ReaderStatus {
+                        stream_id: reader_ip.clone(),
+                        status: reader.clone(),
+                    });
+            }
             state
                 .logger
                 .log(format!("epoch reset for {} via API", reader_ip));
@@ -4683,6 +4705,8 @@ target = "192.168.1.100:10000"
                     reads_since_restart: 2,
                     reads_total: 42,
                     local_port: 10_001,
+                    current_epoch: None,
+                    current_epoch_created_unix_ms: None,
                     current_epoch_name: None,
                     reader_info: None,
                 },

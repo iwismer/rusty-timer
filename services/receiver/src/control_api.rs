@@ -884,6 +884,8 @@ impl AppState {
             reads_session: Some(status.reads_session),
             reads_total: Some(status.reads_total),
             last_seen_secs: status.last_seen_secs,
+            current_epoch: status.current_epoch,
+            current_epoch_created_unix_ms: status.current_epoch_created_unix_ms,
             current_epoch_name: status.current_epoch_name,
             hardware_reader_id: None,
             firmware_version: None,
@@ -915,6 +917,56 @@ impl AppState {
                 };
             })
             .or_insert(reader);
+    }
+
+    pub(crate) fn store_forwarder_reader_epoch_sync(
+        &self,
+        endpoint_id: &str,
+        stream_id: &str,
+        current_epoch: Option<i64>,
+        current_epoch_created_unix_ms: Option<i64>,
+        current_epoch_name: Option<String>,
+    ) {
+        let current_epoch_name = current_epoch_name.map(|name| {
+            let trimmed = name.trim().to_owned();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        let mut live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
+        let live_status = live_statuses.entry(endpoint_id.to_owned()).or_default();
+        live_status
+            .readers
+            .entry(stream_id.to_owned())
+            .and_modify(|reader| {
+                if current_epoch.is_some() {
+                    reader.current_epoch = current_epoch;
+                    reader.current_epoch_created_unix_ms = current_epoch_created_unix_ms;
+                }
+                if let Some(name) = &current_epoch_name {
+                    reader.current_epoch_name = name.clone();
+                }
+            })
+            .or_insert_with(|| ReaderLiveStatus {
+                stream_id: stream_id.to_owned(),
+                connected: false,
+                state: "unknown".to_owned(),
+                last_read_unix_ms: None,
+                reads_session: None,
+                reads_total: None,
+                last_seen_secs: None,
+                current_epoch,
+                current_epoch_created_unix_ms,
+                current_epoch_name: current_epoch_name.flatten(),
+                hardware_reader_id: None,
+                firmware_version: None,
+                model: None,
+                reader_info: None,
+                download_progress: None,
+                local_port: None,
+            });
     }
 
     #[cfg(test)]
@@ -963,6 +1015,8 @@ impl AppState {
                 reads_session: None,
                 reads_total: None,
                 last_seen_secs: None,
+                current_epoch: None,
+                current_epoch_created_unix_ms: None,
                 current_epoch_name: None,
                 hardware_reader_id,
                 firmware_version,
@@ -1017,6 +1071,8 @@ impl AppState {
                 reads_session: None,
                 reads_total: None,
                 last_seen_secs: None,
+                current_epoch: None,
+                current_epoch_created_unix_ms: None,
                 current_epoch_name: None,
                 hardware_reader_id: None,
                 firmware_version: None,
@@ -1788,6 +1844,8 @@ pub struct ReaderLiveStatus {
     pub reads_session: Option<u64>,
     pub reads_total: Option<i64>,
     pub last_seen_secs: Option<u64>,
+    pub current_epoch: Option<i64>,
+    pub current_epoch_created_unix_ms: Option<i64>,
     pub current_epoch_name: Option<String>,
     pub hardware_reader_id: Option<String>,
     pub firmware_version: Option<String>,
@@ -2680,6 +2738,8 @@ mod tests {
                     reads_session: 12,
                     reads_total: 120,
                     last_seen_secs: Some(3),
+                    current_epoch: Some(9),
+                    current_epoch_created_unix_ms: Some(1_783_238_640_000),
                     current_epoch_name: Some("Race 1".to_owned()),
                 },
             )
@@ -2695,6 +2755,8 @@ mod tests {
                     reads_session: 0,
                     reads_total: 0,
                     last_seen_secs: None,
+                    current_epoch: None,
+                    current_epoch_created_unix_ms: None,
                     current_epoch_name: None,
                 },
             )
@@ -2759,6 +2821,8 @@ mod tests {
                     reads_session: 13,
                     reads_total: 121,
                     last_seen_secs: Some(1),
+                    current_epoch: Some(10),
+                    current_epoch_created_unix_ms: Some(1_783_238_700_000),
                     current_epoch_name: Some("Race 2".to_owned()),
                 },
             )
@@ -2789,6 +2853,11 @@ mod tests {
         assert_eq!(forwarder.readers[0].reads_session, Some(13));
         assert_eq!(forwarder.readers[0].reads_total, Some(121));
         assert_eq!(forwarder.readers[0].last_seen_secs, Some(1));
+        assert_eq!(forwarder.readers[0].current_epoch, Some(10));
+        assert_eq!(
+            forwarder.readers[0].current_epoch_created_unix_ms,
+            Some(1_783_238_700_000)
+        );
         assert_eq!(
             forwarder.readers[0].current_epoch_name.as_deref(),
             Some("Race 2")
@@ -2823,6 +2892,11 @@ mod tests {
         assert_eq!(forwarder.readers[1].reads_session, Some(12));
         assert_eq!(forwarder.readers[1].reads_total, Some(120));
         assert_eq!(forwarder.readers[1].last_seen_secs, Some(3));
+        assert_eq!(forwarder.readers[1].current_epoch, Some(9));
+        assert_eq!(
+            forwarder.readers[1].current_epoch_created_unix_ms,
+            Some(1_783_238_640_000)
+        );
         assert_eq!(
             forwarder.readers[1].current_epoch_name.as_deref(),
             Some("Race 1")
@@ -2860,6 +2934,8 @@ mod tests {
                     reads_session: 1,
                     reads_total: 10,
                     last_seen_secs: Some(1),
+                    current_epoch: None,
+                    current_epoch_created_unix_ms: None,
                     current_epoch_name: None,
                 },
             )
@@ -3042,6 +3118,8 @@ mod tests {
                 reads_session,
                 reads_total,
                 last_seen_secs: Some(reads_session),
+                current_epoch: None,
+                current_epoch_created_unix_ms: None,
                 current_epoch_name: None,
             };
 
@@ -3226,6 +3304,9 @@ mod tests {
                 success: true,
                 message: String::new(),
                 reader_info_json: Some(serde_json::to_string(&response_info).unwrap()),
+                current_epoch: None,
+                current_epoch_created_unix_ms: None,
+                current_epoch_name: None,
             })
             .expect("send reader response");
         });
@@ -3250,6 +3331,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reader_control_command_stores_epoch_metadata_from_response() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let _guard = state.register_forwarder_reader_control_tx("endpoint-a", tx);
+
+        tokio::spawn(async move {
+            let ReaderCommand::Request {
+                stream_id,
+                action,
+                resp,
+            } = rx.recv().await.expect("reader command");
+            assert_eq!(stream_id, "stream-a");
+            assert_eq!(action, rt_domain::ReaderControlAction::AdvanceEpoch);
+            resp.send(ReaderControlResponse {
+                stream_id: b"stream-a".to_vec(),
+                request_id: "1".to_owned(),
+                success: true,
+                message: String::new(),
+                reader_info_json: None,
+                current_epoch: Some(5),
+                current_epoch_created_unix_ms: Some(1_783_238_640_000),
+                current_epoch_name: Some("Race 2".to_owned()),
+            })
+            .expect("send reader response");
+        });
+
+        let result = reader_advance_epoch(&state, "endpoint-a".to_owned(), "stream-a".to_owned())
+            .await
+            .expect("reader advance epoch");
+
+        assert!(result.success);
+        assert_eq!(result.current_epoch, Some(5));
+        assert_eq!(
+            result.current_epoch_created_unix_ms,
+            Some(1_783_238_640_000)
+        );
+        assert_eq!(result.current_epoch_name.as_deref(), Some("Race 2"));
+        let response = get_connections(&state).await;
+        let reader = response
+            .forwarders
+            .iter()
+            .find(|forwarder| forwarder.endpoint_id == "endpoint-a")
+            .and_then(|forwarder| forwarder.readers.first())
+            .expect("reader status should be populated from response epoch metadata");
+        assert_eq!(reader.current_epoch, Some(5));
+        assert_eq!(
+            reader.current_epoch_created_unix_ms,
+            Some(1_783_238_640_000)
+        );
+        assert_eq!(reader.current_epoch_name.as_deref(), Some("Race 2"));
+    }
+
+    #[tokio::test]
     async fn reader_control_command_rejects_invalid_reader_info_json() {
         let db = Db::open_in_memory().unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
@@ -3263,6 +3398,9 @@ mod tests {
                 success: true,
                 message: String::new(),
                 reader_info_json: Some("{".to_owned()),
+                current_epoch: None,
+                current_epoch_created_unix_ms: None,
+                current_epoch_name: None,
             })
             .expect("send reader response");
         });
@@ -3378,6 +3516,8 @@ mod tests {
                     reads_session: 1,
                     reads_total: 1,
                     last_seen_secs: Some(1),
+                    current_epoch: None,
+                    current_epoch_created_unix_ms: None,
                     current_epoch_name: None,
                 },
             )

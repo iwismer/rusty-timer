@@ -145,6 +145,9 @@ where
                     success: false,
                     message: format!("unsupported reader control command: {}", request.command),
                     reader_info_json: None,
+                    current_epoch: None,
+                    current_epoch_created_unix_ms: None,
+                    current_epoch_name: None,
                 };
             }
 
@@ -155,6 +158,9 @@ where
                     success: true,
                     message: format!("clock drift recorded: {}ms", clock.drift_ms),
                     reader_info_json: None,
+                    current_epoch: None,
+                    current_epoch_created_unix_ms: None,
+                    current_epoch_name: None,
                 },
                 Err(error) => ReaderControlResponse {
                     stream_id: request.stream_id,
@@ -162,6 +168,9 @@ where
                     success: false,
                     message: error,
                     reader_info_json: None,
+                    current_epoch: None,
+                    current_epoch_created_unix_ms: None,
+                    current_epoch_name: None,
                 },
             }
         })
@@ -182,6 +191,9 @@ impl ReaderControlHandler for NoopReaderControlHandler {
                 success: false,
                 message: "reader control handler not configured".to_owned(),
                 reader_info_json: None,
+                current_epoch: None,
+                current_epoch_created_unix_ms: None,
+                current_epoch_name: None,
             }
         })
     }
@@ -948,6 +960,9 @@ fn reader_control_error_response(
         success: false,
         message: message.to_owned(),
         reader_info_json: None,
+        current_epoch: None,
+        current_epoch_created_unix_ms: None,
+        current_epoch_name: None,
     }
 }
 
@@ -1114,6 +1129,9 @@ mod tests {
                     success: true,
                     message: format!("handled {}", request.command),
                     reader_info_json: None,
+                    current_epoch: None,
+                    current_epoch_created_unix_ms: None,
+                    current_epoch_name: None,
                 }
             })
         }
@@ -1138,6 +1156,9 @@ mod tests {
                     success: true,
                     message: "spy invoked".to_owned(),
                     reader_info_json: None,
+                    current_epoch: None,
+                    current_epoch_created_unix_ms: None,
+                    current_epoch_name: None,
                 }
             })
         }
@@ -1170,6 +1191,9 @@ mod tests {
                     success: true,
                     message: format!("handled {}", request.command),
                     reader_info_json: None,
+                    current_epoch: None,
+                    current_epoch_created_unix_ms: None,
+                    current_epoch_name: None,
                 }
             })
         }
@@ -2207,6 +2231,8 @@ mod tests {
                 reads_total: 0,
                 last_seen_secs: None,
                 current_epoch_name: None,
+                current_epoch: None,
+                current_epoch_created_unix_ms: None,
             }))
             .await
             .expect("control event receiver alive");

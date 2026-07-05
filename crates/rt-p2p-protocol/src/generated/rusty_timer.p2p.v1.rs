@@ -111,6 +111,15 @@ pub struct ReaderControlResponse {
     /// Serialized rt_domain::ReaderInfo, present for commands that return updated reader info.
     #[prost(string, optional, tag = "5")]
     pub reader_info_json: ::core::option::Option<::prost::alloc::string::String>,
+    /// Updated current epoch id, present when the command changes or refreshes it.
+    #[prost(int64, optional, tag = "6")]
+    pub current_epoch: ::core::option::Option<i64>,
+    /// Updated current epoch creation time, in unix milliseconds.
+    #[prost(int64, optional, tag = "7")]
+    pub current_epoch_created_unix_ms: ::core::option::Option<i64>,
+    /// Updated current epoch name, present when the command changes or refreshes it.
+    #[prost(string, optional, tag = "8")]
+    pub current_epoch_name: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Connection/liveness status for a reader.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -138,6 +147,12 @@ pub struct ReaderStatus {
     /// Forwarder-authoritative current epoch name, if any.
     #[prost(string, optional, tag = "8")]
     pub current_epoch_name: ::core::option::Option<::prost::alloc::string::String>,
+    /// Forwarder-authoritative current epoch id, if available.
+    #[prost(int64, optional, tag = "9")]
+    pub current_epoch: ::core::option::Option<i64>,
+    /// Forwarder-authoritative current epoch creation time, in unix milliseconds.
+    #[prost(int64, optional, tag = "10")]
+    pub current_epoch_created_unix_ms: ::core::option::Option<i64>,
 }
 /// Static descriptive information about a reader.
 #[derive(Clone, PartialEq, ::prost::Message)]

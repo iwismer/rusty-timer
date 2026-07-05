@@ -90,6 +90,12 @@ message ReaderControlResponse {
   string message = 4;
   // Serialized rt_domain::ReaderInfo, present for commands that return updated reader info.
   optional string reader_info_json = 5;
+  // Updated current epoch id, present when the command changes or refreshes it.
+  optional int64 current_epoch = 6;
+  // Updated current epoch creation time, in unix milliseconds.
+  optional int64 current_epoch_created_unix_ms = 7;
+  // Updated current epoch name, present when the command changes or refreshes it.
+  optional string current_epoch_name = 8;
 }
 
 // Connection/liveness status for a reader.
@@ -109,6 +115,10 @@ message ReaderStatus {
   optional uint64 last_seen_secs = 7;
   // Forwarder-authoritative current epoch name, if any.
   optional string current_epoch_name = 8;
+  // Forwarder-authoritative current epoch id, if available.
+  optional int64 current_epoch = 9;
+  // Forwarder-authoritative current epoch creation time, in unix milliseconds.
+  optional int64 current_epoch_created_unix_ms = 10;
 }
 
 // Static descriptive information about a reader.

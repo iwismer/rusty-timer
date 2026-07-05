@@ -520,6 +520,9 @@
                         readsSession={reader.reads_session ?? null}
                         readsTotal={reader.reads_total ?? null}
                         lastSeenDisplay={lastSeenDisplayForPanel(reader)}
+                        currentEpoch={reader.current_epoch ?? null}
+                        currentEpochCreatedUnixMs={reader.current_epoch_created_unix_ms ??
+                          null}
                         currentEpochName={reader.current_epoch_name ?? null}
                         localPortLabel="Local proxy"
                         localPortValue={localPortValueForPanel(reader)}

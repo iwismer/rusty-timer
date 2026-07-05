@@ -157,6 +157,9 @@ fn reader_control_response_with_reader_info_json_round_trips() {
                     r#"{"clock":{"reader_clock":"2026-06-22T12:00:00.000","drift_ms":5}}"#
                         .to_string(),
                 ),
+                current_epoch: Some(4),
+                current_epoch_created_unix_ms: Some(1_783_238_640_000),
+                current_epoch_name: Some("Race 2".to_owned()),
             },
         )),
     };

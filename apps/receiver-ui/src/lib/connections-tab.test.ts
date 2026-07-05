@@ -59,6 +59,7 @@ const mockState = vi.hoisted(() => {
           },
         ],
       } as import("./api").ConnectionsResponse,
+      streams: null as import("./api").StreamsResponse | null,
     },
     connectForwarder: vi.fn(async () => {}),
     disconnectForwarder: vi.fn(async () => {}),
@@ -117,6 +118,7 @@ describe("ConnectionsTab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockState.store.savedServerUrl = "https://server.example.com/";
+    mockState.store.streams = null;
     mockState.store.connections = {
       server: {
         configured: true,
@@ -353,6 +355,8 @@ describe("ConnectionsTab", () => {
             reads_session: 12,
             reads_total: 3456,
             last_seen_secs: 5,
+            current_epoch: 9,
+            current_epoch_created_unix_ms: Date.UTC(2026, 6, 5, 8, 24),
             current_epoch_name: "Race Day",
             hardware_reader_id: "reader-42",
             firmware_version: "1.2.3",
@@ -366,6 +370,20 @@ describe("ConnectionsTab", () => {
         reader_control_available: true,
       },
     ] as import("./api").ForwarderConnectionStatus[];
+    mockState.store.streams = {
+      streams: [
+        {
+          forwarder_endpoint_id: "endpoint-live",
+          stream_id: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 9100,
+          stream_epoch: 7,
+          current_epoch_name: "Race Day",
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    };
 
     render(ConnectionsTab);
 
@@ -373,7 +391,9 @@ describe("ConnectionsTab", () => {
     expect(panel).toHaveTextContent("Reads (session): 12");
     expect(panel).toHaveTextContent("Reads (total): 3,456");
     expect(panel).toHaveTextContent("Last seen: 5s ago");
-    expect(panel).toHaveTextContent("Active epoch: Race Day");
+    expect(panel).toHaveTextContent("Current epoch: #9");
+    expect(panel).toHaveTextContent("Name: Race Day");
+    expect(panel).not.toHaveTextContent("Created: —");
 
     // Details start collapsed and can be expanded.
     expect(screen.queryByText("Banner:")).not.toBeInTheDocument();
@@ -383,6 +403,56 @@ describe("ConnectionsTab", () => {
     expect(panel).toHaveTextContent("Hardware: 0x45 (69)");
     await fireEvent.click(screen.getByLabelText("Hide details"));
     expect(screen.queryByText("Banner:")).not.toBeInTheDocument();
+  });
+
+  it("shows unnamed for receiver readers without an epoch name", () => {
+    mockState.store.connections.forwarders = [
+      {
+        endpoint_id: "endpoint-live",
+        display_name: "Live Forwarder",
+        state: "subscribed",
+        pending: false,
+        subscribed_count: 1,
+        available_count: 1,
+        readers: [
+          {
+            stream_id: "10.0.0.1:10000",
+            connected: true,
+            state: "online",
+            last_read_unix_ms: null,
+            current_epoch: 8,
+            current_epoch_name: null,
+            hardware_reader_id: null,
+            firmware_version: null,
+            model: null,
+          },
+        ],
+        ups: null,
+        restart_needed: null,
+        remote_config_available: false,
+        reader_control_available: true,
+      },
+    ] as import("./api").ForwarderConnectionStatus[];
+    mockState.store.streams = {
+      streams: [
+        {
+          forwarder_endpoint_id: "endpoint-live",
+          stream_id: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 9100,
+          stream_epoch: 8,
+          current_epoch_name: null,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    };
+
+    render(ConnectionsTab);
+
+    const panel = screen.getByTestId("reader-control-panel");
+    expect(panel).toHaveTextContent("Current epoch: #8");
+    expect(panel).toHaveTextContent("Name: unnamed");
   });
 
   it("wires epoch name save and advance epoch to the reader commands", async () => {
@@ -431,8 +501,13 @@ describe("ConnectionsTab", () => {
       "endpoint-live",
       "10.0.0.1:10000",
     );
+    expect(mockState.readerSetEpochName).toHaveBeenLastCalledWith(
+      "endpoint-live",
+      "10.0.0.1:10000",
+      "Lap 2",
+    );
     expect(
-      await screen.findByText("Advanced to next epoch"),
+      await screen.findByText("Advanced to next epoch and saved name"),
     ).toBeInTheDocument();
   });
 

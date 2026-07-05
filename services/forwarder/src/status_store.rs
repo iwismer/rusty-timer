@@ -48,6 +48,10 @@ pub struct ReaderStatus {
     pub reads_total: i64,
     /// The local port the forwarder listens on to re-expose reads from this reader.
     pub local_port: u16,
+    /// The current epoch id, if available.
+    pub current_epoch: Option<i64>,
+    /// The current epoch creation time, in unix milliseconds, if available.
+    pub current_epoch_created_unix_ms: Option<i64>,
     /// The name of the current epoch, if any.
     pub current_epoch_name: Option<String>,
     /// Control protocol info (firmware, clock, etc.) — populated on connect.
@@ -1028,6 +1032,8 @@ impl StatusStore {
                     reads_since_restart: 0,
                     reads_total: 0,
                     local_port: *local_port,
+                    current_epoch: None,
+                    current_epoch_created_unix_ms: None,
                     current_epoch_name: None,
                     reader_info: None,
                 });

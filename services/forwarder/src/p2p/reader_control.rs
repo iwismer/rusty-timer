@@ -61,11 +61,19 @@ impl ReaderControlHandler for ForwarderReaderControlHandler {
             };
 
             match dispatch_action(&self.service, &self.journal, &reader_key, action).await {
-                Ok(info) => success_response(stream_id, request_id, "ok", info.as_ref()),
+                Ok(outcome) => success_response(stream_id, request_id, "ok", &outcome),
                 Err(error) => error_response(stream_id, request_id, error),
             }
         })
     }
+}
+
+#[derive(Debug, Default)]
+struct DispatchOutcome {
+    reader_info: Option<rt_domain::ReaderInfo>,
+    current_epoch: Option<i64>,
+    current_epoch_created_unix_ms: Option<i64>,
+    current_epoch_name: Option<String>,
 }
 
 async fn dispatch_action(
@@ -73,50 +81,82 @@ async fn dispatch_action(
     journal: &Arc<Mutex<crate::storage::journal::Journal>>,
     reader_key: &str,
     action: rt_domain::ReaderControlAction,
-) -> Result<Option<rt_domain::ReaderInfo>, String> {
+) -> Result<DispatchOutcome, String> {
     match action {
-        rt_domain::ReaderControlAction::GetInfo => service
-            .get_info(reader_key)
-            .await
-            .map(|info| Some(crate::reader_control_service::native_info_to_domain(&info))),
-        rt_domain::ReaderControlAction::SyncClock => service
-            .sync_clock(reader_key)
-            .await
-            .map(|info| Some(crate::reader_control_service::native_info_to_domain(&info))),
+        rt_domain::ReaderControlAction::GetInfo => {
+            service
+                .get_info(reader_key)
+                .await
+                .map(|info| DispatchOutcome {
+                    reader_info: Some(crate::reader_control_service::native_info_to_domain(&info)),
+                    ..DispatchOutcome::default()
+                })
+        }
+        rt_domain::ReaderControlAction::SyncClock => {
+            service
+                .sync_clock(reader_key)
+                .await
+                .map(|info| DispatchOutcome {
+                    reader_info: Some(crate::reader_control_service::native_info_to_domain(&info)),
+                    ..DispatchOutcome::default()
+                })
+        }
         rt_domain::ReaderControlAction::SetReadMode { mode, timeout } => service
             .set_read_mode(reader_key, domain_read_mode_to_native(mode), timeout)
             .await
-            .map(|info| Some(crate::reader_control_service::native_info_to_domain(&info))),
+            .map(|info| DispatchOutcome {
+                reader_info: Some(crate::reader_control_service::native_info_to_domain(&info)),
+                ..DispatchOutcome::default()
+            }),
         rt_domain::ReaderControlAction::SetTto { enabled } => service
             .set_tto(reader_key, enabled)
             .await
-            .map(|info| Some(crate::reader_control_service::native_info_to_domain(&info))),
+            .map(|info| DispatchOutcome {
+                reader_info: Some(crate::reader_control_service::native_info_to_domain(&info)),
+                ..DispatchOutcome::default()
+            }),
         rt_domain::ReaderControlAction::SetRecording { enabled } => service
             .set_recording(reader_key, enabled)
             .await
-            .map(|info| Some(crate::reader_control_service::native_info_to_domain(&info))),
-        rt_domain::ReaderControlAction::ClearRecords => {
-            service.clear_records(reader_key).await.map(|()| None)
-        }
-        rt_domain::ReaderControlAction::StartDownload => {
-            service.start_download(reader_key).await.map(|_| None)
-        }
-        rt_domain::ReaderControlAction::StopDownload => {
-            service.stop_download(reader_key).await.map(|()| None)
-        }
-        rt_domain::ReaderControlAction::Refresh => service
-            .refresh(reader_key)
+            .map(|info| DispatchOutcome {
+                reader_info: Some(crate::reader_control_service::native_info_to_domain(&info)),
+                ..DispatchOutcome::default()
+            }),
+        rt_domain::ReaderControlAction::ClearRecords => service
+            .clear_records(reader_key)
             .await
-            .map(|info| Some(crate::reader_control_service::native_info_to_domain(&info))),
-        rt_domain::ReaderControlAction::Reconnect => {
-            service.reconnect(reader_key).await.map(|()| None)
+            .map(|()| DispatchOutcome::default()),
+        rt_domain::ReaderControlAction::StartDownload => service
+            .start_download(reader_key)
+            .await
+            .map(|_| DispatchOutcome::default()),
+        rt_domain::ReaderControlAction::StopDownload => service
+            .stop_download(reader_key)
+            .await
+            .map(|()| DispatchOutcome::default()),
+        rt_domain::ReaderControlAction::Refresh => {
+            service
+                .refresh(reader_key)
+                .await
+                .map(|info| DispatchOutcome {
+                    reader_info: Some(crate::reader_control_service::native_info_to_domain(&info)),
+                    ..DispatchOutcome::default()
+                })
         }
+        rt_domain::ReaderControlAction::Reconnect => service
+            .reconnect(reader_key)
+            .await
+            .map(|()| DispatchOutcome::default()),
         rt_domain::ReaderControlAction::SetEpochName { name } => service
-            .set_epoch_name(reader_key, name)
+            .set_epoch_name(reader_key, name.clone())
             .await
-            .map(|info| Some(crate::reader_control_service::native_info_to_domain(&info))),
+            .map(|info| DispatchOutcome {
+                reader_info: Some(crate::reader_control_service::native_info_to_domain(&info)),
+                current_epoch_name: Some(name.unwrap_or_default()),
+                ..DispatchOutcome::default()
+            }),
         rt_domain::ReaderControlAction::AdvanceEpoch => {
-            journal
+            let metadata = journal
                 .lock()
                 .await
                 .reset_epoch(reader_key)
@@ -124,8 +164,15 @@ async fn dispatch_action(
                     EpochResetError::NotFound => "stream not found".to_owned(),
                     EpochResetError::Storage(message) => message,
                 })?;
-            service.emit_status_refresh(reader_key).await;
-            Ok(None)
+            service
+                .set_current_epoch_metadata(reader_key, metadata)
+                .await;
+            Ok(DispatchOutcome {
+                current_epoch: Some(metadata.epoch),
+                current_epoch_created_unix_ms: metadata.created_unix_ms,
+                current_epoch_name: Some(String::new()),
+                ..DispatchOutcome::default()
+            })
         }
     }
 }
@@ -210,18 +257,24 @@ pub(crate) fn domain_info_to_p2p_event(
     })
 }
 
-pub(crate) fn success_response(
+fn success_response(
     stream_id: Vec<u8>,
     request_id: String,
     message: &str,
-    info: Option<&rt_domain::ReaderInfo>,
+    outcome: &DispatchOutcome,
 ) -> ReaderControlResponse {
     ReaderControlResponse {
         stream_id,
         request_id,
         success: true,
         message: message.to_owned(),
-        reader_info_json: info.and_then(|info| domain_info_json(info).ok()),
+        reader_info_json: outcome
+            .reader_info
+            .as_ref()
+            .and_then(|info| domain_info_json(info).ok()),
+        current_epoch: outcome.current_epoch,
+        current_epoch_created_unix_ms: outcome.current_epoch_created_unix_ms,
+        current_epoch_name: outcome.current_epoch_name.clone(),
     }
 }
 
@@ -236,6 +289,9 @@ fn error_response(
         success: false,
         message,
         reader_info_json: None,
+        current_epoch: None,
+        current_epoch_created_unix_ms: None,
+        current_epoch_name: None,
     }
 }
 
@@ -420,7 +476,11 @@ mod tests {
             ..empty_info()
         };
 
-        let response = success_response(b"reader".to_vec(), "req-1".to_owned(), "ok", Some(&info));
+        let outcome = DispatchOutcome {
+            reader_info: Some(info),
+            ..DispatchOutcome::default()
+        };
+        let response = success_response(b"reader".to_vec(), "req-1".to_owned(), "ok", &outcome);
 
         assert!(response.success);
         assert!(
@@ -429,6 +489,25 @@ mod tests {
                 .expect("json")
                 .contains("reader_clock")
         );
+    }
+
+    #[test]
+    fn success_response_populates_epoch_metadata_when_present() {
+        let outcome = DispatchOutcome {
+            current_epoch: Some(4),
+            current_epoch_created_unix_ms: Some(1_783_238_640_000),
+            current_epoch_name: Some("Race 2".to_owned()),
+            ..DispatchOutcome::default()
+        };
+
+        let response = success_response(b"reader".to_vec(), "req-1".to_owned(), "ok", &outcome);
+
+        assert_eq!(response.current_epoch, Some(4));
+        assert_eq!(
+            response.current_epoch_created_unix_ms,
+            Some(1_783_238_640_000)
+        );
+        assert_eq!(response.current_epoch_name.as_deref(), Some("Race 2"));
     }
 
     fn empty_info() -> rt_domain::ReaderInfo {

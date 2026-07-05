@@ -401,6 +401,9 @@ async fn serve_control_loop(
                                 success: true,
                                 message: String::new(),
                                 reader_info_json: script.reader_control_info_json.clone(),
+                                current_epoch: None,
+                                current_epoch_created_unix_ms: None,
+                                current_epoch_name: None,
                             },
                         )),
                     };
