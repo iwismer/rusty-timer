@@ -501,6 +501,7 @@ def dbf_records(dbf_path: Path) -> list[dict[str, str]]:
         records.append({
             "event": record[1:2].decode("ascii").strip(),
             "chip": record[4:16].decode("ascii").strip(),
+            "reader": record[40:41].decode("ascii").strip(),
         })
     return records
 
@@ -1363,9 +1364,11 @@ static_allowed_receivers = ["{receiver_endpoint_id}"]
     dbf_rows = dbf_records(dbf_path)
     dbf_chips = [row["chip"] for row in dbf_rows]
     dbf_events = {row["event"] for row in dbf_rows}
+    dbf_readers = {row["reader"] for row in dbf_rows}
     results.expect_eq(f"DBF record count == {NUM_READS}", len(dbf_rows), NUM_READS)
     results.expect_eq("DBF chip IDs match deterministic scenario", dbf_chips, EXPECTED_TAGS)
     results.expect_eq("DBF event type is finish", dbf_events, {"F"})
+    results.expect_eq("DBF reader index is preseeded value", dbf_readers, {"0"})
     results.expect_eq("DBF has no duplicate chip rows", len(set(dbf_chips)), len(dbf_chips))
 
     # 3. Durable TCP local proxy replays exact frames to a fresh client.

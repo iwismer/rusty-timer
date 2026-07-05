@@ -6,7 +6,7 @@
 
 use crate::db::{Db, StreamSubscription};
 use crate::error::ReceiverError;
-use crate::stream_key::LocalStreamKey;
+use crate::stream_key::{LocalStreamKey, is_valid_endpoint_id, is_valid_identity_part};
 use crate::ui_events::ReceiverUiEvent;
 use rt_p2p_protocol::{
     ConfigGetResponse, ConfigSetResponse, DownloadProgress, ReaderControlResponse, ReaderInfo,
@@ -224,17 +224,17 @@ pub(crate) fn validate_stream_identity(
     forwarder_endpoint_id: &str,
     stream_id: &str,
 ) -> Result<(), ReceiverError> {
-    if forwarder_endpoint_id.trim().is_empty() {
+    if !is_valid_identity_part(forwarder_endpoint_id) {
         return Err(ReceiverError::BadRequest(
             "forwarder_endpoint_id must not be empty".to_owned(),
         ));
     }
-    if forwarder_endpoint_id.contains('\u{1f}') {
+    if !is_valid_endpoint_id(forwarder_endpoint_id) {
         return Err(ReceiverError::BadRequest(
             "forwarder_endpoint_id must not contain the stream key separator".to_owned(),
         ));
     }
-    if stream_id.trim().is_empty() {
+    if !is_valid_identity_part(stream_id) {
         return Err(ReceiverError::BadRequest(
             "stream_id must not be empty".to_owned(),
         ));
@@ -3806,6 +3806,34 @@ mod tests {
             .await,
         );
 
+        let db = state.storage.db.lock().await;
+        assert!(db.load_stream_subscriptions().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn put_subscriptions_rejects_zero_port_override_without_persisting() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+
+        let result = put_subscriptions(
+            &state,
+            SubscriptionsBody {
+                subscriptions: vec![SubscriptionRequest {
+                    forwarder_endpoint_id: "endpoint-1".to_owned(),
+                    stream_id: "stream-1".to_owned(),
+                    local_port_override: Some(0),
+                    event_type: Some(crate::db::EventType::Finish),
+                    forwarder_id: None,
+                    reader_ip: None,
+                }],
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(ReceiverError::BadRequest(message)) if message == "port must be 1-65535"
+        ));
         let db = state.storage.db.lock().await;
         assert!(db.load_stream_subscriptions().unwrap().is_empty());
     }

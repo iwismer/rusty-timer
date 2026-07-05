@@ -2,6 +2,16 @@ use std::borrow::Borrow;
 
 const SEPARATOR: char = '\u{1f}';
 
+#[must_use]
+pub(crate) fn is_valid_identity_part(part: &str) -> bool {
+    !part.trim().is_empty()
+}
+
+#[must_use]
+pub(crate) fn is_valid_endpoint_id(endpoint_id: &str) -> bool {
+    is_valid_identity_part(endpoint_id) && !endpoint_id.contains(SEPARATOR)
+}
+
 /// Receiver-local canonical stream identity: forwarder endpoint + wire stream id.
 ///
 /// Encoded as a single string `{endpoint_id}\u{1F}{stream_id}` for SQLite TEXT
@@ -17,13 +27,16 @@ pub struct LocalStreamKey(String);
 impl LocalStreamKey {
     #[must_use]
     pub fn new(endpoint_id: &str, wire_stream_id: &str) -> Self {
-        assert!(!endpoint_id.is_empty(), "endpoint_id must not be empty");
+        assert!(
+            is_valid_identity_part(endpoint_id),
+            "endpoint_id must not be empty"
+        );
         assert!(
             !endpoint_id.contains(SEPARATOR),
             "endpoint_id must not contain separator"
         );
         assert!(
-            !wire_stream_id.is_empty(),
+            is_valid_identity_part(wire_stream_id),
             "wire_stream_id must not be empty"
         );
         Self(format!("{endpoint_id}{SEPARATOR}{wire_stream_id}"))
@@ -42,6 +55,11 @@ impl LocalStreamKey {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    #[must_use]
+    pub(crate) fn display_encoded(encoded: &str) -> String {
+        encoded.replace(SEPARATOR, "␟")
     }
 
     fn parts(&self) -> (&str, &str) {
@@ -69,6 +87,23 @@ impl std::fmt::Display for LocalStreamKey {
     /// persisted/key encoding returned by [`LocalStreamKey::as_str`] is
     /// unchanged.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.as_str().replace(SEPARATOR, "␟"))
+        f.write_str(&Self::display_encoded(self.as_str()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "endpoint_id must not be empty")]
+    fn constructor_rejects_whitespace_only_endpoint_id() {
+        let _ = LocalStreamKey::new("   ", "stream-1");
+    }
+
+    #[test]
+    #[should_panic(expected = "wire_stream_id must not be empty")]
+    fn constructor_rejects_whitespace_only_wire_stream_id() {
+        let _ = LocalStreamKey::new("endpoint-1", "   ");
     }
 }

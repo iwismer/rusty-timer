@@ -557,7 +557,9 @@ pub fn run_dbf_delivery_pass(
             // transaction. Append-before-mark: a crash in between is healed by
             // the startup regenerate (never the reverse — mark-before-append
             // would lose reads).
-            with_durable_dbf_lock(path, || Ok(append_records(path, &records)?))?;
+            if !records.is_empty() {
+                with_durable_dbf_lock(path, || Ok(append_records(path, &records)?))?;
+            }
             db.mark_dbf_delivered_batch(&spec.stream_id, &processed, delivered_unix_ms)?;
             state.last_delivered.insert(spec.stream_id.clone(), max_seq);
             if fetched < DBF_APPEND_CHUNK_ROWS {
@@ -1050,6 +1052,39 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "the appended invalid frame must also be marked processed"
+        );
+    }
+
+    #[test]
+    fn incremental_pass_with_no_records_to_append_does_not_take_dbf_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let dbf_path = dir.path().join("out.dbf");
+        let lock_path = durable_dbf_lock_path(&dbf_path);
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_id = "s-invalid-only-incremental";
+        insert_durable_event(&db, stream_id, 1, &sample_raw_frame(), 1_700_000_000_000);
+
+        let specs = vec![spec(stream_id, 0)];
+        let mut state = DbfPassState::default();
+        run_dbf_delivery_pass(&mut db, &specs, &dbf_path, &mut state, 1_700_000_010_000).unwrap();
+        assert_eq!(dbf_records(&dbf_path).len(), 1);
+        if lock_path.exists() {
+            std::fs::remove_file(&lock_path).unwrap();
+        }
+
+        insert_durable_event(&db, stream_id, 2, b"not a chip read", 1_700_000_000_001);
+        run_dbf_delivery_pass(&mut db, &specs, &dbf_path, &mut state, 1_700_000_020_000).unwrap();
+
+        assert_eq!(dbf_records(&dbf_path).len(), 1);
+        assert!(
+            !lock_path.exists(),
+            "a no-record incremental append must not touch the durable DBF lock"
+        );
+        assert!(
+            db.load_undelivered_received_events(stream_id)
+                .unwrap()
+                .is_empty(),
+            "invalid frames still need to be marked processed"
         );
     }
 

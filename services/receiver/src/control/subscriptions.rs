@@ -139,6 +139,9 @@ pub async fn put_subscriptions(
     let mut seen = std::collections::HashSet::new();
     for s in &body.subscriptions {
         validate_stream_identity(&s.forwarder_endpoint_id, &s.stream_id)?;
+        if let Some(0) = s.local_port_override {
+            return Err(ReceiverError::BadRequest("port must be 1-65535".to_owned()));
+        }
         if !seen.insert((s.forwarder_endpoint_id.clone(), s.stream_id.clone())) {
             return Err(ReceiverError::BadRequest(
                 "duplicate subscriptions".to_owned(),

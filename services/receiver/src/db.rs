@@ -1,4 +1,4 @@
-use crate::stream_key::LocalStreamKey;
+use crate::stream_key::{LocalStreamKey, is_valid_endpoint_id, is_valid_identity_part};
 use rt_domain::ReceiverMode;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
@@ -477,9 +477,8 @@ impl Db {
         let mut subs = Vec::new();
         for row in rows {
             let sub = row?;
-            if sub.forwarder_endpoint_id.trim().is_empty()
-                || sub.forwarder_endpoint_id.contains('\u{1f}')
-                || sub.stream_id.trim().is_empty()
+            if !is_valid_endpoint_id(&sub.forwarder_endpoint_id)
+                || !is_valid_identity_part(&sub.stream_id)
             {
                 tracing::warn!(
                     forwarder_endpoint_id = %sub.forwarder_endpoint_id,

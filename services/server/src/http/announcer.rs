@@ -51,8 +51,8 @@ pub async fn push_rows(
         )
             .into_response();
     }
-    if let Err(field) = validate_push_rows(&req) {
-        return (StatusCode::BAD_REQUEST, format!("{field} too long")).into_response();
+    if let Err(message) = validate_push_rows(&req) {
+        return (StatusCode::BAD_REQUEST, message).into_response();
     }
     if req.rows.iter().any(|row| {
         Utc.timestamp_millis_opt(row.received_unix_ms)
@@ -124,32 +124,48 @@ pub async fn push_rows(
 /// Per-row validation identical to the old single-row path, applied to every
 /// row up front so a single bad row rejects the whole batch before anything
 /// is persisted.
-fn validate_push_rows(req: &PushRowsRequest) -> Result<(), &'static str> {
+fn validate_push_rows(req: &PushRowsRequest) -> Result<(), String> {
+    validate_non_blank("forwarder_endpoint_id", &req.forwarder_endpoint_id)?;
+    validate_non_blank("stream_id", &req.stream_id)?;
     check_len(
         "forwarder_endpoint_id",
         &req.forwarder_endpoint_id,
         MAX_ANNOUNCER_ID_LEN,
-    )?;
-    check_len("stream_id", &req.stream_id, MAX_ANNOUNCER_ID_LEN)?;
+    )
+    .map_err(|field| format!("{field} too long"))?;
+    check_len("stream_id", &req.stream_id, MAX_ANNOUNCER_ID_LEN)
+        .map_err(|field| format!("{field} too long"))?;
     for row in &req.rows {
-        check_len("chip_id", &row.chip_id, MAX_ANNOUNCER_ID_LEN)?;
+        check_len("chip_id", &row.chip_id, MAX_ANNOUNCER_ID_LEN)
+            .map_err(|field| format!("{field} too long"))?;
         check_len(
             "display_name",
             &row.display_name,
             MAX_ANNOUNCER_DISPLAY_NAME_LEN,
-        )?;
+        )
+        .map_err(|field| format!("{field} too long"))?;
         if let Some(timestamp) = row.reader_timestamp.as_deref() {
             check_len(
                 "reader_timestamp",
                 timestamp,
                 MAX_ANNOUNCER_READER_TIMESTAMP_LEN,
-            )?;
+            )
+            .map_err(|field| format!("{field} too long"))?;
         }
         if let Some(division) = row.division.as_deref() {
-            check_len("division", division, MAX_ANNOUNCER_DIVISION_LEN)?;
+            check_len("division", division, MAX_ANNOUNCER_DIVISION_LEN)
+                .map_err(|field| format!("{field} too long"))?;
         }
     }
     Ok(())
+}
+
+fn validate_non_blank(field: &'static str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        Err(format!("{field} must not be empty"))
+    } else {
+        Ok(())
+    }
 }
 
 pub async fn takeover(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -362,6 +378,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn blank_stream_identity_rejected_without_persisting() {
+        for (field, value) in [
+            ("forwarder_endpoint_id", ""),
+            ("forwarder_endpoint_id", "   "),
+            ("stream_id", ""),
+            ("stream_id", "   "),
+        ] {
+            let state = test_state();
+            let app = router(state.clone());
+            let mut body = batch_body(0, &[row_json(1, 1_000)]);
+            body[field] = serde_json::json!(value);
+
+            let resp = app
+                .oneshot(json_request("/announcer/rows", &body))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "field={field:?} value={value:?}"
+            );
+            assert_eq!(announcer_rows_count(&state), 0);
+        }
     }
 
     #[tokio::test]

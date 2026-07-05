@@ -1208,7 +1208,8 @@ async fn reconcile_once(
     let mut removed_streams = Vec::with_capacity(stale_streams.len());
     for stream_id in stale_streams {
         if let Some(worker) = stream_workers.remove(&stream_id) {
-            info!(%stream_id, "stopping p2p stream worker (subscription removed)");
+            let stream_log_key = LocalStreamKey::display_encoded(&stream_id);
+            info!(stream_id = %stream_log_key, "stopping p2p stream worker (subscription removed)");
             removed_streams.push(worker);
         }
     }
@@ -1246,11 +1247,11 @@ async fn reconcile_once(
             }
             if let Some(worker) = stream_workers.remove(&stream_id) {
                 if config_changed {
-                    info!(%stream_id, "rebuilding p2p stream worker (subscription config changed)");
+                    info!(stream_id = %local_stream_key, "rebuilding p2p stream worker (subscription config changed)");
                 } else if announcer_mismatch {
-                    info!(%stream_id, announce = want_announce, "rebuilding p2p stream worker (announcer state changed)");
+                    info!(stream_id = %local_stream_key, announce = want_announce, "rebuilding p2p stream worker (announcer state changed)");
                 } else {
-                    info!(%stream_id, "rebuilding p2p stream worker (announcer generation changed)");
+                    info!(stream_id = %local_stream_key, "rebuilding p2p stream worker (announcer generation changed)");
                 }
                 rebuilt_workers.push(worker);
             }
@@ -2039,6 +2040,8 @@ pub fn endpoint_id_for_seed(seed: [u8; 32]) -> String {
 
 /// Env var naming the forwarder's iroh endpoint (string endpoint id) to dial.
 pub const ENV_P2P_FORWARDER_ENDPOINT_ID: &str = "RT_P2P_FORWARDER_ENDPOINT_ID";
+/// Removed legacy name for [`ENV_P2P_FORWARDER_ENDPOINT_ID`].
+pub const ENV_P2P_FORWARDER_NODE_ID: &str = "RT_P2P_FORWARDER_NODE_ID";
 /// Env var giving a direct `ip:port` socket address for the forwarder peer.
 pub const ENV_P2P_FORWARDER_DIRECT_ADDR: &str = "RT_P2P_FORWARDER_DIRECT_ADDR";
 /// Env var holding the receiver's 64-hex-character secret-key seed.
@@ -2221,6 +2224,13 @@ pub fn p2p_config_from_lookup(
 pub fn p2p_config_from_env(
     default_key_path: std::path::PathBuf,
 ) -> Result<Option<P2pReceiverConfig>, String> {
+    if std::env::var_os(ENV_P2P_FORWARDER_NODE_ID).is_some() {
+        warn!(
+            old = ENV_P2P_FORWARDER_NODE_ID,
+            new = ENV_P2P_FORWARDER_ENDPOINT_ID,
+            "legacy P2P forwarder env var was renamed and is ignored"
+        );
+    }
     p2p_config_from_lookup(|key| std::env::var(key).ok(), default_key_path)
 }
 
