@@ -138,7 +138,7 @@ export const FORWARDER_HELP = {
     },
     tips: [
       "Enable power actions only when you need to restart or shut down the physical device. Disable again after use.",
-      "Restarting the forwarder service (not device) preserves network connections and is usually sufficient for troubleshooting.",
+      "Restarting the forwarder service briefly disconnects readers and receivers, but journaled reads are preserved and replayed after reconnection.",
     ],
     seeAlso: [{ sectionKey: "dangerous_actions", label: "Dangerous Actions" }],
   },
@@ -232,23 +232,65 @@ export const FORWARDER_HELP = {
       "If the status port conflicts with another service, change it to an unused port.",
     ],
   },
-  update: {
-    title: "Update",
-    overview: "Controls how the forwarder checks for and applies software updates.",
+  ups: {
+    title: "UPS (PiSugar)",
+    overview: "Configure PiSugar UPS monitoring so the forwarder can report battery state and warn when external power is unplugged.",
     fields: {
-      update_mode: {
-        label: "Update Mode",
-        summary: "How the forwarder handles software updates: automatic, check-only, or disabled.",
-        detailHtml: "Controls the forwarder's update behavior.<br><br><strong>Automatic</strong>: Checks for updates and downloads/applies them automatically. The service will restart to apply updates.<br><br><strong>Check Only</strong>: Checks for updates and notifies but does not download or apply them. Use this when you want to review updates before applying.<br><br><strong>Disabled</strong>: No update checking. Use this on race day to prevent unexpected restarts.",
-        default: "Automatic",
-        range: "Automatic, Check Only, Disabled",
-        recommended: "Set to Disabled on race day to prevent unexpected restarts. Use Automatic or Check Only during setup.",
+      enabled: {
+        label: "Enable UPS Monitoring",
+        summary: "Turns on polling of the PiSugar UPS daemon.",
+        detailHtml: "When enabled, the forwarder polls the PiSugar daemon for battery percentage, charging state, and external power state. The status page shows battery information and warns when the forwarder is running on battery power.<br><br>Disable this if the forwarder does not have a PiSugar UPS attached.",
+        default: "Disabled",
+        recommended: "Enable on battery-backed Raspberry Pi forwarders. Leave disabled on devices without PiSugar hardware.",
+      },
+      daemon_addr: {
+        label: "Daemon Address",
+        summary: "Host and port of the PiSugar daemon.",
+        detailHtml: "Network address used to read PiSugar UPS telemetry. Leave blank to use the standard local PiSugar daemon address. Use a custom value only if the daemon is exposed on a different host or port.",
+        default: "127.0.0.1:8423",
+        range: "Valid host:port value",
+      },
+      poll_interval_secs: {
+        label: "Poll Interval",
+        summary: "How often the forwarder reads battery state from PiSugar.",
+        detailHtml: "Polling more often makes the UI update sooner when power or battery state changes. Polling less often reduces background work. The forwarder also sends UPS status upstream on the heartbeat interval.",
+        default: "5 seconds",
+        range: "1-60 seconds",
+        recommended: "Use the default 5-second interval unless you need slower polling on a constrained device.",
+      },
+      upstream_heartbeat_secs: {
+        label: "Heartbeat Interval",
+        summary: "How often UPS status is sent upstream for coordination/status views.",
+        detailHtml: "Controls the periodic UPS heartbeat sent to upstream status consumers. The local UI can update from each poll, but upstream dashboards use this heartbeat cadence.",
+        default: "60 seconds",
+        range: "10-300 seconds",
+        recommended: "Use the default 60-second heartbeat for normal deployments.",
       },
     },
     tips: [
-      "<strong>Set Update Mode to Disabled on race day</strong> to prevent unexpected service restarts during timing.",
+      "If the status page says UPS unavailable, verify the PiSugar daemon is running and the daemon address is correct.",
+      "A battery warning means external power is unplugged or not detected. Check power before starting the next race.",
+      "Leave blank values to use the forwarder's PiSugar defaults.",
+    ],
+    seeAlso: [{ sectionKey: "service_overview", label: "Service" }],
+  },
+  update: {
+    title: "Update",
+    overview: "Controls how the forwarder checks for and stages software updates.",
+    fields: {
+      update_mode: {
+        label: "Update Mode",
+        summary: "How the forwarder handles software updates: automatic download, check-only, or disabled.",
+        detailHtml: "Controls the forwarder's update behavior.<br><br><strong>Automatic</strong>: Checks for updates and downloads/stages them automatically. The UI shows <strong>Update Now</strong> when a downloaded update is ready to install; installing the update restarts the service.<br><br><strong>Check Only</strong>: Checks for updates and notifies but does not download or install them. Use this when you want to review updates before downloading.<br><br><strong>Disabled</strong>: No automatic update checking. Use this on race day to avoid update prompts and unexpected background downloads.",
+        default: "Automatic",
+        range: "Automatic, Check Only, Disabled",
+        recommended: "Set to Disabled on race day. Use Automatic or Check Only during setup.",
+      },
+    },
+    tips: [
+      "<strong>Set Update Mode to Disabled on race day</strong> to prevent update activity during timing.",
       "Use 'Check Now' to manually trigger an update check regardless of the mode setting.",
-      "After an update is applied, verify all readers reconnect and the forwarder is functioning correctly.",
+      "After installing an update, verify all readers reconnect and the forwarder is functioning correctly.",
     ],
     seeAlso: [{ sectionKey: "controls", label: "Forwarder Controls" }],
   },
@@ -297,10 +339,20 @@ export const FORWARDER_HELP = {
         summary: "Whether receivers currently have active P2P sessions with this forwarder.",
         detailHtml: "<strong>Connected</strong>: At least one receiver is actively subscribed over iroh.<br><br><strong>Disconnected</strong>: No receiver is currently connected. Reads continue to accumulate in the journal and will replay from each receiver cursor when sessions resume.",
       },
+      server: {
+        label: "Server",
+        summary: "Server registration and approval status for this forwarder.",
+        detailHtml: "Shows whether the coordination server has accepted this forwarder and whether the server can currently be reached.<br><br><strong>Waiting for approval</strong> means the forwarder has registered, but the server has not approved it for receiver access yet.<br><br><strong>Server unreachable</strong> means the forwarder could not contact the server. Existing live P2P sessions may keep running, but new receiver coordination and allow-list updates may not work until connectivity returns.",
+      },
       restart_needed: {
         label: "Restart Needed",
         summary: "Whether a saved configuration change is waiting to take effect.",
         detailHtml: "Shows <strong>Pending</strong> when a configuration change has been saved but not yet applied. The running service must restart to pick up the changes. Click <strong>Restart Now</strong> to apply.<br><br>Shows <strong>None</strong> when the running service reflects the current configuration.",
+      },
+      battery: {
+        label: "Battery",
+        summary: "UPS battery status when PiSugar monitoring is configured.",
+        detailHtml: "Shows the current PiSugar UPS battery state when UPS monitoring is enabled. A percentage with a charging indicator means the forwarder is receiving UPS telemetry.<br><br>A dash or unavailable warning means the UPS monitor is configured but the forwarder cannot currently read the PiSugar daemon. Check power, the daemon address, and the PiSugar service if this appears unexpectedly.",
       },
     },
     tips: [
@@ -338,6 +390,16 @@ export const FORWARDER_HELP = {
         label: "Last Seen",
         summary: "How long ago the most recent chip read was received from this reader.",
         detailHtml: "The time elapsed since the forwarder last received a chip read from this reader. Updates automatically while the page is open.<br><br>Shows <strong>never</strong> if no reads have been received in the current session. A rapidly increasing value while the reader is connected may indicate the timing mat is idle or no chips are in range.",
+      },
+      current_epoch: {
+        label: "Current Epoch",
+        summary: "The active epoch number for this reader's stream.",
+        detailHtml: "Epochs divide a reader's stream into race or wave segments. The current epoch number is attached to new reads from this reader so receivers can distinguish them from earlier segments.<br><br>Advancing the epoch starts a new segment. Existing reads are not deleted and remain associated with their original epoch.",
+      },
+      current_epoch_created: {
+        label: "Epoch Created",
+        summary: "When the current epoch was started.",
+        detailHtml: "The local date and time when the current epoch was created. Use this to confirm that you advanced the epoch at the intended race or wave boundary.<br><br>A dash means the forwarder does not have a creation timestamp for the current epoch, usually because the epoch was created before this metadata was recorded.",
       },
       epoch_name: {
         label: "Epoch Name",

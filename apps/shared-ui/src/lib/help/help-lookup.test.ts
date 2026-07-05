@@ -128,6 +128,10 @@ describe("template wiring validation", () => {
     { context: "forwarder", section: "journal", field: "sqlite_path" },
     { context: "forwarder", section: "journal", field: "prune_watermark_pct" },
     { context: "forwarder", section: "status_http", field: "bind" },
+    { context: "forwarder", section: "ups", field: "enabled" },
+    { context: "forwarder", section: "ups", field: "daemon_addr" },
+    { context: "forwarder", section: "ups", field: "poll_interval_secs" },
+    { context: "forwarder", section: "ups", field: "upstream_heartbeat_secs" },
     { context: "forwarder", section: "update", field: "update_mode" },
     // forwarder-ui +page.svelte & legacy dashboard +page.svelte
     { context: "forwarder", section: "read_mode", field: "read_mode" },
@@ -140,6 +144,8 @@ describe("template wiring validation", () => {
     // receiver-ui admin/+page.svelte
     { context: "receiver-admin", section: "port_overrides", field: "port_override" },
     // reader live controls
+    { context: "forwarder", section: "reader_live", field: "current_epoch" },
+    { context: "forwarder", section: "reader_live", field: "current_epoch_created" },
     { context: "forwarder", section: "reader_live", field: "clock_drift" },
     { context: "forwarder", section: "reader_live", field: "tto_bytes" },
     { context: "forwarder", section: "reader_live", field: "sync_clock" },
@@ -167,6 +173,7 @@ describe("template wiring validation", () => {
     { context: "forwarder", section: "auth" },
     { context: "forwarder", section: "journal" },
     { context: "forwarder", section: "status_http" },
+    { context: "forwarder", section: "ups" },
     { context: "forwarder", section: "update" },
     // forwarder-ui & legacy dashboard +page.svelte (HelpDialog usage)
     { context: "forwarder", section: "read_mode" },
