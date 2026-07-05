@@ -1,13 +1,25 @@
 import { describe, expect, it } from "vitest";
 import adminTab from "./AdminTab.svelte?raw";
+import cursorResetSection from "./admin/CursorResetSection.svelte?raw";
+import dangerActionsSection from "./admin/DangerActionsSection.svelte?raw";
+import earliestEpochSection from "./admin/EarliestEpochSection.svelte?raw";
+import portOverridesSection from "./admin/PortOverridesSection.svelte?raw";
 import announcerTab from "./AnnouncerTab.svelte?raw";
 import configTab from "./ConfigTab.svelte?raw";
 import connectionsTab from "./ConnectionsTab.svelte?raw";
 import statusBar from "./StatusBar.svelte?raw";
 import streamsTab from "./StreamsTab.svelte?raw";
 
+// The admin UI is composed from the thin AdminTab plus shared per-section
+// components; coverage assertions run against the combined source.
 const components: Record<string, string> = {
-  AdminTab: adminTab,
+  AdminTab: [
+    adminTab,
+    cursorResetSection,
+    earliestEpochSection,
+    portOverridesSection,
+    dangerActionsSection,
+  ].join("\n"),
   AnnouncerTab: announcerTab,
   ConfigTab: configTab,
   ConnectionsTab: connectionsTab,

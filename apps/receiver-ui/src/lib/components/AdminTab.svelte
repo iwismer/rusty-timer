@@ -1,243 +1,40 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { HelpTip } from "@rusty-timer/shared-ui";
-  import * as api from "$lib/api";
+  import { AdminActions } from "$lib/admin-actions.svelte";
   import { loadAll as globalLoadAll, openHelp } from "$lib/store.svelte";
+  import CursorResetSection from "./admin/CursorResetSection.svelte";
+  import DangerActionsSection from "./admin/DangerActionsSection.svelte";
+  import EarliestEpochSection from "./admin/EarliestEpochSection.svelte";
+  import PortOverridesSection from "./admin/PortOverridesSection.svelte";
 
-  let streams = $state<api.StreamEntry[]>([]);
-  let subscriptions = $state<api.SubscriptionItem[]>([]);
-  let loading = $state(true);
-  let loadError = $state<string | null>(null);
-  let inFlightKeys = $state<Set<string>>(new Set());
-  let inFlightAction = $state<string | null>(null);
-  let feedback = $state<{ message: string; ok: boolean } | null>(null);
-  let confirmingClearData = $state(false);
-  let confirmingFactoryReset = $state(false);
-  let portEdits = $state<Map<string, string>>(new Map());
+  // Refresh global store state after every bulk action so other tabs see the
+  // changes; Clear Data passes { forceHydrateMode: true }.
+  const actions = new AdminActions({
+    afterMutate: (opts) => globalLoadAll(opts),
+  });
 
-  function streamKey(s: {
-    forwarder_endpoint_id: string;
-    stream_id: string;
-  }): string {
-    return `${s.forwarder_endpoint_id}/${s.stream_id}`;
-  }
-
-  function streamLabel(s: api.StreamEntry): string {
-    return (
-      s.display_alias ??
-      (s.forwarder_id && s.reader_ip
-        ? `${s.forwarder_id} / ${s.reader_ip}`
-        : s.stream_id)
-    );
-  }
-
-  function setFeedback(message: string, ok: boolean) {
-    feedback = { message, ok };
-  }
-
-  async function loadAll() {
-    loading = true;
-    loadError = null;
-    try {
-      const [streamsResp, subsResp] = await Promise.all([
-        api.getStreams(),
-        api.getSubscriptions(),
-      ]);
-      streams = streamsResp.streams;
-      subscriptions = subsResp.subscriptions;
-    } catch {
-      streams = [];
-      subscriptions = [];
-      loadError = "Failed to load data.";
-    } finally {
-      loading = false;
-    }
-  }
-
-  async function handleResetCursor(stream: api.StreamEntry) {
-    const key = streamKey(stream);
-    inFlightKeys = new Set(inFlightKeys).add(key);
-    feedback = null;
-    try {
-      await api.resetStreamCursor({
-        forwarder_endpoint_id: stream.forwarder_endpoint_id,
-        stream_id: stream.stream_id,
-      });
-      setFeedback(`Cursor reset for ${streamLabel(stream)}.`, true);
-    } catch {
-      setFeedback(`Failed to reset cursor for ${streamLabel(stream)}.`, false);
-    } finally {
-      const next = new Set(inFlightKeys);
-      next.delete(key);
-      inFlightKeys = next;
-    }
-  }
-
-  async function handleBulkAction(
-    action: () => Promise<{ deleted: number } | void>,
-    label: string,
-    actionId: string,
-    refreshGlobal: () => Promise<void> | void = () => globalLoadAll(),
-  ) {
-    inFlightAction = actionId;
-    feedback = null;
-    try {
-      const result = await action();
-      if (result && typeof result === "object" && "deleted" in result) {
-        setFeedback(`${label}: ${result.deleted} item(s) removed.`, true);
-      } else {
-        setFeedback(`${label}: done.`, true);
-      }
-      await loadAll();
-      // Also refresh global store state so other tabs see the changes.
-      await refreshGlobal();
-    } catch {
-      setFeedback(`${label}: failed.`, false);
-    } finally {
-      inFlightAction = null;
-    }
-  }
-
-  async function handleResetEpoch(stream: api.StreamEntry) {
-    const key = `epoch-${streamKey(stream)}`;
-    inFlightKeys = new Set(inFlightKeys).add(key);
-    feedback = null;
-    try {
-      await api.resetEarliestEpoch({
-        forwarder_endpoint_id: stream.forwarder_endpoint_id,
-        stream_id: stream.stream_id,
-      });
-      setFeedback(
-        `Earliest-epoch override reset for ${streamLabel(stream)}.`,
-        true,
-      );
-    } catch {
-      setFeedback(
-        `Failed to reset earliest-epoch for ${streamLabel(stream)}.`,
-        false,
-      );
-    } finally {
-      const next = new Set(inFlightKeys);
-      next.delete(key);
-      inFlightKeys = next;
-    }
-  }
-
-  function getPortDisplayValue(sub: api.SubscriptionItem): string {
-    const key = streamKey(sub);
-    if (portEdits.has(key)) return portEdits.get(key)!;
-    return sub.local_port_override?.toString() ?? "";
-  }
-
-  function handlePortInput(sub: api.SubscriptionItem, value: string) {
-    const next = new Map(portEdits);
-    next.set(streamKey(sub), value);
-    portEdits = next;
-  }
-
-  function isPortDirty(sub: api.SubscriptionItem): boolean {
-    const key = streamKey(sub);
-    if (!portEdits.has(key)) return false;
-    return portEdits.get(key)! !== (sub.local_port_override?.toString() ?? "");
-  }
-
-  async function handleSavePort(sub: api.SubscriptionItem) {
-    const key = streamKey(sub);
-    const raw = portEdits.get(key) ?? "";
-    const trimmed = raw.trim();
-    let portValue: number | null = null;
-    if (trimmed !== "") {
-      if (!/^\d+$/.test(trimmed)) {
-        setFeedback("Port must be 1-65535 or empty to clear.", false);
-        return;
-      }
-      const parsed = Number(trimmed);
-      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
-        setFeedback("Port must be 1-65535 or empty to clear.", false);
-        return;
-      }
-      portValue = parsed;
-    }
-    const actionKey = `port-${key}`;
-    inFlightKeys = new Set(inFlightKeys).add(actionKey);
-    feedback = null;
-    try {
-      await api.updateLocalPort(
-        {
-          forwarder_endpoint_id: sub.forwarder_endpoint_id,
-          stream_id: sub.stream_id,
-        },
-        portValue,
-      );
-      setFeedback(
-        portValue !== null
-          ? `Port override set to ${portValue} for ${sub.forwarder_id} / ${sub.reader_ip}.`
-          : `Port override cleared for ${sub.forwarder_id} / ${sub.reader_ip}.`,
-        true,
-      );
-      const next = new Map(portEdits);
-      next.delete(key);
-      portEdits = next;
-      await loadAll();
-    } catch {
-      setFeedback(
-        `Failed to update port for ${sub.forwarder_id} / ${sub.reader_ip}.`,
-        false,
-      );
-    } finally {
-      const next = new Set(inFlightKeys);
-      next.delete(actionKey);
-      inFlightKeys = next;
-    }
-  }
-
-  async function handleClearData() {
-    confirmingClearData = false;
-    await handleBulkAction(
-      () => api.clearData(),
-      "Clear data",
-      "clear-data",
-      () => globalLoadAll({ forceHydrateMode: true }),
-    );
-  }
-
-  async function handleFactoryReset() {
-    confirmingFactoryReset = false;
-    await handleBulkAction(
-      () => api.factoryReset(),
-      "Factory reset",
-      "factory-reset",
-    );
-  }
-
-  const btnWarn =
-    "px-2.5 py-1 text-xs font-medium rounded-md text-status-warn border border-status-warn-border bg-status-warn-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed";
-  const btnDanger =
-    "px-3 py-1.5 text-xs font-medium rounded-md text-status-err border border-status-err bg-transparent cursor-pointer hover:opacity-80";
-  const btnDangerConfirm =
-    "px-3 py-1.5 text-xs font-medium rounded-md text-white bg-status-err border border-status-err cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed";
-  const btnNeutral =
-    "px-2.5 py-1 text-xs font-medium rounded-md text-text-primary border border-border bg-surface-2 cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed";
-
-  onMount(loadAll);
+  onMount(() => {
+    void actions.loadAll();
+  });
 </script>
 
 <div class="max-w-[700px] mx-auto px-6 py-6">
-  {#if feedback}
+  {#if actions.feedback}
     <p
-      class="text-sm mb-4 m-0 {feedback.ok
+      class="text-sm mb-4 m-0 {actions.feedback.ok
         ? 'text-status-ok'
         : 'text-status-err'}"
       data-testid="admin-feedback"
     >
-      {feedback.message}
+      {actions.feedback.message}
     </p>
   {/if}
 
-  {#if loading}
+  {#if actions.loading}
     <p class="text-sm text-text-muted">Loading...</p>
-  {:else if loadError}
-    <p class="text-sm text-status-err">{loadError}</p>
+  {:else if actions.loadError}
+    <p class="text-sm text-status-err">{actions.loadError}</p>
   {:else}
     <div class="space-y-6">
       <!-- Cursor Reset -->
@@ -251,88 +48,7 @@
             onOpenModal={openHelp}
           />
         </h3>
-        <p class="text-xs text-text-muted m-0 mb-3">
-          Reset resume cursors per stream. The selected stream will replay from
-          the beginning on next connect.
-        </p>
-        {#if streams.length === 0}
-          <p class="text-xs text-text-muted m-0">No streams available.</p>
-        {:else}
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="border-b border-border text-left text-text-muted">
-                <th class="py-1.5 pr-3 font-medium text-xs">Stream</th>
-                <th class="py-1.5 pr-3 font-medium text-xs">
-                  Epoch
-                  <HelpTip
-                    fieldKey="stream_cursor"
-                    sectionKey="cursor_reset"
-                    context="receiver-admin"
-                    onOpenModal={openHelp}
-                  />
-                </th>
-                <th class="py-1.5 pr-3 font-medium text-xs">Seq</th>
-                <th class="py-1.5 font-medium text-xs"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each streams as stream (streamKey(stream))}
-                {@const key = streamKey(stream)}
-                <tr class="border-b border-border/50">
-                  <td class="py-1.5 pr-3 text-text-primary text-xs">
-                    {streamLabel(stream)}
-                    <span class="block text-text-muted font-mono"
-                      >{stream.reader_ip}</span
-                    >
-                  </td>
-                  <td class="py-1.5 pr-3 text-text-muted tabular-nums text-xs"
-                    >{stream.cursor_epoch ?? "\u2014"}</td
-                  >
-                  <td class="py-1.5 pr-3 text-text-muted tabular-nums text-xs"
-                    >{stream.cursor_seq ?? "\u2014"}</td
-                  >
-                  <td class="py-1.5 text-right">
-                    <button
-                      onclick={() => handleResetCursor(stream)}
-                      disabled={inFlightKeys.has(key)}
-                      class={btnWarn}
-                    >
-                      {inFlightKeys.has(key) ? "Resetting..." : "Reset Cursor"}
-                    </button>
-                    <HelpTip
-                      fieldKey="reset_cursor"
-                      sectionKey="cursor_reset"
-                      context="receiver-admin"
-                      onOpenModal={openHelp}
-                    />
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-          <div class="mt-3 flex justify-end">
-            <button
-              onclick={() =>
-                handleBulkAction(
-                  () => api.resetAllCursors(),
-                  "Reset all cursors",
-                  "reset-all-cursors",
-                )}
-              disabled={inFlightAction === "reset-all-cursors"}
-              class={btnWarn}
-            >
-              {inFlightAction === "reset-all-cursors"
-                ? "Resetting..."
-                : "Reset All Cursors"}
-            </button>
-            <HelpTip
-              fieldKey="reset_all_cursors"
-              sectionKey="cursor_reset"
-              context="receiver-admin"
-              onOpenModal={openHelp}
-            />
-          </div>
-        {/if}
+        <CursorResetSection {actions} compact {openHelp} />
       </section>
 
       <hr class="border-border" />
@@ -348,68 +64,7 @@
             onOpenModal={openHelp}
           />
         </h3>
-        <p class="text-xs text-text-muted m-0 mb-3">
-          Clear earliest-epoch overrides per stream or all at once.
-        </p>
-        {#if streams.length === 0}
-          <p class="text-xs text-text-muted m-0">No streams available.</p>
-        {:else}
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="border-b border-border text-left text-text-muted">
-                <th class="py-1.5 pr-3 font-medium text-xs">Stream</th>
-                <th class="py-1.5 font-medium text-xs"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each streams as stream (streamKey(stream))}
-                {@const key = `epoch-${streamKey(stream)}`}
-                <tr class="border-b border-border/50">
-                  <td class="py-1.5 pr-3 text-text-primary text-xs"
-                    >{streamLabel(stream)}</td
-                  >
-                  <td class="py-1.5 text-right">
-                    <button
-                      onclick={() => handleResetEpoch(stream)}
-                      disabled={inFlightKeys.has(key)}
-                      class={btnWarn}
-                    >
-                      {inFlightKeys.has(key) ? "Resetting..." : "Reset Epoch"}
-                    </button>
-                    <HelpTip
-                      fieldKey="reset_epoch_override"
-                      sectionKey="epoch_overrides"
-                      context="receiver-admin"
-                      onOpenModal={openHelp}
-                    />
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-          <div class="mt-3 flex justify-end">
-            <button
-              onclick={() =>
-                handleBulkAction(
-                  () => api.resetAllEarliestEpochs(),
-                  "Reset all earliest-epoch overrides",
-                  "reset-all-epochs",
-                )}
-              disabled={inFlightAction === "reset-all-epochs"}
-              class={btnWarn}
-            >
-              {inFlightAction === "reset-all-epochs"
-                ? "Resetting..."
-                : "Reset All Epoch Overrides"}
-            </button>
-            <HelpTip
-              fieldKey="reset_all_epoch_overrides"
-              sectionKey="epoch_overrides"
-              context="receiver-admin"
-              onOpenModal={openHelp}
-            />
-          </div>
-        {/if}
+        <EarliestEpochSection {actions} compact {openHelp} />
       </section>
 
       <hr class="border-border" />
@@ -425,244 +80,12 @@
             onOpenModal={openHelp}
           />
         </h3>
-        <p class="text-xs text-text-muted m-0 mb-3">
-          Set or clear the local forwarding port per subscription.
-        </p>
-        {#if subscriptions.length === 0}
-          <p class="text-xs text-text-muted m-0">No subscriptions.</p>
-        {:else}
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="border-b border-border text-left text-text-muted">
-                <th class="py-1.5 pr-3 font-medium text-xs">Forwarder</th>
-                <th class="py-1.5 pr-3 font-medium text-xs">Reader</th>
-                <th class="py-1.5 pr-3 font-medium text-xs">Port</th>
-                <th class="py-1.5 font-medium text-xs"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each subscriptions as sub (streamKey(sub))}
-                {@const portKey = `port-${streamKey(sub)}`}
-                <tr class="border-b border-border/50">
-                  <td class="py-1.5 pr-3 text-text-muted text-xs"
-                    >{sub.forwarder_id}</td
-                  >
-                  <td class="py-1.5 pr-3 text-text-muted text-xs"
-                    >{sub.reader_ip}</td
-                  >
-                  <td class="py-1.5 pr-3">
-                    <input
-                      type="text"
-                      inputmode="numeric"
-                      placeholder="default"
-                      value={getPortDisplayValue(sub)}
-                      oninput={(e) =>
-                        handlePortInput(
-                          sub,
-                          (e.target as HTMLInputElement).value,
-                        )}
-                      class="w-20 px-2 py-0.5 text-xs rounded border border-border bg-surface-0 text-text-primary font-mono"
-                    />
-                  </td>
-                  <td class="py-1.5 text-right">
-                    <button
-                      onclick={() => handleSavePort(sub)}
-                      disabled={!isPortDirty(sub) || inFlightKeys.has(portKey)}
-                      class={btnNeutral}
-                    >
-                      {inFlightKeys.has(portKey) ? "Saving..." : "Save"}
-                    </button>
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {/if}
+        <PortOverridesSection {actions} compact />
       </section>
 
       <hr class="border-border" />
 
-      <!-- Purge Subscriptions -->
-      <section>
-        <h3 class="text-sm font-semibold text-text-primary mb-1">
-          Purge Subscriptions
-        </h3>
-        <p class="text-xs text-text-muted m-0 mb-3">
-          Remove all stream subscriptions.
-        </p>
-        <button
-          onclick={() =>
-            handleBulkAction(
-              () => api.purgeSubscriptions(),
-              "Purge subscriptions",
-              "purge-subs",
-            )}
-          disabled={inFlightAction === "purge-subs" ||
-            subscriptions.length === 0}
-          class={btnWarn}
-        >
-          {inFlightAction === "purge-subs"
-            ? "Purging..."
-            : "Purge All Subscriptions"}
-        </button>
-        <HelpTip
-          fieldKey="purge_all_subscriptions"
-          sectionKey="purge_subscriptions"
-          context="receiver-admin"
-          onOpenModal={openHelp}
-        />
-      </section>
-
-      <hr class="border-border" />
-
-      <!-- Reset Profile -->
-      <section>
-        <h3 class="text-sm font-semibold text-text-primary mb-1">
-          Reset Profile
-        </h3>
-        <p class="text-xs text-text-muted m-0 mb-3">
-          Clear server URL, token, and receiver ID back to defaults.
-        </p>
-        <button
-          onclick={() =>
-            handleBulkAction(
-              () => api.resetProfile(),
-              "Reset profile",
-              "reset-profile",
-            )}
-          disabled={inFlightAction === "reset-profile"}
-          class={btnWarn}
-        >
-          {inFlightAction === "reset-profile"
-            ? "Resetting..."
-            : "Reset Profile to Defaults"}
-        </button>
-        <HelpTip
-          fieldKey="reset_profile_action"
-          sectionKey="reset_profile"
-          context="receiver-admin"
-          onOpenModal={openHelp}
-        />
-      </section>
-
-      <hr class="border-border" />
-
-      <!-- Clear Data -->
-      <section>
-        <h3 class="text-sm font-semibold text-status-err mb-1">
-          Clear Data
-          <HelpTip
-            fieldKey="clear_data_action"
-            sectionKey="clear_data"
-            context="receiver-admin"
-            onOpenModal={openHelp}
-          />
-        </h3>
-        <p class="text-xs text-text-muted m-0 mb-3">
-          Clear local subscriptions, cursors, mode, and DBF config. Keeps the
-          server URL, token, and receiver ID.
-        </p>
-        {#if confirmingClearData}
-          <div class="flex items-center gap-3">
-            <span class="text-sm text-status-err font-medium"
-              >Are you sure?</span
-            >
-            <button
-              onclick={handleClearData}
-              disabled={inFlightAction === "clear-data"}
-              class={btnDangerConfirm}
-            >
-              {inFlightAction === "clear-data"
-                ? "Clearing..."
-                : "Yes, Clear Data"}
-            </button>
-            <HelpTip
-              fieldKey="clear_data_action"
-              sectionKey="clear_data"
-              context="receiver-admin"
-              onOpenModal={openHelp}
-            />
-            <button
-              onclick={() => (confirmingClearData = false)}
-              class={btnNeutral}
-            >
-              Cancel
-            </button>
-          </div>
-        {:else}
-          <button
-            onclick={() => (confirmingClearData = true)}
-            class={btnDanger}
-          >
-            Clear Data...
-          </button>
-          <HelpTip
-            fieldKey="clear_data_action"
-            sectionKey="clear_data"
-            context="receiver-admin"
-            onOpenModal={openHelp}
-          />
-        {/if}
-      </section>
-
-      <hr class="border-border" />
-
-      <!-- Factory Reset -->
-      <section>
-        <h3 class="text-sm font-semibold text-status-err mb-1">
-          Factory Reset
-          <HelpTip
-            fieldKey="factory_reset_action"
-            sectionKey="factory_reset"
-            context="receiver-admin"
-            onOpenModal={openHelp}
-          />
-        </h3>
-        <p class="text-xs text-text-muted m-0 mb-3">
-          Clear <strong>all</strong> local data. This cannot be undone.
-        </p>
-        {#if confirmingFactoryReset}
-          <div class="flex items-center gap-3">
-            <span class="text-sm text-status-err font-medium"
-              >Are you sure?</span
-            >
-            <button
-              onclick={handleFactoryReset}
-              disabled={inFlightAction === "factory-reset"}
-              class={btnDangerConfirm}
-            >
-              {inFlightAction === "factory-reset"
-                ? "Resetting..."
-                : "Yes, Factory Reset"}
-            </button>
-            <HelpTip
-              fieldKey="factory_reset_action"
-              sectionKey="factory_reset"
-              context="receiver-admin"
-              onOpenModal={openHelp}
-            />
-            <button
-              onclick={() => (confirmingFactoryReset = false)}
-              class={btnNeutral}
-            >
-              Cancel
-            </button>
-          </div>
-        {:else}
-          <button
-            onclick={() => (confirmingFactoryReset = true)}
-            class={btnDanger}
-          >
-            Factory Reset...
-          </button>
-          <HelpTip
-            fieldKey="factory_reset_action"
-            sectionKey="factory_reset"
-            context="receiver-admin"
-            onOpenModal={openHelp}
-          />
-        {/if}
-      </section>
+      <DangerActionsSection {actions} compact showClearData {openHelp} />
     </div>
   {/if}
 </div>
