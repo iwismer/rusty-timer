@@ -431,6 +431,13 @@ pub struct Signals {
     _conn_state_keepalive: watch::Receiver<ConnectionState>,
     /// State transitions already applied by the sync guard-drop fallback but
     /// still needing the async path's UI/log side effects.
+    ///
+    /// Holds at most one pending transition: a second sync-fallback transition
+    /// before the async recompute consumes the marker overwrites the first, so
+    /// intermediate transitions coalesce and only the final state's side
+    /// effects (UI status event + log line) are emitted. That is intentional:
+    /// final-state emission is what matters; intermediate states may skip
+    /// their UI/log emission.
     pending_connection_state_side_effect: StdMutex<Option<ConnectionState>>,
     pub shutdown_tx: watch::Sender<ShutdownSignal>,
     connect_attempt: AtomicU64,
@@ -3748,6 +3755,25 @@ mod tests {
         assert!(
             rx.has_changed().unwrap(),
             "changing a subscription event type must signal the DBF worker to regenerate"
+        );
+
+        // A same-value update is a no-op and must NOT signal: SQLite counts
+        // identity updates as changed rows, and a spurious signal resets the
+        // DBF worker's pass state (full cross-stream regenerate).
+        let rx = state.subscriptions_rx();
+        update_subscription_event_type(
+            &state,
+            "endpoint-1",
+            "stream-1",
+            EventTypeRequest {
+                event_type: crate::db::EventType::Start,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            !rx.has_changed().unwrap(),
+            "a same-value event-type update must not signal the DBF worker"
         );
     }
 

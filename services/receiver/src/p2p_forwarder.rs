@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use rt_iroh::{Endpoint, EndpointAddr, RecvStream, SendStream};
@@ -38,13 +39,29 @@ pub struct ForwarderDataStream {
     pub subscription: StreamSubscription,
 }
 
+/// Desired-streams watch payload: the desired set plus a monotonically
+/// increasing generation stamped by `set_desired_streams`. The connection task
+/// echoes the generation of the last update it finished reconciling through
+/// `ForwarderConnection::synced_generation`, giving tests a barrier that
+/// proves a specific update was processed (the watch channel coalesces
+/// back-to-back sends, so "send then assert" is otherwise racy).
+#[derive(Clone, Debug, Default)]
+struct DesiredStreams {
+    generation: u64,
+    streams: HashMap<String, ForwarderDataStream>,
+}
+
 /// Owns one live control session to a forwarder and opens one data bi-stream per
 /// desired stream on that same QUIC connection.
 #[derive(Debug)]
 pub struct ForwarderConnection {
     /// The forwarder this connection dials; kept for stop-timeout logging.
     endpoint_id: String,
-    desired_tx: watch::Sender<HashMap<String, ForwarderDataStream>>,
+    desired_tx: watch::Sender<DesiredStreams>,
+    /// Generation of the last desired-streams update the connection task
+    /// finished reconciling (see `DesiredStreams`). Read only by tests.
+    #[cfg_attr(not(test), allow(dead_code))]
+    synced_generation: Arc<AtomicU64>,
     shutdown_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
@@ -60,8 +77,9 @@ impl ForwarderConnection {
         reporter: Arc<SessionStatusReporter>,
         backoff: BackoffConfig,
     ) -> Self {
-        let (desired_tx, desired_rx) = watch::channel(HashMap::new());
+        let (desired_tx, desired_rx) = watch::channel(DesiredStreams::default());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let synced_generation = Arc::new(AtomicU64::new(0));
         let task = tokio::spawn(run_forwarder_connection(
             endpoint_id.clone(),
             endpoint,
@@ -71,11 +89,13 @@ impl ForwarderConnection {
             reporter,
             backoff,
             desired_rx,
+            Arc::clone(&synced_generation),
             shutdown_rx,
         ));
         Self {
             endpoint_id,
             desired_tx,
+            synced_generation,
             shutdown_tx,
             task,
         }
@@ -97,7 +117,23 @@ impl ForwarderConnection {
                 (stream.local_stream_key.as_str().to_owned(), stream)
             })
             .collect();
-        let _ = self.desired_tx.send(desired);
+        self.desired_tx.send_modify(|current| {
+            current.generation += 1;
+            current.streams = desired;
+        });
+    }
+
+    /// Generation stamped on the most recent `set_desired_streams` call.
+    #[cfg(test)]
+    fn desired_generation(&self) -> u64 {
+        self.desired_tx.borrow().generation
+    }
+
+    /// Generation of the last desired-streams update the connection task
+    /// finished reconciling.
+    #[cfg(test)]
+    fn synced_generation(&self) -> u64 {
+        self.synced_generation.load(Ordering::Acquire)
     }
 
     #[must_use]
@@ -131,7 +167,8 @@ async fn run_forwarder_connection(
     client_hello: Hello,
     reporter: Arc<SessionStatusReporter>,
     backoff: BackoffConfig,
-    mut desired_rx: watch::Receiver<HashMap<String, ForwarderDataStream>>,
+    mut desired_rx: watch::Receiver<DesiredStreams>,
+    synced_generation: Arc<AtomicU64>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let mut next_delay = backoff.initial;
@@ -163,6 +200,7 @@ async fn run_forwarder_connection(
                     &writer,
                     &reporter,
                     &mut desired_rx,
+                    &synced_generation,
                     &mut shutdown_rx,
                 )
                 .await;
@@ -194,12 +232,14 @@ fn next_backoff(current: Duration, max: Duration) -> Duration {
     current.saturating_mul(2).min(max)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_connected_forwarder(
     endpoint_id: &str,
     session: crate::p2p_session::ControlSession,
     writer: &WriterHandle,
     reporter: &Arc<SessionStatusReporter>,
-    desired_rx: &mut watch::Receiver<HashMap<String, ForwarderDataStream>>,
+    desired_rx: &mut watch::Receiver<DesiredStreams>,
+    synced_generation: &AtomicU64,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) {
     let _control_guard = reporter.on_control_connected(endpoint_id).await;
@@ -278,12 +318,13 @@ async fn run_connected_forwarder(
         &connection,
         writer,
         reporter,
-        &desired,
+        &desired.streams,
         &mut data_tasks,
         &mut failed_streams,
         &mut panic_exits,
     )
     .await;
+    synced_generation.store(desired.generation, Ordering::Release);
 
     // BUG 1 fix: cancel-safe control reads. A dedicated task exclusively owns
     // the control `RecvStream` and loops `read_frame` (which uses `read_exact`
@@ -337,11 +378,12 @@ async fn run_connected_forwarder(
                     &connection,
                     writer,
                     reporter,
-                    &desired,
+                    &desired.streams,
                     &mut data_tasks,
                     &mut failed_streams,
                     &mut panic_exits,
                 ).await;
+                synced_generation.store(desired.generation, Ordering::Release);
             }
             frame = frame_rx.recv() => {
                 match frame {
@@ -940,6 +982,32 @@ mod tests {
         LocalStreamKey::new(endpoint_id, STREAM_ID)
     }
 
+    /// Barrier: wait until the connection task has finished a reconcile pass
+    /// for the LATEST `set_desired_streams` update. The desired-streams watch
+    /// channel coalesces back-to-back sends, so asserting immediately after a
+    /// send is vacuous — the task may not have observed that value yet (or
+    /// ever, for an intermediate value).
+    async fn wait_for_reconcile(connection: &ForwarderConnection) {
+        let target = connection.desired_generation();
+        poll_until(
+            || async { connection.synced_generation() >= target },
+            Duration::from_secs(10),
+        )
+        .await;
+    }
+
+    /// The `failed_stream_ids` currently surfaced for `endpoint_id` through
+    /// the connections payload.
+    async fn failed_stream_ids(state: &AppState, endpoint_id: &str) -> Vec<String> {
+        get_connections(state)
+            .await
+            .forwarders
+            .iter()
+            .find(|forwarder| forwarder.endpoint_id == endpoint_id)
+            .map(|forwarder| forwarder.failed_stream_ids.clone())
+            .unwrap_or_default()
+    }
+
     fn test_subscription(endpoint_id: &str) -> crate::db::StreamSubscription {
         crate::db::StreamSubscription {
             forwarder_endpoint_id: endpoint_id.to_owned(),
@@ -1319,15 +1387,23 @@ mod tests {
 
             // Further reconcile passes with an unchanged subscription config
             // must not respawn the terminally failed stream: exactly one
-            // subscribe attempt on this connection. This assertion is made
-            // immediately before the positive config-change retry below, so the
-            // test does not pass merely because a wall-clock delay was too
-            // short to observe a slow respawn.
+            // subscribe attempt on this connection. The barrier proves the
+            // connection task fully reconciled THIS update (the watch channel
+            // coalesces, so without it the task might never observe the value
+            // before the assertion); the failure-marker check is synchronous
+            // with that reconcile pass, so a wrongly cleared marker cannot
+            // hide behind data-task spawn latency.
             connection.set_desired_streams(desired());
+            wait_for_reconcile(&connection).await;
             assert_eq!(
                 forwarder.subscribes().len(),
                 1,
                 "a terminally failed stream must not be respawned on the same connection"
+            );
+            assert_eq!(
+                failed_stream_ids(&state, &endpoint_id).await,
+                vec![STREAM_ID.to_owned()],
+                "an unchanged-config reconcile pass must keep the failure marker"
             );
 
             // An announcer-driven stream-worker rebuild swaps the hint channel
@@ -1341,10 +1417,16 @@ mod tests {
                 durable_hint_tx: Some(rebuilt_hint_tx.clone()),
                 subscription: test_subscription(&endpoint_id),
             }]);
+            wait_for_reconcile(&connection).await;
             assert_eq!(
                 forwarder.subscribes().len(),
                 1,
                 "a hint-channel swap without a subscription config change (announcer rebuild) must not clear the failure marker"
+            );
+            assert_eq!(
+                failed_stream_ids(&state, &endpoint_id).await,
+                vec![STREAM_ID.to_owned()],
+                "a hint-channel swap (announcer rebuild) must keep the failure marker"
             );
 
             // A REAL subscription config change clears the failure and permits

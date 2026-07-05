@@ -224,12 +224,16 @@ pub async fn update_subscription_event_type(
         stream_id,
         body.event_type,
     ) {
-        Ok(true) => {
+        Ok(Some(changed)) => {
             drop(db);
-            state.notify_subscriptions_changed();
+            // A same-value update is a no-op: signaling would needlessly reset
+            // the DBF worker's pass state and force a cross-stream regenerate.
+            if changed {
+                state.notify_subscriptions_changed();
+            }
             Ok(())
         }
-        Ok(false) => Err(ReceiverError::BadRequest(
+        Ok(None) => Err(ReceiverError::BadRequest(
             "subscription not found".to_owned(),
         )),
         Err(e) => Err(ReceiverError::Internal(e.to_string())),

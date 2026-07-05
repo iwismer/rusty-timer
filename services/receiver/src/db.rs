@@ -1685,19 +1685,37 @@ impl Db {
         Ok(count > 0)
     }
 
+    /// Set a subscription's event type by stream identity. Returns `None`
+    /// when no subscription matches, `Some(true)` when a row was updated, and
+    /// `Some(false)` when the stored value already matched — SQLite counts
+    /// identity updates as changed rows, and callers use "changed" to fire a
+    /// full DBF pass reset, so a same-value write must not count as a change.
     pub fn update_stream_subscription_event_type(
         &self,
         forwarder_endpoint_id: &str,
         stream_id: &str,
         event_type: EventType,
-    ) -> DbResult<bool> {
+    ) -> DbResult<Option<bool>> {
         let count = self.conn.execute(
             "UPDATE subscriptions
              SET event_type = ?1
-             WHERE forwarder_endpoint_id = ?2 AND stream_id = ?3",
+             WHERE forwarder_endpoint_id = ?2 AND stream_id = ?3
+               AND event_type != ?1",
             rusqlite::params![event_type.as_str(), forwarder_endpoint_id, stream_id],
         )?;
-        Ok(count > 0)
+        if count > 0 {
+            return Ok(Some(true));
+        }
+        let exists = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM subscriptions
+                 WHERE forwarder_endpoint_id = ?1 AND stream_id = ?2",
+                rusqlite::params![forwarder_endpoint_id, stream_id],
+                |_| Ok(()),
+            )
+            .optional()?;
+        Ok(exists.map(|()| false))
     }
 
     /// Resolve a subscription's DBF delivery parameters: the persisted
