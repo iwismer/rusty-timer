@@ -341,6 +341,22 @@ async fn main() {
             }
         };
         status_server.set_reader_total(reader_addr, total).await;
+
+        let epoch_metadata = {
+            let j = journal.lock().await;
+            match j.current_epoch_metadata(reader_addr) {
+                Ok(metadata) => metadata,
+                Err(e) => {
+                    warn!(reader_ip = %reader_addr, error = %e, "failed to load reader epoch metadata");
+                    None
+                }
+            }
+        };
+        if let Some(metadata) = epoch_metadata {
+            status_server
+                .set_reader_epoch_metadata(reader_addr, metadata)
+                .await;
+        }
     }
 
     // Set forwarder identity on status page

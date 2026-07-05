@@ -354,6 +354,16 @@ impl StatusServer {
         self.store.set_reader_total(reader_ip, total).await;
     }
 
+    pub async fn set_reader_epoch_metadata(
+        &self,
+        reader_ip: &str,
+        metadata: crate::storage::journal::CurrentEpochMetadata,
+    ) {
+        self.store
+            .set_reader_epoch_metadata(reader_ip, metadata)
+            .await;
+    }
+
     /// Set the current epoch name for a reader and broadcast a ReaderUpdated SSE event.
     pub async fn set_reader_epoch_name(&self, reader_ip: &str, name: Option<String>) {
         self.store.set_reader_epoch_name(reader_ip, name).await;

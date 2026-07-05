@@ -1053,6 +1053,22 @@ impl StatusStore {
         self.publish_display_state().await;
     }
 
+    /// Seed a reader's current epoch metadata from durable journal state.
+    pub async fn set_reader_epoch_metadata(
+        &self,
+        reader_ip: &str,
+        metadata: crate::storage::journal::CurrentEpochMetadata,
+    ) {
+        {
+            let mut ss = self.subsystem.lock().await;
+            if let Some(r) = ss.readers.get_mut(reader_ip) {
+                r.current_epoch = Some(metadata.epoch);
+                r.current_epoch_created_unix_ms = metadata.created_unix_ms;
+            }
+        }
+        self.publish_display_state().await;
+    }
+
     /// Set the current epoch name for a reader and broadcast a ReaderUpdated SSE event.
     pub async fn set_reader_epoch_name(&self, reader_ip: &str, name: Option<String>) {
         {
@@ -1171,6 +1187,34 @@ mod tests {
             cached: true,
             checked_unix_ms,
         }
+    }
+
+    #[tokio::test]
+    async fn set_reader_epoch_metadata_updates_control_snapshot() {
+        let store = StatusStore::new(SubsystemStatus::ready());
+        store.init_readers(&[("reader-a".to_owned(), 10_001)]).await;
+
+        store
+            .set_reader_epoch_metadata(
+                "reader-a",
+                crate::storage::journal::CurrentEpochMetadata {
+                    epoch: 4,
+                    created_unix_ms: Some(1_783_238_640_000),
+                },
+            )
+            .await;
+
+        let (_rx, snapshot) = store.status_feed().subscribe_and_snapshot().await;
+        let (_stream_id, status) = snapshot
+            .readers
+            .iter()
+            .find(|(stream_id, _)| stream_id == "reader-a")
+            .expect("reader status should be present");
+        assert_eq!(status.current_epoch, Some(4));
+        assert_eq!(
+            status.current_epoch_created_unix_ms,
+            Some(1_783_238_640_000)
+        );
     }
 
     #[tokio::test]
