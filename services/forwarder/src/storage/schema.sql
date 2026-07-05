@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS stream_epochs (
     end_seq INTEGER,
     reason TEXT NOT NULL,
     created_unix_ms INTEGER,
+    name TEXT,
     PRIMARY KEY (stream_id, epoch),
     FOREIGN KEY (stream_id) REFERENCES streams(stream_id) ON DELETE CASCADE
 );
