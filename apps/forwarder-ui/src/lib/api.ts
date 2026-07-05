@@ -39,6 +39,8 @@ export interface ReaderStatus {
   reads_total: number;
   last_seen_secs: number | null;
   local_port: number;
+  current_epoch?: number | null;
+  current_epoch_created_unix_ms?: number | null;
   current_epoch_name?: string | null;
   reader_info?: ReaderInfo | null;
 }
@@ -175,7 +177,7 @@ export async function shutdownDevice(): Promise<{
 
 export async function resetEpoch(
   readerIp: string,
-): Promise<{ new_epoch: number }> {
+): Promise<{ new_epoch: number; created_unix_ms?: number | null }> {
   return apiFetch(`/api/v1/streams/${readerIp}/reset-epoch`, {
     method: "POST",
   });

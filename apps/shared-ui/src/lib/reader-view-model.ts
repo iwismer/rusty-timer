@@ -11,6 +11,19 @@ export function formatTtoState(enabled: boolean | null | undefined): string {
   return enabled ? "Enabled" : "Disabled";
 }
 
+export function formatEpochCreatedAt(
+  unixMs: number | null | undefined,
+  locale?: string,
+  timeZone?: string,
+): string {
+  if (unixMs == null) return "\u2014";
+  return new Intl.DateTimeFormat(locale, {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZone,
+  }).format(new Date(unixMs));
+}
+
 export function readerControlDisabled(
   state: "connected" | "connecting" | "disconnected",
   busy: boolean | null | undefined,

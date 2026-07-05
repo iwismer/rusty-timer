@@ -458,8 +458,17 @@ impl StatusServer {
 pub trait JournalAccess {
     /// Bump the epoch for `stream_key`.
     ///
-    /// Returns `Ok(new_epoch)` on success, `Err(NotFound)` if stream unknown.
-    fn reset_epoch(&mut self, stream_key: &str) -> Result<i64, EpochResetError>;
+    /// Returns the new current epoch metadata on success, or `Err(NotFound)` if stream unknown.
+    fn reset_epoch(
+        &mut self,
+        stream_key: &str,
+    ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochResetError>;
+
+    /// Return the current epoch metadata for a stream_key, or `None` if stream unknown.
+    fn current_epoch_metadata(
+        &self,
+        stream_key: &str,
+    ) -> Result<Option<crate::storage::journal::CurrentEpochMetadata>, String>;
 
     /// Count total events for a stream_key.
     fn event_count(&self, stream_key: &str) -> Result<i64, String>;
@@ -473,7 +482,10 @@ pub enum EpochResetError {
 
 /// Real journal: delegates to `Journal`.
 impl JournalAccess for Journal {
-    fn reset_epoch(&mut self, stream_key: &str) -> Result<i64, EpochResetError> {
+    fn reset_epoch(
+        &mut self,
+        stream_key: &str,
+    ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochResetError> {
         // Get current epoch
         let (current_epoch, _) = self.current_epoch_and_next_seq(stream_key).map_err(|e| {
             // If query_row returns nothing, rusqlite returns QueryReturnedNoRows
@@ -486,7 +498,16 @@ impl JournalAccess for Journal {
         let new_epoch = current_epoch + 1;
         self.bump_epoch(stream_key, new_epoch)
             .map_err(|e| EpochResetError::Storage(e.to_string()))?;
-        Ok(new_epoch)
+        self.current_epoch_metadata(stream_key)
+            .map_err(|e| EpochResetError::Storage(e.to_string()))?
+            .ok_or(EpochResetError::NotFound)
+    }
+
+    fn current_epoch_metadata(
+        &self,
+        stream_key: &str,
+    ) -> Result<Option<crate::storage::journal::CurrentEpochMetadata>, String> {
+        Journal::current_epoch_metadata(self, stream_key).map_err(|e| e.to_string())
     }
 
     fn event_count(&self, stream_key: &str) -> Result<i64, String> {
@@ -498,8 +519,18 @@ impl JournalAccess for Journal {
 struct NoJournal;
 
 impl JournalAccess for NoJournal {
-    fn reset_epoch(&mut self, _stream_key: &str) -> Result<i64, EpochResetError> {
+    fn reset_epoch(
+        &mut self,
+        _stream_key: &str,
+    ) -> Result<crate::storage::journal::CurrentEpochMetadata, EpochResetError> {
         Err(EpochResetError::NotFound)
+    }
+
+    fn current_epoch_metadata(
+        &self,
+        _stream_key: &str,
+    ) -> Result<Option<crate::storage::journal::CurrentEpochMetadata>, String> {
+        Ok(None)
     }
 
     fn event_count(&self, _stream_key: &str) -> Result<i64, String> {
@@ -696,6 +727,8 @@ struct ReaderStatusJson {
     reads_total: i64,
     last_seen_secs: Option<u64>,
     local_port: u16,
+    current_epoch: Option<i64>,
+    current_epoch_created_unix_ms: Option<i64>,
     current_epoch_name: Option<String>,
     reader_info: Option<crate::reader_control::ReaderInfo>,
 }
@@ -712,7 +745,13 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
         .server_status()
         .cloned()
         .unwrap_or_else(crate::status_store::ServerDeviceStatus::not_configured);
-    let mut readers: Vec<_> = ss
+    let forwarder_id = ss.forwarder_id.clone();
+    let ready = ss.is_ready();
+    let ready_reason = ss.reason.clone();
+    let p2p_connected = ss.p2p_connected();
+    let restart_needed = ss.restart_needed();
+    let ups_status = ss.ups_status().cloned();
+    let reader_snapshots: Vec<_> = ss
         .readers
         .iter()
         .map(|(ip, r)| {
@@ -721,28 +760,57 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
                 ReaderConnectionState::Connecting => "connecting",
                 ReaderConnectionState::Disconnected => "disconnected",
             };
-            ReaderStatusJson {
-                ip: ip.clone(),
-                state: state_str.to_owned(),
-                reads_session: r.reads_since_restart,
-                reads_total: r.reads_total,
-                last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
-                local_port: r.local_port,
-                current_epoch_name: r.current_epoch_name.clone(),
-                reader_info: r.reader_info.clone(),
-            }
+            (
+                ip.clone(),
+                state_str.to_owned(),
+                r.reads_since_restart,
+                r.reads_total,
+                r.last_seen.map(|t| t.elapsed().as_secs()),
+                r.local_port,
+                r.current_epoch_name.clone(),
+                r.reader_info.clone(),
+            )
         })
         .collect();
+    drop(ss);
+
+    let journal = state.journal.lock().await;
+    let mut readers: Vec<_> = Vec::with_capacity(reader_snapshots.len());
+    for (
+        ip,
+        state,
+        reads_session,
+        reads_total,
+        last_seen_secs,
+        local_port,
+        current_epoch_name,
+        reader_info,
+    ) in reader_snapshots
+    {
+        let epoch = journal.current_epoch_metadata(&ip).ok().flatten();
+        readers.push(ReaderStatusJson {
+            ip,
+            state,
+            reads_session,
+            reads_total,
+            last_seen_secs,
+            local_port,
+            current_epoch: epoch.map(|metadata| metadata.epoch),
+            current_epoch_created_unix_ms: epoch.and_then(|metadata| metadata.created_unix_ms),
+            current_epoch_name,
+            reader_info,
+        });
+    }
     readers.sort_by(|a, b| a.ip.cmp(&b.ip));
 
     let resp = StatusJsonResponse {
-        forwarder_id: ss.forwarder_id.clone(),
+        forwarder_id,
         version: (*state.version).clone(),
-        ready: ss.is_ready(),
-        ready_reason: ss.reason.clone(),
-        p2p_connected: ss.p2p_connected(),
-        restart_needed: ss.restart_needed(),
-        ups_status: ss.ups_status().cloned(),
+        ready,
+        ready_reason,
+        p2p_connected,
+        restart_needed,
+        ups_status,
         server,
         fanout_dropped_total: state.store.fanout_dropped_total(),
         readers,
@@ -1430,11 +1498,15 @@ async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
 ) -> Response {
     let result = state.journal.lock().await.reset_epoch(&reader_ip);
     match result {
-        Ok(new_epoch) => {
+        Ok(metadata) => {
             state
                 .logger
                 .log(format!("epoch reset for {} via API", reader_ip));
-            let body = serde_json::json!({"new_epoch": new_epoch}).to_string();
+            let body = serde_json::json!({
+                "new_epoch": metadata.epoch,
+                "created_unix_ms": metadata.created_unix_ms,
+            })
+            .to_string();
             json_response(StatusCode::OK, body)
         }
         Err(EpochResetError::NotFound) => text_response(StatusCode::NOT_FOUND, "stream not found"),
@@ -4148,6 +4220,45 @@ target = "192.168.1.100:10000"
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn status_json_includes_current_epoch_id_and_created_time() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("journal.db");
+        let mut journal = Journal::open(&path).expect("open journal");
+        journal
+            .ensure_stream_state("192.168.1.10", 3)
+            .expect("ensure stream");
+        let journal = Arc::new(Mutex::new(journal));
+
+        let server = StatusServer::start_with_journal(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            journal,
+        )
+        .await
+        .expect("start status server");
+
+        server
+            .init_readers(&[("192.168.1.10".to_owned(), 10010)])
+            .await;
+
+        let addr = server.local_addr();
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{}/api/v1/status", addr))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert_eq!(body["readers"][0]["current_epoch"], 3);
+        assert!(body["readers"][0]["current_epoch_created_unix_ms"].is_number());
     }
 
     #[tokio::test]

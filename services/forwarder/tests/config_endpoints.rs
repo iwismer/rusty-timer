@@ -128,8 +128,17 @@ fn response_body(response: &str) -> &str {
 struct NoopJournal;
 
 impl JournalAccess for NoopJournal {
-    fn reset_epoch(&mut self, _stream_key: &str) -> Result<i64, EpochResetError> {
+    fn reset_epoch(
+        &mut self,
+        _stream_key: &str,
+    ) -> Result<forwarder::storage::journal::CurrentEpochMetadata, EpochResetError> {
         Err(EpochResetError::NotFound)
+    }
+    fn current_epoch_metadata(
+        &self,
+        _stream_key: &str,
+    ) -> Result<Option<forwarder::storage::journal::CurrentEpochMetadata>, String> {
+        Ok(None)
     }
     fn event_count(&self, _stream_key: &str) -> Result<i64, String> {
         Ok(0)

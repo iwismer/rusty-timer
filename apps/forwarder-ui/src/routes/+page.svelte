@@ -187,6 +187,7 @@
   // success feedback is likewise rendered by the panel.
   async function handleResetEpoch(readerIp: string) {
     await api.resetEpoch(readerIp);
+    await loadAll();
   }
 
   async function handleSetCurrentEpochName(
@@ -445,7 +446,7 @@
       onReaderUpdated: (reader) => {
         if (status) {
           const readers = status.readers.map((r) =>
-            r.ip === reader.ip ? reader : r,
+            r.ip === reader.ip ? { ...r, ...reader } : r,
           );
           status = { ...status, readers };
           lastSeenBase = {
@@ -723,6 +724,9 @@
                 localPortLabel="Local Port"
                 localPortValue={String(reader.local_port)}
                 lastSeenDisplay={formatLastSeen(tickingLastSeen(reader.ip))}
+                currentEpoch={reader.current_epoch ?? null}
+                currentEpochCreatedUnixMs={reader.current_epoch_created_unix_ms ??
+                  null}
                 currentEpochName={reader.current_epoch_name ?? null}
                 readerClockDisplay={tickingReaderClock(reader.ip)}
                 forwarderClockDisplay={tickingForwarderClock(reader.ip)}

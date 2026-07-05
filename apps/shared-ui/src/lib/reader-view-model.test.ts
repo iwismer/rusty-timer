@@ -12,6 +12,7 @@ import {
   computeTickingClock,
   parseWallClock,
   formatHardwareCode,
+  formatEpochCreatedAt,
 } from "./reader-view-model";
 
 describe("formatHardwareCode", () => {
@@ -41,6 +42,19 @@ describe("formatHardwareCode", () => {
   it("returns dash for empty strings", () => {
     expect(formatHardwareCode("")).toBe("\u2014");
     expect(formatHardwareCode("   ")).toBe("\u2014");
+  });
+});
+
+describe("formatEpochCreatedAt", () => {
+  it("returns dash for null/undefined", () => {
+    expect(formatEpochCreatedAt(null)).toBe("\u2014");
+    expect(formatEpochCreatedAt(undefined)).toBe("\u2014");
+  });
+
+  it("formats an epoch creation timestamp as a readable date and time", () => {
+    expect(
+      formatEpochCreatedAt(Date.UTC(2026, 6, 5, 7, 57), "en-US", "UTC"),
+    ).toBe("Jul 5, 2026, 7:57 AM");
   });
 });
 

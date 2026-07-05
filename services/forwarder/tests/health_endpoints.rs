@@ -567,8 +567,18 @@ impl forwarder::status_http::JournalAccess for NoJournalForNameApi {
     fn reset_epoch(
         &mut self,
         _stream_key: &str,
-    ) -> Result<i64, forwarder::status_http::EpochResetError> {
+    ) -> Result<
+        forwarder::storage::journal::CurrentEpochMetadata,
+        forwarder::status_http::EpochResetError,
+    > {
         Err(forwarder::status_http::EpochResetError::NotFound)
+    }
+
+    fn current_epoch_metadata(
+        &self,
+        _stream_key: &str,
+    ) -> Result<Option<forwarder::storage::journal::CurrentEpochMetadata>, String> {
+        Ok(None)
     }
 
     fn event_count(&self, _stream_key: &str) -> Result<i64, String> {
@@ -744,8 +754,21 @@ async fn status_page_does_not_query_journal_for_totals() {
     }
 
     impl JournalAccess for CountingJournal {
-        fn reset_epoch(&mut self, _stream_key: &str) -> Result<i64, EpochResetError> {
-            Ok(1)
+        fn reset_epoch(
+            &mut self,
+            _stream_key: &str,
+        ) -> Result<forwarder::storage::journal::CurrentEpochMetadata, EpochResetError> {
+            Ok(forwarder::storage::journal::CurrentEpochMetadata {
+                epoch: 1,
+                created_unix_ms: Some(1),
+            })
+        }
+
+        fn current_epoch_metadata(
+            &self,
+            _stream_key: &str,
+        ) -> Result<Option<forwarder::storage::journal::CurrentEpochMetadata>, String> {
+            Ok(None)
         }
 
         fn event_count(&self, _stream_key: &str) -> Result<i64, String> {

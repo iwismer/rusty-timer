@@ -77,6 +77,12 @@ struct PruneCandidate {
 }
 
 /// A read event retrieved from the journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CurrentEpochMetadata {
+    pub epoch: i64,
+    pub created_unix_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct JournalEvent {
     pub id: i64,
@@ -316,9 +322,9 @@ impl Journal {
         )?;
         self.conn.execute(
             "INSERT OR IGNORE INTO stream_epochs
-                 (stream_id, epoch, start_seq, end_seq, reason)
-             VALUES (?1, ?2, 1, NULL, 'initial')",
-            params![stream_key, initial_epoch],
+                 (stream_id, epoch, start_seq, end_seq, reason, created_unix_ms)
+             VALUES (?1, ?2, 1, NULL, 'initial', ?3)",
+            params![stream_key, initial_epoch, now_ms],
         )?;
         self.conn.execute(
             "INSERT OR IGNORE INTO stream_retention
@@ -421,9 +427,9 @@ impl Journal {
         )?;
         tx.execute(
             "INSERT INTO stream_epochs
-                 (stream_id, epoch, start_seq, end_seq, reason)
-             VALUES (?1, ?2, ?3, NULL, 'reset')",
-            params![stream_key, new_epoch, start_seq],
+                 (stream_id, epoch, start_seq, end_seq, reason, created_unix_ms)
+             VALUES (?1, ?2, ?3, NULL, 'reset', ?4)",
+            params![stream_key, new_epoch, start_seq, unix_ms()],
         )?;
         tx.commit()?;
         Ok(())
@@ -732,9 +738,9 @@ impl Journal {
         )?;
         tx.execute(
             "INSERT INTO stream_epochs
-                 (stream_id, epoch, start_seq, end_seq, reason)
-             VALUES (?1, ?2, ?3, NULL, 'manual_clear')",
-            params![stream_key, next_epoch, next_seq],
+                 (stream_id, epoch, start_seq, end_seq, reason, created_unix_ms)
+             VALUES (?1, ?2, ?3, NULL, 'manual_clear', ?4)",
+            params![stream_key, next_epoch, next_seq, unix_ms()],
         )?;
         tx.execute(
             "UPDATE stream_retention
@@ -748,6 +754,13 @@ impl Journal {
 
     fn current_epoch(&self, stream_key: &str) -> Result<i64, JournalError> {
         current_epoch(&self.conn, stream_key)
+    }
+
+    pub fn current_epoch_metadata(
+        &self,
+        stream_key: &str,
+    ) -> Result<Option<CurrentEpochMetadata>, JournalError> {
+        current_epoch_metadata(&self.conn, stream_key)
     }
 
     /// Whether the journal has any stream state for `stream_id`.
@@ -829,9 +842,9 @@ fn insert_stream_seed(
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO stream_epochs
-             (stream_id, epoch, start_seq, end_seq, reason)
-         VALUES (?1, ?2, ?3, NULL, ?4)",
-        params![stream_id, epoch, next_seq, reason],
+             (stream_id, epoch, start_seq, end_seq, reason, created_unix_ms)
+         VALUES (?1, ?2, ?3, NULL, ?4, ?5)",
+        params![stream_id, epoch, next_seq, reason, now_ms],
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO stream_retention
@@ -1062,6 +1075,28 @@ fn current_epoch(conn: &Connection, stream_key: &str) -> Result<i64, JournalErro
     .map_err(Into::into)
 }
 
+fn current_epoch_metadata(
+    conn: &Connection,
+    stream_key: &str,
+) -> Result<Option<CurrentEpochMetadata>, JournalError> {
+    conn.query_row(
+        "SELECT epoch, created_unix_ms
+         FROM stream_epochs
+         WHERE stream_id = ?1
+         ORDER BY epoch DESC
+         LIMIT 1",
+        params![stream_key],
+        |row| {
+            Ok(CurrentEpochMetadata {
+                epoch: row.get(0)?,
+                created_unix_ms: row.get(1)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 fn collect_events<F>(rows: rusqlite::MappedRows<'_, F>) -> Result<Vec<JournalEvent>, JournalError>
 where
     F: FnMut(&rusqlite::Row<'_>) -> Result<JournalEvent, rusqlite::Error>,
@@ -1122,6 +1157,40 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].seq, 1);
         assert_eq!(events[0].raw_frame, b"one");
+    }
+
+    #[test]
+    fn current_epoch_metadata_tracks_created_time() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("journal.db");
+        let mut journal = Journal::open(&path).expect("open write journal");
+        let before_initial = super::unix_ms();
+
+        journal
+            .ensure_stream_state("stream-a", 7)
+            .expect("ensure stream");
+        let initial = journal
+            .current_epoch_metadata("stream-a")
+            .expect("current epoch metadata")
+            .expect("stream has metadata");
+        assert_eq!(initial.epoch, 7);
+        assert!(
+            initial
+                .created_unix_ms
+                .is_some_and(|ts| ts >= before_initial),
+            "initial epoch should record when it was created"
+        );
+
+        journal.bump_epoch("stream-a", 8).expect("bump epoch");
+        let reset = journal
+            .current_epoch_metadata("stream-a")
+            .expect("current epoch metadata")
+            .expect("stream has metadata");
+        assert_eq!(reset.epoch, 8);
+        assert!(
+            reset.created_unix_ms >= initial.created_unix_ms,
+            "new epoch should have a creation timestamp at least as new as the initial epoch"
+        );
     }
 
     #[test]

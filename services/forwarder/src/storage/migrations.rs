@@ -1,7 +1,7 @@
 use crate::storage::journal::JournalError;
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 pub fn migrate(conn: &Connection) -> Result<(), JournalError> {
     apply_pragmas(conn)?;
@@ -25,8 +25,16 @@ pub fn migrate(conn: &Connection) -> Result<(), JournalError> {
         }
         1 => {
             conn.execute_batch(&format!(
-                "BEGIN IMMEDIATE;\n{}\nPRAGMA user_version = {};\nCOMMIT;",
+                "BEGIN IMMEDIATE;\n{}\n{}\nPRAGMA user_version = {};\nCOMMIT;",
                 retention_index_sql(),
+                epoch_created_sql(),
+                SCHEMA_VERSION
+            ))?;
+        }
+        2 => {
+            conn.execute_batch(&format!(
+                "BEGIN IMMEDIATE;\n{}\nPRAGMA user_version = {};\nCOMMIT;",
+                epoch_created_sql(),
                 SCHEMA_VERSION
             ))?;
         }
@@ -54,6 +62,10 @@ fn retention_index_sql() -> &'static str {
          ON events(received_unix_ms, stream_id, seq);
      CREATE INDEX IF NOT EXISTS idx_cursors_stream_acked
          ON receiver_stream_cursors(stream_id, acked_through_seq);"
+}
+
+fn epoch_created_sql() -> &'static str {
+    "ALTER TABLE stream_epochs ADD COLUMN created_unix_ms INTEGER;"
 }
 
 fn user_version(conn: &Connection) -> Result<u32, JournalError> {

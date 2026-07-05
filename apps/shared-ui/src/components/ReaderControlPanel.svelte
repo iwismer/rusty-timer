@@ -6,6 +6,7 @@
     formatTtoState,
     formatClockDrift,
     formatHardwareCode,
+    formatEpochCreatedAt,
     driftColorClass,
     computeDownloadPercent,
     readerControlDisabled,
@@ -49,6 +50,8 @@
     lastSeenDisplay = undefined,
     localPortLabel = "Local port",
     localPortValue = undefined,
+    currentEpoch = null,
+    currentEpochCreatedUnixMs = null,
     currentEpochName = null,
     epochEditable = true,
     epochBusy = false,
@@ -92,6 +95,10 @@
     localPortLabel?: string;
     /** Pre-formatted local port value; entry hidden when undefined. */
     localPortValue?: string;
+    /** Numeric id of the currently active epoch, when known. */
+    currentEpoch?: number | null;
+    /** Unix-ms timestamp when the current epoch was created, when known. */
+    currentEpochCreatedUnixMs?: number | null;
     /** Name of the currently active epoch, when known. */
     currentEpochName?: string | null;
     /** Whether the epoch name input/save controls are enabled. */
@@ -438,10 +445,32 @@
   <!-- Epoch name row -->
   {#if showEpochRow}
     <div class="mb-3 flex flex-col gap-1">
-      {#if currentEpochName}
-        <span class="text-xs text-text-muted font-mono">
-          Active epoch: {currentEpochName}
-        </span>
+      {#if currentEpoch != null || currentEpochName || currentEpochCreatedUnixMs != null}
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-muted">
+          <span>
+            Current epoch:{#if onOpenHelpModal}<HelpTip
+                fieldKey="current_epoch"
+                sectionKey="reader_live"
+                context={helpContext}
+                onOpenModal={openHelp}
+              />{/if}
+            <span class="font-mono text-text-primary">
+              {#if currentEpoch != null}#{currentEpoch}{:else}—{/if}{#if currentEpochName}
+                — {currentEpochName}{/if}
+            </span>
+          </span>
+          <span>
+            Created:{#if onOpenHelpModal}<HelpTip
+                fieldKey="current_epoch_created"
+                sectionKey="reader_live"
+                context={helpContext}
+                onOpenModal={openHelp}
+              />{/if}
+            <span class="font-mono text-text-primary">
+              {formatEpochCreatedAt(currentEpochCreatedUnixMs)}
+            </span>
+          </span>
+        </div>
       {/if}
       <div class="flex items-center gap-2 flex-wrap">
         {#if onSetEpochName}
