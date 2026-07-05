@@ -314,6 +314,15 @@
                       >
                         {primaryLabel}
                       </span>
+                      {#if stream.failure}
+                        <span
+                          data-testid="stream-halted-{key}"
+                          class="rounded border border-status-err-border bg-status-err-bg px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-status-err"
+                          title={`Stream halted: ${stream.failure.reason}${stream.failure.seq != null ? ` (seq ${stream.failure.seq})` : ""} — see the operator runbook. Delivery stays stopped until the receiver reconnects or the subscription changes.`}
+                        >
+                          halted
+                        </span>
+                      {/if}
                       {#if !stream.subscribed}
                         <span
                           class="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-muted"
@@ -608,7 +617,7 @@
                         {#if stream.override_held}
                           <span
                             data-testid="override-held-{key}"
-                            class="text-xs text-warning"
+                            class="text-xs text-status-warn"
                             title="The selected earliest epoch is not advertised by the forwarder. No data flows until it becomes available or the override is cleared."
                           >
                             paused: epoch unavailable

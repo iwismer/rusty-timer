@@ -317,7 +317,7 @@ fn u64_to_i64(value: u64, field: &'static str) -> Result<i64, P2pSessionError> {
     i64::try_from(value).map_err(|_| P2pSessionError::NumericOutOfRange { field, value })
 }
 
-fn now_unix_ms() -> i64 {
+pub(crate) fn now_unix_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     i64::try_from(
         SystemTime::now()

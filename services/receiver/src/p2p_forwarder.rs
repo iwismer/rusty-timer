@@ -985,9 +985,23 @@ async fn reap_finished_data_task(
         Ok(Err(err)) => {
             panic_exits.remove(stream_key);
             error!(%endpoint_id, stream_id = %task.stream.stream_id, error = %err, "forwarder data subscription failed terminally; suppressing respawn until reconnect or subscription config change");
+            let seq = match &err {
+                crate::p2p_session::P2pSessionError::ConflictingDuplicate { seq, .. } => {
+                    u64::try_from(*seq).ok()
+                }
+                _ => None,
+            };
             reporter
                 .app_state()
-                .mark_forwarder_stream_failed(endpoint_id, &task.stream.stream_id)
+                .mark_forwarder_stream_failed(
+                    endpoint_id,
+                    &task.stream.stream_id,
+                    crate::control_api::StreamFailure {
+                        reason: err.to_string(),
+                        seq,
+                        unix_ms: crate::p2p_session::now_unix_ms(),
+                    },
+                )
                 .await;
             failed.insert(stream_key.to_owned(), task.stream);
         }
@@ -1003,7 +1017,15 @@ async fn reap_finished_data_task(
                 error!(%endpoint_id, stream_id = %task.stream.stream_id, %join_error, panics = MAX_CONSECUTIVE_PANIC_EXITS, "forwarder data subscription task panicked repeatedly; treating as terminal and suppressing respawn until reconnect or subscription config change");
                 reporter
                     .app_state()
-                    .mark_forwarder_stream_failed(endpoint_id, &task.stream.stream_id)
+                    .mark_forwarder_stream_failed(
+                        endpoint_id,
+                        &task.stream.stream_id,
+                        crate::control_api::StreamFailure {
+                            reason: format!("data task panicked repeatedly: {join_error}"),
+                            seq: None,
+                            unix_ms: crate::p2p_session::now_unix_ms(),
+                        },
+                    )
                     .await;
                 failed.insert(stream_key.to_owned(), task.stream);
             } else {

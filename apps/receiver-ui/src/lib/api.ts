@@ -71,6 +71,14 @@ export interface StreamEntry {
   override_held?: boolean;
   /** Stored earliest-epoch override for this stream, if any. */
   earliest_epoch?: number | null;
+  /** Terminal data-subscription failure on the live connection, if any. */
+  failure?: StreamFailure | null;
+}
+
+export interface StreamFailure {
+  reason: string;
+  seq?: number | null;
+  unix_ms: number;
 }
 
 export interface StreamCountUpdate {

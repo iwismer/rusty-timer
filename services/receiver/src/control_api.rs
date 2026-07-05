@@ -13,7 +13,7 @@ use rt_p2p_protocol::{
     ReaderStatus, RestartResponse, StreamCatalog, UpsStatus,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -184,11 +184,11 @@ pub(crate) struct ForwarderLiveStatus {
     readers: HashMap<String, ReaderLiveStatus>,
     pub(crate) ups: Option<UpsStatusPayload>,
     /// Wire stream ids whose data subscription failed terminally on the live
-    /// connection (protocol/data-integrity error). Set by
-    /// [`AppState::mark_forwarder_stream_failed`]; cleared on control
+    /// connection (protocol/data-integrity error), with the failure detail.
+    /// Set by [`AppState::mark_forwarder_stream_failed`]; cleared on control
     /// disconnect (the whole live status is dropped) or on a subscription
     /// config change ([`AppState::clear_forwarder_stream_failed`]).
-    pub(crate) failed_streams: BTreeSet<String>,
+    pub(crate) failed_streams: BTreeMap<String, StreamFailure>,
     /// Wire stream ids whose data task is held fail-closed because their
     /// earliest-epoch override cannot be resolved against the connection's
     /// catalog. Cleared when the override resolves, is removed, or the
@@ -1383,14 +1383,19 @@ impl AppState {
     /// [`crate::p2p_session::P2pSessionError::is_retryable`]). Surfaced through
     /// the connections payload/fingerprint so the UI sees the failed stream via
     /// the existing `ConnectionsChanged` event.
-    pub(crate) async fn mark_forwarder_stream_failed(&self, endpoint_id: &str, stream_id: &str) {
+    pub(crate) async fn mark_forwarder_stream_failed(
+        &self,
+        endpoint_id: &str,
+        stream_id: &str,
+        failure: StreamFailure,
+    ) {
         {
             let mut live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
             live_statuses
                 .entry(endpoint_id.to_owned())
                 .or_default()
                 .failed_streams
-                .insert(stream_id.to_owned());
+                .insert(stream_id.to_owned(), failure);
         }
         self.recompute_aggregate_connection_state().await;
     }
@@ -1403,7 +1408,7 @@ impl AppState {
             let mut live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
             live_statuses
                 .get_mut(endpoint_id)
-                .is_some_and(|status| status.failed_streams.remove(stream_id))
+                .is_some_and(|status| status.failed_streams.remove(stream_id).is_some())
         };
         if removed {
             self.recompute_aggregate_connection_state().await;
@@ -1664,7 +1669,7 @@ impl AppState {
                         &endpoint_id,
                     )),
                     ups: live_status.ups,
-                    failed_stream_ids: live_status.failed_streams.into_iter().collect(),
+                    failed_stream_ids: live_status.failed_streams.into_keys().collect(),
                 }
             })
             .collect();
@@ -1874,9 +1879,13 @@ impl AppState {
             let override_held = live_statuses
                 .get(&sub.forwarder_endpoint_id)
                 .is_some_and(|status| status.override_held_streams.contains(&sub.stream_id));
+            let failure = live_statuses
+                .get(&sub.forwarder_endpoint_id)
+                .and_then(|status| status.failed_streams.get(&sub.stream_id).cloned());
             let discovered_stream = discovered_pair.map(|(_, stream)| stream);
             streams.push(StreamEntry {
                 override_held,
+                failure,
                 earliest_epoch: earliest_epochs.get(local_stream_key.as_str()).copied(),
                 forwarder_endpoint_id: sub.forwarder_endpoint_id.clone(),
                 stream_id: sub.stream_id.clone(),
@@ -1940,9 +1949,13 @@ impl AppState {
                 let override_held = live_statuses
                     .get(endpoint_id)
                     .is_some_and(|status| status.override_held_streams.contains(&stream.stream_id));
+                let failure = live_statuses
+                    .get(endpoint_id)
+                    .and_then(|status| status.failed_streams.get(&stream.stream_id).cloned());
                 let local_stream_key = LocalStreamKey::new(endpoint_id, &stream.stream_id);
                 streams.push(StreamEntry {
                     override_held,
+                    failure,
                     earliest_epoch: earliest_epochs.get(local_stream_key.as_str()).copied(),
                     forwarder_endpoint_id: endpoint_id.clone(),
                     stream_id: stream.stream_id.clone(),
@@ -2104,6 +2117,25 @@ pub struct StreamEntry {
     /// read-back path for the "From epoch" control.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub earliest_epoch: Option<i64>,
+    /// Terminal data-subscription failure on the live connection, if any.
+    /// Present until reconnect or a subscription config change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<StreamFailure>,
+}
+
+/// Detail for a terminally failed stream data subscription, surfaced to the
+/// UI so operators see WHY a stream halted (e.g. conflicting data at a seq —
+/// see the runbook) instead of a silent stall.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct StreamFailure {
+    /// Human-readable failure reason (the terminal session error).
+    pub reason: String,
+    /// The sequence number involved, when the failure is seq-specific
+    /// (conflicting duplicate).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    /// When the failure was recorded, in unix milliseconds.
+    pub unix_ms: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
