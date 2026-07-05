@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "vitest";
 import {
   fromConfig,
   parseTarget,
@@ -23,16 +23,16 @@ import {
   type ReaderEntry,
   type SingleReaderEntry,
   type RangeReaderEntry,
-} from './forwarder-config-form';
+} from "./forwarder-config-form";
 
 // Helper to build a single-IP reader entry
 function makeSingleReader(overrides: Partial<SingleReaderEntry> = {}): SingleReaderEntry {
-  return { ...blankSingleReader(), ip: '192.168.0.1', ...overrides };
+  return { ...blankSingleReader(), ip: "192.168.0.1", ...overrides };
 }
 
 // Helper to build a range reader entry
 function makeRangeReader(overrides: Partial<RangeReaderEntry> = {}): RangeReaderEntry {
-  return { ...blankRangeReader(), ip_start: '192.168.0.100', ip_end_octet: '110', ...overrides };
+  return { ...blankRangeReader(), ip_start: "192.168.0.100", ip_end_octet: "110", ...overrides };
 }
 
 // Shorthand alias for makeSingleReader
@@ -40,155 +40,151 @@ const makeReader = makeSingleReader;
 
 function makeForm(overrides: Partial<ForwarderConfigFormState> = {}): ForwarderConfigFormState {
   return {
-    generalDisplayName: '',
+    generalDisplayName: "",
     p2pEnabled: true,
-    p2pServerUrl: 'http://localhost:8080',
-    p2pServerTokenFile: '/tmp/token.txt',
-    authTokenFile: '/tmp/token.txt',
-    journalSqlitePath: '',
-    journalPruneWatermarkPct: '',
-    statusHttpBind: '',
+    p2pServerUrl: "http://localhost:8080",
+    p2pServerTokenFile: "/tmp/token.txt",
+    authTokenFile: "/tmp/token.txt",
+    journalSqlitePath: "",
+    journalPruneWatermarkPct: "",
+    statusHttpBind: "",
     upsEnabled: false,
-    upsDaemonAddr: '',
-    upsPollIntervalSecs: '',
-    upsUpstreamHeartbeatSecs: '',
+    upsDaemonAddr: "",
+    upsPollIntervalSecs: "",
+    upsUpstreamHeartbeatSecs: "",
     controlAllowPowerActions: false,
-    updateMode: '',
+    updateMode: "",
     readers: [makeReader()],
     ...overrides,
   };
 }
 
-describe('parseTarget', () => {
-  it('parses a simple IP:port target', () => {
-    expect(parseTarget('192.168.0.50:10000')).toEqual({
+describe("parseTarget", () => {
+  it("parses a simple IP:port target", () => {
+    expect(parseTarget("192.168.0.50:10000")).toEqual({
       is_range: false,
-      ip: '192.168.0.50',
-      port: '10000',
+      ip: "192.168.0.50",
+      port: "10000",
     });
   });
 
-  it('parses a range target', () => {
-    expect(parseTarget('192.168.0.150-160:10000')).toEqual({
+  it("parses a range target", () => {
+    expect(parseTarget("192.168.0.150-160:10000")).toEqual({
       is_range: true,
-      ip_start: '192.168.0.150',
-      ip_end_octet: '160',
-      port: '10000',
+      ip_start: "192.168.0.150",
+      ip_end_octet: "160",
+      port: "10000",
     });
   });
 
-  it('returns defaults for empty string', () => {
-    expect(parseTarget('')).toEqual({
+  it("returns defaults for empty string", () => {
+    expect(parseTarget("")).toEqual({
       is_range: false,
-      ip: '',
-      port: '10000',
+      ip: "",
+      port: "10000",
     });
   });
 
-  it('defaults port to 10000 when no colon present', () => {
-    expect(parseTarget('192.168.0.50')).toEqual({
+  it("defaults port to 10000 when no colon present", () => {
+    expect(parseTarget("192.168.0.50")).toEqual({
       is_range: false,
-      ip: '192.168.0.50',
-      port: '10000',
+      ip: "192.168.0.50",
+      port: "10000",
     });
   });
 
-  it('parses a range target without port', () => {
-    expect(parseTarget('10.0.0.100-200')).toEqual({
+  it("parses a range target without port", () => {
+    expect(parseTarget("10.0.0.100-200")).toEqual({
       is_range: true,
-      ip_start: '10.0.0.100',
-      ip_end_octet: '200',
-      port: '10000',
+      ip_start: "10.0.0.100",
+      ip_end_octet: "200",
+      port: "10000",
     });
   });
 
-  it('handles non-standard port', () => {
-    expect(parseTarget('10.0.0.5:9999')).toEqual({
+  it("handles non-standard port", () => {
+    expect(parseTarget("10.0.0.5:9999")).toEqual({
       is_range: false,
-      ip: '10.0.0.5',
-      port: '9999',
+      ip: "10.0.0.5",
+      port: "9999",
     });
   });
 
-  it('treats trailing dash as single IP (not range)', () => {
-    expect(parseTarget('192.168.0.50-:10000')).toEqual({
+  it("treats trailing dash as single IP (not range)", () => {
+    expect(parseTarget("192.168.0.50-:10000")).toEqual({
       is_range: false,
-      ip: '192.168.0.50-',
-      port: '10000',
+      ip: "192.168.0.50-",
+      port: "10000",
     });
   });
 
-  it('treats dash in wrong octet position as single IP', () => {
-    expect(parseTarget('192.168.0-50:10000')).toEqual({
+  it("treats dash in wrong octet position as single IP", () => {
+    expect(parseTarget("192.168.0-50:10000")).toEqual({
       is_range: false,
-      ip: '192.168.0-50',
-      port: '10000',
+      ip: "192.168.0-50",
+      port: "10000",
     });
   });
 
-  it('treats double-dash as single IP', () => {
-    expect(parseTarget('192.168.0.50--160:10000')).toEqual({
+  it("treats double-dash as single IP", () => {
+    expect(parseTarget("192.168.0.50--160:10000")).toEqual({
       is_range: false,
-      ip: '192.168.0.50--160',
-      port: '10000',
+      ip: "192.168.0.50--160",
+      port: "10000",
     });
   });
 });
 
-describe('buildTarget', () => {
-  it('builds a single-IP target string', () => {
-    const reader = makeReader({ ip: '192.168.0.50', port: '10000' });
-    expect(buildTarget(reader)).toBe('192.168.0.50:10000');
+describe("buildTarget", () => {
+  it("builds a single-IP target string", () => {
+    const reader = makeReader({ ip: "192.168.0.50", port: "10000" });
+    expect(buildTarget(reader)).toBe("192.168.0.50:10000");
   });
 
-  it('builds a range target string', () => {
-    const reader = makeRangeReader({
-      ip_start: '192.168.0.150',
-      ip_end_octet: '160',
-      port: '10000',
-    });
-    expect(buildTarget(reader)).toBe('192.168.0.150-160:10000');
+  it("builds a range target string", () => {
+    const reader = makeRangeReader({ ip_start: "192.168.0.150", ip_end_octet: "160", port: "10000" });
+    expect(buildTarget(reader)).toBe("192.168.0.150-160:10000");
   });
 
-  it('returns empty string when ip is empty (single mode)', () => {
-    const reader = makeReader({ ip: '', port: '10000' });
-    expect(buildTarget(reader)).toBe('');
+  it("returns empty string when ip is empty (single mode)", () => {
+    const reader = makeReader({ ip: "", port: "10000" });
+    expect(buildTarget(reader)).toBe("");
   });
 
-  it('returns empty string when port is empty', () => {
-    const reader = makeReader({ ip: '192.168.0.1', port: '' });
-    expect(buildTarget(reader)).toBe('');
+  it("returns empty string when port is empty", () => {
+    const reader = makeReader({ ip: "192.168.0.1", port: "" });
+    expect(buildTarget(reader)).toBe("");
   });
 
-  it('returns empty string when range start IP is empty', () => {
-    const reader = makeRangeReader({ ip_start: '', ip_end_octet: '160', port: '10000' });
-    expect(buildTarget(reader)).toBe('');
+  it("returns empty string when range start IP is empty", () => {
+    const reader = makeRangeReader({ ip_start: "", ip_end_octet: "160", port: "10000" });
+    expect(buildTarget(reader)).toBe("");
   });
 
-  it('returns empty string when range end octet is empty', () => {
-    const reader = makeRangeReader({ ip_start: '192.168.0.150', ip_end_octet: '', port: '10000' });
-    expect(buildTarget(reader)).toBe('');
+  it("returns empty string when range end octet is empty", () => {
+    const reader = makeRangeReader({ ip_start: "192.168.0.150", ip_end_octet: "", port: "10000" });
+    expect(buildTarget(reader)).toBe("");
   });
 
-  it('trims whitespace from fields', () => {
-    const reader = makeReader({ ip: ' 192.168.0.50 ', port: ' 10000 ' });
-    expect(buildTarget(reader)).toBe('192.168.0.50:10000');
+  it("trims whitespace from fields", () => {
+    const reader = makeReader({ ip: " 192.168.0.50 ", port: " 10000 " });
+    expect(buildTarget(reader)).toBe("192.168.0.50:10000");
   });
 
-  it('returns empty string when port is NaN (cleared number input)', () => {
-    const reader = makeReader({ ip: '192.168.0.1', port: NaN as unknown as string });
-    expect(buildTarget(reader)).toBe('');
+  it("returns empty string when port is NaN (cleared number input)", () => {
+    const reader = makeReader({ ip: "192.168.0.1", port: NaN as unknown as string });
+    expect(buildTarget(reader)).toBe("");
   });
 
-  it('handles numeric port from Svelte number input', () => {
-    const reader = makeReader({ ip: '192.168.0.50', port: 10000 as unknown as string });
-    expect(buildTarget(reader)).toBe('192.168.0.50:10000');
+  it("handles numeric port from Svelte number input", () => {
+    const reader = makeReader({ ip: "192.168.0.50", port: 10000 as unknown as string });
+    expect(buildTarget(reader)).toBe("192.168.0.50:10000");
   });
 });
 
-describe('parseTarget/buildTarget round-trip', () => {
-  it('round-trips a single-IP target', () => {
-    const original = '192.168.0.50:10000';
+describe("parseTarget/buildTarget round-trip", () => {
+  it("round-trips a single-IP target", () => {
+    const original = "192.168.0.50:10000";
     const parsed = parseTarget(original);
     expect(parsed.is_range).toBe(false);
     if (!parsed.is_range) {
@@ -197,22 +193,18 @@ describe('parseTarget/buildTarget round-trip', () => {
     }
   });
 
-  it('round-trips a range target', () => {
-    const original = '192.168.0.150-160:10000';
+  it("round-trips a range target", () => {
+    const original = "192.168.0.150-160:10000";
     const parsed = parseTarget(original);
     expect(parsed.is_range).toBe(true);
     if (parsed.is_range) {
-      const reader = makeRangeReader({
-        ip_start: parsed.ip_start,
-        ip_end_octet: parsed.ip_end_octet,
-        port: parsed.port,
-      });
+      const reader = makeRangeReader({ ip_start: parsed.ip_start, ip_end_octet: parsed.ip_end_octet, port: parsed.port });
       expect(buildTarget(reader)).toBe(original);
     }
   });
 
-  it('round-trips a non-standard port', () => {
-    const original = '10.0.0.5:9999';
+  it("round-trips a non-standard port", () => {
+    const original = "10.0.0.5:9999";
     const parsed = parseTarget(original);
     expect(parsed.is_range).toBe(false);
     if (!parsed.is_range) {
@@ -222,30 +214,30 @@ describe('parseTarget/buildTarget round-trip', () => {
   });
 });
 
-describe('fromConfig', () => {
-  it('normalizes missing sections to empty form defaults', () => {
+describe("fromConfig", () => {
+  it("normalizes missing sections to empty form defaults", () => {
     const form = fromConfig({});
     expect(form.p2pEnabled).toBe(false);
-    expect(form.p2pServerUrl).toBe('');
-    expect(form.p2pServerTokenFile).toBe('');
+    expect(form.p2pServerUrl).toBe("");
+    expect(form.p2pServerTokenFile).toBe("");
     expect(form.controlAllowPowerActions).toBe(false);
     expect(form.readers).toEqual([]);
   });
 
-  it('loads p2p server settings when present', () => {
+  it("loads p2p server settings when present", () => {
     const form = fromConfig({
       p2p: {
         enabled: true,
-        server_url: 'https://thin.example.com',
-        server_token_file: '/etc/rusty-timer/forwarder.token',
+        server_url: "https://thin.example.com",
+        server_token_file: "/etc/rusty-timer/forwarder.token",
       },
     });
     expect(form.p2pEnabled).toBe(true);
-    expect(form.p2pServerUrl).toBe('https://thin.example.com');
-    expect(form.p2pServerTokenFile).toBe('/etc/rusty-timer/forwarder.token');
+    expect(form.p2pServerUrl).toBe("https://thin.example.com");
+    expect(form.p2pServerTokenFile).toBe("/etc/rusty-timer/forwarder.token");
   });
 
-  it('loads control.allow_power_actions when present', () => {
+  it("loads control.allow_power_actions when present", () => {
     const form = fromConfig({
       control: {
         allow_power_actions: true,
@@ -254,91 +246,97 @@ describe('fromConfig', () => {
     expect(form.controlAllowPowerActions).toBe(true);
   });
 
-  it('reads update.mode when present', () => {
-    const form = fromConfig({ update: { mode: 'check-only' } });
-    expect(form.updateMode).toBe('check-only');
+  it("reads update.mode when present", () => {
+    const form = fromConfig({ update: { mode: "check-only" } });
+    expect(form.updateMode).toBe("check-only");
   });
 
-  it('reads ups settings when present', () => {
+  it("reads ups settings when present", () => {
     const form = fromConfig({
       ups: {
         enabled: true,
-        daemon_addr: '127.0.0.1:8423',
+        daemon_addr: "127.0.0.1:8423",
         poll_interval_secs: 5,
         upstream_heartbeat_secs: 60,
       },
     });
     expect(form.upsEnabled).toBe(true);
-    expect(form.upsDaemonAddr).toBe('127.0.0.1:8423');
-    expect(form.upsPollIntervalSecs).toBe('5');
-    expect(form.upsUpstreamHeartbeatSecs).toBe('60');
+    expect(form.upsDaemonAddr).toBe("127.0.0.1:8423");
+    expect(form.upsPollIntervalSecs).toBe("5");
+    expect(form.upsUpstreamHeartbeatSecs).toBe("60");
   });
 
-  it('defaults updateMode to empty string when update section missing', () => {
+  it("defaults updateMode to empty string when update section missing", () => {
     const form = fromConfig({});
-    expect(form.updateMode).toBe('');
+    expect(form.updateMode).toBe("");
   });
 
-  it('parses reader targets into split fields', () => {
+  it("parses reader targets into split fields", () => {
     const form = fromConfig({
-      readers: [{ target: '192.168.0.50:10000', enabled: true, local_fallback_port: 10050 }],
+      readers: [
+        { target: "192.168.0.50:10000", enabled: true, local_fallback_port: 10050 },
+      ],
     });
     expect(form.readers).toEqual([
       {
-        ip: '192.168.0.50',
-        port: '10000',
+        ip: "192.168.0.50",
+        port: "10000",
         is_range: false,
         enabled: true,
-        local_fallback_port: '10050',
+        local_fallback_port: "10050",
       },
     ]);
   });
 
-  it('parses range reader targets', () => {
+  it("parses range reader targets", () => {
     const form = fromConfig({
-      readers: [{ target: '192.168.0.150-160:10000', enabled: false }],
+      readers: [
+        { target: "192.168.0.150-160:10000", enabled: false },
+      ],
     });
     const r = form.readers[0];
     expect(r.is_range).toBe(true);
     if (r.is_range) {
-      expect(r.ip_start).toBe('192.168.0.150');
-      expect(r.ip_end_octet).toBe('160');
+      expect(r.ip_start).toBe("192.168.0.150");
+      expect(r.ip_end_octet).toBe("160");
     }
     expect(r.enabled).toBe(false);
   });
 
-  it('drops persisted local fallback overrides for range readers', () => {
+  it("drops persisted local fallback overrides for range readers", () => {
     const form = fromConfig({
-      readers: [{ target: '192.168.0.150-160:10000', enabled: true, local_fallback_port: 12000 }],
+      readers: [
+        { target: "192.168.0.150-160:10000", enabled: true, local_fallback_port: 12000 },
+      ],
     });
     expect(form.readers[0].is_range).toBe(true);
-    expect('local_fallback_port' in form.readers[0]).toBe(false);
+    expect("local_fallback_port" in form.readers[0]).toBe(false);
   });
 
-  it('defaults enabled to true when not specified', () => {
+  it("defaults enabled to true when not specified", () => {
     const form = fromConfig({
-      readers: [{ target: '10.0.0.1:10000' }],
+      readers: [{ target: "10.0.0.1:10000" }],
     });
     expect(form.readers[0].enabled).toBe(true);
   });
 
-  it('defaults local_fallback_port to empty string when not specified', () => {
+  it("defaults local_fallback_port to empty string when not specified", () => {
     const form = fromConfig({
-      readers: [{ target: '10.0.0.1:10000' }],
+      readers: [{ target: "10.0.0.1:10000" }],
     });
     const r = form.readers[0];
     expect(r.is_range).toBe(false);
     if (!r.is_range) {
-      expect(r.local_fallback_port).toBe('');
+      expect(r.local_fallback_port).toBe("");
     }
   });
 
-  it('handles mixed single and range readers in same config', () => {
+  it("handles mixed single and range readers in same config", () => {
     const form = fromConfig({
       readers: [
-        { target: '192.168.0.50:10000', enabled: true, local_fallback_port: 10050 },
-        { target: '192.168.0.150-160:10000', enabled: false },
-        { target: '10.0.0.1:9999', enabled: true },
+        { target: "192.168.0.50:10000", enabled: true, local_fallback_port: 10050 },
+        { target: "192.168.0.150-160:10000", enabled: false },
+        { target: "10.0.0.1:9999", enabled: true },
       ],
     });
     expect(form.readers).toHaveLength(3);
@@ -346,48 +344,48 @@ describe('fromConfig', () => {
     expect(form.readers[1].is_range).toBe(true);
     expect(form.readers[2].is_range).toBe(false);
     if (!form.readers[0].is_range) {
-      expect(form.readers[0].ip).toBe('192.168.0.50');
-      expect(form.readers[0].local_fallback_port).toBe('10050');
+      expect(form.readers[0].ip).toBe("192.168.0.50");
+      expect(form.readers[0].local_fallback_port).toBe("10050");
     }
     if (form.readers[1].is_range) {
-      expect(form.readers[1].ip_start).toBe('192.168.0.150');
-      expect(form.readers[1].ip_end_octet).toBe('160');
+      expect(form.readers[1].ip_start).toBe("192.168.0.150");
+      expect(form.readers[1].ip_end_octet).toBe("160");
     }
     if (!form.readers[2].is_range) {
-      expect(form.readers[2].ip).toBe('10.0.0.1');
-      expect(form.readers[2].port).toBe('9999');
+      expect(form.readers[2].ip).toBe("10.0.0.1");
+      expect(form.readers[2].port).toBe("9999");
     }
   });
 });
 
-describe('payload builders', () => {
-  it('serializes empty display name as null', () => {
+describe("payload builders", () => {
+  it("serializes empty display name as null", () => {
     expect(
       toGeneralPayload({
-        generalDisplayName: '',
-      } as ForwarderConfigFormState)
+        generalDisplayName: "",
+      } as ForwarderConfigFormState),
     ).toEqual({
       display_name: null,
     });
   });
 
-  it('serializes readers using buildTarget', () => {
+  it("serializes readers using buildTarget", () => {
     const form = {
       readers: [
-        makeReader({ ip: '127.0.0.1', port: '10001', local_fallback_port: '12484' }),
-        makeReader({ ip: '127.0.0.1', port: '10002', enabled: false, local_fallback_port: '' }),
+        makeReader({ ip: "127.0.0.1", port: "10001", local_fallback_port: "12484" }),
+        makeReader({ ip: "127.0.0.1", port: "10002", enabled: false, local_fallback_port: "" }),
       ],
     } as ForwarderConfigFormState;
 
     expect(toReadersPayload(form)).toEqual({
       readers: [
         {
-          target: '127.0.0.1:10001',
+          target: "127.0.0.1:10001",
           enabled: true,
           local_fallback_port: 12484,
         },
         {
-          target: '127.0.0.1:10002',
+          target: "127.0.0.1:10002",
           enabled: false,
           local_fallback_port: null,
         },
@@ -395,13 +393,13 @@ describe('payload builders', () => {
     });
   });
 
-  it('serializes range readers using buildTarget', () => {
+  it("serializes range readers using buildTarget", () => {
     const form = {
       readers: [
         makeRangeReader({
-          ip_start: '192.168.0.150',
-          ip_end_octet: '160',
-          port: '10000',
+          ip_start: "192.168.0.150",
+          ip_end_octet: "160",
+          port: "10000",
         }),
       ],
     } as ForwarderConfigFormState;
@@ -409,7 +407,7 @@ describe('payload builders', () => {
     expect(toReadersPayload(form)).toEqual({
       readers: [
         {
-          target: '192.168.0.150-160:10000',
+          target: "192.168.0.150-160:10000",
           enabled: true,
           local_fallback_port: null,
         },
@@ -417,43 +415,43 @@ describe('payload builders', () => {
     });
   });
 
-  it('serializes disabled reader with empty IP as null target', () => {
+  it("serializes disabled reader with empty IP as null target", () => {
     const form = {
-      readers: [makeReader({ ip: '', port: '10000', enabled: false })],
+      readers: [makeReader({ ip: "", port: "10000", enabled: false })],
     } as ForwarderConfigFormState;
     const payload = toReadersPayload(form);
     expect(payload.readers[0].target).toBeNull();
   });
 
-  it('serializes disabled reader with empty port as null target', () => {
+  it("serializes disabled reader with empty port as null target", () => {
     const form = {
-      readers: [makeReader({ ip: '192.168.0.1', port: '', enabled: false })],
+      readers: [makeReader({ ip: "192.168.0.1", port: "", enabled: false })],
     } as ForwarderConfigFormState;
     const payload = toReadersPayload(form);
     expect(payload.readers[0].target).toBeNull();
   });
 
-  it('serializes p2p server settings', () => {
+  it("serializes p2p server settings", () => {
     expect(
       toP2pPayload({
         p2pEnabled: true,
-        p2pServerUrl: ' https://thin.example.com/ ',
-        p2pServerTokenFile: ' /etc/rusty-timer/forwarder.token ',
-      } as ForwarderConfigFormState)
+        p2pServerUrl: " https://thin.example.com/ ",
+        p2pServerTokenFile: " /etc/rusty-timer/forwarder.token ",
+      } as ForwarderConfigFormState),
     ).toEqual({
       enabled: true,
-      server_url: 'https://thin.example.com/',
-      server_token_file: '/etc/rusty-timer/forwarder.token',
+      server_url: "https://thin.example.com/",
+      server_token_file: "/etc/rusty-timer/forwarder.token",
     });
   });
 
-  it('serializes blank p2p optional fields as null', () => {
+  it("serializes blank p2p optional fields as null", () => {
     expect(
       toP2pPayload({
         p2pEnabled: false,
-        p2pServerUrl: '',
-        p2pServerTokenFile: '',
-      } as ForwarderConfigFormState)
+        p2pServerUrl: "",
+        p2pServerTokenFile: "",
+      } as ForwarderConfigFormState),
     ).toEqual({
       enabled: false,
       server_url: null,
@@ -461,7 +459,7 @@ describe('payload builders', () => {
     });
   });
 
-  it('serializes control allow_power_actions boolean', () => {
+  it("serializes control allow_power_actions boolean", () => {
     const form = {
       controlAllowPowerActions: true,
     } as ForwarderConfigFormState;
@@ -471,545 +469,439 @@ describe('payload builders', () => {
     });
   });
 
-  it('serializes update mode', () => {
+  it("serializes update mode", () => {
     expect(
       toUpdatePayload({
-        updateMode: 'check-only',
-      } as ForwarderConfigFormState)
-    ).toEqual({ mode: 'check-only' });
+        updateMode: "check-only",
+      } as ForwarderConfigFormState),
+    ).toEqual({ mode: "check-only" });
   });
 
-  it('serializes empty update mode as null', () => {
+  it("serializes empty update mode as null", () => {
     expect(
       toUpdatePayload({
-        updateMode: '',
-      } as ForwarderConfigFormState)
+        updateMode: "",
+      } as ForwarderConfigFormState),
     ).toEqual({ mode: null });
   });
 
-  it('serializes ups settings', () => {
+  it("serializes ups settings", () => {
     expect(
       toUpsPayload({
         upsEnabled: true,
-        upsDaemonAddr: '127.0.0.1:8423',
-        upsPollIntervalSecs: '5',
-        upsUpstreamHeartbeatSecs: '60',
-      } as ForwarderConfigFormState)
+        upsDaemonAddr: "127.0.0.1:8423",
+        upsPollIntervalSecs: "5",
+        upsUpstreamHeartbeatSecs: "60",
+      } as ForwarderConfigFormState),
     ).toEqual({
       enabled: true,
-      daemon_addr: '127.0.0.1:8423',
+      daemon_addr: "127.0.0.1:8423",
       poll_interval_secs: 5,
       upstream_heartbeat_secs: 60,
     });
   });
 });
 
-describe('validateGeneral', () => {
-  it('passes when empty (optional)', () => {
-    expect(validateGeneral(makeForm({ generalDisplayName: '' }))).toBeNull();
+describe("validateGeneral", () => {
+  it("passes when empty (optional)", () => {
+    expect(validateGeneral(makeForm({ generalDisplayName: "" }))).toBeNull();
   });
 
-  it('passes for a normal name', () => {
-    expect(validateGeneral(makeForm({ generalDisplayName: 'Start Line' }))).toBeNull();
+  it("passes for a normal name", () => {
+    expect(validateGeneral(makeForm({ generalDisplayName: "Start Line" }))).toBeNull();
   });
 
-  it('rejects all-whitespace name', () => {
-    expect(validateGeneral(makeForm({ generalDisplayName: '   ' }))).toBeTruthy();
+  it("rejects all-whitespace name", () => {
+    expect(validateGeneral(makeForm({ generalDisplayName: "   " }))).toBeTruthy();
   });
 
-  it('rejects name with newline', () => {
-    expect(validateGeneral(makeForm({ generalDisplayName: 'Start\nLine' }))).toBeTruthy();
+  it("rejects name with newline", () => {
+    expect(validateGeneral(makeForm({ generalDisplayName: "Start\nLine" }))).toBeTruthy();
   });
 
-  it('rejects name over 150 characters', () => {
-    expect(validateGeneral(makeForm({ generalDisplayName: 'A'.repeat(151) }))).toBeTruthy();
+  it("rejects name over 150 characters", () => {
+    expect(validateGeneral(makeForm({ generalDisplayName: "A".repeat(151) }))).toBeTruthy();
   });
 
-  it('passes for exactly 150 characters', () => {
-    expect(validateGeneral(makeForm({ generalDisplayName: 'A'.repeat(150) }))).toBeNull();
-  });
-});
-
-describe('validateP2p', () => {
-  it('accepts blank server URL for local-only tests', () => {
-    expect(validateP2p(makeForm({ p2pServerUrl: '' }))).toBeNull();
-  });
-
-  it('passes for valid http URL', () => {
-    expect(validateP2p(makeForm({ p2pServerUrl: 'http://example.com' }))).toBeNull();
-  });
-
-  it('passes for valid https URL', () => {
-    expect(validateP2p(makeForm({ p2pServerUrl: 'https://example.com:8443' }))).toBeNull();
-  });
-
-  it('rejects unsupported URL schemes', () => {
-    expect(validateP2p(makeForm({ p2pServerUrl: 'ftp://example.com' }))).toBeTruthy();
-  });
-
-  it('rejects URL without scheme', () => {
-    expect(validateP2p(makeForm({ p2pServerUrl: 'example.com' }))).toBeTruthy();
-  });
-
-  it('rejects multiline server token file', () => {
-    expect(validateP2p(makeForm({ p2pServerTokenFile: '/tmp/\ntoken.txt' }))).toBeTruthy();
+  it("passes for exactly 150 characters", () => {
+    expect(validateGeneral(makeForm({ generalDisplayName: "A".repeat(150) }))).toBeNull();
   });
 });
 
-describe('validateAuth', () => {
-  it('passes for valid path', () => {
-    expect(validateAuth(makeForm({ authTokenFile: '/tmp/token.txt' }))).toBeNull();
+describe("validateP2p", () => {
+  it("accepts blank server URL for local-only tests", () => {
+    expect(validateP2p(makeForm({ p2pServerUrl: "" }))).toBeNull();
   });
 
-  it('rejects empty path', () => {
-    expect(validateAuth(makeForm({ authTokenFile: '' }))).toBeTruthy();
+  it("passes for valid http URL", () => {
+    expect(validateP2p(makeForm({ p2pServerUrl: "http://example.com" }))).toBeNull();
   });
 
-  it('rejects path with newline', () => {
-    expect(validateAuth(makeForm({ authTokenFile: '/tmp/\ntoken.txt' }))).toBeTruthy();
-  });
-});
-
-describe('validateJournal', () => {
-  it('passes when empty (uses default)', () => {
-    expect(validateJournal(makeForm({ journalPruneWatermarkPct: '' }))).toBeNull();
+  it("passes for valid https URL", () => {
+    expect(validateP2p(makeForm({ p2pServerUrl: "https://example.com:8443" }))).toBeNull();
   });
 
-  it('passes for valid percentage', () => {
-    expect(validateJournal(makeForm({ journalPruneWatermarkPct: '80' }))).toBeNull();
+  it("rejects unsupported URL schemes", () => {
+    expect(validateP2p(makeForm({ p2pServerUrl: "ftp://example.com" }))).toBeTruthy();
   });
 
-  it('rejects percentage over 100', () => {
-    expect(validateJournal(makeForm({ journalPruneWatermarkPct: '101' }))).toBeTruthy();
+  it("rejects URL without scheme", () => {
+    expect(validateP2p(makeForm({ p2pServerUrl: "example.com" }))).toBeTruthy();
   });
 
-  it('rejects negative percentage', () => {
-    expect(validateJournal(makeForm({ journalPruneWatermarkPct: '-1' }))).toBeTruthy();
-  });
-
-  it('rejects non-integer percentage', () => {
-    expect(validateJournal(makeForm({ journalPruneWatermarkPct: '80.5' }))).toBeTruthy();
+  it("rejects multiline server token file", () => {
+    expect(validateP2p(makeForm({ p2pServerTokenFile: "/tmp/\ntoken.txt" }))).toBeTruthy();
   });
 });
 
-describe('validateUps', () => {
-  it('passes when UPS is disabled', () => {
+describe("validateAuth", () => {
+  it("passes for valid path", () => {
+    expect(validateAuth(makeForm({ authTokenFile: "/tmp/token.txt" }))).toBeNull();
+  });
+
+  it("rejects empty path", () => {
+    expect(validateAuth(makeForm({ authTokenFile: "" }))).toBeTruthy();
+  });
+
+  it("rejects path with newline", () => {
+    expect(validateAuth(makeForm({ authTokenFile: "/tmp/\ntoken.txt" }))).toBeTruthy();
+  });
+});
+
+describe("validateJournal", () => {
+  it("passes when empty (uses default)", () => {
+    expect(validateJournal(makeForm({ journalPruneWatermarkPct: "" }))).toBeNull();
+  });
+
+  it("passes for valid percentage", () => {
+    expect(validateJournal(makeForm({ journalPruneWatermarkPct: "80" }))).toBeNull();
+  });
+
+  it("rejects percentage over 100", () => {
+    expect(validateJournal(makeForm({ journalPruneWatermarkPct: "101" }))).toBeTruthy();
+  });
+
+  it("rejects negative percentage", () => {
+    expect(validateJournal(makeForm({ journalPruneWatermarkPct: "-1" }))).toBeTruthy();
+  });
+
+  it("rejects non-integer percentage", () => {
+    expect(validateJournal(makeForm({ journalPruneWatermarkPct: "80.5" }))).toBeTruthy();
+  });
+});
+
+describe("validateUps", () => {
+  it("passes when UPS is disabled", () => {
     expect(validateUps(makeForm())).toBeNull();
   });
 
-  it('passes when enabled UPS uses backend defaults', () => {
+  it("passes when enabled UPS uses backend defaults", () => {
     expect(
       validateUps(
         makeForm({
           upsEnabled: true,
-        })
-      )
+        }),
+      ),
     ).toBeNull();
   });
 
-  it('passes for valid UPS settings', () => {
+  it("passes for valid UPS settings", () => {
     expect(
       validateUps(
         makeForm({
           upsEnabled: true,
-          upsDaemonAddr: '127.0.0.1:8423',
-          upsPollIntervalSecs: '5',
-          upsUpstreamHeartbeatSecs: '60',
-        })
-      )
+          upsDaemonAddr: "127.0.0.1:8423",
+          upsPollIntervalSecs: "5",
+          upsUpstreamHeartbeatSecs: "60",
+        }),
+      ),
     ).toBeNull();
   });
 
-  it('rejects malformed UPS daemon address when provided', () => {
+  it("rejects malformed UPS daemon address when provided", () => {
     expect(
       validateUps(
         makeForm({
           upsEnabled: true,
-          upsDaemonAddr: 'not-valid',
-        })
-      )
+          upsDaemonAddr: "not-valid",
+        }),
+      ),
     ).toBeTruthy();
   });
 });
 
-describe('validateStatusHttp', () => {
-  it('passes when empty (uses default)', () => {
-    expect(validateStatusHttp(makeForm({ statusHttpBind: '' }))).toBeNull();
+describe("validateStatusHttp", () => {
+  it("passes when empty (uses default)", () => {
+    expect(validateStatusHttp(makeForm({ statusHttpBind: "" }))).toBeNull();
   });
 
-  it('passes for valid bind address', () => {
-    expect(validateStatusHttp(makeForm({ statusHttpBind: '0.0.0.0:8080' }))).toBeNull();
+  it("passes for valid bind address", () => {
+    expect(validateStatusHttp(makeForm({ statusHttpBind: "0.0.0.0:8080" }))).toBeNull();
   });
 
-  it('rejects missing port', () => {
-    expect(validateStatusHttp(makeForm({ statusHttpBind: '0.0.0.0' }))).toBeTruthy();
+  it("rejects missing port", () => {
+    expect(validateStatusHttp(makeForm({ statusHttpBind: "0.0.0.0" }))).toBeTruthy();
   });
 
-  it('rejects hostname instead of IP', () => {
-    expect(validateStatusHttp(makeForm({ statusHttpBind: 'localhost:8080' }))).toBeTruthy();
+  it("rejects hostname instead of IP", () => {
+    expect(validateStatusHttp(makeForm({ statusHttpBind: "localhost:8080" }))).toBeTruthy();
   });
 
-  it('rejects ipv6 bind', () => {
-    expect(validateStatusHttp(makeForm({ statusHttpBind: '[::1]:8080' }))).toBeTruthy();
+  it("rejects ipv6 bind", () => {
+    expect(validateStatusHttp(makeForm({ statusHttpBind: "[::1]:8080" }))).toBeTruthy();
   });
 
-  it('rejects octet out of range', () => {
-    expect(validateStatusHttp(makeForm({ statusHttpBind: '999.0.0.1:8080' }))).toBeTruthy();
+  it("rejects octet out of range", () => {
+    expect(validateStatusHttp(makeForm({ statusHttpBind: "999.0.0.1:8080" }))).toBeTruthy();
   });
 
-  it('rejects port out of range', () => {
-    expect(validateStatusHttp(makeForm({ statusHttpBind: '127.0.0.1:99999' }))).toBeTruthy();
+  it("rejects port out of range", () => {
+    expect(validateStatusHttp(makeForm({ statusHttpBind: "127.0.0.1:99999" }))).toBeTruthy();
   });
 });
 
-describe('validateReaders', () => {
-  it('passes for valid single-IP readers', () => {
+describe("validateReaders", () => {
+  it("passes for valid single-IP readers", () => {
     expect(validateReaders(makeForm())).toBeNull();
   });
 
-  it('accepts numeric port values produced by number inputs', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeReader({ port: 10000 as unknown as string })],
-        })
-      )
-    ).toBeNull();
+  it("accepts numeric port values produced by number inputs", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeReader({ port: 10000 as unknown as string })],
+    }))).toBeNull();
   });
 
-  it('passes for valid range readers', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeRangeReader()],
-        })
-      )
-    ).toBeNull();
+  it("passes for valid range readers", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeRangeReader()],
+    }))).toBeNull();
   });
 
-  it('accepts numeric range end octet values produced by number inputs', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [
-            makeRangeReader({
-              ip_end_octet: 110 as unknown as string,
-            }),
-          ],
-        })
-      )
-    ).toBeNull();
+  it("accepts numeric range end octet values produced by number inputs", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeRangeReader({
+        ip_end_octet: 110 as unknown as string,
+      })],
+    }))).toBeNull();
   });
 
-  it('rejects empty readers list', () => {
+  it("rejects empty readers list", () => {
     expect(validateReaders(makeForm({ readers: [] }))).toBeTruthy();
   });
 
-  it('rejects reader with empty IP (single mode)', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeReader({ ip: '' })],
-        })
-      )
-    ).toBeTruthy();
+  it("rejects reader with empty IP (single mode)", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeReader({ ip: "" })],
+    }))).toBeTruthy();
   });
 
-  it('rejects reader with invalid IP (single mode)', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeReader({ ip: '999.0.0.1' })],
-        })
-      )
-    ).toBeTruthy();
+  it("rejects reader with invalid IP (single mode)", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeReader({ ip: "999.0.0.1" })],
+    }))).toBeTruthy();
   });
 
-  it('rejects reader with non-IP string', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeReader({ ip: 'reader1.local' })],
-        })
-      )
-    ).toBeTruthy();
+  it("rejects reader with non-IP string", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeReader({ ip: "reader1.local" })],
+    }))).toBeTruthy();
   });
 
-  it('rejects reader with empty port', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeReader({ port: '' })],
-        })
-      )
-    ).toBeTruthy();
+  it("rejects reader with empty port", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeReader({ port: "" })],
+    }))).toBeTruthy();
   });
 
-  it('rejects reader with port out of range', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeReader({ port: '99999' })],
-        })
-      )
-    ).toBeTruthy();
+  it("rejects reader with port out of range", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeReader({ port: "99999" })],
+    }))).toBeTruthy();
   });
 
-  it('rejects reader with port 0', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeReader({ port: '0' })],
-        })
-      )
-    ).toBeTruthy();
+  it("rejects reader with port 0", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeReader({ port: "0" })],
+    }))).toBeTruthy();
   });
 
-  it('rejects reader with fallback port out of range', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeReader({ local_fallback_port: '99999' })],
-        })
-      )
-    ).toBeTruthy();
+  it("rejects reader with fallback port out of range", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeReader({ local_fallback_port: "99999" })],
+    }))).toBeTruthy();
   });
 
-  it('passes when fallback port is empty (optional)', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeReader({ local_fallback_port: '' })],
-        })
-      )
-    ).toBeNull();
+  it("passes when fallback port is empty (optional)", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeReader({ local_fallback_port: "" })],
+    }))).toBeNull();
   });
 
-  it('rejects range reader with empty start IP', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeRangeReader({ ip_start: '', ip_end_octet: '110' })],
-        })
-      )
-    ).toBeTruthy();
+  it("rejects range reader with empty start IP", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeRangeReader({ ip_start: "", ip_end_octet: "110" })],
+    }))).toBeTruthy();
   });
 
-  it('rejects range reader with invalid start IP', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeRangeReader({ ip_start: '999.0.0.100', ip_end_octet: '110' })],
-        })
-      )
-    ).toBeTruthy();
+  it("rejects range reader with invalid start IP", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeRangeReader({ ip_start: "999.0.0.100", ip_end_octet: "110" })],
+    }))).toBeTruthy();
   });
 
-  it('rejects range reader with empty end octet', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeRangeReader({ ip_start: '192.168.0.100', ip_end_octet: '' })],
-        })
-      )
-    ).toBeTruthy();
+  it("rejects range reader with empty end octet", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeRangeReader({ ip_start: "192.168.0.100", ip_end_octet: "" })],
+    }))).toBeTruthy();
   });
 
-  it('rejects range reader with end octet > 255', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeRangeReader({ ip_start: '192.168.0.100', ip_end_octet: '256' })],
-        })
-      )
-    ).toBeTruthy();
+  it("rejects range reader with end octet > 255", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeRangeReader({ ip_start: "192.168.0.100", ip_end_octet: "256" })],
+    }))).toBeTruthy();
   });
 
-  it('rejects range reader with end octet < start IP last octet', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeRangeReader({ ip_start: '192.168.0.100', ip_end_octet: '50' })],
-        })
-      )
-    ).toBeTruthy();
+  it("rejects range reader with end octet < start IP last octet", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeRangeReader({ ip_start: "192.168.0.100", ip_end_octet: "50" })],
+    }))).toBeTruthy();
   });
 
-  it('passes range reader with end octet equal to start IP last octet', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeRangeReader({ ip_start: '192.168.0.100', ip_end_octet: '100' })],
-        })
-      )
-    ).toBeNull();
+  it("passes range reader with end octet equal to start IP last octet", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeRangeReader({ ip_start: "192.168.0.100", ip_end_octet: "100" })],
+    }))).toBeNull();
   });
 
-  it('rejects reader with whitespace-only IP', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeSingleReader({ ip: '   ' })],
-        })
-      )
-    ).toBeTruthy();
+  it("rejects reader with whitespace-only IP", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeSingleReader({ ip: "   " })],
+    }))).toBeTruthy();
   });
 
-  it('rejects reader with non-numeric port', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeSingleReader({ port: 'abc' })],
-        })
-      )
-    ).toBeTruthy();
+  it("rejects reader with non-numeric port", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeSingleReader({ port: "abc" })],
+    }))).toBeTruthy();
   });
 
-  it('rejects reader with decimal port', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeSingleReader({ port: '80.5' })],
-        })
-      )
-    ).toBeTruthy();
+  it("rejects reader with decimal port", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeSingleReader({ port: "80.5" })],
+    }))).toBeTruthy();
   });
 
-  it('rejects NaN port from cleared number input', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeReader({ port: NaN as unknown as string })],
-        })
-      )
-    ).toBeTruthy();
+  it("rejects NaN port from cleared number input", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeReader({ port: NaN as unknown as string })],
+    }))).toBeTruthy();
   });
 
-  it('rejects NaN end octet from cleared number input', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeRangeReader({ ip_end_octet: NaN as unknown as string })],
-        })
-      )
-    ).toBeTruthy();
+  it("rejects NaN end octet from cleared number input", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeRangeReader({ ip_end_octet: NaN as unknown as string })],
+    }))).toBeTruthy();
   });
 
-  it('rejects range reader with negative end octet', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeRangeReader({ ip_start: '192.168.0.100', ip_end_octet: '-1' })],
-        })
-      )
-    ).toBeTruthy();
+  it("rejects range reader with negative end octet", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeRangeReader({ ip_start: "192.168.0.100", ip_end_octet: "-1" })],
+    }))).toBeTruthy();
   });
 
-  it('passes range reader with start and end octet both 0', () => {
-    expect(
-      validateReaders(
-        makeForm({
-          readers: [makeRangeReader({ ip_start: '192.168.0.0', ip_end_octet: '0' })],
-        })
-      )
-    ).toBeNull();
+  it("passes range reader with start and end octet both 0", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeRangeReader({ ip_start: "192.168.0.0", ip_end_octet: "0" })],
+    }))).toBeNull();
   });
 
-  it('reports correct index for invalid second reader', () => {
-    const result = validateReaders(
-      makeForm({
-        readers: [makeSingleReader(), makeSingleReader({ ip: '' })],
-      })
-    );
-    expect(result).toContain('Reader 2');
+  it("reports correct index for invalid second reader", () => {
+    const result = validateReaders(makeForm({
+      readers: [makeSingleReader(), makeSingleReader({ ip: "" })],
+    }));
+    expect(result).toContain("Reader 2");
   });
 });
 
-describe('defaultFallbackPort', () => {
-  it('computes 10000 + last octet for valid IP', () => {
-    expect(defaultFallbackPort('192.168.0.50')).toBe('10050');
+describe("defaultFallbackPort", () => {
+  it("computes 10000 + last octet for valid IP", () => {
+    expect(defaultFallbackPort("192.168.0.50")).toBe("10050");
   });
 
-  it('computes for another valid IP', () => {
-    expect(defaultFallbackPort('10.0.0.1')).toBe('10001');
+  it("computes for another valid IP", () => {
+    expect(defaultFallbackPort("10.0.0.1")).toBe("10001");
   });
 
-  it('returns empty for non-IP string', () => {
-    expect(defaultFallbackPort('reader1.local')).toBe('');
+  it("returns empty for non-IP string", () => {
+    expect(defaultFallbackPort("reader1.local")).toBe("");
   });
 
-  it('returns empty for invalid first octet', () => {
-    expect(defaultFallbackPort('999.168.0.42')).toBe('');
+  it("returns empty for invalid first octet", () => {
+    expect(defaultFallbackPort("999.168.0.42")).toBe("");
   });
 
-  it('returns empty for invalid second octet', () => {
-    expect(defaultFallbackPort('10.999.0.42')).toBe('');
+  it("returns empty for invalid second octet", () => {
+    expect(defaultFallbackPort("10.999.0.42")).toBe("");
   });
 
-  it('returns empty for invalid third octet', () => {
-    expect(defaultFallbackPort('10.0.999.42')).toBe('');
+  it("returns empty for invalid third octet", () => {
+    expect(defaultFallbackPort("10.0.999.42")).toBe("");
   });
 
-  it('returns empty for empty string', () => {
-    expect(defaultFallbackPort('')).toBe('');
+  it("returns empty for empty string", () => {
+    expect(defaultFallbackPort("")).toBe("");
   });
 
-  it('returns empty for IP:port format (not just IP)', () => {
-    expect(defaultFallbackPort('192.168.0.50:10000')).toBe('');
+  it("returns empty for IP:port format (not just IP)", () => {
+    expect(defaultFallbackPort("192.168.0.50:10000")).toBe("");
   });
 
-  it('computes 10255 for last octet 255', () => {
-    expect(defaultFallbackPort('192.168.0.255')).toBe('10255');
+  it("computes 10255 for last octet 255", () => {
+    expect(defaultFallbackPort("192.168.0.255")).toBe("10255");
   });
 });
 
-describe('toReadersPayload', () => {
-  it('throws when enabled reader has empty target', () => {
+describe("toReadersPayload", () => {
+  it("throws when enabled reader has empty target", () => {
     const form = {
-      readers: [makeReader({ ip: '', port: '10000', enabled: true })],
+      readers: [makeReader({ ip: "", port: "10000", enabled: true })],
     } as ForwarderConfigFormState;
     expect(() => toReadersPayload(form)).toThrow(/empty target/i);
   });
 
-  it('allows disabled reader with empty target', () => {
+  it("allows disabled reader with empty target", () => {
     const form = {
-      readers: [makeReader({ ip: '', port: '10000', enabled: false })],
+      readers: [makeReader({ ip: "", port: "10000", enabled: false })],
     } as ForwarderConfigFormState;
     const payload = toReadersPayload(form);
     expect(payload.readers[0].target).toBeNull();
   });
 
-  it('handles numeric local_fallback_port from number input', () => {
+  it("handles numeric local_fallback_port from number input", () => {
     const form = {
-      readers: [
-        makeReader({
-          ip: '192.168.0.1',
-          port: '10000',
-          local_fallback_port: 12345 as unknown as string,
-        }),
-      ],
+      readers: [makeReader({ ip: "192.168.0.1", port: "10000", local_fallback_port: 12345 as unknown as string })],
     } as ForwarderConfigFormState;
     const payload = toReadersPayload(form);
     expect(payload.readers[0].local_fallback_port).toBe(12345);
   });
 });
 
-describe('fromConfig/toReadersPayload round-trip', () => {
-  it('round-trips mixed single and range readers', () => {
+describe("fromConfig/toReadersPayload round-trip", () => {
+  it("round-trips mixed single and range readers", () => {
     const originalConfig = {
       readers: [
-        { target: '192.168.0.50:10000', enabled: true, local_fallback_port: 10050 },
-        { target: '192.168.0.150-160:10000', enabled: false },
-        { target: '10.0.0.1:9999', enabled: true, local_fallback_port: null },
+        { target: "192.168.0.50:10000", enabled: true, local_fallback_port: 10050 },
+        { target: "192.168.0.150-160:10000", enabled: false },
+        { target: "10.0.0.1:9999", enabled: true, local_fallback_port: null },
       ],
     };
     const form = fromConfig(originalConfig);
     const payload = toReadersPayload({ readers: form.readers } as ForwarderConfigFormState);
 
     expect(payload.readers).toEqual([
-      { target: '192.168.0.50:10000', enabled: true, local_fallback_port: 10050 },
-      { target: '192.168.0.150-160:10000', enabled: false, local_fallback_port: null },
-      { target: '10.0.0.1:9999', enabled: true, local_fallback_port: null },
+      { target: "192.168.0.50:10000", enabled: true, local_fallback_port: 10050 },
+      { target: "192.168.0.150-160:10000", enabled: false, local_fallback_port: null },
+      { target: "10.0.0.1:9999", enabled: true, local_fallback_port: null },
     ]);
   });
 });

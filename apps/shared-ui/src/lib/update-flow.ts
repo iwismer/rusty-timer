@@ -1,13 +1,13 @@
 export type UpdateStatusResponse = {
-  status: 'up_to_date' | 'available' | 'downloaded' | 'failed';
+  status: "up_to_date" | "available" | "downloaded" | "failed";
   version?: string;
   error?: string;
 };
 
 export type ApplyResult =
-  | { outcome: 'applied' }
-  | { outcome: 'failed'; error: string }
-  | { outcome: 'timeout' };
+  | { outcome: "applied" }
+  | { outcome: "failed"; error: string }
+  | { outcome: "timeout" };
 
 export interface WaitForApplyOptions {
   attempts?: number;
@@ -21,7 +21,7 @@ function defaultSleep(ms: number): Promise<void> {
 
 export async function waitForApplyResult(
   getStatus: () => Promise<UpdateStatusResponse>,
-  options: WaitForApplyOptions = {}
+  options: WaitForApplyOptions = {},
 ): Promise<ApplyResult> {
   const attempts = options.attempts ?? 20;
   const intervalMs = options.intervalMs ?? 500;
@@ -30,14 +30,14 @@ export async function waitForApplyResult(
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const status = await getStatus();
-      if (status.status === 'failed') {
+      if (status.status === "failed") {
         return {
-          outcome: 'failed',
-          error: status.error ?? 'update apply failed',
+          outcome: "failed",
+          error: status.error ?? "update apply failed",
         };
       }
-      if (status.status === 'up_to_date') {
-        return { outcome: 'applied' };
+      if (status.status === "up_to_date") {
+        return { outcome: "applied" };
       }
     } catch {
       // Keep polling through transient request failures.
@@ -48,5 +48,5 @@ export async function waitForApplyResult(
     }
   }
 
-  return { outcome: 'timeout' };
+  return { outcome: "timeout" };
 }

@@ -23,26 +23,26 @@ export interface RangeReaderEntry extends ReaderBase {
 export type ReaderEntry = SingleReaderEntry | RangeReaderEntry;
 
 export function blankSingleReader(): SingleReaderEntry {
-  return { is_range: false, ip: '', port: '10000', enabled: true, local_fallback_port: '' };
+  return { is_range: false, ip: "", port: "10000", enabled: true, local_fallback_port: "" };
 }
 
 export function blankRangeReader(): RangeReaderEntry {
-  return { is_range: true, ip_start: '', ip_end_octet: '', port: '10000', enabled: true };
+  return { is_range: true, ip_start: "", ip_end_octet: "", port: "10000", enabled: true };
 }
 
 /** Fields extracted from a target string. Single targets omit local_fallback_port
  *  because that value comes from a separate config field, not the target string. */
 type ParsedTarget =
-  | Omit<SingleReaderEntry, 'enabled' | 'local_fallback_port'>
-  | Omit<RangeReaderEntry, 'enabled'>;
+  | Omit<SingleReaderEntry, "enabled" | "local_fallback_port">
+  | Omit<RangeReaderEntry, "enabled">;
 
 /** Parse a target string like "192.168.0.50:10000" or "192.168.0.150-160:10000" into split fields. */
 export function parseTarget(target: string): ParsedTarget {
-  if (!target) return { is_range: false, ip: '', port: '10000' };
+  if (!target) return { is_range: false, ip: "", port: "10000" };
 
-  const colonIdx = target.lastIndexOf(':');
+  const colonIdx = target.lastIndexOf(":");
   const host = colonIdx >= 0 ? target.slice(0, colonIdx) : target;
-  const port = colonIdx >= 0 ? target.slice(colonIdx + 1) : '10000';
+  const port = colonIdx >= 0 ? target.slice(colonIdx + 1) : "10000";
 
   // Check for range syntax: A.B.C.D-END (full IP, then dash, then end octet)
   const rangeMatch = host.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})-(\d{1,3})$/);
@@ -57,15 +57,15 @@ export function parseTarget(target: string): ParsedTarget {
  *  for range readers, requires ip_start, ip_end_octet, and port. Returns empty string if any required field is missing or blank. */
 export function buildTarget(reader: ReaderEntry): string {
   const port = asTrimmedString(reader.port);
-  if (!port) return '';
+  if (!port) return "";
   if (reader.is_range) {
     const start = asTrimmedString(reader.ip_start);
     const end = asTrimmedString(reader.ip_end_octet);
-    if (!start || !end) return '';
+    if (!start || !end) return "";
     return `${start}-${end}:${port}`;
   }
   const ip = asTrimmedString(reader.ip);
-  if (!ip) return '';
+  if (!ip) return "";
   return `${ip}:${port}`;
 }
 
@@ -88,20 +88,20 @@ export interface ForwarderConfigFormState {
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
     return value as Record<string, unknown>;
   }
   return {};
 }
 
 function asString(value: unknown): string {
-  return typeof value === 'string' ? value : '';
+  return typeof value === "string" ? value : "";
 }
 
 function asTrimmedString(value: unknown): string {
-  if (typeof value === 'string') return value.trim();
-  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
-  return '';
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return "";
 }
 
 export function fromConfig(cfg: Record<string, unknown>): ForwarderConfigFormState {
@@ -117,7 +117,7 @@ export function fromConfig(cfg: Record<string, unknown>): ForwarderConfigFormSta
   const readers: ReaderEntry[] = rawReaders.map((reader) => {
     const parsed = asRecord(reader);
     const targetFields = parseTarget(asString(parsed.target));
-    const enabled = typeof parsed.enabled === 'boolean' ? parsed.enabled : true;
+    const enabled = typeof parsed.enabled === "boolean" ? parsed.enabled : true;
     if (targetFields.is_range) {
       return { ...targetFields, enabled };
     }
@@ -125,7 +125,9 @@ export function fromConfig(cfg: Record<string, unknown>): ForwarderConfigFormSta
       ...targetFields,
       enabled,
       local_fallback_port:
-        parsed.local_fallback_port != null ? String(parsed.local_fallback_port) : '',
+        parsed.local_fallback_port != null
+          ? String(parsed.local_fallback_port)
+          : "",
     };
   });
 
@@ -137,24 +139,33 @@ export function fromConfig(cfg: Record<string, unknown>): ForwarderConfigFormSta
     authTokenFile: asString(auth.token_file),
     journalSqlitePath: asString(journal.sqlite_path),
     journalPruneWatermarkPct:
-      journal.prune_watermark_pct != null ? String(journal.prune_watermark_pct) : '',
+      journal.prune_watermark_pct != null
+        ? String(journal.prune_watermark_pct)
+        : "",
     statusHttpBind: asString(statusHttp.bind),
     upsEnabled: ups.enabled === true,
     upsDaemonAddr: asString(ups.daemon_addr),
-    upsPollIntervalSecs: ups.poll_interval_secs != null ? String(ups.poll_interval_secs) : '',
+    upsPollIntervalSecs:
+      ups.poll_interval_secs != null ? String(ups.poll_interval_secs) : "",
     upsUpstreamHeartbeatSecs:
-      ups.upstream_heartbeat_secs != null ? String(ups.upstream_heartbeat_secs) : '',
+      ups.upstream_heartbeat_secs != null
+        ? String(ups.upstream_heartbeat_secs)
+        : "",
     updateMode: asString(update.mode),
     controlAllowPowerActions: control.allow_power_actions === true,
     readers,
   };
 }
 
-export function toGeneralPayload(form: ForwarderConfigFormState): Record<string, unknown> {
+export function toGeneralPayload(
+  form: ForwarderConfigFormState,
+): Record<string, unknown> {
   return { display_name: form.generalDisplayName || null };
 }
 
-export function toP2pPayload(form: ForwarderConfigFormState): Record<string, unknown> {
+export function toP2pPayload(
+  form: ForwarderConfigFormState,
+): Record<string, unknown> {
   return {
     enabled: form.p2pEnabled,
     server_url: form.p2pServerUrl.trim() || null,
@@ -162,11 +173,15 @@ export function toP2pPayload(form: ForwarderConfigFormState): Record<string, unk
   };
 }
 
-export function toAuthPayload(form: ForwarderConfigFormState): Record<string, unknown> {
+export function toAuthPayload(
+  form: ForwarderConfigFormState,
+): Record<string, unknown> {
   return { token_file: form.authTokenFile };
 }
 
-export function toJournalPayload(form: ForwarderConfigFormState): Record<string, unknown> {
+export function toJournalPayload(
+  form: ForwarderConfigFormState,
+): Record<string, unknown> {
   return {
     sqlite_path: form.journalSqlitePath || null,
     prune_watermark_pct: form.journalPruneWatermarkPct
@@ -175,39 +190,49 @@ export function toJournalPayload(form: ForwarderConfigFormState): Record<string,
   };
 }
 
-export function toStatusHttpPayload(form: ForwarderConfigFormState): Record<string, unknown> {
+export function toStatusHttpPayload(
+  form: ForwarderConfigFormState,
+): Record<string, unknown> {
   return { bind: form.statusHttpBind || null };
 }
 
-export function toControlPayload(form: ForwarderConfigFormState): Record<string, unknown> {
+export function toControlPayload(
+  form: ForwarderConfigFormState,
+): Record<string, unknown> {
   return { allow_power_actions: form.controlAllowPowerActions };
 }
 
-export function toUpsPayload(form: ForwarderConfigFormState): Record<string, unknown> {
+export function toUpsPayload(
+  form: ForwarderConfigFormState,
+): Record<string, unknown> {
   return {
     enabled: form.upsEnabled,
     daemon_addr: form.upsDaemonAddr.trim() || null,
-    poll_interval_secs: form.upsPollIntervalSecs ? Number(form.upsPollIntervalSecs) : null,
+    poll_interval_secs: form.upsPollIntervalSecs
+      ? Number(form.upsPollIntervalSecs)
+      : null,
     upstream_heartbeat_secs: form.upsUpstreamHeartbeatSecs
       ? Number(form.upsUpstreamHeartbeatSecs)
       : null,
   };
 }
 
-export function toUpdatePayload(form: ForwarderConfigFormState): Record<string, unknown> {
+export function toUpdatePayload(
+  form: ForwarderConfigFormState,
+): Record<string, unknown> {
   return { mode: form.updateMode || null };
 }
 
-export function toReadersPayload(form: ForwarderConfigFormState): Record<string, unknown> {
+export function toReadersPayload(
+  form: ForwarderConfigFormState,
+): Record<string, unknown> {
   return {
     readers: form.readers.map((reader, i) => {
       const target = buildTarget(reader) || null;
       if (reader.enabled && !target) {
-        throw new Error(
-          `Reader ${i + 1}: empty target for enabled reader. Run validateReaders first.`
-        );
+        throw new Error(`Reader ${i + 1}: empty target for enabled reader. Run validateReaders first.`);
       }
-      const fallbackPort = !reader.is_range ? asTrimmedString(reader.local_fallback_port) : '';
+      const fallbackPort = !reader.is_range ? asTrimmedString(reader.local_fallback_port) : "";
       return {
         target,
         enabled: reader.enabled,
@@ -222,31 +247,31 @@ export function toReadersPayload(form: ForwarderConfigFormState): Record<string,
 export function validateGeneral(form: ForwarderConfigFormState): string | null {
   const name = form.generalDisplayName;
   if (!name) return null; // optional field
-  if (!name.trim()) return 'Display name must not be blank.';
-  if (name.includes('\n') || name.includes('\r')) {
-    return 'Display name must not contain newlines.';
+  if (!name.trim()) return "Display name must not be blank.";
+  if (name.includes("\n") || name.includes("\r")) {
+    return "Display name must not contain newlines.";
   }
-  if (name.length > 150) return 'Display name must be 150 characters or fewer.';
+  if (name.length > 150) return "Display name must be 150 characters or fewer.";
   return null;
 }
 
 export function validateP2p(form: ForwarderConfigFormState): string | null {
   const url = form.p2pServerUrl.trim();
   if (url && !/^https?:\/\/.+/.test(url)) {
-    return 'Server URL must start with http:// or https://.';
+    return "Server URL must start with http:// or https://.";
   }
   const tokenFile = form.p2pServerTokenFile.trim();
-  if (tokenFile.includes('\n') || tokenFile.includes('\r')) {
-    return 'Server token file path must be a single-line path.';
+  if (tokenFile.includes("\n") || tokenFile.includes("\r")) {
+    return "Server token file path must be a single-line path.";
   }
   return null;
 }
 
 export function validateAuth(form: ForwarderConfigFormState): string | null {
   const path = form.authTokenFile.trim();
-  if (!path) return 'Token file path is required.';
-  if (path.includes('\n') || path.includes('\r')) {
-    return 'Token file path must be a single-line path.';
+  if (!path) return "Token file path is required.";
+  if (path.includes("\n") || path.includes("\r")) {
+    return "Token file path must be a single-line path.";
   }
   return null;
 }
@@ -255,16 +280,18 @@ export function validateJournal(form: ForwarderConfigFormState): string | null {
   if (form.journalPruneWatermarkPct) {
     const pct = Number(form.journalPruneWatermarkPct);
     if (!Number.isFinite(pct) || !Number.isInteger(pct) || pct < 0 || pct > 100) {
-      return 'Prune watermark must be an integer between 0 and 100.';
+      return "Prune watermark must be an integer between 0 and 100.";
     }
   }
   return null;
 }
 
-export function validateStatusHttp(form: ForwarderConfigFormState): string | null {
+export function validateStatusHttp(
+  form: ForwarderConfigFormState,
+): string | null {
   const bind = form.statusHttpBind.trim();
   if (bind && !isValidIpv4Bind(bind)) {
-    return 'Bind address must be a valid IPv4 address with port (e.g. 0.0.0.0:8080).';
+    return "Bind address must be a valid IPv4 address with port (e.g. 0.0.0.0:8080).";
   }
   return null;
 }
@@ -274,20 +301,20 @@ export function validateUps(form: ForwarderConfigFormState): string | null {
 
   const daemonAddr = form.upsDaemonAddr.trim();
   if (daemonAddr && !isValidHostPort(daemonAddr)) {
-    return 'UPS daemon address must be a valid host:port.';
+    return "UPS daemon address must be a valid host:port.";
   }
 
   if (form.upsPollIntervalSecs) {
     const poll = Number(form.upsPollIntervalSecs);
     if (!Number.isInteger(poll) || poll < 1 || poll > 60) {
-      return 'UPS poll interval must be an integer between 1 and 60 seconds.';
+      return "UPS poll interval must be an integer between 1 and 60 seconds.";
     }
   }
 
   if (form.upsUpstreamHeartbeatSecs) {
     const heartbeat = Number(form.upsUpstreamHeartbeatSecs);
     if (!Number.isInteger(heartbeat) || heartbeat < 10 || heartbeat > 300) {
-      return 'UPS heartbeat interval must be an integer between 10 and 300 seconds.';
+      return "UPS heartbeat interval must be an integer between 10 and 300 seconds.";
     }
   }
 
@@ -310,7 +337,7 @@ function isValidIpv4Bind(bind: string): boolean {
 }
 
 function isValidHostPort(value: string): boolean {
-  const idx = value.lastIndexOf(':');
+  const idx = value.lastIndexOf(":");
   if (idx <= 0 || idx === value.length - 1) return false;
   const host = value.slice(0, idx);
   const port = Number(value.slice(idx + 1));
@@ -328,13 +355,15 @@ function isValidIpv4(ip: string): boolean {
 
 /** Caller must ensure ip passes isValidIpv4 first. */
 function lastOctet(ip: string): number {
-  const parts = ip.split('.');
+  const parts = ip.split(".");
   if (parts.length !== 4) throw new Error(`lastOctet called with invalid IP: ${ip}`);
   return Number(parts[3]);
 }
 
-export function validateReaders(form: ForwarderConfigFormState): string | null {
-  if (form.readers.length === 0) return 'At least one reader is required.';
+export function validateReaders(
+  form: ForwarderConfigFormState,
+): string | null {
+  if (form.readers.length === 0) return "At least one reader is required.";
   for (let i = 0; i < form.readers.length; i++) {
     const r = form.readers[i];
     // Port validation (common to both single and range)
@@ -381,7 +410,7 @@ export function validateReaders(form: ForwarderConfigFormState): string | null {
 /** Compute the default fallback port from a reader IP address (10000 + last octet).
  *  Returns empty string if ip is empty or not a valid IPv4 address. */
 export function defaultFallbackPort(ip: string): string {
-  if (!ip) return '';
-  if (!isValidIpv4(ip)) return '';
+  if (!ip) return "";
+  if (!isValidIpv4(ip)) return "";
   return String(10000 + lastOctet(ip));
 }

@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const mockFetch = vi.fn();
-vi.stubGlobal('fetch', mockFetch);
+vi.stubGlobal("fetch", mockFetch);
 
 beforeEach(() => {
   mockFetch.mockReset();
@@ -16,80 +16,80 @@ function makeResponse(status: number, body: unknown) {
   };
 }
 
-describe('apiFetch', () => {
-  it('fetches JSON on success', async () => {
-    const { apiFetch } = await import('./api-helpers');
-    mockFetch.mockResolvedValue(makeResponse(200, { key: 'value' }));
-    const result = await apiFetch<{ key: string }>('/api/v1/test');
-    expect(result.key).toBe('value');
+describe("apiFetch", () => {
+  it("fetches JSON on success", async () => {
+    const { apiFetch } = await import("./api-helpers");
+    mockFetch.mockResolvedValue(makeResponse(200, { key: "value" }));
+    const result = await apiFetch<{ key: string }>("/api/v1/test");
+    expect(result.key).toBe("value");
     expect(mockFetch).toHaveBeenCalledWith(
-      '/api/v1/test',
+      "/api/v1/test",
       expect.objectContaining({
         headers: expect.objectContaining({
-          'Content-Type': 'application/json',
+          "Content-Type": "application/json",
         }),
-      })
+      }),
     );
   });
 
-  it('throws on non-ok response', async () => {
-    const { apiFetch } = await import('./api-helpers');
-    mockFetch.mockResolvedValue(makeResponse(500, 'internal error'));
-    await expect(apiFetch('/api/v1/fail')).rejects.toThrow('500');
+  it("throws on non-ok response", async () => {
+    const { apiFetch } = await import("./api-helpers");
+    mockFetch.mockResolvedValue(makeResponse(500, "internal error"));
+    await expect(apiFetch("/api/v1/fail")).rejects.toThrow("500");
   });
 
-  it('returns undefined for 204 No Content', async () => {
-    const { apiFetch } = await import('./api-helpers');
+  it("returns undefined for 204 No Content", async () => {
+    const { apiFetch } = await import("./api-helpers");
     mockFetch.mockResolvedValue(makeResponse(204, null));
-    const result = await apiFetch('/api/v1/empty');
+    const result = await apiFetch("/api/v1/empty");
     expect(result).toBeUndefined();
   });
 
-  it('passes through custom init options', async () => {
-    const { apiFetch } = await import('./api-helpers');
+  it("passes through custom init options", async () => {
+    const { apiFetch } = await import("./api-helpers");
     mockFetch.mockResolvedValue(makeResponse(200, {}));
-    await apiFetch('/api/v1/test', { method: 'PUT', body: '{"a":1}' });
+    await apiFetch("/api/v1/test", { method: "PUT", body: '{"a":1}' });
     expect(mockFetch).toHaveBeenCalledWith(
-      '/api/v1/test',
-      expect.objectContaining({ method: 'PUT', body: '{"a":1}' })
+      "/api/v1/test",
+      expect.objectContaining({ method: "PUT", body: '{"a":1}' }),
     );
   });
 
-  it('retains Content-Type when caller passes custom headers', async () => {
-    const { apiFetch } = await import('./api-helpers');
+  it("retains Content-Type when caller passes custom headers", async () => {
+    const { apiFetch } = await import("./api-helpers");
     mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
-    await apiFetch('/api/v1/test', {
-      method: 'POST',
-      headers: { 'X-Custom': 'value' },
+    await apiFetch("/api/v1/test", {
+      method: "POST",
+      headers: { "X-Custom": "value" },
       body: '{"cursor":"abc"}',
     });
     const callArgs = mockFetch.mock.calls[0];
     const headers = callArgs[1].headers;
-    expect(headers['Content-Type']).toBe('application/json');
-    expect(headers['X-Custom']).toBe('value');
+    expect(headers["Content-Type"]).toBe("application/json");
+    expect(headers["X-Custom"]).toBe("value");
   });
 
   it("throws ApiError with 'invalid JSON' on non-JSON 200 response", async () => {
-    const { apiFetch } = await import('./api-helpers');
-    const { ApiError } = await import('./api-helpers');
+    const { apiFetch } = await import("./api-helpers");
+    const { ApiError } = await import("./api-helpers");
     mockFetch.mockResolvedValue({
       ok: true,
       status: 200,
-      json: () => Promise.reject(new SyntaxError('Unexpected token')),
-      text: () => Promise.resolve('not json'),
+      json: () => Promise.reject(new SyntaxError("Unexpected token")),
+      text: () => Promise.resolve("not json"),
     });
-    await expect(apiFetch('/api/v1/bad-json')).rejects.toThrow(ApiError);
-    await expect(apiFetch('/api/v1/bad-json')).rejects.toThrow('invalid JSON');
+    await expect(apiFetch("/api/v1/bad-json")).rejects.toThrow(ApiError);
+    await expect(apiFetch("/api/v1/bad-json")).rejects.toThrow("invalid JSON");
   });
 
-  it('allows caller to override Content-Type', async () => {
-    const { apiFetch } = await import('./api-helpers');
+  it("allows caller to override Content-Type", async () => {
+    const { apiFetch } = await import("./api-helpers");
     mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
-    await apiFetch('/api/v1/test', {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
+    await apiFetch("/api/v1/test", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
     });
     const callArgs = mockFetch.mock.calls[0];
-    expect(callArgs[1].headers['Content-Type']).toBe('text/plain');
+    expect(callArgs[1].headers["Content-Type"]).toBe("text/plain");
   });
 });

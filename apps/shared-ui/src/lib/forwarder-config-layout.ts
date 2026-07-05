@@ -8,7 +8,12 @@ export type ForwarderConfigSection =
   | 'ups';
 
 export function getForwarderConfigSectionRows(): ForwarderConfigSection[][] {
-  return [['general', 'p2p'], ['auth', 'journal'], ['status_http'], ['readers', 'ups']];
+  return [
+    ['general', 'p2p'],
+    ['auth', 'journal'],
+    ['status_http'],
+    ['readers', 'ups'],
+  ];
 }
 
 export type FieldType = 'text' | 'number' | 'toggle';

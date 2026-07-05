@@ -1,4 +1,4 @@
-export const LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error'] as const;
+export const LOG_LEVELS = ["trace", "debug", "info", "warn", "error"] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
 
 export function levelPriority(level: LogLevel): number {
@@ -12,10 +12,13 @@ export function parseLogLevel(entry: string): LogLevel {
     const tag = match[1].toLowerCase() as LogLevel;
     if (LOG_LEVELS.includes(tag)) return tag;
   }
-  return 'info';
+  return "info";
 }
 
-export function filterEntries(entries: string[], minLevel: LogLevel): string[] {
+export function filterEntries(
+  entries: string[],
+  minLevel: LogLevel,
+): string[] {
   const min = levelPriority(minLevel);
   return entries.filter((e) => levelPriority(parseLogLevel(e)) >= min);
 }
