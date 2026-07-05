@@ -4,6 +4,7 @@
 @import "tailwindcss";
 
 @source "../components/**/*.svelte";
+@source "../lib/**/*.ts";
 
 @theme {
   --font-sans: "IBM Plex Sans Variable", system-ui, -apple-system, sans-serif;
