@@ -1,5 +1,13 @@
 <script lang="ts">
-  import { HelpTip, buttonClass } from "@rusty-timer/shared-ui";
+  import {
+    HelpTip,
+    buttonClass,
+    tableCellClass,
+    tableClass,
+    tableHeadRowClass,
+    tableHeaderCellClass,
+    tableRowClass,
+  } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
   import {
     streamKey,
@@ -30,21 +38,21 @@
   {#if actions.streams.length === 0}
     <p class="text-xs text-text-muted m-0">No streams available.</p>
   {:else}
-    <table class="w-full text-sm">
+    <table class={tableClass}>
       <thead>
-        <tr class="border-b border-border text-left text-text-muted">
-          <th class="py-1.5 pr-3 font-medium text-xs">Stream</th>
-          <th class="py-1.5 font-medium text-xs"></th>
+        <tr class={tableHeadRowClass}>
+          <th class={tableHeaderCellClass(true)}>Stream</th>
+          <th class={tableHeaderCellClass(true, "!pr-0")}></th>
         </tr>
       </thead>
       <tbody>
         {#each actions.streams as stream (streamKey(stream))}
           {@const key = `epoch-${streamKey(stream)}`}
-          <tr class="border-b border-border/50">
-            <td class="py-1.5 pr-3 text-text-primary text-xs"
+          <tr class={tableRowClass}>
+            <td class={tableCellClass(true, "text-text-primary")}
               >{streamLabel(stream)}</td
             >
-            <td class="py-1.5 text-right">
+            <td class={tableCellClass(true, "!pr-0 !text-sm text-right")}>
               <button
                 onclick={() => actions.resetEpoch(stream)}
                 disabled={actions.inFlightKeys.has(key)}
@@ -96,21 +104,21 @@
   {#if actions.streams.length === 0}
     <p class="text-sm text-text-muted m-0">No streams available.</p>
   {:else}
-    <table class="w-full text-sm">
+    <table class={tableClass}>
       <thead>
-        <tr class="border-b border-border text-left text-text-muted">
-          <th class="py-2 pr-4 font-medium">Stream</th>
-          <th class="py-2 font-medium"></th>
+        <tr class={tableHeadRowClass}>
+          <th class={tableHeaderCellClass()}>Stream</th>
+          <th class={tableHeaderCellClass(false, "!pr-0")}></th>
         </tr>
       </thead>
       <tbody>
         {#each actions.streams as stream (streamKey(stream))}
           {@const key = `epoch-${streamKey(stream)}`}
-          <tr class="border-b border-border/50">
-            <td class="py-2 pr-4">
+          <tr class={tableRowClass}>
+            <td class={tableCellClass()}>
               <span class="text-text-primary">{streamLabel(stream)}</span>
             </td>
-            <td class="py-2 text-right">
+            <td class={tableCellClass(false, "!pr-0 text-right")}>
               <button
                 onclick={() => actions.resetEpoch(stream)}
                 disabled={actions.inFlightKeys.has(key)}

@@ -1,5 +1,13 @@
 <script lang="ts">
-  import { HelpTip, buttonClass } from "@rusty-timer/shared-ui";
+  import {
+    HelpTip,
+    buttonClass,
+    tableCellClass,
+    tableClass,
+    tableHeadRowClass,
+    tableHeaderCellClass,
+    tableRowClass,
+  } from "@rusty-timer/shared-ui";
   import { streamKey, type AdminActions } from "$lib/admin-actions.svelte";
 
   const btnNeutral = buttonClass("secondary", "xs");
@@ -21,24 +29,26 @@
   {#if actions.subscriptions.length === 0}
     <p class="text-xs text-text-muted m-0">No subscriptions.</p>
   {:else}
-    <table class="w-full text-sm">
+    <table class={tableClass}>
       <thead>
-        <tr class="border-b border-border text-left text-text-muted">
-          <th class="py-1.5 pr-3 font-medium text-xs">Forwarder</th>
-          <th class="py-1.5 pr-3 font-medium text-xs">Reader</th>
-          <th class="py-1.5 pr-3 font-medium text-xs">Port</th>
-          <th class="py-1.5 font-medium text-xs"></th>
+        <tr class={tableHeadRowClass}>
+          <th class={tableHeaderCellClass(true)}>Forwarder</th>
+          <th class={tableHeaderCellClass(true)}>Reader</th>
+          <th class={tableHeaderCellClass(true)}>Port</th>
+          <th class={tableHeaderCellClass(true, "!pr-0")}></th>
         </tr>
       </thead>
       <tbody>
         {#each actions.subscriptions as sub (streamKey(sub))}
           {@const portKey = `port-${streamKey(sub)}`}
-          <tr class="border-b border-border/50">
-            <td class="py-1.5 pr-3 text-text-muted text-xs"
+          <tr class={tableRowClass}>
+            <td class={tableCellClass(true, "text-text-muted")}
               >{sub.forwarder_id}</td
             >
-            <td class="py-1.5 pr-3 text-text-muted text-xs">{sub.reader_ip}</td>
-            <td class="py-1.5 pr-3">
+            <td class={tableCellClass(true, "text-text-muted")}
+              >{sub.reader_ip}</td
+            >
+            <td class={tableCellClass(true, "!text-sm")}>
               <input
                 type="text"
                 inputmode="numeric"
@@ -52,7 +62,7 @@
                 class="w-20 px-2 py-0.5 text-xs rounded border border-border bg-surface-0 text-text-primary font-mono"
               />
             </td>
-            <td class="py-1.5 text-right">
+            <td class={tableCellClass(true, "!pr-0 !text-sm text-right")}>
               <button
                 onclick={() => actions.savePort(sub)}
                 disabled={!actions.isPortDirty(sub) ||
@@ -76,28 +86,32 @@
   {#if actions.subscriptions.length === 0}
     <p class="text-sm text-text-muted m-0">No subscriptions.</p>
   {:else}
-    <table class="w-full text-sm">
+    <table class={tableClass}>
       <thead>
-        <tr class="border-b border-border text-left text-text-muted">
-          <th class="py-2 pr-4 font-medium">Forwarder</th>
-          <th class="py-2 pr-4 font-medium">Reader</th>
-          <th class="py-2 pr-4 font-medium"
+        <tr class={tableHeadRowClass}>
+          <th class={tableHeaderCellClass()}>Forwarder</th>
+          <th class={tableHeaderCellClass()}>Reader</th>
+          <th class={tableHeaderCellClass()}
             >Port Override <HelpTip
               fieldKey="port_override"
               sectionKey="port_overrides"
               context="receiver-admin"
             /></th
           >
-          <th class="py-2 font-medium"></th>
+          <th class={tableHeaderCellClass(false, "!pr-0")}></th>
         </tr>
       </thead>
       <tbody>
         {#each actions.subscriptions as sub (streamKey(sub))}
           {@const portKey = `port-${streamKey(sub)}`}
-          <tr class="border-b border-border/50">
-            <td class="py-2 pr-4 text-text-secondary">{sub.forwarder_id}</td>
-            <td class="py-2 pr-4 text-text-secondary">{sub.reader_ip}</td>
-            <td class="py-2 pr-4">
+          <tr class={tableRowClass}>
+            <td class={tableCellClass(false, "text-text-secondary")}
+              >{sub.forwarder_id}</td
+            >
+            <td class={tableCellClass(false, "text-text-secondary")}
+              >{sub.reader_ip}</td
+            >
+            <td class={tableCellClass()}>
               <input
                 type="text"
                 inputmode="numeric"
@@ -111,7 +125,7 @@
                 class="w-24 px-2 py-1 text-sm rounded border border-border bg-surface-0 text-text-primary"
               />
             </td>
-            <td class="py-2 text-right">
+            <td class={tableCellClass(false, "!pr-0 text-right")}>
               <button
                 onclick={() => actions.savePort(sub)}
                 disabled={!actions.isPortDirty(sub) ||

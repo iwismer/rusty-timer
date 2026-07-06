@@ -1,5 +1,13 @@
 <script lang="ts">
-  import { HelpTip, buttonClass } from "@rusty-timer/shared-ui";
+  import {
+    HelpTip,
+    buttonClass,
+    tableCellClass,
+    tableClass,
+    tableHeadRowClass,
+    tableHeaderCellClass,
+    tableRowClass,
+  } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
   import {
     streamKey,
@@ -31,11 +39,11 @@
   {#if actions.streams.length === 0}
     <p class="text-xs text-text-muted m-0">No streams available.</p>
   {:else}
-    <table class="w-full text-sm">
+    <table class={tableClass}>
       <thead>
-        <tr class="border-b border-border text-left text-text-muted">
-          <th class="py-1.5 pr-3 font-medium text-xs">Stream</th>
-          <th class="py-1.5 pr-3 font-medium text-xs">
+        <tr class={tableHeadRowClass}>
+          <th class={tableHeaderCellClass(true)}>Stream</th>
+          <th class={tableHeaderCellClass(true)}>
             Epoch
             <HelpTip
               fieldKey="stream_cursor"
@@ -44,27 +52,27 @@
               onOpenModal={openHelp}
             />
           </th>
-          <th class="py-1.5 pr-3 font-medium text-xs">Seq</th>
-          <th class="py-1.5 font-medium text-xs"></th>
+          <th class={tableHeaderCellClass(true)}>Seq</th>
+          <th class={tableHeaderCellClass(true, "!pr-0")}></th>
         </tr>
       </thead>
       <tbody>
         {#each actions.streams as stream (streamKey(stream))}
           {@const key = streamKey(stream)}
-          <tr class="border-b border-border/50">
-            <td class="py-1.5 pr-3 text-text-primary text-xs">
+          <tr class={tableRowClass}>
+            <td class={tableCellClass(true, "text-text-primary")}>
               {streamLabel(stream)}
               <span class="block text-text-muted font-mono"
                 >{stream.reader_ip}</span
               >
             </td>
-            <td class="py-1.5 pr-3 text-text-muted tabular-nums text-xs"
+            <td class={tableCellClass(true, "text-text-muted tabular-nums")}
               >{stream.cursor_epoch ?? "\u2014"}</td
             >
-            <td class="py-1.5 pr-3 text-text-muted tabular-nums text-xs"
+            <td class={tableCellClass(true, "text-text-muted tabular-nums")}
               >{stream.cursor_seq ?? "\u2014"}</td
             >
-            <td class="py-1.5 text-right">
+            <td class={tableCellClass(true, "!pr-0 !text-sm text-right")}>
               <button
                 onclick={() => actions.resetCursor(stream)}
                 disabled={actions.inFlightKeys.has(key)}
@@ -137,22 +145,22 @@
   {#if actions.streams.length === 0}
     <p class="text-sm text-text-muted m-0">No streams available.</p>
   {:else}
-    <table class="w-full text-sm">
+    <table class={tableClass}>
       <thead>
-        <tr class="border-b border-border text-left text-text-muted">
-          <th class="py-2 pr-4 font-medium">Stream</th>
-          <th class="py-2 pr-4 font-medium">Forwarder</th>
-          <th class="py-2 pr-4 font-medium">Reader</th>
-          <th class="py-2 pr-4 font-medium">Epoch</th>
-          <th class="py-2 pr-4 font-medium">Seq</th>
-          <th class="py-2 font-medium"></th>
+        <tr class={tableHeadRowClass}>
+          <th class={tableHeaderCellClass()}>Stream</th>
+          <th class={tableHeaderCellClass()}>Forwarder</th>
+          <th class={tableHeaderCellClass()}>Reader</th>
+          <th class={tableHeaderCellClass()}>Epoch</th>
+          <th class={tableHeaderCellClass()}>Seq</th>
+          <th class={tableHeaderCellClass(false, "!pr-0")}></th>
         </tr>
       </thead>
       <tbody>
         {#each actions.streams as stream (streamKey(stream))}
           {@const key = streamKey(stream)}
-          <tr class="border-b border-border/50">
-            <td class="py-2 pr-4">
+          <tr class={tableRowClass}>
+            <td class={tableCellClass()}>
               {#if stream.display_alias}
                 <span class="text-text-primary font-medium"
                   >{stream.display_alias}</span
@@ -166,15 +174,21 @@
                 >
               {/if}
             </td>
-            <td class="py-2 pr-4 text-text-secondary">{stream.forwarder_id}</td>
-            <td class="py-2 pr-4 text-text-secondary">{stream.reader_ip}</td>
-            <td class="py-2 pr-4 text-text-secondary tabular-nums"
+            <td class={tableCellClass(false, "text-text-secondary")}
+              >{stream.forwarder_id}</td
+            >
+            <td class={tableCellClass(false, "text-text-secondary")}
+              >{stream.reader_ip}</td
+            >
+            <td
+              class={tableCellClass(false, "text-text-secondary tabular-nums")}
               >{stream.cursor_epoch ?? "\u2014"}</td
             >
-            <td class="py-2 pr-4 text-text-secondary tabular-nums"
+            <td
+              class={tableCellClass(false, "text-text-secondary tabular-nums")}
               >{stream.cursor_seq ?? "\u2014"}</td
             >
-            <td class="py-2 text-right">
+            <td class={tableCellClass(false, "!pr-0 text-right")}>
               <button
                 onclick={() => actions.resetCursor(stream)}
                 disabled={actions.inFlightKeys.has(key)}
