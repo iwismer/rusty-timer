@@ -6,12 +6,11 @@ import adminSource from "../routes/admin/+page.svelte?raw";
 import sbcSetupSource from "../routes/sbc-setup/+page.svelte?raw";
 
 function expectHelpSection(source: string, section: string) {
-  expect(source, `missing helpSection=${section}`).toContain(
-    `helpSection="${section}"`,
+  const escapedSection = section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(
+    `<Card\\b(?=[^>]*\\bhelpSection="${escapedSection}")(?=[^>]*\\bhelpContext="server")[^>]*>`,
   );
-  expect(source, `missing server help context for ${section}`).toContain(
-    'helpContext="server"',
-  );
+  expect(source, `missing server help Card for ${section}`).toMatch(pattern);
 }
 
 function expectHelpTip(source: string, section: string, field: string) {
@@ -38,6 +37,15 @@ function expectButtonHelpTipGroup(
 }
 
 describe("server UI help wiring", () => {
+  it("requires helpContext on the same Card as helpSection", () => {
+    expect(() =>
+      expectHelpSection(
+        '<Card helpSection="server_status"></Card><Card helpContext="server"></Card>',
+        "server_status",
+      ),
+    ).toThrow();
+  });
+
   it("enables global server help search in the shared NavBar", () => {
     expect(layoutSource).toContain('helpContext="server"');
   });

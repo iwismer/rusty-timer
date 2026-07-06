@@ -7,7 +7,7 @@ function expectFields(section: { fields: Record<string, unknown> }, fields: stri
   }
 }
 
-const htmlTagPattern = /<\/?[a-z][\s>]/i;
+const htmlTagPattern = /<\/?[a-z][a-z0-9-]*(?:\s|>|\/>)/i;
 
 function expectPlainText(value: string | undefined, label: string) {
   if (value === undefined) return;
@@ -99,6 +99,10 @@ describe('server help coverage', () => {
     expect(SERVER_HELP.sbc_download_actions.fields.save_next_device.detailHtml).toMatch(
       /clears? the auth token/i
     );
+  });
+
+  it('rejects multi-letter HTML tags in server plain-text fields', () => {
+    expect(() => expectPlainText('<strong>not plain</strong>', 'example.summary')).toThrow();
   });
 
   it('keeps server plain-text help fields free of HTML markup', () => {

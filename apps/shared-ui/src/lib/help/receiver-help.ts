@@ -82,19 +82,6 @@ export const RECEIVER_HELP = {
           '</ul>' +
           'A badge such as <strong>Reader down</strong> or <strong>Waiting for data</strong> appears next to the stream name when attention is needed.',
       },
-      status_indicator: {
-        label: 'Status',
-        summary: 'Colored dot showing the live delivery state of the stream.',
-        detailHtml:
-          'The dot next to each stream reflects its current state:' +
-          '<ul>' +
-          '<li><strong>Green</strong>: reads are flowing or the stream is healthy.</li>' +
-          '<li><strong>Yellow</strong>: subscribing, waiting for data, or the reader needs attention.</li>' +
-          '<li><strong>Red</strong>: subscribed but not receiving data.</li>' +
-          '<li><strong>Gray</strong>: not subscribed.</li>' +
-          '</ul>' +
-          'A badge such as <strong>Reader down</strong> or <strong>Waiting for data</strong> appears next to the stream name when attention is needed.',
-      },
       subscribed: {
         label: 'Subscribed',
         summary: 'Whether the receiver is actively receiving data from this stream.',

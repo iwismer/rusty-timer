@@ -22,7 +22,7 @@ describe('receiver help coverage', () => {
     ]);
 
     expectFields(RECEIVER_HELP.streams, [
-      'status_indicator',
+      'stream_identity',
       'last_read',
       'reads',
       'stream_metrics',
@@ -71,6 +71,7 @@ describe('receiver help coverage', () => {
     expectFields(RECEIVER_ADMIN_HELP.cursor_reset, [
       'stream_cursor',
       'reset_cursor',
+      'reset_stream_data',
       'reset_all_cursors',
     ]);
     expectFields(RECEIVER_ADMIN_HELP.epoch_overrides, [

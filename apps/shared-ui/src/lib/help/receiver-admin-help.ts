@@ -46,31 +46,31 @@ export const RECEIVER_ADMIN_HELP = {
   epoch_overrides: {
     title: 'Earliest-Epoch Overrides',
     overview:
-      'Clear earliest-epoch overrides to receive all available data. Epoch overrides control the starting point for data delivery per stream.',
+      'Clear earliest-epoch overrides to remove future fetch floors. Epoch overrides control the starting point used the next time each stream subscribes; clearing them does not back-fill reads that were already skipped.',
     fields: {
       epoch_override: {
         label: 'Epoch Override',
         summary: 'The earliest epoch the stream will deliver data from.',
         detailHtml:
-          'Earliest-epoch overrides filter out data older than the specified epoch. Clearing an override causes the stream to deliver data from all available epochs instead of just recent ones. This is useful when you need access to historical data that was previously filtered out.',
+          'Earliest-epoch overrides tell the receiver to ask for reads from the specified epoch onward when the stream subscribes. Clearing an override removes that future fetch floor, but it does not delete local data, move the stream cursor backward, or back-fill reads that this receiver already skipped.<br><br>To re-fetch older retained reads, clear or change the override first, then use <strong>Reset Stream Data</strong> for the stream (or reset its cursor when you only need a replay) before reconnecting your timing software.',
       },
       reset_epoch_override: {
         label: 'Reset Epoch',
         summary: "Clear one stream's earliest-epoch override.",
         detailHtml:
-          "Clears the selected stream's earliest-epoch override so the receiver can request all available epochs for that stream. This affects filtering only; it does not delete data.",
+          "Clears the selected stream's earliest-epoch override so future subscriptions no longer ask the forwarder to skip earlier epochs. This affects the future fetch floor only; it does not delete data, reset the cursor, or back-fill reads already skipped. Use Reset Stream Data or a cursor reset when you need to re-fetch older retained reads.",
       },
       reset_all_epoch_overrides: {
         label: 'Reset All Epoch Overrides',
         summary: 'Clear earliest-epoch overrides for every stream.',
         detailHtml:
-          'Removes every earliest-epoch override. Afterward, streams can deliver data from all epochs retained by their forwarders.',
+          'Removes every earliest-epoch override. Afterward, future stream subscriptions no longer ask forwarders to skip earlier epochs, but existing cursors are not moved backward and skipped reads are not back-filled automatically. Use Reset Stream Data or cursor resets for streams that must re-fetch older retained reads.',
       },
     },
     tips: [
-      'Clear epoch overrides when you need to access historical data that was previously filtered.',
-      "This only affects the receiver's filtering. The forwarder's journal still has all retained data available.",
-      'After clearing, the receiver may re-deliver older reads. Combine with a cursor reset if needed.',
+      'Clear epoch overrides before resetting stream data when you need to re-fetch older retained reads.',
+      "This only affects the receiver's future fetch floor. The forwarder's journal still determines which epochs are retained.",
+      'Clearing an override alone does not move a stream cursor backward or back-fill reads already skipped.',
     ],
     seeAlso: [{ sectionKey: 'cursor_reset', label: 'Cursor Reset' }],
   },
@@ -113,7 +113,7 @@ export const RECEIVER_ADMIN_HELP = {
       'Received stream data is NOT deleted. You can re-subscribe to streams after purging.',
       'In Live mode, the receiver will automatically re-subscribe to available streams after purging.',
       'Try this when streams are in a bad state and you want a clean start without a full factory reset.',
-      'Cursor positions and epoch overrides are also cleared when subscriptions are purged.',
+      'Purging deletes subscription records only. Cursor positions, epoch overrides, and locally received reads are preserved; use Reset Stream Data, Clear Data, or Factory Reset for broader cleanup.',
     ],
     seeAlso: [
       { sectionKey: 'cursor_reset', label: 'Cursor Reset' },

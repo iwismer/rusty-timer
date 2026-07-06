@@ -55,7 +55,7 @@ export const SERVER_HELP = {
         label: 'Epoch',
         summary: 'Current data segment number reported for this stream.',
         detailHtml:
-          'The forwarder starts a new epoch when its stream data is reset. If you reset a forwarder mid-event, expect this number to increase; receivers use epochs to avoid mixing old and new reads.',
+          'Epochs are operator-controlled stream segments reported by forwarders. Operators advance the epoch at race or wave boundaries from the forwarder or receiver reader controls, and new reads are tagged with the active epoch number. Receivers use this metadata to separate segments and apply From-epoch filters; resetting stream data does not itself start a new epoch.',
       },
       next_seq: {
         label: 'Next Seq',

@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import forwarderPageSource from '../../../../forwarder-ui/src/routes/+page.svelte?raw';
+import forwarderConfigSource from '../../components/ForwarderConfig.svelte?raw';
+import readerControlPanelSource from '../../components/ReaderControlPanel.svelte?raw';
 import { getSection, getField, searchHelp } from './index';
 import { FORWARDER_HELP } from './forwarder-help';
 import { RECEIVER_HELP } from './receiver-help';
@@ -13,11 +16,100 @@ const ALL_CONTEXTS: Record<HelpContextName, HelpContext> = {
   server: SERVER_HELP,
 };
 
-const htmlTagPattern = /<\/?[a-z][\s>]/i;
+const htmlTagPattern = /<\/?[a-z][a-z0-9-]*(?:\s|>|\/>)/i;
+
+type SourceUnit = {
+  name: string;
+  source: string;
+  variables?: Record<string, string>;
+};
+
+type FieldLookup = {
+  context: HelpContextName;
+  section: string;
+  field: string;
+  source: string;
+};
+
+type SectionLookup = {
+  context: HelpContextName;
+  section: string;
+  source: string;
+};
+
+const SHARED_HELP_SOURCES: SourceUnit[] = [
+  { name: 'ForwarderConfig.svelte', source: forwarderConfigSource },
+  { name: 'ReaderControlPanel.svelte', source: readerControlPanelSource, variables: { helpContext: 'forwarder' } },
+  { name: 'forwarder-ui/routes/+page.svelte', source: forwarderPageSource },
+];
 
 function expectPlainText(value: string | undefined, label: string) {
   if (value === undefined) return;
   expect(value, `${label} should be plain text, not HTML`).not.toMatch(htmlTagPattern);
+}
+
+function attrValue(tag: string, attr: string): string | undefined {
+  const match = tag.match(new RegExp(`\\b${attr}=("[^"]*"|'[^']*'|\\{[^}]+\\})`));
+  if (!match) return undefined;
+  return match[1];
+}
+
+function resolveAttr(
+  rawValue: string | undefined,
+  attr: string,
+  sourceName: string,
+  variables: Record<string, string> = {}
+): string | undefined {
+  if (rawValue === undefined) return undefined;
+  if (rawValue.startsWith('"') || rawValue.startsWith("'")) {
+    return rawValue.slice(1, -1);
+  }
+
+  const expression = rawValue.slice(1, -1).trim();
+  const resolved = variables[expression];
+  if (resolved !== undefined) return resolved;
+  throw new Error(`unsupported dynamic ${attr}={${expression}} in ${sourceName}`);
+}
+
+function resolveHelpContext(value: string | undefined, sourceName: string, variables?: Record<string, string>) {
+  const resolved = resolveAttr(value, 'context', sourceName, variables);
+  if (!resolved) return undefined;
+  if (!Object.hasOwn(ALL_CONTEXTS, resolved)) {
+    throw new Error(`unsupported help context ${resolved} in ${sourceName}`);
+  }
+  return resolved as HelpContextName;
+}
+
+function extractHelpTips(sources: SourceUnit[]): FieldLookup[] {
+  return sources.flatMap(({ name, source, variables }) =>
+    [...source.matchAll(/<HelpTip\b[^>]*>/g)]
+      .map((match) => ({ tag: match[0], index: match.index ?? 0 }))
+      .map(({ tag, index }) => {
+        const field = resolveAttr(attrValue(tag, 'fieldKey'), 'fieldKey', name, variables);
+        const section = resolveAttr(attrValue(tag, 'sectionKey'), 'sectionKey', name, variables);
+        const context = resolveHelpContext(attrValue(tag, 'context'), name, variables);
+        if (!field || !section || !context) return undefined;
+        return { context, section, field, source: `${name}:${index}` };
+      })
+      .filter((lookup): lookup is FieldLookup => lookup !== undefined)
+  );
+}
+
+function extractHelpCards(sources: SourceUnit[]): SectionLookup[] {
+  return sources.flatMap(({ name, source, variables }) =>
+    [...source.matchAll(/<Card\b[^>]*>/g)]
+      .map((match) => ({ tag: match[0], index: match.index ?? 0 }))
+      .map(({ tag, index }) => {
+        const section = resolveAttr(attrValue(tag, 'helpSection'), 'helpSection', name, variables);
+        const context = resolveHelpContext(attrValue(tag, 'helpContext'), name, variables);
+        if (!section && !context) return undefined;
+        if (!section || !context) {
+          throw new Error(`incomplete Card help wiring in ${name}:${index}`);
+        }
+        return { context, section, source: `${name}:${index}` };
+      })
+      .filter((lookup): lookup is SectionLookup => lookup !== undefined)
+  );
 }
 
 describe('getSection', () => {
@@ -104,8 +196,8 @@ describe('searchHelp', () => {
     expect(match).toBeDefined();
   });
 
-  it('handles sections with empty fields (tips-only sections)', () => {
-    const results = searchHelp('purge');
+  it('matches receiver-admin purge subscription tips', () => {
+    const results = searchHelp('broader cleanup');
     const match = results.find(
       (r) => r.context === 'receiver-admin' && r.sectionKey === 'purge_subscriptions'
     );
@@ -115,142 +207,19 @@ describe('searchHelp', () => {
 });
 
 describe('template wiring validation', () => {
-  // All fieldKey+sectionKey+context triples used in HelpTip components across Svelte templates.
-  // Update this list when adding new HelpTip usages.
-  const expectedFieldLookups: Array<{ context: HelpContextName; section: string; field: string }> =
-    [
-      // ForwarderConfig.svelte
-      { context: 'forwarder', section: 'general', field: 'display_name' },
-      { context: 'forwarder', section: 'p2p', field: 'enabled' },
-      { context: 'forwarder', section: 'p2p', field: 'server_url' },
-      { context: 'forwarder', section: 'p2p', field: 'server_token_file' },
-      { context: 'forwarder', section: 'readers', field: 'reader_ip' },
-      { context: 'forwarder', section: 'readers', field: 'reader_port' },
-      { context: 'forwarder', section: 'readers', field: 'enabled' },
-      { context: 'forwarder', section: 'readers', field: 'default_local_port' },
-      { context: 'forwarder', section: 'readers', field: 'local_port_override' },
-      { context: 'forwarder', section: 'controls', field: 'allow_power_actions' },
-      { context: 'forwarder', section: 'auth', field: 'token_file' },
-      { context: 'forwarder', section: 'journal', field: 'sqlite_path' },
-      { context: 'forwarder', section: 'journal', field: 'prune_watermark_pct' },
-      { context: 'forwarder', section: 'status_http', field: 'bind' },
-      { context: 'forwarder', section: 'ups', field: 'enabled' },
-      { context: 'forwarder', section: 'ups', field: 'daemon_addr' },
-      { context: 'forwarder', section: 'ups', field: 'poll_interval_secs' },
-      { context: 'forwarder', section: 'ups', field: 'upstream_heartbeat_secs' },
-      { context: 'forwarder', section: 'update', field: 'update_mode' },
-      // forwarder-ui +page.svelte & legacy dashboard +page.svelte
-      { context: 'forwarder', section: 'read_mode', field: 'read_mode' },
-      { context: 'forwarder', section: 'read_mode', field: 'timeout' },
-      // receiver-ui +page.svelte
-      { context: 'receiver', section: 'config', field: 'receiver_id' },
-      { context: 'receiver', section: 'config', field: 'server_url' },
-      { context: 'receiver', section: 'config', field: 'token' },
-      { context: 'receiver', section: 'receiver_mode', field: 'mode' },
-      // receiver-ui admin/+page.svelte
-      { context: 'receiver-admin', section: 'port_overrides', field: 'port_override' },
-      // reader live controls
-      { context: 'forwarder', section: 'reader_live', field: 'current_epoch' },
-      { context: 'forwarder', section: 'reader_live', field: 'current_epoch_created' },
-      { context: 'forwarder', section: 'reader_live', field: 'clock_drift' },
-      { context: 'forwarder', section: 'reader_live', field: 'tto_bytes' },
-      { context: 'forwarder', section: 'reader_live', field: 'sync_clock' },
-      { context: 'forwarder', section: 'reader_live', field: 'refresh_reader' },
-      { context: 'forwarder', section: 'reader_live', field: 'recording' },
-      { context: 'forwarder', section: 'reader_live', field: 'download_reads' },
-      { context: 'forwarder', section: 'reader_live', field: 'clear_records' },
-      // server-ui admin
-      { context: 'server', section: 'receiver_tokens', field: 'display_name' },
-      { context: 'server', section: 'receiver_tokens', field: 'manual_token' },
-      { context: 'server', section: 'receiver_tokens', field: 'generate_token' },
-      { context: 'server', section: 'receiver_tokens', field: 'add_manual_token' },
-      { context: 'server', section: 'receiver_tokens', field: 'one_time_token' },
-      { context: 'server', section: 'receiver_tokens', field: 'revoke_token' },
-      { context: 'server', section: 'device_approval', field: 'pending_device' },
-      { context: 'server', section: 'device_approval', field: 'approve_device' },
-      { context: 'server', section: 'device_approval', field: 'approved_device' },
-      // server-ui SBC setup
-      { context: 'server', section: 'sbc_token_management', field: 'display_name' },
-      { context: 'server', section: 'sbc_token_management', field: 'manual_token' },
-      { context: 'server', section: 'sbc_token_management', field: 'generate_token' },
-      { context: 'server', section: 'sbc_token_management', field: 'add_manual_token' },
-      { context: 'server', section: 'sbc_token_management', field: 'one_time_token' },
-      { context: 'server', section: 'sbc_token_management', field: 'use_in_setup_form' },
-      { context: 'server', section: 'sbc_token_management', field: 'revoke_token' },
-      { context: 'server', section: 'sbc_device_identity', field: 'hostname' },
-      { context: 'server', section: 'sbc_device_identity', field: 'admin_username' },
-      { context: 'server', section: 'sbc_device_identity', field: 'ssh_public_key' },
-      { context: 'server', section: 'sbc_network', field: 'static_ipv4_cidr' },
-      { context: 'server', section: 'sbc_network', field: 'gateway' },
-      { context: 'server', section: 'sbc_network', field: 'dns_servers' },
-      { context: 'server', section: 'sbc_network', field: 'wifi_enabled' },
-      { context: 'server', section: 'sbc_network', field: 'wifi_ssid' },
-      { context: 'server', section: 'sbc_network', field: 'wifi_country' },
-      { context: 'server', section: 'sbc_network', field: 'wifi_password' },
-      { context: 'server', section: 'sbc_forwarder_setup', field: 'server_url' },
-      { context: 'server', section: 'sbc_forwarder_setup', field: 'auth_token' },
-      { context: 'server', section: 'sbc_forwarder_setup', field: 'display_name' },
-      { context: 'server', section: 'sbc_forwarder_setup', field: 'reader_targets' },
-      { context: 'server', section: 'sbc_advanced', field: 'status_bind' },
-      { context: 'server', section: 'sbc_advanced', field: 'setup_script_url' },
-      { context: 'server', section: 'sbc_advanced', field: 'ups_enabled' },
-      { context: 'server', section: 'sbc_download_actions', field: 'download_user_data' },
-      { context: 'server', section: 'sbc_download_actions', field: 'download_network_config' },
-      { context: 'server', section: 'sbc_download_actions', field: 'save_next_device' },
-    ];
-
-  it.each(expectedFieldLookups)(
-    'resolves $context/$section/$field',
+  it.each(extractHelpTips(SHARED_HELP_SOURCES))(
+    'resolves $context/$section/$field from $source',
     ({ context, section, field }) => {
       expect(getField(context, section, field)).toBeDefined();
     }
   );
 
-  // All helpSection+helpContext pairs used on Card components.
-  const expectedSectionLookups: Array<{ context: HelpContextName; section: string }> = [
-    // ForwarderConfig.svelte
-    { context: 'forwarder', section: 'general' },
-    { context: 'forwarder', section: 'p2p' },
-    { context: 'forwarder', section: 'readers' },
-    { context: 'forwarder', section: 'controls' },
-    { context: 'forwarder', section: 'dangerous_actions' },
-    { context: 'forwarder', section: 'auth' },
-    { context: 'forwarder', section: 'journal' },
-    { context: 'forwarder', section: 'status_http' },
-    { context: 'forwarder', section: 'ups' },
-    { context: 'forwarder', section: 'update' },
-    // forwarder-ui & legacy dashboard +page.svelte (HelpDialog usage)
-    { context: 'forwarder', section: 'read_mode' },
-    // receiver-ui +page.svelte
-    { context: 'receiver', section: 'config' },
-    { context: 'receiver', section: 'receiver_mode' },
-    { context: 'receiver', section: 'streams' },
-    // receiver-ui admin/+page.svelte
-    { context: 'receiver-admin', section: 'cursor_reset' },
-    { context: 'receiver-admin', section: 'epoch_overrides' },
-    { context: 'receiver-admin', section: 'port_overrides' },
-    { context: 'receiver-admin', section: 'purge_subscriptions' },
-    { context: 'receiver-admin', section: 'reset_profile' },
-    { context: 'receiver-admin', section: 'factory_reset' },
-    // reader live controls
-    { context: 'forwarder', section: 'reader_live' },
-    // server-ui
-    { context: 'server', section: 'server_status' },
-    { context: 'server', section: 'stream_catalogs' },
-    { context: 'server', section: 'registered_devices' },
-    { context: 'server', section: 'receiver_tokens' },
-    { context: 'server', section: 'device_approval' },
-    { context: 'server', section: 'sbc_token_management' },
-    { context: 'server', section: 'sbc_device_identity' },
-    { context: 'server', section: 'sbc_network' },
-    { context: 'server', section: 'sbc_forwarder_setup' },
-    { context: 'server', section: 'sbc_advanced' },
-    { context: 'server', section: 'sbc_download_actions' },
-  ];
-
-  it.each(expectedSectionLookups)('resolves section $context/$section', ({ context, section }) => {
-    expect(getSection(context, section)).toBeDefined();
-  });
+  it.each(extractHelpCards(SHARED_HELP_SOURCES))(
+    'resolves section $context/$section from $source',
+    ({ context, section }) => {
+      expect(getSection(context, section)).toBeDefined();
+    }
+  );
 });
 
 describe('help content validation', () => {
@@ -271,6 +240,10 @@ describe('help content validation', () => {
         }
       }
     }
+  });
+
+  it('rejects multi-letter HTML tags in plain-text fields', () => {
+    expect(() => expectPlainText('<strong>not plain</strong>', 'example.summary')).toThrow();
   });
 
   it('all seeAlso references resolve to existing sections', () => {
