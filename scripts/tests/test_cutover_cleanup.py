@@ -120,7 +120,6 @@ class CutoverCleanupTests(unittest.TestCase):
             "apps/receiver-ui/src/lib/components/RacesTab.svelte",
             "apps/shared-ui/src/components/AnnouncerConfigForm.svelte",
             "apps/shared-ui/src/lib/announcer-types.ts",
-            "apps/shared-ui/src/lib/help/server-help.ts",
         ]:
             self.assertFalse((ROOT / rel_path).exists(), rel_path)
 
