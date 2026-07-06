@@ -1,7 +1,7 @@
 import { createSSE, type SseHandle } from "@rusty-timer/shared-ui/lib/sse";
 import type {
   ReaderInfo,
-  ReaderStatus,
+  ReaderUpdatedEvent,
   ServerDeviceStatus,
   UpdateStatusResponse,
 } from "./api";
@@ -12,7 +12,7 @@ export type ForwarderSseCallbacks = {
     p2p_connected: boolean;
     restart_needed: boolean;
   }) => void;
-  onReaderUpdated: (reader: ReaderStatus) => void;
+  onReaderUpdated: (reader: ReaderUpdatedEvent) => void;
   onLogEntry: (entry: string) => void;
   onResync: () => void;
   onConnectionChange: (connected: boolean) => void;
@@ -42,7 +42,7 @@ export function initSSE(callbacks: ForwarderSseCallbacks): void {
       }) => {
         callbacks.onStatusChanged(data);
       },
-      reader_updated: (data: ReaderStatus) => {
+      reader_updated: (data: ReaderUpdatedEvent) => {
         callbacks.onReaderUpdated(data);
       },
       log_entry: (data: { entry: string }) => {

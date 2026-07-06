@@ -199,6 +199,14 @@ pub enum P2pSessionError {
         /// The out-of-range wire value.
         value: u64,
     },
+    /// A wire epoch was zero or negative; stream epochs start at 1.
+    #[error("{field} value {value} must be >= 1")]
+    NonPositiveEpoch {
+        /// The protobuf field carrying the malformed value.
+        field: &'static str,
+        /// The non-positive wire value.
+        value: i64,
+    },
     /// The writer thread rejected or dropped a persist command (group commit
     /// failure or shutdown). Nothing was persisted or acked; resuming from the
     /// persisted cursor is safe, so this is retryable.
@@ -238,7 +246,8 @@ impl P2pSessionError {
             | P2pSessionError::UnexpectedMessage { .. }
             | P2pSessionError::StreamIdMismatch { .. }
             | P2pSessionError::ConflictingDuplicate { .. }
-            | P2pSessionError::NumericOutOfRange { .. } => false,
+            | P2pSessionError::NumericOutOfRange { .. }
+            | P2pSessionError::NonPositiveEpoch { .. } => false,
         }
     }
 }
@@ -447,6 +456,12 @@ fn prepare_batch(
         check_stream_id(stream_id, &record.stream_id)?;
         let seq = u64_to_i64(record.seq, "record.seq")?;
         let epoch = record.epoch;
+        if epoch < 1 {
+            return Err(P2pSessionError::NonPositiveEpoch {
+                field: "record.epoch",
+                value: epoch,
+            });
+        }
         // A non-zero received_unix_ms is part of the immutable payload for
         // duplicate-conflict checks (it is persisted and used as the announcer
         // ordering key); zero means the forwarder omitted it and the receiver
@@ -1804,6 +1819,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn negative_epoch_rejected_without_persist_or_ack() {
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            let stream_id = stream_id();
+            let mut script = base_script();
+            script.batches = vec![EventBatch {
+                records: vec![ReadRecord {
+                    epoch: -1,
+                    ..record(1)
+                }],
+                replay: false,
+            }];
+
+            let forwarder = MockForwarderPeer::start([40; 32], script).await.unwrap();
+            let endpoint = test_endpoint(41).await;
+            let store = test_store();
+
+            let session = connect_and_hello(&endpoint, forwarder.endpoint_addr(), test_hello(0))
+                .await
+                .unwrap();
+            let result = run_data_subscription(
+                &session.connection,
+                &store.writer,
+                stream_id,
+                &local_stream_key(),
+                SubscribeMode::Replay,
+            )
+            .await;
+
+            assert!(
+                matches!(
+                    result,
+                    Err(P2pSessionError::NonPositiveEpoch {
+                        field: "record.epoch",
+                        value: -1,
+                    })
+                ),
+                "negative epoch must be rejected, got {result:?}"
+            );
+            let guard = store.db.lock().await;
+            assert!(
+                guard
+                    .load_received_events(local_stream_key().as_str())
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                guard
+                    .load_stream_cursor(local_stream_key().as_str())
+                    .unwrap(),
+                0
+            );
+            drop(guard);
+            assert!(forwarder.acks().is_empty());
+
+            forwarder.shutdown().await;
+        })
+        .await
+        .expect("negative_epoch_rejected_without_persist_or_ack timed out");
+    }
+
+    #[tokio::test]
     async fn over_i64_gap_rejected_without_marker_or_ack() {
         tokio::time::timeout(TEST_TIMEOUT, async {
             let stream_id = stream_id();
@@ -1944,6 +2020,13 @@ mod tests {
             !P2pSessionError::NumericOutOfRange {
                 field: "record.seq",
                 value: i64::MAX as u64 + 1,
+            }
+            .is_retryable()
+        );
+        assert!(
+            !P2pSessionError::NonPositiveEpoch {
+                field: "record.epoch",
+                value: 0,
             }
             .is_retryable()
         );

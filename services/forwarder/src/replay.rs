@@ -86,13 +86,32 @@ impl Default for ReplayEngine {
 #[cfg(test)]
 mod tests {
     use super::ReplayEngine;
-    use crate::storage::journal::{Journal, RegistryStreamRestore, StreamStartupStatus};
+    use crate::storage::journal::{
+        Journal, RegistryStreamRestore, RetentionContext, RetentionPolicy, StreamStartupStatus,
+    };
     use tempfile::NamedTempFile;
 
     fn make_journal() -> (Journal, NamedTempFile) {
         let file = NamedTempFile::new().expect("temp file");
         let journal = Journal::open(file.path()).expect("open journal");
         (journal, file)
+    }
+
+    fn prune_retained_acked_prefix(journal: &mut Journal) {
+        journal
+            .prune_retention(
+                &RetentionPolicy {
+                    min_retention_ms: 0,
+                    max_retention_ms: i64::MAX,
+                    emergency_free_disk_bytes: 0,
+                    emergency_max_rows: i64::MAX,
+                },
+                RetentionContext {
+                    now_unix_ms: i64::MAX,
+                    free_disk_bytes: u64::MAX,
+                },
+            )
+            .expect("prune retention");
     }
 
     #[test]
@@ -129,7 +148,7 @@ mod tests {
         journal
             .update_receiver_stream_cursor("test-receiver", "stream-gap", 2)
             .unwrap();
-        journal.prune_acked("stream-gap", 10).unwrap();
+        prune_retained_acked_prefix(&mut journal);
 
         let batch = ReplayEngine::new()
             .read_after(&journal, "stream-gap", 0, 10)

@@ -784,61 +784,32 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
     let p2p_connected = ss.p2p_connected();
     let restart_needed = ss.restart_needed();
     let ups_status = ss.ups_status().cloned();
-    let reader_snapshots: Vec<_> = ss
+    let mut readers: Vec<_> = ss
         .readers
         .iter()
         .map(|(ip, r)| {
-            let state_str = match r.state {
+            let state = match r.state {
                 ReaderConnectionState::Connected => "connected",
                 ReaderConnectionState::Connecting => "connecting",
                 ReaderConnectionState::Disconnected => "disconnected",
-            };
-            (
-                ip.clone(),
-                state_str.to_owned(),
-                r.reads_since_restart,
-                r.reads_total,
-                r.reads_epoch,
-                r.last_seen.map(|t| t.elapsed().as_secs()),
-                r.local_port,
-                r.current_epoch_name.clone(),
-                r.reader_info.clone(),
-            )
+            }
+            .to_owned();
+            ReaderStatusJson {
+                ip: ip.clone(),
+                state,
+                reads_session: r.reads_since_restart,
+                reads_total: r.reads_total,
+                reads_epoch: r.reads_epoch,
+                last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                local_port: r.local_port,
+                current_epoch: r.current_epoch,
+                current_epoch_created_unix_ms: r.current_epoch_created_unix_ms,
+                current_epoch_name: r.current_epoch_name.clone(),
+                reader_info: r.reader_info.clone(),
+            }
         })
         .collect();
     drop(ss);
-
-    let journal = state.journal.lock().await;
-    let mut readers: Vec<_> = Vec::with_capacity(reader_snapshots.len());
-    for (
-        ip,
-        state,
-        reads_session,
-        reads_total,
-        reads_epoch,
-        last_seen_secs,
-        local_port,
-        current_epoch_name,
-        reader_info,
-    ) in reader_snapshots
-    {
-        let epoch = journal.current_epoch_metadata(&ip).ok().flatten();
-        readers.push(ReaderStatusJson {
-            ip,
-            state,
-            reads_session,
-            reads_total,
-            reads_epoch,
-            last_seen_secs,
-            local_port,
-            current_epoch: epoch.as_ref().map(|metadata| metadata.epoch),
-            current_epoch_created_unix_ms: epoch
-                .as_ref()
-                .and_then(|metadata| metadata.created_unix_ms),
-            current_epoch_name,
-            reader_info,
-        });
-    }
     readers.sort_by(|a, b| a.ip.cmp(&b.ip));
 
     let resp = StatusJsonResponse {
@@ -4271,10 +4242,14 @@ target = "192.168.1.100:10000"
         match evt {
             crate::ui_events::ForwarderUiEvent::ReaderUpdated {
                 ip,
+                current_epoch,
+                current_epoch_created_unix_ms,
                 current_epoch_name,
                 ..
             } => {
                 assert_eq!(ip, "192.168.1.10");
+                assert_eq!(current_epoch, Some(1));
+                assert_eq!(current_epoch_created_unix_ms, None);
                 assert_eq!(current_epoch_name, Some("Race Day".to_owned()));
             }
             other => panic!("unexpected event: {other:?}"),
@@ -4329,8 +4304,13 @@ target = "192.168.1.100:10000"
             .expect("recv event");
         match evt {
             crate::ui_events::ForwarderUiEvent::ReaderUpdated {
-                current_epoch_name, ..
+                current_epoch,
+                current_epoch_created_unix_ms,
+                current_epoch_name,
+                ..
             } => {
+                assert_eq!(current_epoch, Some(1));
+                assert_eq!(current_epoch_created_unix_ms, None);
                 assert_eq!(current_epoch_name, None);
             }
             other => panic!("unexpected event: {other:?}"),
@@ -4338,7 +4318,7 @@ target = "192.168.1.100:10000"
     }
 
     #[tokio::test]
-    async fn status_json_includes_current_epoch_id_and_created_time() {
+    async fn status_json_uses_in_memory_epoch_metadata() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("journal.db");
         let mut journal = Journal::open(&path).expect("open journal");
@@ -4361,6 +4341,17 @@ target = "192.168.1.100:10000"
         server
             .init_readers(&[("192.168.1.10".to_owned(), 10010)])
             .await;
+        server
+            .apply_epoch_metadata(
+                "192.168.1.10",
+                crate::storage::journal::CurrentEpochMetadata {
+                    epoch: 4,
+                    created_unix_ms: Some(1_783_238_640_000),
+                    start_seq: 7,
+                    name: Some("Live Status".to_owned()),
+                },
+            )
+            .await;
 
         let addr = server.local_addr();
         let client = reqwest::Client::new();
@@ -4372,8 +4363,12 @@ target = "192.168.1.100:10000"
         assert_eq!(resp.status(), 200);
 
         let body: serde_json::Value = resp.json().await.expect("json body");
-        assert_eq!(body["readers"][0]["current_epoch"], 3);
-        assert!(body["readers"][0]["current_epoch_created_unix_ms"].is_number());
+        assert_eq!(body["readers"][0]["current_epoch"], 4);
+        assert_eq!(
+            body["readers"][0]["current_epoch_created_unix_ms"],
+            1_783_238_640_000i64
+        );
+        assert_eq!(body["readers"][0]["current_epoch_name"], "Live Status");
     }
 
     #[tokio::test]

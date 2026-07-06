@@ -292,7 +292,10 @@ fn merge_epoch_options(
                 if existing.created_unix_ms.is_none() {
                     existing.created_unix_ms = option.created_unix_ms;
                 }
-                if existing.name.is_none() {
+                if existing.name.is_none()
+                    && live_reader.and_then(|reader| reader.current_epoch)
+                        != Some(option.stream_epoch)
+                {
                     existing.name = option.name.clone();
                 }
             } else {
@@ -3887,6 +3890,47 @@ mod tests {
             assert_eq!(reader.current_epoch_start_seq, None);
             assert_eq!(reader.current_epoch_name.as_deref(), Some("Race 2"));
         }
+    }
+
+    #[tokio::test]
+    async fn live_cleared_epoch_name_is_not_resurrected_from_catalog() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+
+        state
+            .store_forwarder_catalog(
+                "endpoint-1",
+                &StreamCatalog {
+                    generation: 1,
+                    entries: vec![rt_p2p_protocol::StreamEntry {
+                        stream_id: b"stream-a".to_vec(),
+                        display_name: "Finish".to_owned(),
+                        network_addr: "10.0.0.1:10000".to_owned(),
+                        reader_connected: true,
+                        hardware_reader_id: "R1".to_owned(),
+                        epoch_summaries: vec![rt_p2p_protocol::StreamEpochSummary {
+                            epoch: 3,
+                            created_unix_ms: Some(1_783_238_640_000),
+                            start_seq: 42,
+                            end_seq: None,
+                            name: Some("Stale Catalog Name".to_owned()),
+                        }],
+                    }],
+                },
+            )
+            .await;
+        state.store_forwarder_reader_epoch_sync(
+            "endpoint-1",
+            "stream-a",
+            Some(3),
+            Some(1_783_238_640_000),
+            None,
+        );
+
+        let response = state.build_streams_response().await;
+        assert_eq!(response.streams[0].current_epoch_name, None);
+        assert_eq!(response.streams[0].epoch_options[0].name, None);
+        assert_eq!(response.streams[0].epoch_options[0].start_seq, Some(42));
     }
 
     #[tokio::test]

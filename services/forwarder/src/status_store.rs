@@ -1113,6 +1113,8 @@ impl StatusStore {
                         reads_epoch: r.reads_epoch,
                         last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                         local_port: r.local_port,
+                        current_epoch: r.current_epoch,
+                        current_epoch_created_unix_ms: r.current_epoch_created_unix_ms,
                         current_epoch_name: r.current_epoch_name.clone(),
                     });
                 // Only broadcast a P2P control delta on an actual state
@@ -1151,6 +1153,8 @@ impl StatusStore {
                         reads_epoch: r.reads_epoch,
                         last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                         local_port: r.local_port,
+                        current_epoch: r.current_epoch,
+                        current_epoch_created_unix_ms: r.current_epoch_created_unix_ms,
                         current_epoch_name: r.current_epoch_name.clone(),
                     });
                 // Per-read P2P broadcasts would flood the control stream during
@@ -1165,7 +1169,7 @@ impl StatusStore {
 
 /// Shared implementation of the epoch transition applied to a reader's status.
 ///
-/// Zeroes `reads_epoch` only when the epoch id changes, sets the epoch id,
+/// Zeroes `reads_epoch` when the epoch id changes or is first established, sets the epoch id,
 /// creation time, and name from the (journal-authoritative) metadata, and
 /// broadcasts both the local `ReaderUpdated` SSE event and the P2P
 /// `ReaderStatus` delta under the subsystem lock. Returns `false` when the
@@ -1181,7 +1185,7 @@ pub(crate) async fn apply_epoch_metadata_to_subsystem(
     let Some(r) = ss.readers.get_mut(reader_ip) else {
         return false;
     };
-    if r.current_epoch.is_some_and(|e| e != metadata.epoch) {
+    if r.current_epoch != Some(metadata.epoch) {
         // Epoch changed: the new epoch starts with zero reads.
         r.reads_epoch = 0;
     }
@@ -1197,6 +1201,8 @@ pub(crate) async fn apply_epoch_metadata_to_subsystem(
         reads_epoch: r.reads_epoch,
         last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
         local_port: r.local_port,
+        current_epoch: r.current_epoch,
+        current_epoch_created_unix_ms: r.current_epoch_created_unix_ms,
         current_epoch_name: r.current_epoch_name.clone(),
     });
     let _ = status_event_tx.send(ForwarderStatusEvent::ReaderStatus {
@@ -1349,7 +1355,9 @@ mod tests {
         let store = StatusStore::new(SubsystemStatus::ready());
         store.init_readers(&[("reader-a".to_owned(), 10_001)]).await;
 
-        // Startup: seed epoch metadata, then the durable epoch read count.
+        // A runtime-added stream may have reads before journal metadata arrives;
+        // the first Some(epoch) transition starts that epoch at zero reads.
+        store.record_read("reader-a").await;
         store
             .apply_epoch_metadata(
                 "reader-a",
@@ -1361,6 +1369,15 @@ mod tests {
                 },
             )
             .await;
+        let (_rx, snapshot) = store.status_feed().subscribe_and_snapshot().await;
+        let (_stream_id, status) = snapshot
+            .readers
+            .iter()
+            .find(|(stream_id, _)| stream_id == "reader-a")
+            .expect("reader status should be present");
+        assert_eq!(status.reads_epoch, 0);
+
+        // Startup: seed the durable epoch read count.
         store.set_reader_epoch_reads("reader-a", 10).await;
 
         // Reads bump the epoch counter alongside session/total.
@@ -1374,7 +1391,7 @@ mod tests {
             .find(|(stream_id, _)| stream_id == "reader-a")
             .expect("reader status should be present");
         assert_eq!(status.reads_epoch, 12);
-        assert_eq!(status.reads_since_restart, 2);
+        assert_eq!(status.reads_since_restart, 3);
 
         // Re-seeding the SAME epoch must not reset the counter.
         store

@@ -726,9 +726,8 @@ async fn unresolvable_override_holds_stream_fail_closed_until_cleared() {
         )
         .await;
 
-        // Fail closed: no data subscription, no rows — give the runtime a
-        // moment to prove it is holding rather than merely slow.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Fail closed: observing the held marker is deterministic because the
+        // runtime sets it on the exact branch that skips opening DataSubscribe.
         assert!(
             forwarder.subscribes().is_empty(),
             "held stream must never open a data subscription"

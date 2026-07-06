@@ -447,7 +447,15 @@
       onReaderUpdated: (reader) => {
         if (status) {
           const readers = status.readers.map((r) =>
-            r.ip === reader.ip ? { ...r, ...reader } : r,
+            r.ip === reader.ip
+              ? {
+                  ...r,
+                  ...reader,
+                  current_epoch: reader.current_epoch,
+                  current_epoch_created_unix_ms:
+                    reader.current_epoch_created_unix_ms,
+                }
+              : r,
           );
           status = { ...status, readers };
           lastSeenBase = {

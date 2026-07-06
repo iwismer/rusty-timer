@@ -46,6 +46,14 @@ export interface ReaderStatus {
   reader_info?: ReaderInfo | null;
 }
 
+export type ReaderUpdatedEvent = Omit<
+  ReaderStatus,
+  "current_epoch" | "current_epoch_created_unix_ms"
+> & {
+  current_epoch: number | null;
+  current_epoch_created_unix_ms: number | null;
+};
+
 export interface ServerDeviceStatus {
   configured: boolean;
   endpoint_id: string | null;

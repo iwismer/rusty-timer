@@ -6,7 +6,7 @@
 /// - events written before close survive reopen
 /// - acked cursor survives reopen
 /// - UNIQUE(stream_key, stream_epoch, seq) constraint is enforced
-use forwarder::storage::journal::Journal;
+use forwarder::storage::journal::{Journal, RetentionContext, RetentionPolicy};
 use tempfile::NamedTempFile;
 
 // ---------------------------------------------------------------------------
@@ -119,7 +119,7 @@ fn duplicate_stream_epoch_seq_is_rejected() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn prune_acked_events_first() {
+fn prune_retention_removes_acked_events_first() {
     let f = NamedTempFile::new().unwrap();
     let mut j = Journal::open(f.path()).unwrap();
     j.ensure_stream_state("10.0.0.8", 1).unwrap();
@@ -134,9 +134,24 @@ fn prune_acked_events_first() {
     j.update_receiver_stream_cursor("test-receiver", "10.0.0.8", 3)
         .unwrap();
 
-    // Prune up to 3 records (should remove the 3 acked ones)
-    let pruned = j.prune_acked("10.0.0.8", 3).unwrap();
-    assert_eq!(pruned, 3, "should prune exactly 3 acked records");
+    let stats = j
+        .prune_retention(
+            &RetentionPolicy {
+                min_retention_ms: 0,
+                max_retention_ms: i64::MAX,
+                emergency_free_disk_bytes: 0,
+                emergency_max_rows: i64::MAX,
+            },
+            RetentionContext {
+                now_unix_ms: i64::MAX,
+                free_disk_bytes: u64::MAX,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        stats.acked_deleted, 3,
+        "should prune exactly 3 acked records"
+    );
 
     // Seq 4 and 5 must still be present
     let unacked = j.read_events_after("10.0.0.8", 0, usize::MAX).unwrap();

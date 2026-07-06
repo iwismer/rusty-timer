@@ -526,9 +526,11 @@ impl Journal {
         Ok(())
     }
 
-    /// Return the lowest cumulative ack cursor across all receivers for a
-    /// stream (`0` when no receiver has acked anything). Events at or below
-    /// this seq have been acked by every known receiver.
+    /// Return the lowest cumulative ack cursor among receiver cursor rows for
+    /// a stream (`0` when no receiver has acked anything).
+    ///
+    /// Receivers with no cursor row are not represented in this minimum and
+    /// therefore do not hold back retention pruning.
     pub fn min_acked_through_seq(&self, stream_key: &str) -> Result<i64, JournalError> {
         self.conn
             .query_row(
@@ -587,8 +589,13 @@ impl Journal {
             .map_err(Into::into)
     }
 
-    /// Delete up to `limit` events for `stream_key` that every known receiver
-    /// has acked.
+    /// Test-only ack-cursor pruning helper retained for legacy integration
+    /// tests. Production pruning goes through [`Self::prune_retention`].
+    ///
+    /// The cutoff is [`Self::min_acked_through_seq`], i.e. the minimum over
+    /// existing receiver cursor rows only; receivers with no cursor row do not
+    /// hold back this helper.
+    #[cfg(any(test, debug_assertions))]
     pub fn prune_acked(&mut self, stream_key: &str, limit: i64) -> Result<i64, JournalError> {
         let acked_seq = self.min_acked_through_seq(stream_key)?;
         let deleted = self.conn.execute(

@@ -855,7 +855,7 @@ impl Db {
     /// `received_events` (and advances cursors) by `stream_id` alone, leaving the
     /// legacy `(forwarder_id, reader_ip)` columns NULL. A legacy-keyed lookup
     /// therefore matches nothing for currently-receiving streams.
-    pub fn load_replay_target_epochs(
+    pub fn load_received_stream_epochs(
         &self,
         stream_id: &str,
     ) -> DbResult<Vec<(i64, Option<String>)>> {
@@ -3119,7 +3119,7 @@ mod tests {
     }
 
     #[test]
-    fn load_replay_target_epochs_uses_local_received_events() {
+    fn load_received_stream_epochs_uses_local_received_events() {
         let mut db = Db::open_in_memory().unwrap();
         let stream_id = "stream-a";
         // Canonical live-mode subscription: legacy (forwarder_id, reader_ip)
@@ -3153,7 +3153,7 @@ mod tests {
             .unwrap();
         }
 
-        let epochs = db.load_replay_target_epochs(stream_id).unwrap();
+        let epochs = db.load_received_stream_epochs(stream_id).unwrap();
         assert_eq!(
             epochs,
             vec![
@@ -3162,7 +3162,7 @@ mod tests {
             ]
         );
         assert!(
-            db.load_replay_target_epochs("other-stream")
+            db.load_received_stream_epochs("other-stream")
                 .unwrap()
                 .is_empty()
         );

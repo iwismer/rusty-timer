@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, expectTypeOf } from "vitest";
+import type { ReaderUpdatedEvent } from "./api";
 
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
@@ -17,6 +18,13 @@ function makeResponse(status: number, body: unknown) {
 }
 
 describe("forwarder api client", () => {
+  it("types reader update SSE payload with epoch identity fields", () => {
+    expectTypeOf<ReaderUpdatedEvent>().toMatchTypeOf<{
+      current_epoch: number | null;
+      current_epoch_created_unix_ms: number | null;
+    }>();
+  });
+
   it("getStatus fetches forwarder status", async () => {
     const { getStatus } = await import("./api");
     mockFetch.mockResolvedValue(

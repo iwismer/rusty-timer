@@ -87,18 +87,6 @@ impl ReaderControlService {
         .await
     }
 
-    pub async fn emit_status_refresh(&self, reader_ip: &str) {
-        let ss = self.subsystem.lock().await;
-        if let Some(status) = ss.readers.get(reader_ip) {
-            let _ = self
-                .status_event_tx
-                .send(ForwarderStatusEvent::ReaderStatus {
-                    stream_id: reader_ip.to_owned(),
-                    status: status.clone(),
-                });
-        }
-    }
-
     pub async fn sync_clock(
         &self,
         reader_ip: &str,

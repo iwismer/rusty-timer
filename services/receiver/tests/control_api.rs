@@ -6,6 +6,7 @@ use receiver::control_api::{
 use receiver::db::{EventType, StreamEarliestEpoch, StreamSubscription};
 use receiver::stream_key::LocalStreamKey;
 use std::sync::Arc;
+use std::time::Duration;
 
 const TEST_RACE_ID: &str = "11111111-1111-1111-1111-111111111111";
 
@@ -13,6 +14,23 @@ fn setup() -> Arc<AppState> {
     let db = Db::open_in_memory().unwrap();
     let (state, _rx) = AppState::new(db, "test-receiver".to_owned());
     state
+}
+
+async fn recv_streams_snapshot(
+    rx: &mut tokio::sync::broadcast::Receiver<receiver::ui_events::ReceiverUiEvent>,
+) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if matches!(
+                rx.recv().await.unwrap(),
+                receiver::ui_events::ReceiverUiEvent::StreamsSnapshot { .. }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("streams snapshot event");
 }
 
 #[tokio::test]
@@ -346,6 +364,9 @@ async fn admin_reset_all_earliest_epochs_deletes_all() {
         db.save_stream_earliest_epoch("endpoint-1", "10.0.0.1", 7)
             .unwrap();
     }
+    state.set_connection_state(ConnectionState::Connected).await;
+    let mut ui_rx = state.ui.ui_tx.subscribe();
+
     let result = control_api::admin_reset_all_earliest_epochs(&state)
         .await
         .unwrap();
@@ -361,6 +382,9 @@ async fn admin_reset_all_earliest_epochs_deletes_all() {
         remaining.is_empty(),
         "all stream earliest epochs must be deleted"
     );
+    let status = control_api::get_status(&state).await;
+    assert_eq!(status.connection_state, ConnectionState::Connecting);
+    recv_streams_snapshot(&mut ui_rx).await;
 }
 
 #[tokio::test]
@@ -373,6 +397,9 @@ async fn admin_reset_earliest_epoch_per_stream() {
         db.save_stream_earliest_epoch("endpoint-2", "22222222-2222-2222-2222-222222222222", 3)
             .unwrap();
     }
+    state.set_connection_state(ConnectionState::Connected).await;
+    let mut ui_rx = state.ui.ui_tx.subscribe();
+
     control_api::admin_reset_earliest_epoch(
         &state,
         StreamRef {
@@ -396,6 +423,9 @@ async fn admin_reset_earliest_epoch_per_stream() {
         LocalStreamKey::new("endpoint-2", "22222222-2222-2222-2222-222222222222").as_str()
     );
     assert_eq!(remaining[0].forwarder_endpoint_id, "endpoint-2");
+    let status = control_api::get_status(&state).await;
+    assert_eq!(status.connection_state, ConnectionState::Connecting);
+    recv_streams_snapshot(&mut ui_rx).await;
 }
 
 #[tokio::test]

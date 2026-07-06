@@ -28,7 +28,7 @@ This is the **Rusty Timer P2P Remote Forwarding Suite**, a multi-service Rust wo
 - `crates/rt-test-utils/` — P2P loopback test helpers.
 
 ### Key Decisions
-- Rust MSRV: 1.85.0; pinned toolchain: 1.93.1 (see `rust-toolchain.toml`).
+- Rust MSRV: 1.88.0 or newer (the codebase uses let-chains); pinned toolchain: 1.96.1 (see `rust-toolchain.toml`).
 - Node 24.x / npm 11.x (see root `package.json` + `.nvmrc`).
 - Forwarder config: TOML only (no env var overrides).
 - Server config: env vars for process deployment; SQLite for persistence.

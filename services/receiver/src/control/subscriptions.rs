@@ -106,6 +106,7 @@ pub async fn put_earliest_epoch(
         Ok(()) => {
             drop(db);
             let _ = state.request_reconnect_if_connected().await;
+            state.emit_streams_snapshot().await;
             Ok(())
         }
         Err(e) => Err(ReceiverError::Internal(e.to_string())),
@@ -131,7 +132,7 @@ pub async fn get_stream_epochs(
     let local_stream_key = LocalStreamKey::new(&forwarder_endpoint_id, &stream_id);
     let rows = {
         let db = state.storage.db.lock().await;
-        db.load_replay_target_epochs(local_stream_key.as_str())
+        db.load_received_stream_epochs(local_stream_key.as_str())
             .map_err(|e| ReceiverError::Internal(e.to_string()))?
     };
 
@@ -315,7 +316,12 @@ pub async fn admin_reset_all_earliest_epochs(
 ) -> Result<serde_json::Value, ReceiverError> {
     let db = state.storage.db.lock().await;
     match db.delete_all_earliest_epochs() {
-        Ok(count) => Ok(serde_json::json!({ "deleted": count })),
+        Ok(count) => {
+            drop(db);
+            let _ = state.request_reconnect_if_connected().await;
+            state.emit_streams_snapshot().await;
+            Ok(serde_json::json!({ "deleted": count }))
+        }
         Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
 }
@@ -328,7 +334,12 @@ pub async fn admin_reset_earliest_epoch(
     let local_stream_key = LocalStreamKey::new(&body.forwarder_endpoint_id, &body.stream_id);
     let db = state.storage.db.lock().await;
     match db.delete_stream_earliest_epoch(local_stream_key.as_str()) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            drop(db);
+            let _ = state.request_reconnect_if_connected().await;
+            state.emit_streams_snapshot().await;
+            Ok(())
+        }
         Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
 }
