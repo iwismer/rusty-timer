@@ -22,6 +22,9 @@
   } from '../lib/read-mode-form';
   import type { HelpContextName } from '../lib/help/help-types';
 
+  const componentId = $props.id();
+  const detailsRegionId = `${componentId}-details`;
+
   /** Reader info matching the Rust ReaderInfo struct. */
   export interface ReaderInfoData {
     banner?: string | null;
@@ -362,7 +365,7 @@
   <!-- Always-visible summary row -->
   {#if showSummaryRow}
     <div class="mb-3 flex items-start justify-between gap-4">
-      <div class="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+      <div class="min-w-0 flex-1 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
         {#if readsSession != null}
           <div class="inline-flex items-baseline gap-1">
             <span class="text-text-muted">Reads (session):</span>
@@ -431,6 +434,7 @@
             detailsOpen = !detailsOpen;
           }}
           aria-expanded={detailsOpen}
+          aria-controls={detailsRegionId}
           aria-label={detailsOpen ? 'Hide details' : 'Show details'}
         >
           <span class={`inline-block transition-transform ${detailsOpen ? 'rotate-180' : ''}`}
@@ -523,7 +527,10 @@
   {/if}
 
   {#if detailsShown}
-    <div class={detailsCollapsible ? 'mt-4 pt-4 border-t border-border' : ''}>
+    <div
+      id={detailsRegionId}
+      class={detailsCollapsible ? 'mt-4 pt-4 border-t border-border' : ''}
+    >
       {#if !readerInfo && readerState === 'disconnected'}
         <p class="mb-4 text-sm text-text-muted">No reader data available</p>
       {/if}

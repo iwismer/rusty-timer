@@ -327,18 +327,41 @@ describe("ConnectionsTab", () => {
       screen.queryByTestId("forwarder-reader-endpoint-live-10.0.0.1:10001"),
     ).not.toBeInTheDocument();
 
-    // Reader identity now lives in the wrapping card header rather than the
-    // control panel's own header.
-    const row = screen.getByTestId("forwarder-row-endpoint-live");
-    expect(row).toHaveTextContent("10.0.0.1:10000");
-    expect(row).toHaveTextContent("connected to forwarder");
-    expect(row).toHaveTextContent("10.0.0.1:10001");
-    expect(row).toHaveTextContent("disconnected from forwarder");
+    const forwarderHeading = screen.getByRole("heading", {
+      level: 3,
+      name: "Live Forwarder",
+    });
+    const forwarderCard = forwarderHeading.closest("section");
+    expect(forwarderCard).not.toBeNull();
 
-    const panels = screen.getAllByTestId("reader-control-panel");
-    expect(panels).toHaveLength(2);
-    expect(panels[0]).toHaveTextContent("Local proxy: 127.0.0.1:9100");
-    expect(panels[1]).toHaveTextContent("Local proxy: not subscribed");
+    const readerHeadings = within(forwarderCard as HTMLElement).getAllByRole(
+      "heading",
+      { level: 4 },
+    );
+    expect(readerHeadings.map((heading) => heading.textContent)).toEqual([
+      "10.0.0.1:10000",
+      "10.0.0.1:10001",
+    ]);
+
+    const firstReaderCard = readerHeadings[0].closest("section");
+    expect(firstReaderCard).not.toBeNull();
+    expect(
+      within(firstReaderCard as HTMLElement).getAllByTestId(
+        "reader-control-panel",
+      ),
+    ).toHaveLength(1);
+    expect(firstReaderCard).toHaveTextContent("connected to forwarder");
+    expect(firstReaderCard).toHaveTextContent("Local proxy: 127.0.0.1:9100");
+
+    const secondReaderCard = readerHeadings[1].closest("section");
+    expect(secondReaderCard).not.toBeNull();
+    expect(
+      within(secondReaderCard as HTMLElement).getAllByTestId(
+        "reader-control-panel",
+      ),
+    ).toHaveLength(1);
+    expect(secondReaderCard).toHaveTextContent("disconnected from forwarder");
+    expect(secondReaderCard).toHaveTextContent("Local proxy: not subscribed");
   });
 
   it("shows reads counters, last seen, epoch name, and collapsible details", async () => {
@@ -401,8 +424,16 @@ describe("ConnectionsTab", () => {
 
     // Details start collapsed and can be expanded.
     expect(screen.queryByText("Banner:")).not.toBeInTheDocument();
-    await fireEvent.click(screen.getByLabelText("Show details"));
-    expect(screen.getByText("Banner:")).toBeInTheDocument();
+    const detailsToggle = screen.getByLabelText("Show details");
+    const detailsRegionId = detailsToggle.getAttribute("aria-controls");
+    expect(detailsRegionId).toBeTruthy();
+    await fireEvent.click(detailsToggle);
+    const detailsRegion = document.getElementById(detailsRegionId as string);
+    expect(detailsRegion).toHaveTextContent("Banner:");
+    expect(screen.getByLabelText("Hide details")).toHaveAttribute(
+      "aria-controls",
+      detailsRegionId,
+    );
     // Hardware code renders both hex and decimal forms.
     expect(panel).toHaveTextContent("Hardware: 0x45 (69)");
     await fireEvent.click(screen.getByLabelText("Hide details"));

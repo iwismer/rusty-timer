@@ -422,11 +422,11 @@
           <div data-testid={`forwarder-row-${forwarder.endpoint_id}`}>
             <Card headerBg borderStatus={forwarderBorderStatus(forwarder)}>
               {#snippet header()}
-                <span
-                  class="min-w-0 truncate text-sm font-semibold text-text-primary"
+                <h3
+                  class="m-0 min-w-0 truncate text-sm font-semibold text-text-primary"
                 >
                   {forwarder.display_name ?? forwarder.endpoint_id}
-                </span>
+                </h3>
                 <span
                   data-testid={`forwarder-state-${forwarder.endpoint_id}`}
                   class="flex items-center gap-2 text-sm font-medium {stateDisplay.textClass}"
@@ -570,9 +570,11 @@
                   {#each forwarder.readers as reader (reader.stream_id)}
                     <Card borderStatus={readerBorderStatus(reader)}>
                       {#snippet header()}
-                        <span class="font-mono text-sm text-text-primary">
+                        <h4
+                          class="m-0 font-mono text-sm font-normal text-text-primary"
+                        >
                           {readerLabel(reader)}
-                        </span>
+                        </h4>
                         <StatusBadge
                           label={readerForwarderStateLabel(reader)}
                           state={readerBorderStatus(reader)}

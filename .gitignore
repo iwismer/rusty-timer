@@ -15,6 +15,9 @@ ext_docs/
 docs/plans/
 docs/superpowers/
 
+# Generated docs artifacts
+docs/runbooks/forwarder-quick-guide.pdf
+
 # Python
 __pycache__/
 
