@@ -2,12 +2,13 @@
 // Prints two identical half-letter guides side by side on one US letter landscape page.
 
 #set page(width: 11in, height: 8.5in, margin: 0in)
-#set text(size: 7.4pt)
-#set par(leading: 0.38em)
-#set list(indent: 0.75em, body-indent: 0.32em)
+#set text(size: 8.5pt)
+#set par(leading: 0.46em)
+#set list(indent: 0.75em, body-indent: 0.32em, tight: false)
+#set enum(indent: 0.75em, body-indent: 0.32em, tight: false)
 
 #let fill-line(width) = box(width: width)[#line(length: width, stroke: 0.45pt)]
-#let code(body) = box(fill: rgb("f3f3f3"), inset: (x: 2pt, y: 1pt), radius: 1.5pt, text(font: "DejaVu Sans Mono", size: 6.8pt, body))
+#let code(body) = box(fill: rgb("f3f3f3"), inset: (x: 2pt, y: 1pt), radius: 1.5pt, text(font: "DejaVu Sans Mono", size: 7.6pt, body))
 #let note(body) = block(fill: rgb("fff5cc"), inset: 4pt, radius: 2pt)[#body]
 #let warning(body) = block(fill: rgb("ffe2e2"), inset: 4pt, radius: 2pt)[#body]
 #let section(title, body) = [
@@ -41,7 +42,7 @@
 
   #v(0.22em)
   #table(
-    columns: (0.86in, 1fr, 1fr),
+    columns: (0.72in, 1fr, 1fr),
     stroke: rgb("d8d8d8") + 0.45pt,
     align: horizon,
     hdr[Device], hdr[Turn on], hdr[Turn off],
