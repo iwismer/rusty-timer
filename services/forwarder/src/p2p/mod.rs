@@ -851,7 +851,7 @@ fn decode_seed(seed: &str) -> Result<[u8; 32], P2pStartError> {
     if seed.len() != 64 {
         return Err(P2pStartError::InvalidSecretKeySeed);
     }
-    for (idx, chunk) in seed.as_bytes().chunks_exact(2).enumerate() {
+    for (idx, chunk) in seed.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let hex = std::str::from_utf8(chunk).map_err(|_| P2pStartError::InvalidSecretKeySeed)?;
         bytes[idx] =
             u8::from_str_radix(hex, 16).map_err(|_| P2pStartError::InvalidSecretKeySeed)?;

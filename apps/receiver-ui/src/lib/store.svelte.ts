@@ -28,12 +28,7 @@ import {
 // --------------- Tab enum ---------------
 
 export type TabId =
-  | "connections"
-  | "streams"
-  | "config"
-  | "announcer"
-  | "logs"
-  | "admin";
+  "connections" | "streams" | "config" | "announcer" | "logs" | "admin";
 
 function subscriptionBuildStreams(
   streams: api.StreamEntry[],

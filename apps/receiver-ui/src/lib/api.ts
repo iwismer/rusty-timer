@@ -146,10 +146,7 @@ export interface EarliestEpochRequest {
 }
 
 export type ConnectionState =
-  | "disconnected"
-  | "connecting"
-  | "connected"
-  | "disconnecting";
+  "disconnected" | "connecting" | "connected" | "disconnecting";
 
 export interface ServerDeviceStatus {
   configured: boolean;
@@ -161,10 +158,7 @@ export interface ServerDeviceStatus {
 }
 
 export type ForwarderConnState =
-  | "subscribed"
-  | "connected"
-  | "unavailable"
-  | "disconnected";
+  "subscribed" | "connected" | "unavailable" | "disconnected";
 
 export type ReadMode = "raw" | "event" | "fsls";
 

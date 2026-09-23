@@ -1800,13 +1800,7 @@ impl Db {
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(raw.flatten().and_then(|json| {
-            if json.trim().is_empty() {
-                None
-            } else {
-                Some(json)
-            }
-        }))
+        Ok(raw.flatten().filter(|json| !json.trim().is_empty()))
     }
 }
 

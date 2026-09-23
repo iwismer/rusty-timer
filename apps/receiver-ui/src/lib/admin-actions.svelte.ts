@@ -23,8 +23,7 @@ export const PORT_VALIDATION_MESSAGE =
   "Port must be 1-65535 or empty to clear.";
 
 export type PortValidation =
-  | { ok: true; port: number | null }
-  | { ok: false; message: string };
+  { ok: true; port: number | null } | { ok: false; message: string };
 
 /** Validate a raw port-override input: 1-65535, or empty to clear. */
 export function validatePortInput(raw: string): PortValidation {
