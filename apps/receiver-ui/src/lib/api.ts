@@ -73,10 +73,7 @@ export interface SubscriptionItem {
 }
 
 export type ConnectionState =
-  | "disconnected"
-  | "connecting"
-  | "connected"
-  | "disconnecting";
+  "disconnected" | "connecting" | "connected" | "disconnecting";
 
 export interface StatusResponse {
   connection_state: ConnectionState;

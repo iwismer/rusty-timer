@@ -261,9 +261,7 @@ export interface ConfigSetResult {
 }
 
 export type ForwarderControlAction =
-  | "restart-service"
-  | "restart-device"
-  | "shutdown-device";
+  "restart-service" | "restart-device" | "shutdown-device";
 
 // ----- Forwarder config API -----
 

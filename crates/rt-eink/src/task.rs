@@ -55,7 +55,7 @@ pub async fn run_eink_task<F>(
                     let sleep = tokio::time::sleep(min_refresh.checked_sub(elapsed).unwrap());
                     tokio::pin!(sleep);
                     tokio::select! {
-                        _ = &mut sleep => {}
+                        () = &mut sleep => {}
                         result = shutdown_rx.changed() => {
                             if result.is_err() || *shutdown_rx.borrow() {
                                 info!("eink task: shutdown requested during debounce, stopping");
@@ -83,7 +83,7 @@ pub async fn run_eink_task<F>(
                     let sleep = tokio::time::sleep(min_refresh.checked_sub(elapsed).unwrap());
                     tokio::pin!(sleep);
                     tokio::select! {
-                        _ = &mut sleep => {}
+                        () = &mut sleep => {}
                         result = shutdown_rx.changed() => {
                             if result.is_err() || *shutdown_rx.borrow() {
                                 info!("eink task: shutdown requested during debounce, stopping");

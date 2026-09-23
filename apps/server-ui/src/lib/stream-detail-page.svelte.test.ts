@@ -13,8 +13,7 @@ const sseMock = vi.hoisted(() => ({
   onStreamUpdated: vi.fn(),
   unsubscribe: vi.fn(),
   listener: null as
-    | ((update: { stream_id: string; stream_epoch?: number }) => void)
-    | null,
+    ((update: { stream_id: string; stream_epoch?: number }) => void) | null,
 }));
 
 vi.mock("$app/stores", async () => {

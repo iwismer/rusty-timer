@@ -926,9 +926,7 @@
                             updateReadModeDraft(
                               key,
                               (e.currentTarget as HTMLSelectElement).value as
-                                | "raw"
-                                | "event"
-                                | "fsls",
+                                "raw" | "event" | "fsls",
                               info,
                             );
                           }}

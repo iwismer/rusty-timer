@@ -507,13 +507,11 @@ pub(crate) async fn run_reader(
             }
 
             // Parse IPICO chip read to validate and extract metadata
-            let parsed_read_type;
-            let reader_timestamp;
-            match ChipRead::try_from(raw_line.as_str()) {
-                Ok(chip) => {
-                    reader_timestamp = Some(chip.timestamp.to_string());
-                    parsed_read_type = chip.read_type.as_str().to_owned();
-                }
+            let (reader_timestamp, parsed_read_type) = match ChipRead::try_from(raw_line.as_str()) {
+                Ok(chip) => (
+                    Some(chip.timestamp.to_string()),
+                    chip.read_type.as_str().to_owned(),
+                ),
                 Err(_) => {
                     // Line is not a valid IPICO read — log and skip
                     logger.log_at(
@@ -522,7 +520,7 @@ pub(crate) async fn run_reader(
                     );
                     continue;
                 }
-            }
+            };
 
             // Write to journal. Keep status updates out of the DB lock scope.
             let append_result = {
