@@ -15,7 +15,7 @@ use rt_p2p_protocol::{
 use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::control_api::{ConfigCommand, FORWARDER_CONFIG_TIMEOUT, ReaderCommand};
 use crate::db::StreamSubscription;
@@ -520,8 +520,15 @@ async fn control_reader_loop(
                     return;
                 }
             }
-            // A read error is the expected clean disconnect/EOF signal.
-            Err(P2pSessionError::Read(_)) => return,
+            // A read error is the expected clean disconnect/EOF signal, but it
+            // is also how a silently broken QUIC path (relay or direct) surfaces
+            // here. A receiver-initiated teardown aborts this task, so reaching
+            // this arm means the session ended from the outside: log it, because
+            // otherwise a transport-level drop leaves no trace at all.
+            Err(P2pSessionError::Read(error)) => {
+                info!(%endpoint_id, %error, "forwarder control stream ended");
+                return;
+            }
             Err(error) => {
                 warn!(%endpoint_id, %error, "forwarder control stream ended with error");
                 return;
