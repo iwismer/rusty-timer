@@ -9,8 +9,8 @@
 //! - **Public read** (`GET /status`): unauthenticated, but trimmed. The
 //!   status board is intended to be readable by anyone who can reach the node
 //!   (e.g. on the local race network); the public view carries the announcer
-//!   board and device approval states but hides forwarder `direct_addrs` and
-//!   the `forwarder_streams` catalog. Requests carrying the trusted admin
+//!   board, device approval states, and the `forwarder_streams` catalog, but
+//!   hides forwarder `direct_addrs`. Requests carrying the trusted admin
 //!   identity header ([`ADMIN_HEADER`], see below) get the full view.
 //! - **Admin routes** (`POST /admin/*`, e.g. device approval): require the
 //!   upstream-injected admin identity header [`ADMIN_HEADER`]. Authelia injects
@@ -58,9 +58,9 @@ pub struct ApproveRequest {
 
 /// `GET /status` — public, unauthenticated status board.
 ///
-/// The public (unauthenticated) view hides forwarder `direct_addrs` and the
-/// `forwarder_streams` catalog; an admin-authorized request (trusted-proxy
-/// [`ADMIN_HEADER`]) receives the full data.
+/// The public (unauthenticated) view hides forwarder `direct_addrs`; an
+/// admin-authorized request (trusted-proxy [`ADMIN_HEADER`]) receives the full
+/// data including forwarder `direct_addrs`.
 pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let admin = admin_authorized(&headers, state.admin_proxy_trusted);
     let snapshot = {
@@ -95,16 +95,15 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> Respon
         };
         (generation, devices, forwarders, forwarder_streams)
     };
-    let (announcer_source_generation, devices, mut forwarders, mut forwarder_streams) = snapshot;
+    let (announcer_source_generation, devices, mut forwarders, forwarder_streams) = snapshot;
     if !admin {
-        // Public status keeps the announcer board and device approval states
-        // (device clients poll their own approval here) but hides internal
-        // addresses and the stream catalog; those mirror the data the
-        // authenticated GET /forwarders gate protects.
+        // Public status keeps the announcer board, stream catalog, and device
+        // approval states (device clients poll their own approval here) but
+        // hides internal addresses; those mirror the data the authenticated
+        // GET /forwarders gate protects.
         for forwarder in &mut forwarders {
             forwarder.direct_addrs.clear();
         }
-        forwarder_streams.clear();
     }
 
     let (finisher_count, announcer_rows) = {
@@ -387,7 +386,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_status_omits_direct_addrs_and_streams() {
+    async fn public_status_omits_direct_addrs_but_includes_streams() {
         let state = test_state();
         seed_forwarder_catalog(&state);
 
@@ -395,11 +394,14 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = response_json(resp).await;
 
-        // The forwarder itself is still listed (with approval state), but its
-        // internal addresses and the stream catalog are hidden.
+        // The forwarder itself is still listed (with approval state), its
+        // internal addresses are hidden, but its stream catalog is visible.
         assert_eq!(body["forwarders"][0]["endpoint_id"], "fwd-node-1");
         assert_eq!(body["forwarders"][0]["direct_addrs"], serde_json::json!([]));
-        assert_eq!(body["forwarder_streams"], serde_json::json!([]));
+        assert_eq!(body["forwarder_streams"][0]["stream_id"], "reader-a");
+        assert_eq!(body["forwarder_streams"][0]["endpoint_id"], "fwd-node-1");
+        assert_eq!(body["forwarder_streams"][0]["epoch"], 3);
+        assert_eq!(body["forwarder_streams"][0]["next_seq"], 42);
         assert_eq!(body["devices"].as_array().unwrap().len(), 1);
     }
 

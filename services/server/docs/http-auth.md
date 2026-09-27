@@ -8,7 +8,7 @@ protect. The in-code source of truth is the module doc on
 
 | Route | Method | Auth posture | Enforced by |
 | --- | --- | --- | --- |
-| `/status` | GET | Public (trimmed) | none; the public view exposes the announcer board and device/forwarder approval metadata but hides forwarder `direct_addrs` and the `forwarder_streams` catalog. Requests carrying a trusted `Remote-User` header (`SERVER_TRUSTED_PROXY=1`) get the full view. No tokens/secrets in either view |
+| `/status` | GET | Public (trimmed) | none; the public view exposes the announcer board, device/forwarder approval metadata, and the `forwarder_streams` catalog, but hides forwarder `direct_addrs`. Requests carrying a trusted `Remote-User` header (`SERVER_TRUSTED_PROXY=1`) get the full view. No tokens/secrets in either view |
 | `/healthz` | GET | Public | none |
 | `/admin/devices/approve` | POST | Admin | upstream `Remote-User` header; requires `SERVER_TRUSTED_PROXY=1` |
 | `/admin/enrollment-tokens` | GET | Admin | upstream `Remote-User` header; requires `SERVER_TRUSTED_PROXY=1` |
@@ -32,7 +32,7 @@ protect. The in-code source of truth is the module doc on
   cannot be spoofed.
 - **Public routes** (`/status`, `/healthz`) may be allow-listed without
   authentication. The unauthenticated `/status` view is trimmed (no forwarder
-  `direct_addrs`, no stream catalog); forward the authenticated `Remote-User`
+  `direct_addrs`); forward the authenticated `Remote-User`
   header so admin sessions see the full view. Protect `/status` at the proxy
   if even the trimmed device/announcer visibility should be private for a
   deployment.
