@@ -5,6 +5,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -197,6 +198,97 @@ fn stage_root_dir_from_with_override(
 }
 
 // ---------------------------------------------------------------------------
+// GitHub releases API
+// ---------------------------------------------------------------------------
+
+/// GitHub REST API base URL for repository release lookups.
+const GITHUB_API_BASE: &str = "https://api.github.com";
+
+/// Number of releases requested per page (GitHub's documented maximum).
+const RELEASES_PER_PAGE: usize = 100;
+
+/// Hard upper bound on pages fetched, so an unexpected API response can never
+/// cause unbounded pagination.
+const MAX_RELEASE_PAGES: u32 = 10;
+
+/// Per-request timeout for GitHub API calls.
+const GITHUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A release as returned by the GitHub REST API.
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    #[serde(default)]
+    assets: Vec<GitHubAsset>,
+}
+
+/// A downloadable asset attached to a GitHub release.
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+/// Appends `key=value` to `url`, using `&` when a query string already exists.
+///
+/// This replaces the previous `self_update` pagination, which joined
+/// `"?per_page=100"` onto GitHub's `Link: rel="next"` URL (which already
+/// contains `?per_page=100&page=2`), producing `...&page=2?per_page=100`:
+/// GitHub parsed the malformed `page` as invalid, served page 1 again, and the
+/// client recursed until it was rate limited.
+fn append_query_param(url: &mut String, key: &str, value: &str) {
+    url.push(if url.contains('?') { '&' } else { '?' });
+    url.push_str(key);
+    url.push('=');
+    url.push_str(value);
+}
+
+/// Builds the releases list URL for a specific page.
+fn releases_page_url(repo_owner: &str, repo_name: &str, page: u32) -> String {
+    let mut url = format!("{GITHUB_API_BASE}/repos/{repo_owner}/{repo_name}/releases");
+    append_query_param(&mut url, "per_page", &RELEASES_PER_PAGE.to_string());
+    append_query_param(&mut url, "page", &page.to_string());
+    url
+}
+
+/// Fetches every release (bounded) for a repository from the GitHub REST API.
+///
+/// Pagination uses explicit page numbers rather than following `Link` headers,
+/// and is capped at [`MAX_RELEASE_PAGES`].
+fn fetch_releases(
+    repo_owner: &str,
+    repo_name: &str,
+) -> Result<Vec<GitHubRelease>, Box<dyn std::error::Error + Send + Sync>> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(concat!(
+            "rusty-timer-rt-updater/",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .timeout(GITHUB_REQUEST_TIMEOUT)
+        .build()?;
+
+    let mut releases = Vec::new();
+    for page in 1..=MAX_RELEASE_PAGES {
+        let url = releases_page_url(repo_owner, repo_name, page);
+        let response = client.get(&url).send()?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "github releases request failed with status {} for {url}",
+                response.status()
+            )
+            .into());
+        }
+        let batch: Vec<GitHubRelease> = response.json()?;
+        let fetched = batch.len();
+        releases.extend(batch);
+        if fetched < RELEASES_PER_PAGE {
+            break;
+        }
+    }
+    Ok(releases)
+}
+
+// ---------------------------------------------------------------------------
 // Blocking implementations (run inside spawn_blocking)
 // ---------------------------------------------------------------------------
 
@@ -212,19 +304,15 @@ fn check_blocking(
         "checking for updates"
     );
 
-    let releases = self_update::backends::github::ReleaseList::configure()
-        .repo_owner(repo_owner)
-        .repo_name(repo_name)
-        .build()?
-        .fetch()?;
+    let releases = fetch_releases(repo_owner, repo_name)?;
 
     // Find the latest release whose tag matches our service prefix.
     let mut best: Option<(Version, String)> = None;
     for release in &releases {
-        if let Some(ver) = parse_version_from_tag(&release.version, service_name)
+        if let Some(ver) = parse_version_from_tag(&release.tag_name, service_name)
             && best.as_ref().is_none_or(|(v, _)| ver > *v)
         {
-            best = Some((ver, release.version.clone()));
+            best = Some((ver, release.tag_name.clone()));
         }
     }
 
@@ -255,15 +343,11 @@ fn download_blocking(
     info!(tag = %tag, target = %target, "downloading release");
 
     // Fetch the release list and find the matching release.
-    let releases = self_update::backends::github::ReleaseList::configure()
-        .repo_owner(repo_owner)
-        .repo_name(repo_name)
-        .build()?
-        .fetch()?;
+    let releases = fetch_releases(repo_owner, repo_name)?;
 
     let release = releases
         .iter()
-        .find(|r| r.version == tag)
+        .find(|r| r.tag_name == tag)
         .ok_or_else(|| format!("release not found for tag {tag}"))?;
 
     let asset = select_archive_asset(&release.assets, target)
@@ -285,7 +369,7 @@ fn download_blocking(
 
     {
         let mut out = std::fs::File::create(&tmp_archive)?;
-        self_update::Download::from_url(&asset.download_url)
+        self_update::Download::from_url(&asset.browser_download_url)
             .set_header(reqwest::header::ACCEPT, "application/octet-stream".parse()?)
             .download_to(&mut out)?;
         out.flush()?;
@@ -320,7 +404,7 @@ fn download_blocking(
 /// Download the `.sha256` sidecar and verify the archive's hash.
 /// The sidecar is required.
 fn verify_sha256(
-    assets: &[self_update::update::ReleaseAsset],
+    assets: &[GitHubAsset],
     asset_name: &str,
     archive_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -333,7 +417,7 @@ fn verify_sha256(
 
     // Download the sidecar.
     let mut sha_buf: Vec<u8> = Vec::new();
-    self_update::Download::from_url(&sha_asset.download_url)
+    self_update::Download::from_url(&sha_asset.browser_download_url)
         .set_header(reqwest::header::ACCEPT, "application/octet-stream".parse()?)
         .download_to(&mut sha_buf)?;
 
@@ -356,10 +440,7 @@ fn verify_sha256(
     Ok(())
 }
 
-fn select_archive_asset<'a>(
-    assets: &'a [self_update::update::ReleaseAsset],
-    target: &str,
-) -> Option<&'a self_update::update::ReleaseAsset> {
+fn select_archive_asset<'a>(assets: &'a [GitHubAsset], target: &str) -> Option<&'a GitHubAsset> {
     assets.iter().find(|asset| {
         let name = asset.name.as_str();
         name.contains(target) && is_supported_archive_name(name)
@@ -469,10 +550,40 @@ mod tests {
         assert_eq!(stage_dir, PathBuf::from("/var/lib/rusty-timer"));
     }
 
-    fn release_asset(name: &str) -> self_update::update::ReleaseAsset {
-        self_update::update::ReleaseAsset {
-            download_url: format!("https://example.invalid/{name}"),
+    #[test]
+    fn releases_page_url_uses_single_query_separator() {
+        let page1 = releases_page_url("owner", "repo", 1);
+        assert_eq!(
+            page1,
+            "https://api.github.com/repos/owner/repo/releases?per_page=100&page=1"
+        );
+
+        // Regression guard: the bug joined a second `?` onto a URL that already
+        // had a query string, making GitHub serve page 1 forever.
+        let page2 = releases_page_url("owner", "repo", 2);
+        assert_eq!(
+            page2,
+            "https://api.github.com/repos/owner/repo/releases?per_page=100&page=2"
+        );
+        assert_eq!(page2.matches('?').count(), 1, "only one query separator");
+    }
+
+    #[test]
+    fn append_query_param_uses_ampersand_when_query_present() {
+        let mut url =
+            String::from("https://api.github.com/repositories/1/releases?per_page=100&page=2");
+        append_query_param(&mut url, "page", "3");
+        assert_eq!(
+            url,
+            "https://api.github.com/repositories/1/releases?per_page=100&page=2&page=3"
+        );
+        assert_eq!(url.matches('?').count(), 1, "only one query separator");
+    }
+
+    fn release_asset(name: &str) -> GitHubAsset {
+        GitHubAsset {
             name: name.to_owned(),
+            browser_download_url: format!("https://example.invalid/{name}"),
         }
     }
 
@@ -597,5 +708,30 @@ mod tests {
 
         let found = find_extracted_binary(temp.path(), "my-service").expect("should find binary");
         assert_eq!(found, bin_path);
+    }
+
+    /// Network-gated: verifies the hand-rolled, bounded release fetch against
+    /// the real GitHub API. Run with `cargo test -p rt-updater -- --ignored`.
+    #[test]
+    #[ignore = "hits the live GitHub API"]
+    fn live_check_finds_newer_forwarder_release() {
+        let status = check_blocking(
+            "iwismer",
+            "rusty-timer",
+            "forwarder",
+            &Version::new(0, 0, 1),
+        )
+        .expect("live update check should succeed");
+
+        match status {
+            UpdateStatus::Available { version } => {
+                let parsed = Version::parse(&version).expect("valid semver");
+                assert!(
+                    parsed >= Version::new(0, 16, 0),
+                    "expected at least forwarder v0.16.0, got {version}"
+                );
+            }
+            other => panic!("expected an available update, got {other:?}"),
+        }
     }
 }

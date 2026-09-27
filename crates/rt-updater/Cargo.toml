@@ -20,11 +20,11 @@ semver = "1"
 tracing = "0.1"
 tokio = { version = "1", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sha2 = "0.11"
 hex = "0.4"
 tempfile = "3"
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "blocking", "json"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
-serde_json = "1"
