@@ -2,7 +2,8 @@
 #
 # cloud-init network configuration for Raspberry Pi.
 #
-# This file sets a static IPv4 address on the ethernet adapter.
+# This file sets a static IPv4 address on the ethernet adapter and enables
+# DHCP on USB tethering interfaces (usb*, enx*) with higher route priority.
 # You can optionally add a Wi-Fi config under `wifis.wlan0`.
 # Edit the values below to match your network, then copy this file
 # to the SD card boot partition as "network-config" (no extension).
@@ -26,6 +27,20 @@ network:
         addresses:
           - 8.8.8.8
           - 8.8.4.4
+    usb-tether:
+      match:
+        name: 'usb*'
+      dhcp4: true
+      optional: true
+      dhcp4-overrides:
+        route-metric: 50
+    enx-tether:
+      match:
+        name: 'enx*'
+      dhcp4: true
+      optional: true
+      dhcp4-overrides:
+        route-metric: 50
 
 # Optional Wi-Fi example:
 #   wifis:

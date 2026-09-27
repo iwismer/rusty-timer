@@ -173,6 +173,55 @@ assert_contains "${polkit_rules}" "action.lookup(\"verb\") == \"start\"" "polkit
 assert_contains "${polkit_rules}" "action.lookup(\"unit\") == \"reboot.target\"" "polkit rules should allow reboot target for manage-units"
 assert_contains "${polkit_rules}" "action.lookup(\"unit\") == \"poweroff.target\"" "polkit rules should allow poweroff target for manage-units"
 
+usb_netplan="$(render_usb_tether_netplan)"
+assert_eq "/etc/netplan/99-usb-tether.yaml" "${USB_TETHER_NETPLAN_PATH}" "USB tether netplan path constant should match expected location"
+expected_usb_netplan=$'network:\n  version: 2\n  ethernets:\n    usb-tether:\n      match:\n        name: \'usb*\'\n      dhcp4: true\n      optional: true\n      dhcp4-overrides:\n        route-metric: 50\n    enx-tether:\n      match:\n        name: \'enx*\'\n      dhcp4: true\n      optional: true\n      dhcp4-overrides:\n        route-metric: 50'
+assert_eq "${expected_usb_netplan}" "${usb_netplan}" "render_usb_tether_netplan should render complete usb-tether and enx-tether stanzas"
+
+tmp_netplan_root="$(mktemp -d)"
+orig_usb_tether_path="${USB_TETHER_NETPLAN_PATH}"
+netplan_calls=0
+chown() { :; }
+netplan() {
+  if [[ "${1:-}" == "apply" ]]; then
+    netplan_calls=$((netplan_calls + 1))
+  fi
+}
+
+# 1. Missing netplan directory is a no-op
+USB_TETHER_NETPLAN_PATH="${tmp_netplan_root}/missing-dir/99-usb-tether.yaml"
+ensure_usb_tether_netplan >/dev/null
+assert_eq "0" "${netplan_calls}" "missing netplan dir should not call netplan apply"
+
+# 2. Existing netplan dir without tether stanzas writes file and applies
+mkdir -p "${tmp_netplan_root}/netplan"
+USB_TETHER_NETPLAN_PATH="${tmp_netplan_root}/netplan/99-usb-tether.yaml"
+ensure_usb_tether_netplan >/dev/null
+assert_eq "1" "${netplan_calls}" "ensure_usb_tether_netplan should call netplan apply when writing config"
+assert_eq "${expected_usb_netplan}" "$(cat "${USB_TETHER_NETPLAN_PATH}")" "ensure_usb_tether_netplan should write expected netplan YAML"
+
+# 3. Both usb-tether and enx-tether present -> no-op
+ensure_usb_tether_netplan >/dev/null
+assert_eq "1" "${netplan_calls}" "ensure_usb_tether_netplan should skip when both usb-tether and enx-tether exist"
+
+# 4. Partial config (only usb-tether) still writes full config
+rm -f "${USB_TETHER_NETPLAN_PATH}"
+cat > "${tmp_netplan_root}/netplan/50-cloud-init.yaml" <<'EOF'
+network:
+  version: 2
+  ethernets:
+    usb-tether:
+      match:
+        name: 'usb*'
+EOF
+ensure_usb_tether_netplan >/dev/null
+assert_eq "2" "${netplan_calls}" "ensure_usb_tether_netplan should write config when enx-tether is missing"
+assert_eq "${expected_usb_netplan}" "$(cat "${USB_TETHER_NETPLAN_PATH}")" "partial netplan config should trigger writing 99-usb-tether.yaml"
+
+rm -rf "${tmp_netplan_root}"
+USB_TETHER_NETPLAN_PATH="${orig_usb_tether_path}"
+unset -f chown netplan
+
 setup_script="$(cat "${SCRIPT_PATH}")"
 assert_contains "${setup_script}" $'[p2p]\nenabled = true\nsecret_key_path' "generated forwarder config should enable P2P on SBC installs"
 assert_contains "${setup_script}" $'[control]\nallow_power_actions = ${control_allow_power_actions}\nallow_remote_config = ${control_allow_remote_config}' "generated [control] section should provision allow_remote_config alongside allow_power_actions"

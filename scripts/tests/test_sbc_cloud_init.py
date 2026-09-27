@@ -85,6 +85,23 @@ class RenderTests(unittest.TestCase):
         self.assertIn("via: 192.168.1.1", text)
         self.assertIn("- 1.1.1.1", text)
         self.assertIn("- 8.8.8.8", text)
+        self.assertIn(
+            "    usb-tether:\n"
+            "      match:\n"
+            "        name: 'usb*'\n"
+            "      dhcp4: true\n"
+            "      optional: true\n"
+            "      dhcp4-overrides:\n"
+            "        route-metric: 50\n"
+            "    enx-tether:\n"
+            "      match:\n"
+            "        name: 'enx*'\n"
+            "      dhcp4: true\n"
+            "      optional: true\n"
+            "      dhcp4-overrides:\n"
+            "        route-metric: 50\n",
+            text,
+        )
 
     def test_render_network_config_includes_wifi_with_password(self) -> None:
         config = sbc_cloud_init.SbcCloudInitConfig(

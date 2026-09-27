@@ -27,6 +27,7 @@ STAGED_FORWARDER_PATH="${DATA_DIR}/.forwarder-staged"
 APPLY_STAGED_HELPER="${HELPER_DIR}/rt-forwarder-apply-staged.sh"
 POWER_ACTIONS_SUDOERS_PATH="/etc/sudoers.d/90-rt-forwarder-power-actions"
 POWER_ACTIONS_POLKIT_RULES_PATH="/etc/polkit-1/rules.d/90-rt-forwarder-power-actions.rules"
+USB_TETHER_NETPLAN_PATH="/etc/netplan/99-usb-tether.yaml"
 PISUGAR_INSTALL_SCRIPT_URL="https://cdn.pisugar.com/release/pisugar-power-manager.sh"
 SPI_REBOOT_NEEDED="0"
 
@@ -439,6 +440,49 @@ require_root() {
   fi
 }
 
+render_usb_tether_netplan() {
+  cat <<'EOF'
+network:
+  version: 2
+  ethernets:
+    usb-tether:
+      match:
+        name: 'usb*'
+      dhcp4: true
+      optional: true
+      dhcp4-overrides:
+        route-metric: 50
+    enx-tether:
+      match:
+        name: 'enx*'
+      dhcp4: true
+      optional: true
+      dhcp4-overrides:
+        route-metric: 50
+EOF
+}
+
+ensure_usb_tether_netplan() {
+  local netplan_dir
+  netplan_dir="$(dirname "${USB_TETHER_NETPLAN_PATH}")"
+  if [[ ! -d "${netplan_dir}" ]]; then
+    return 0
+  fi
+  if grep -q "usb-tether:" "${netplan_dir}"/*.yaml 2>/dev/null \
+    && grep -q "enx-tether:" "${netplan_dir}"/*.yaml 2>/dev/null; then
+    return 0
+  fi
+  render_usb_tether_netplan > "${USB_TETHER_NETPLAN_PATH}"
+  chmod 0600 "${USB_TETHER_NETPLAN_PATH}"
+  chown root:root "${USB_TETHER_NETPLAN_PATH}"
+  if command -v netplan >/dev/null 2>&1; then
+    if ! netplan apply; then
+      log "Warning: failed to apply Netplan rules from ${USB_TETHER_NETPLAN_PATH}"
+    fi
+  fi
+  log "Configured USB tethering Netplan rules at ${USB_TETHER_NETPLAN_PATH}"
+}
+
 enable_spi() {
   local boot_config="/boot/config.txt"
   if [[ ! -f "${boot_config}" ]]; then
@@ -488,6 +532,9 @@ ensure_prerequisites() {
 
   # Enable SPI interface for e-ink display (requires reboot to take effect).
   enable_spi
+
+  # Ensure USB tethering interfaces (usb*, enx*) are configured in Netplan if present.
+  ensure_usb_tether_netplan
 
   # Grant SPI and GPIO access for e-ink display (if groups exist).
   if getent group spi &>/dev/null; then

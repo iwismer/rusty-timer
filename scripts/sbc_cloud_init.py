@@ -433,6 +433,20 @@ def render_network_config(config: SbcCloudInitConfig) -> str:
         "      nameservers:\n"
         "        addresses:\n"
         f"{dns_lines}\n"
+        "    usb-tether:\n"
+        "      match:\n"
+        "        name: 'usb*'\n"
+        "      dhcp4: true\n"
+        "      optional: true\n"
+        "      dhcp4-overrides:\n"
+        "        route-metric: 50\n"
+        "    enx-tether:\n"
+        "      match:\n"
+        "        name: 'enx*'\n"
+        "      dhcp4: true\n"
+        "      optional: true\n"
+        "      dhcp4-overrides:\n"
+        "        route-metric: 50\n"
     )
     if not config.wifi_ssid:
         return text

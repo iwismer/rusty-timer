@@ -134,7 +134,21 @@ export function generateNetworkConfig(config: SbcSetupFormData): string {
     "          metric: 600\n" +
     "      nameservers:\n" +
     "        addresses:\n" +
-    `${dnsLines}\n`;
+    `${dnsLines}\n` +
+    "    usb-tether:\n" +
+    "      match:\n" +
+    "        name: 'usb*'\n" +
+    "      dhcp4: true\n" +
+    "      optional: true\n" +
+    "      dhcp4-overrides:\n" +
+    "        route-metric: 50\n" +
+    "    enx-tether:\n" +
+    "      match:\n" +
+    "        name: 'enx*'\n" +
+    "      dhcp4: true\n" +
+    "      optional: true\n" +
+    "      dhcp4-overrides:\n" +
+    "        route-metric: 50\n";
 
   if (!config.wifiEnabled || !config.wifiSsid.trim()) return text;
 
