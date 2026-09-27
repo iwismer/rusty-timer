@@ -57,14 +57,15 @@ events (`CHIPRACE`, `RACER`, `PARTRACE`, `REPTTR1`, …). Confirm an event via
 | `DIVISION.DBF` | 3 | Divisions for the loaded event: `DIVNO`→`DIVNAME` (1=5k, 2=10k, 3=test), `DIVEVENT`, counts, and (empty here) gun/wave-time fields (`DIVGUNTM`, `DIVMXSTRT`, `DIVWTIME`). |
 | `RACE.DBF` | 462 | Current-race participant table (219-col `RUN*` schema); most complete/recent — likely the canonical source. |
 | `ANNRACE.DBF` | 461 | Near-identical participant table (218 cols). `ANN` prefix *suggests* an announcer table, but its purpose/refresh trigger is **unverified** (no vendor docs). Differs slightly from `RACE.DBF` in record + field count. |
-| `checkchip.dbf` | 850 (849 live + 1 deleted header) | **bib ↔ chip map**. `CHECK1`=bib, `CHECK2`=chip (12-hex iPico). Row 1 is a deleted `BIB`/`CHIP` header; the 849 live rows include spare unassigned chips. Our default chip source. |
+| `checkchip.dbf` | 850 (849 live + 1 deleted header) | **bib ↔ chip map** (diagnostic export / fallback). `CHECK1`=bib, `CHECK2`=chip (12-hex iPico). Row 1 is a deleted `BIB`/`CHIP` header; the 849 live rows include spare unassigned chips. |
+| `CHMPCHIP.DBF` | 849 | **Authoritative active chip table**. `RUNERNO` → `CHIPNORFID` / `CHIPNOWT` / `CHIPNO`. Persisted as `CHMCHP<raceno>.F`. Our primary chip source. |
 
 ## Chip-assignment files (several representations of the same data)
 
 | File | Recs | Key → chip | Notes |
 |---|---|---|---|
-| `checkchip.dbf` | 849 live | bib → chip | Flat, one row per chip (850 total incl. 1 deleted header row). Cleanest for chip→bib. |
-| `CHMPCHIP.DBF` | 849 | `RUNERNO` → `CHIPNOWT` + `CHIPNORFID` | Two chip *types* per runner (write tag + RFID). |
+| `CHMPCHIP.DBF` | 849 | `RUNERNO` → `CHIPNORFID` + `CHIPNOWT` + `CHIPNO` | Authoritative active chip table for the open race. Primary source. |
+| `checkchip.dbf` | 849 live | bib → chip | Flat diagnostic export from "Check Chips" utility (fallback if `CHMPCHIP.DBF` is absent). |
 | `REPTANCHIP.DBF` | 849 | `RUNERNO` → chips | Announcer report chip snapshot (paired w/ ANNRACE). |
 | `REPTAGCHIP.DBF` | 1501 | `RUNERNO` → chips | Age-graded report chip snapshot (stale/other event). |
 | `REPTOVCHIP.DBF` | 898 | `RUNERNO` → chips | Overall report chip snapshot (stale). |
@@ -151,7 +152,7 @@ Families cloned from the participant/division/chip tables at report time:
 
 ## Files most relevant to us
 
-- **Read for participant import**: `checkchip.dbf` (chip↔bib), `RACE.DBF`
+- **Read for participant import**: `CHMPCHIP.DBF` (authoritative chip↔bib, with `checkchip.dbf` as fallback), `RACE.DBF`
   (bib→name/division; `ANNRACE.DBF` is an unverified alternative — see spec §3),
   `DIVISION.DBF` (division names).
   See `participant-dbf-import.md`.

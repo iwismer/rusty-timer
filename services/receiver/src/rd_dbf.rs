@@ -23,18 +23,26 @@
 //! which held for the one sample event but is unverified across RD installs.
 
 use crate::participants::Participant;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-/// Fixed RD filename for the bib↔chip map.
+/// Fixed RD filename for the authoritative active bib↔chip map.
+pub const CHMPCHIP_FILE: &str = "CHMPCHIP.DBF";
+/// Fixed RD filename for the diagnostic bib↔chip map (fallback).
 pub const CHECKCHIP_FILE: &str = "checkchip.dbf";
 /// Fixed RD filename for the participant table (default source; see spec §3).
 pub const RACE_FILE: &str = "RACE.DBF";
 /// Fixed RD filename for the division-name table.
 pub const DIVISION_FILE: &str = "DIVISION.DBF";
 
-/// The set of files an RD import reads, in the order they are parsed. Used by
-/// the background poller for change detection and snapshot copying.
+/// Candidate filenames for RD DBFs, allowing case variants.
+const RACE_CANDIDATES: &[&str] = &[RACE_FILE, "race.dbf", "Race.dbf"];
+const DIVISION_CANDIDATES: &[&str] = &[DIVISION_FILE, "division.dbf", "Division.dbf"];
+const CHMPCHIP_CANDIDATES: &[&str] = &[CHMPCHIP_FILE, "chmpchip.dbf", "Chmpchip.dbf"];
+const CHECKCHIP_CANDIDATES: &[&str] = &[CHECKCHIP_FILE, "CHECKCHIP.DBF", "Checkchip.dbf"];
+
+/// The default set of files an RD import reads when using checkchip.
+/// Kept for backwards compatibility; runtime code should use [`resolve_rd_files`].
 pub const RD_FILES: &[&str] = &[CHECKCHIP_FILE, RACE_FILE, DIVISION_FILE];
 
 /// Parsed contents of an RD working directory, in the shape the existing
@@ -43,7 +51,7 @@ pub const RD_FILES: &[&str] = &[CHECKCHIP_FILE, RACE_FILE, DIVISION_FILE];
 pub struct RdImport {
     /// Participants from `RACE.DBF` (bib, name, gender, division code).
     pub participants: Vec<Participant>,
-    /// `(bib, chip_id)` pairs from `checkchip.dbf`; chip ids are lowercased.
+    /// `(bib, chip_id)` pairs from `CHMPCHIP.DBF` or `checkchip.dbf`; chip ids are lowercased.
     pub chips: Vec<(i64, String)>,
     /// Division code → display name from `DIVISION.DBF`.
     pub divisions: HashMap<i32, String>,
@@ -331,17 +339,115 @@ fn parse_divisions(dbf: &Dbf) -> Result<HashMap<i32, String>, RdError> {
     Ok(divisions)
 }
 
-/// Parse a complete RD working directory into an [`RdImport`]. Reads all three
-/// fixed-name files; any read/parse failure returns `Err` so a background
-/// caller can keep its last good import rather than blanking the board.
+/// Parse `CHMPCHIP.DBF` into `(bib, chip_id)` pairs. Skips deleted rows,
+/// rows with non-numeric bibs, and empty/non-hex chip values.
+/// Chip IDs are lowercased to match reader/emulator frames (`{:012x}`).
+fn parse_chmpchip(dbf: &Dbf) -> Result<Vec<(i64, String)>, RdError> {
+    let missing = |col: &str| RdError::Malformed {
+        file: CHMPCHIP_FILE.to_owned(),
+        reason: format!("missing {col} column"),
+    };
+    let bib_field = dbf
+        .field("RUNERNO")
+        .or_else(|| dbf.field("CHECK1"))
+        .ok_or_else(|| missing("RUNERNO"))?;
+
+    let rfid_field = dbf.field("CHIPNORFID");
+    let wt_field = dbf.field("CHIPNOWT");
+    let no_field = dbf.field("CHIPNO");
+    let check2_field = dbf.field("CHECK2");
+
+    if rfid_field.is_none() && wt_field.is_none() && no_field.is_none() && check2_field.is_none() {
+        return Err(RdError::Malformed {
+            file: CHMPCHIP_FILE.to_owned(),
+            reason:
+                "missing chip column in CHMPCHIP.DBF (expected CHIPNORFID, CHIPNOWT, or CHIPNO)"
+                    .to_owned(),
+        });
+    }
+
+    let mut chips = Vec::new();
+    let mut seen_chips = HashSet::new();
+
+    for rec in dbf.records() {
+        let Some(bib_raw) = dbf.value(rec, bib_field) else {
+            continue;
+        };
+        let Ok(bib) = bib_raw.parse::<i64>() else {
+            continue;
+        };
+
+        for field in [rfid_field, wt_field, no_field, check2_field]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(chip_raw) = dbf.value(rec, field) {
+                if chip_raw.is_empty() || !chip_raw.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    continue;
+                }
+                let chip_lower = chip_raw.to_ascii_lowercase();
+                if seen_chips.insert(chip_lower.clone()) {
+                    chips.push((bib, chip_lower));
+                }
+            }
+        }
+    }
+    Ok(chips)
+}
+
+fn find_file<'a>(dir: &Path, candidates: &[&'a str]) -> Option<&'a str> {
+    candidates
+        .iter()
+        .copied()
+        .find(|&name| dir.join(name).is_file())
+}
+
+/// Resolve the active set of RD files in `dir`.
+///
+/// Returns `[race_file, division_file, chip_file]`.
+/// For chips, `CHMPCHIP.DBF` (the authoritative Race Director active chip table)
+/// is preferred; `checkchip.dbf` (a diagnostic export) is used as fallback.
+pub fn resolve_rd_files(dir: &Path) -> Result<[&'static str; 3], RdError> {
+    let race_file = find_file(dir, RACE_CANDIDATES).ok_or_else(|| RdError::Io {
+        file: RACE_FILE.to_owned(),
+        source: std::io::Error::new(std::io::ErrorKind::NotFound, "file not found"),
+    })?;
+    let div_file = find_file(dir, DIVISION_CANDIDATES).ok_or_else(|| RdError::Io {
+        file: DIVISION_FILE.to_owned(),
+        source: std::io::Error::new(std::io::ErrorKind::NotFound, "file not found"),
+    })?;
+    let chip_file = find_file(dir, CHMPCHIP_CANDIDATES)
+        .or_else(|| find_file(dir, CHECKCHIP_CANDIDATES))
+        .ok_or_else(|| RdError::Io {
+            file: CHMPCHIP_FILE.to_owned(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "neither CHMPCHIP.DBF nor checkchip.dbf found",
+            ),
+        })?;
+
+    Ok([race_file, div_file, chip_file])
+}
+
+/// Parse a complete RD working directory into an [`RdImport`]. Reads the
+/// participant, division, and chip files; any read/parse failure returns `Err`
+/// so a background caller can keep its last good import rather than blanking the board.
 pub fn load_from_dir(dir: impl AsRef<Path>) -> Result<RdImport, RdError> {
     let dir = dir.as_ref();
-    let checkchip = read_dbf(dir, CHECKCHIP_FILE)?;
-    let race = read_dbf(dir, RACE_FILE)?;
-    let division = read_dbf(dir, DIVISION_FILE)?;
+    let [race_name, div_name, chip_name] = resolve_rd_files(dir)?;
+    let race = read_dbf(dir, race_name)?;
+    let division = read_dbf(dir, div_name)?;
+    let chip_dbf = read_dbf(dir, chip_name)?;
+
+    let chips = if chip_name.eq_ignore_ascii_case(CHMPCHIP_FILE) {
+        parse_chmpchip(&chip_dbf)?
+    } else {
+        parse_checkchip(&chip_dbf)?
+    };
+
     Ok(RdImport {
         participants: parse_race(&race)?,
-        chips: parse_checkchip(&checkchip)?,
+        chips,
         divisions: parse_divisions(&division)?,
     })
 }
@@ -547,5 +653,80 @@ mod tests {
         let dbf = Dbf::parse("built.dbf", bytes).unwrap();
         let chips = parse_checkchip(&dbf).unwrap();
         assert_eq!(chips, vec![(7, "0abf".to_owned())]);
+    }
+
+    #[test]
+    fn parse_chmpchip_extracts_rfid_wt_and_chipno() {
+        let bytes = build_dbf(
+            0x30,
+            &[
+                ("RUNERNO", b'C', 5),
+                ("CHIPNORFID", b'C', 12),
+                ("CHIPNOWT", b'C', 12),
+                ("CHIPNO", b'C', 12),
+            ],
+            &[
+                (true, vec!["1", "058000168536", "", ""]),  // deleted
+                (false, vec!["1", "058000168536", "", ""]), // rfid only
+                (
+                    false,
+                    vec!["2", "05800015158e", "05800015158e", ""], // duplicate in wt
+                ),
+                (
+                    false,
+                    vec!["3", "058000166306", "058000166307", ""], // distinct in rfid and wt
+                ),
+                (false, vec!["not_a_bib", "05800016513f", "", ""]), // non-numeric bib
+                (false, vec!["4", "invalid_hex!", "", ""]),         // non-hex
+                (false, vec!["5", "", "", "05800017a787"]),         // chipno column
+            ],
+        );
+        let dbf = Dbf::parse("chmpchip.dbf", bytes).unwrap();
+        let chips = parse_chmpchip(&dbf).unwrap();
+        assert_eq!(
+            chips,
+            vec![
+                (1, "058000168536".to_owned()),
+                (2, "05800015158e".to_owned()),
+                (3, "058000166306".to_owned()),
+                (3, "058000166307".to_owned()),
+                (5, "05800017a787".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn chmpchip_preferred_over_checkchip_in_load_from_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Copy standard RACE.DBF and DIVISION.DBF from fixtures
+        std::fs::copy(fixtures_dir().join(RACE_FILE), tmp.path().join(RACE_FILE)).unwrap();
+        std::fs::copy(
+            fixtures_dir().join(DIVISION_FILE),
+            tmp.path().join(DIVISION_FILE),
+        )
+        .unwrap();
+        // Also copy fixture checkchip.dbf
+        std::fs::copy(
+            fixtures_dir().join(CHECKCHIP_FILE),
+            tmp.path().join(CHECKCHIP_FILE),
+        )
+        .unwrap();
+
+        // Write an authoritative CHMPCHIP.DBF with distinct chip for bib 1
+        let chmp_bytes = build_dbf(
+            0x30,
+            &[
+                ("RUNERNO", b'C', 5),
+                ("CHIPNORFID", b'C', 12),
+                ("CHIPNOWT", b'C', 12),
+                ("CHIPNO", b'C', 12),
+            ],
+            &[(false, vec!["1", "aabbccddeeff", "", ""])],
+        );
+        std::fs::write(tmp.path().join(CHMPCHIP_FILE), chmp_bytes).unwrap();
+
+        let import = load_from_dir(tmp.path()).unwrap();
+        // bib 1 must resolve to the chip in CHMPCHIP.DBF, NOT checkchip.dbf
+        assert_eq!(import.chips, vec![(1, "aabbccddeeff".to_owned())]);
     }
 }

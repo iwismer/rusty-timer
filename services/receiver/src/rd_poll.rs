@@ -10,7 +10,7 @@
 
 use crate::control_api::AppState;
 use crate::control_api::ShutdownSignal;
-use crate::rd_dbf::{self, RD_FILES, RdError, RdImport};
+use crate::rd_dbf::{self, RdError, RdImport};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -32,29 +32,31 @@ pub enum PollOutcome {
     Failed(String),
 }
 
-/// Compute the `(mtime, size)` signature of all RD files in `dir`, or `None` if
+/// Compute the `(mtime, size)` signature of all active RD files in `dir`, or `None` if
 /// any file's metadata cannot be read (missing file, RD closed, share
 /// unmounted).
 fn signature(dir: &Path) -> Option<FileSignature> {
-    let mut sig = Vec::with_capacity(RD_FILES.len());
-    for file in RD_FILES {
+    let files = rd_dbf::resolve_rd_files(dir).ok()?;
+    let mut sig = Vec::with_capacity(files.len());
+    for file in files {
         let meta = std::fs::metadata(dir.join(file)).ok()?;
         sig.push((meta.modified().ok()?, meta.len()));
     }
     Some(sig)
 }
 
-/// Copy each RD file into a fresh temp directory and parse the copies. Copying
+/// Copy each active RD file into a fresh temp directory and parse the copies. Copying
 /// first mitigates sharing violations / torn reads while RD writes the
 /// originals. Any copy or parse error is returned so the caller keeps last good.
 fn snapshot_and_load(dir: &Path) -> Result<RdImport, RdError> {
+    let files = rd_dbf::resolve_rd_files(dir)?;
     let tmp = tempfile::tempdir().map_err(|e| RdError::Io {
         file: "<tempdir>".to_owned(),
         source: e,
     })?;
-    for file in RD_FILES {
+    for file in files {
         std::fs::copy(dir.join(file), tmp.path().join(file)).map_err(|e| RdError::Io {
-            file: (*file).to_owned(),
+            file: file.to_owned(),
             source: e,
         })?;
     }
@@ -152,6 +154,7 @@ mod tests {
     use super::*;
     use crate::control_api::AppState;
     use crate::db::{Db, RdImportConfig};
+    use crate::rd_dbf::RD_FILES;
     use std::path::PathBuf;
 
     fn fixtures_dir() -> PathBuf {
