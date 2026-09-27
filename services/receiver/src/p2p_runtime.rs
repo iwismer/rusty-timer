@@ -246,9 +246,22 @@ const APPROVAL_FOLLOW_UP_RECONNECT_DELAY: Duration = Duration::from_millis(1_000
 /// Cadence of the server approval watch. Each tick is a server round trip and
 /// the approval state is an admin-driven transition, so this is deliberately
 /// far slower than forwarder discovery (which keeps `direct_addrs` fresh and
+/// Cadence of the server approval watch. Each tick is a server round trip and
+/// the approval state is an admin-driven transition, so this is deliberately
+/// far slower than forwarder discovery (which keeps `direct_addrs` fresh and
 /// must stay responsive). The first tick still runs immediately, so a fresh
 /// start connects without waiting for a full interval.
+///
+/// This is also the throttled path that resets the receiver's exponential dial
+/// backoff on an approve→revoke→re-approve cycle, so that reset now lands
+/// within one interval instead of within a second.
 const APPROVAL_WATCH_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Effective cadence for the approval watch: the floor above, unless the
+/// operator configured a slower reconcile cadence, which then wins.
+fn approval_watch_interval(discovery_interval: Duration) -> Duration {
+    APPROVAL_WATCH_INTERVAL.max(discovery_interval)
+}
 
 /// Returns true iff this is the rising edge into "active".
 fn approval_became_active(previous: Option<&str>, current: Option<&str>) -> bool {
@@ -522,7 +535,7 @@ async fn run_reconcile_loop(
         tokio::spawn(run_approval_watch_loop(
             Arc::clone(&state),
             thin.url.clone(),
-            APPROVAL_WATCH_INTERVAL,
+            approval_watch_interval(discovery_interval),
             shutdown,
         ))
     };
@@ -978,11 +991,18 @@ async fn run_approval_watch_loop(
     let mut previous_approval: Option<String> = None;
     loop {
         let status = server_device_status_for_url(&state, &server_url).await;
-        // A poll that could not reach the server (or parse its reply) says
-        // nothing about the approval state. Recording it as `None` would erase
-        // the remembered "active", so the next healthy poll would look like a
-        // fresh rising edge and tear down a healthy session over a transient
-        // network blip. Only determinate polls update the remembered state.
+        // A poll that failed at the HTTP layer tells us nothing about the
+        // approval state, so it must not update the remembered value: recording
+        // its `None` would erase the remembered "active" and make the next
+        // healthy poll look like a fresh rising edge, tearing down a healthy
+        // session over a transient blip.
+        //
+        // A board that answers but omits this device is still treated as
+        // determinate (`None`), which keeps "device disappears, then reappears
+        // as active" a valid edge. The consequence is that an edge arriving
+        // while already `Connected` is consumed and not retried, so its backoff
+        // reset is skipped until the next transition; the receiver's own dial
+        // loop covers that bounded case.
         if status.reachable == Some(true) {
             if approval_became_active(
                 previous_approval.as_deref(),
@@ -2583,13 +2603,19 @@ mod tests {
         assert!(!approval_became_active(Some("pending"), Some("pending")));
     }
 
-    /// The approval watch costs a server round trip per tick, so it must stay
-    /// a slow background check rather than a hot poll of the status board.
+    /// The approval watch must not fall back to the fast discovery cadence,
+    /// and an explicitly slower configured cadence must still win.
     #[test]
-    fn approval_watch_interval_is_not_a_hot_poll() {
-        assert!(
-            APPROVAL_WATCH_INTERVAL >= Duration::from_secs(5),
-            "approval watch interval {APPROVAL_WATCH_INTERVAL:?} is too aggressive"
+    fn approval_watch_interval_floors_the_configured_cadence() {
+        assert_eq!(
+            approval_watch_interval(Duration::from_millis(1_000)),
+            APPROVAL_WATCH_INTERVAL,
+            "the default reconcile cadence must not become the approval cadence"
+        );
+        assert_eq!(
+            approval_watch_interval(Duration::from_secs(60)),
+            Duration::from_secs(60),
+            "a slower configured cadence wins"
         );
     }
 
@@ -2710,44 +2736,118 @@ mod tests {
             .expect("approval watch task should not panic");
     }
 
-    /// Spawns a `/status` board endpoint advertising `approval_state` for
-    /// `receiver-ep`, plus a flag that makes it answer 503 while set.
-    async fn spawn_status_board(approval_state: &'static str) -> (Arc<AtomicBool>, String) {
-        use axum::response::IntoResponse;
+    /// A `/status` board for `receiver-ep` with a mutable approval state, a
+    /// failure toggle, a device-present toggle, and a counter of polls that
+    /// actually reached the handler. Tests wait on the counter, so an assertion
+    /// about "nothing happened" still proves the window it covers was observed.
+    struct StatusBoard {
+        approval_state: Arc<std::sync::Mutex<&'static str>>,
+        failing: Arc<AtomicBool>,
+        present: Arc<AtomicBool>,
+        polls: Arc<AtomicUsize>,
+        url: String,
+        server: tokio::task::JoinHandle<()>,
+    }
 
-        let failing = Arc::new(AtomicBool::new(false));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let app = {
-            let failing = Arc::clone(&failing);
-            axum::Router::new().route(
-                "/status",
-                axum::routing::get(move || {
-                    let failing = Arc::clone(&failing);
-                    async move {
-                        if failing.load(Ordering::SeqCst) {
-                            (
-                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                                "server status unavailable",
-                            )
-                                .into_response()
-                        } else {
-                            axum::Json(serde_json::json!({
-                                "devices": [{
-                                    "endpoint_id": "receiver-ep",
-                                    "approval_state": approval_state,
-                                }]
-                            }))
-                            .into_response()
+    impl StatusBoard {
+        async fn spawn(approval_state: &'static str) -> Self {
+            use axum::response::IntoResponse;
+
+            let approval_state = Arc::new(std::sync::Mutex::new(approval_state));
+            let failing = Arc::new(AtomicBool::new(false));
+            let present = Arc::new(AtomicBool::new(true));
+            let polls = Arc::new(AtomicUsize::new(0));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let app = {
+                let approval_state = Arc::clone(&approval_state);
+                let failing = Arc::clone(&failing);
+                let present = Arc::clone(&present);
+                let polls = Arc::clone(&polls);
+                axum::Router::new().route(
+                    "/status",
+                    axum::routing::get(move || {
+                        let approval_state = Arc::clone(&approval_state);
+                        let failing = Arc::clone(&failing);
+                        let present = Arc::clone(&present);
+                        let polls = Arc::clone(&polls);
+                        async move {
+                            let failing_now = failing.load(Ordering::SeqCst);
+                            let present_now = present.load(Ordering::SeqCst);
+                            let state_now = *approval_state.lock().unwrap();
+                            // Count only after reading the state, so a test that
+                            // waits for N polls knows N polls observed what it set.
+                            polls.fetch_add(1, Ordering::SeqCst);
+                            if failing_now {
+                                (
+                                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                    "server status unavailable",
+                                )
+                                    .into_response()
+                            } else {
+                                let devices = if present_now {
+                                    serde_json::json!([{
+                                        "endpoint_id": "receiver-ep",
+                                        "approval_state": state_now,
+                                    }])
+                                } else {
+                                    serde_json::json!([])
+                                };
+                                axum::Json(serde_json::json!({ "devices": devices }))
+                                    .into_response()
+                            }
                         }
-                    }
-                }),
-            )
-        };
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        (failing, format!("http://{addr}"))
+                    }),
+                )
+            };
+            let server = tokio::spawn(async move {
+                let _ = axum::serve(listener, app).await;
+            });
+            Self {
+                approval_state,
+                failing,
+                present,
+                polls,
+                url: format!("http://{addr}"),
+                server,
+            }
+        }
+
+        fn set_approval(&self, approval_state: &'static str) {
+            *self.approval_state.lock().unwrap() = approval_state;
+        }
+
+        fn set_failing(&self, failing: bool) {
+            self.failing.store(failing, Ordering::SeqCst);
+        }
+
+        fn set_present(&self, present: bool) {
+            self.present.store(present, Ordering::SeqCst);
+        }
+
+        fn polls(&self) -> usize {
+            self.polls.load(Ordering::SeqCst)
+        }
+
+        /// Waits until the handler has served at least `target` polls, then
+        /// yields so the receiver can finish processing the last one.
+        async fn await_polls(&self, target: usize) {
+            for _ in 0..300 {
+                if self.polls() >= target {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!(
+                "board served only {} of {target} expected polls",
+                self.polls()
+            );
+        }
+
+        async fn shutdown(self) {
+            self.server.abort();
+        }
     }
 
     /// A failed poll says nothing about the approval state, so it must not
@@ -2760,12 +2860,12 @@ mod tests {
             .expect("init receiver state");
         state.set_p2p_endpoint_id("receiver-ep".to_owned()).await;
 
-        let (failing, url) = spawn_status_board("active").await;
+        let board = StatusBoard::spawn("active").await;
         let mut connect_rx = state.connect_attempt_rx();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let task = tokio::spawn(run_approval_watch_loop(
             Arc::clone(&state),
-            url,
+            board.url.clone(),
             Duration::from_millis(50),
             shutdown_rx,
         ));
@@ -2775,11 +2875,15 @@ mod tests {
             .expect("the first observed approval should request a reconnect")
             .expect("connect attempt sender should remain open");
         assert_eq!(state.current_connect_attempt(), 1);
+        let baseline = board.polls();
 
-        failing.store(true, Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        failing.store(false, Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Drop the board for a couple of polls, then let it recover with the
+        // same state. The waits prove both windows were really polled, so the
+        // "no new attempt" assertion below cannot pass vacuously.
+        board.set_failing(true);
+        board.await_polls(baseline + 2).await;
+        board.set_failing(false);
+        board.await_polls(baseline + 3).await;
 
         assert_eq!(
             state.current_connect_attempt(),
@@ -2792,6 +2896,45 @@ mod tests {
             .await
             .expect("approval watch should stop")
             .expect("approval watch task should not panic");
+        board.shutdown().await;
+    }
+
+    /// The gate must not *lose* a real edge: polling an unreachable server and
+    /// then observing "active" is still a transition into "active".
+    #[tokio::test]
+    async fn active_after_initial_outage_still_reconnects() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _shutdown_rx) = crate::runtime::init_with_data_dir(None, dir.path())
+            .await
+            .expect("init receiver state");
+        state.set_p2p_endpoint_id("receiver-ep".to_owned()).await;
+
+        let board = StatusBoard::spawn("active").await;
+        board.set_failing(true);
+        let mut connect_rx = state.connect_attempt_rx();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(run_approval_watch_loop(
+            Arc::clone(&state),
+            board.url.clone(),
+            Duration::from_millis(50),
+            shutdown_rx,
+        ));
+
+        board.await_polls(2).await;
+        board.set_failing(false);
+
+        tokio::time::timeout(Duration::from_secs(2), connect_rx.changed())
+            .await
+            .expect("recovery into active should still request a reconnect")
+            .expect("connect attempt sender should remain open");
+        assert_eq!(state.current_connect_attempt(), 1);
+
+        let _ = shutdown_tx.send(true);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("approval watch should stop")
+            .expect("approval watch task should not panic");
+        board.shutdown().await;
     }
 
     /// An approval edge must not restart forwarder workers, tearing down a
@@ -2805,16 +2948,18 @@ mod tests {
         state.set_p2p_endpoint_id("receiver-ep".to_owned()).await;
         state.set_connection_state(ConnectionState::Connected).await;
 
-        let (_failing, url) = spawn_status_board("active").await;
+        let board = StatusBoard::spawn("active").await;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let task = tokio::spawn(run_approval_watch_loop(
             Arc::clone(&state),
-            url,
+            board.url.clone(),
             Duration::from_millis(50),
             shutdown_rx,
         ));
 
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Several "active" polls must land while connected, so the absence of a
+        // reconnect below proves the guard fired rather than that nothing ran.
+        board.await_polls(3).await;
         assert_eq!(
             state.current_connect_attempt(),
             0,
@@ -2826,6 +2971,94 @@ mod tests {
             .await
             .expect("approval watch should stop")
             .expect("approval watch task should not panic");
+        board.shutdown().await;
+    }
+
+    /// A genuine pending→active approval while disconnected is still an edge.
+    #[tokio::test]
+    async fn pending_to_active_while_disconnected_reconnects() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _shutdown_rx) = crate::runtime::init_with_data_dir(None, dir.path())
+            .await
+            .expect("init receiver state");
+        state.set_p2p_endpoint_id("receiver-ep".to_owned()).await;
+
+        let board = StatusBoard::spawn("pending").await;
+        let mut connect_rx = state.connect_attempt_rx();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(run_approval_watch_loop(
+            Arc::clone(&state),
+            board.url.clone(),
+            Duration::from_millis(50),
+            shutdown_rx,
+        ));
+
+        board.await_polls(2).await;
+        assert_eq!(
+            state.current_connect_attempt(),
+            0,
+            "being pending is not a rising edge"
+        );
+
+        board.set_approval("active");
+        tokio::time::timeout(Duration::from_secs(2), connect_rx.changed())
+            .await
+            .expect("admin approval should request a reconnect")
+            .expect("connect attempt sender should remain open");
+        assert_eq!(state.current_connect_attempt(), 1);
+
+        let _ = shutdown_tx.send(true);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("approval watch should stop")
+            .expect("approval watch task should not panic");
+        board.shutdown().await;
+    }
+
+    /// A board that stops naming the device (server-side reset) and later names
+    /// it active again is still a transition. This is deliberate: the
+    /// device-absent answer is determinate, and recovery depends on the
+    /// reappearance being treated as an edge.
+    #[tokio::test]
+    async fn device_reappearing_active_reconnects() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _shutdown_rx) = crate::runtime::init_with_data_dir(None, dir.path())
+            .await
+            .expect("init receiver state");
+        state.set_p2p_endpoint_id("receiver-ep".to_owned()).await;
+
+        let board = StatusBoard::spawn("active").await;
+        let mut connect_rx = state.connect_attempt_rx();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(run_approval_watch_loop(
+            Arc::clone(&state),
+            board.url.clone(),
+            Duration::from_millis(50),
+            shutdown_rx,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(2), connect_rx.changed())
+            .await
+            .expect("the first active poll should request a reconnect")
+            .expect("connect attempt sender should remain open");
+
+        let baseline = board.polls();
+        board.set_present(false);
+        board.await_polls(baseline + 2).await;
+        board.set_present(true);
+
+        tokio::time::timeout(Duration::from_secs(2), connect_rx.changed())
+            .await
+            .expect("the device reappearing as active should request a reconnect")
+            .expect("connect attempt sender should remain open");
+        assert_eq!(state.current_connect_attempt(), 2);
+
+        let _ = shutdown_tx.send(true);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("approval watch should stop")
+            .expect("approval watch task should not panic");
+        board.shutdown().await;
     }
 
     #[test]

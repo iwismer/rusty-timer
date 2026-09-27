@@ -647,10 +647,14 @@ async fn run_control_loop(
                 }
                 // Previously silent. A read error here ends the control loop
                 // (the dropped sender stops the main select), so without this
-                // log a decode error or a broken connection is indistinguishable
-                // from a clean hangup by the peer.
+                // log a decode error is indistinguishable from a clean hangup.
+                //
+                // This stays at `info`, not `warn`: `read_frame` maps a clean
+                // EOF and a broken connection to the same `Read`, so every
+                // ordinary receiver disconnect reaches this arm too, and the
+                // forwarder logs at `info` anyway.
                 Err(error) => {
-                    tracing::warn!(%peer, error = %error, "p2p: control frame read failed");
+                    tracing::info!(%peer, error = %error, "p2p: control frame read failed");
                     break;
                 }
             }
