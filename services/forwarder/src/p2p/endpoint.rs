@@ -302,7 +302,10 @@ async fn handle_connection(
         task.abort();
     }
     match &control_result {
-        Ok(()) => tracing::info!(%endpoint_id, "p2p: control stream closed by peer"),
+        Ok(()) => tracing::info!(
+            %endpoint_id,
+            "p2p: control stream closed (peer hangup or unwritable stream)"
+        ),
         Err(error) => tracing::warn!(%endpoint_id, %error, "p2p: control stream failed"),
     }
 

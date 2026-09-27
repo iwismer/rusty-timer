@@ -797,7 +797,15 @@ fn main() {
         .install_default()
         .expect("Failed to install rustls CryptoProvider");
 
-    tracing_subscriber::fmt::init();
+    // Default to `info` so lifecycle events and warnings (session teardowns,
+    // failed server polls) are visible in a plain `cargo tauri dev` run;
+    // `RUST_LOG` still takes precedence. Mirrors `receiver-headless`.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())

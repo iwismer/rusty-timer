@@ -638,9 +638,21 @@ async fn run_control_loop(
     // partially-read frame (which would desync the length-prefixed framing).
     let (tx, mut rx) = mpsc::channel::<ControlC2F>(16);
     let reader = tokio::spawn(async move {
-        while let Ok(frame) = read_frame::<ControlC2F>(&mut recv).await {
-            if tx.send(frame).await.is_err() {
-                break;
+        loop {
+            match read_frame::<ControlC2F>(&mut recv).await {
+                Ok(frame) => {
+                    if tx.send(frame).await.is_err() {
+                        break;
+                    }
+                }
+                // Previously silent. A read error here ends the control loop
+                // (the dropped sender stops the main select), so without this
+                // log a decode error or a broken connection is indistinguishable
+                // from a clean hangup by the peer.
+                Err(error) => {
+                    tracing::warn!(%peer, error = %error, "p2p: control frame read failed");
+                    break;
+                }
             }
         }
     });
@@ -667,13 +679,16 @@ async fn run_control_loop(
         tokio::select! {
             _ = ticker.tick() => {
                 nonce += 1;
-                if write_frame(
+                if let Err(error) = write_frame(
                     &mut send,
                     &ControlF2C { msg: Some(control_f2c::Msg::Ping(Ping { nonce })) },
                 )
                 .await
-                .is_err()
                 {
+                    // A failed ping write means the stream or connection is
+                    // gone — a different event from the peer hanging up, yet
+                    // both exit the loop as `Ok` and were reported identically.
+                    tracing::info!(%peer, %error, "p2p: control ping write failed");
                     break Ok(());
                 }
                 outstanding += 1;

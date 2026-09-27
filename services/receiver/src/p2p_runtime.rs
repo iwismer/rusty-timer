@@ -243,6 +243,13 @@ fn now_unix_ms() -> i64 {
 /// exponential dial backoff once that allow-list has usually propagated.
 const APPROVAL_FOLLOW_UP_RECONNECT_DELAY: Duration = Duration::from_millis(1_000);
 
+/// Cadence of the server approval watch. Each tick is a server round trip and
+/// the approval state is an admin-driven transition, so this is deliberately
+/// far slower than forwarder discovery (which keeps `direct_addrs` fresh and
+/// must stay responsive). The first tick still runs immediately, so a fresh
+/// start connects without waiting for a full interval.
+const APPROVAL_WATCH_INTERVAL: Duration = Duration::from_secs(15);
+
 /// Returns true iff this is the rising edge into "active".
 fn approval_became_active(previous: Option<&str>, current: Option<&str>) -> bool {
     previous != Some("active") && current == Some("active")
@@ -515,7 +522,7 @@ async fn run_reconcile_loop(
         tokio::spawn(run_approval_watch_loop(
             Arc::clone(&state),
             thin.url.clone(),
-            discovery_interval,
+            APPROVAL_WATCH_INTERVAL,
             shutdown,
         ))
     };
@@ -971,24 +978,32 @@ async fn run_approval_watch_loop(
     let mut previous_approval: Option<String> = None;
     loop {
         let status = server_device_status_for_url(&state, &server_url).await;
-        if approval_became_active(
-            previous_approval.as_deref(),
-            status.approval_state.as_deref(),
-        ) {
-            info!(
-                endpoint_id = status.endpoint_id.as_deref().unwrap_or("<unknown>"),
-                "server approval became active; reconnecting receiver"
-            );
-            // A transient active→unknown→active flap intentionally re-requests
-            // a connect so server recovery resets backoff and re-dials.
-            state.request_connect().await;
-            state.emit_resync();
-            schedule_approval_follow_up_reconnect(
-                Arc::clone(&state),
-                APPROVAL_FOLLOW_UP_RECONNECT_DELAY,
-            );
+        // A poll that could not reach the server (or parse its reply) says
+        // nothing about the approval state. Recording it as `None` would erase
+        // the remembered "active", so the next healthy poll would look like a
+        // fresh rising edge and tear down a healthy session over a transient
+        // network blip. Only determinate polls update the remembered state.
+        if status.reachable == Some(true) {
+            if approval_became_active(
+                previous_approval.as_deref(),
+                status.approval_state.as_deref(),
+            ) && *state.signals.connection_state.borrow() != ConnectionState::Connected
+            {
+                info!(
+                    endpoint_id = status.endpoint_id.as_deref().unwrap_or("<unknown>"),
+                    "server approval became active; reconnecting receiver"
+                );
+                // Re-dialing resets the receiver's exponential dial backoff,
+                // which is only wanted when no session is already up.
+                state.request_connect().await;
+                state.emit_resync();
+                schedule_approval_follow_up_reconnect(
+                    Arc::clone(&state),
+                    APPROVAL_FOLLOW_UP_RECONNECT_DELAY,
+                );
+            }
+            previous_approval = status.approval_state;
         }
-        previous_approval = status.approval_state;
 
         tokio::select! {
             biased;
@@ -2568,6 +2583,16 @@ mod tests {
         assert!(!approval_became_active(Some("pending"), Some("pending")));
     }
 
+    /// The approval watch costs a server round trip per tick, so it must stay
+    /// a slow background check rather than a hot poll of the status board.
+    #[test]
+    fn approval_watch_interval_is_not_a_hot_poll() {
+        assert!(
+            APPROVAL_WATCH_INTERVAL >= Duration::from_secs(5),
+            "approval watch interval {APPROVAL_WATCH_INTERVAL:?} is too aggressive"
+        );
+    }
+
     #[test]
     fn receiver_pending_approval_detects_only_registered_pending_receiver() {
         let pending = crate::control_api::ServerDeviceStatus {
@@ -2677,6 +2702,124 @@ mod tests {
             .expect("approval watch should request reconnect from configured server url")
             .expect("connect attempt sender should remain open");
         assert_eq!(state.current_connect_attempt(), 1);
+
+        let _ = shutdown_tx.send(true);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("approval watch should stop")
+            .expect("approval watch task should not panic");
+    }
+
+    /// Spawns a `/status` board endpoint advertising `approval_state` for
+    /// `receiver-ep`, plus a flag that makes it answer 503 while set.
+    async fn spawn_status_board(approval_state: &'static str) -> (Arc<AtomicBool>, String) {
+        use axum::response::IntoResponse;
+
+        let failing = Arc::new(AtomicBool::new(false));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = {
+            let failing = Arc::clone(&failing);
+            axum::Router::new().route(
+                "/status",
+                axum::routing::get(move || {
+                    let failing = Arc::clone(&failing);
+                    async move {
+                        if failing.load(Ordering::SeqCst) {
+                            (
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                "server status unavailable",
+                            )
+                                .into_response()
+                        } else {
+                            axum::Json(serde_json::json!({
+                                "devices": [{
+                                    "endpoint_id": "receiver-ep",
+                                    "approval_state": approval_state,
+                                }]
+                            }))
+                            .into_response()
+                        }
+                    }
+                }),
+            )
+        };
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (failing, format!("http://{addr}"))
+    }
+
+    /// A failed poll says nothing about the approval state, so it must not
+    /// clear the remembered "active" and fake a fresh approval edge on recovery.
+    #[tokio::test]
+    async fn transient_server_outage_does_not_trigger_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _shutdown_rx) = crate::runtime::init_with_data_dir(None, dir.path())
+            .await
+            .expect("init receiver state");
+        state.set_p2p_endpoint_id("receiver-ep".to_owned()).await;
+
+        let (failing, url) = spawn_status_board("active").await;
+        let mut connect_rx = state.connect_attempt_rx();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(run_approval_watch_loop(
+            Arc::clone(&state),
+            url,
+            Duration::from_millis(50),
+            shutdown_rx,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(2), connect_rx.changed())
+            .await
+            .expect("the first observed approval should request a reconnect")
+            .expect("connect attempt sender should remain open");
+        assert_eq!(state.current_connect_attempt(), 1);
+
+        failing.store(true, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        failing.store(false, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        assert_eq!(
+            state.current_connect_attempt(),
+            1,
+            "a transient server outage must not be replayed as a fresh approval"
+        );
+
+        let _ = shutdown_tx.send(true);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("approval watch should stop")
+            .expect("approval watch task should not panic");
+    }
+
+    /// An approval edge must not restart forwarder workers, tearing down a
+    /// session that is already up.
+    #[tokio::test]
+    async fn approval_edge_does_not_reset_an_already_connected_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _shutdown_rx) = crate::runtime::init_with_data_dir(None, dir.path())
+            .await
+            .expect("init receiver state");
+        state.set_p2p_endpoint_id("receiver-ep".to_owned()).await;
+        state.set_connection_state(ConnectionState::Connected).await;
+
+        let (_failing, url) = spawn_status_board("active").await;
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(run_approval_watch_loop(
+            Arc::clone(&state),
+            url,
+            Duration::from_millis(50),
+            shutdown_rx,
+        ));
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            state.current_connect_attempt(),
+            0,
+            "an approval edge must not restart forwarder workers while connected"
+        );
 
         let _ = shutdown_tx.send(true);
         tokio::time::timeout(Duration::from_secs(2), task)
