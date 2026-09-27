@@ -75,10 +75,54 @@ impl fmt::Display for Participant {
     }
 }
 
+fn split_ppl_fields(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut chars = line.chars().peekable();
+    loop {
+        while chars.next_if(|c| *c == ' ' || *c == '\t').is_some() {}
+        let mut saw_comma = false;
+        if chars.next_if_eq(&'"').is_some() {
+            let mut field = String::new();
+            while let Some(ch) = chars.next() {
+                if ch == '"' {
+                    if chars.next_if_eq(&'"').is_some() {
+                        field.push('"');
+                    } else {
+                        break;
+                    }
+                } else {
+                    field.push(ch);
+                }
+            }
+            fields.push(field.trim().to_owned());
+            for ch in chars.by_ref() {
+                if ch == ',' {
+                    saw_comma = true;
+                    break;
+                }
+            }
+        } else {
+            let mut field = String::new();
+            for ch in chars.by_ref() {
+                if ch == ',' {
+                    saw_comma = true;
+                    break;
+                }
+                field.push(ch);
+            }
+            fields.push(field.trim().to_owned());
+        }
+        if !saw_comma {
+            break;
+        }
+    }
+    fields
+}
+
 #[allow(dead_code)]
 impl Participant {
     pub fn from_ppl_record(record: &str) -> Result<Participant, &'static str> {
-        let parts = record.split(",").collect::<Vec<&str>>();
+        let parts = split_ppl_fields(record);
         if parts.len() < 3 {
             return Err("Participant Record Error");
         }
@@ -86,15 +130,15 @@ impl Participant {
             Err(_) => return Err("Participant Record Error"),
             Ok(id) => id,
         };
-        let last_name = parts[1].to_owned();
-        let first_name = parts[2].to_owned();
+        let last_name = parts[1].clone();
+        let first_name = parts[2].clone();
         let mut affil: Option<String> = None;
         if parts.len() >= 4 {
-            affil = Some(parts[3].to_owned());
+            affil = Some(parts[3].clone());
         }
         let mut gender = Gender::X;
         if parts.len() >= 6 {
-            gender = match parts[5] {
+            gender = match parts[5].as_str() {
                 "M" | "m" => Gender::M,
                 "F" | "f" => Gender::F,
                 _ => Gender::X,
@@ -158,6 +202,24 @@ mod tests {
                 last_name: "Smith".to_owned(),
                 affiliation: None,
                 gender: Gender::X,
+                age: None,
+                division: None,
+            }
+        );
+    }
+
+    #[test]
+    fn quoted_ppl() {
+        let part = Participant::from_ppl_record(r#"1,"Arnold","Debra","",,F,1"#).unwrap();
+        assert_eq!(
+            part,
+            Participant {
+                chip_id: Vec::<String>::new(),
+                bib: 1,
+                first_name: "Debra".to_owned(),
+                last_name: "Arnold".to_owned(),
+                affiliation: Some(String::new()),
+                gender: Gender::F,
                 age: None,
                 division: None,
             }

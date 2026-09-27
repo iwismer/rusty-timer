@@ -33,6 +33,50 @@ pub struct Participant {
     pub division: Option<i32>,
 }
 
+fn split_ppl_fields(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut chars = line.chars().peekable();
+    loop {
+        while chars.next_if(|c| *c == ' ' || *c == '\t').is_some() {}
+        let mut saw_comma = false;
+        if chars.next_if_eq(&'"').is_some() {
+            let mut field = String::new();
+            while let Some(ch) = chars.next() {
+                if ch == '"' {
+                    if chars.next_if_eq(&'"').is_some() {
+                        field.push('"');
+                    } else {
+                        break;
+                    }
+                } else {
+                    field.push(ch);
+                }
+            }
+            fields.push(field.trim().to_owned());
+            for ch in chars.by_ref() {
+                if ch == ',' {
+                    saw_comma = true;
+                    break;
+                }
+            }
+        } else {
+            let mut field = String::new();
+            for ch in chars.by_ref() {
+                if ch == ',' {
+                    saw_comma = true;
+                    break;
+                }
+                field.push(ch);
+            }
+            fields.push(field.trim().to_owned());
+        }
+        if !saw_comma {
+            break;
+        }
+    }
+    fields
+}
+
 /// Parse a single `.ppl` line.
 ///
 /// Returns `Ok(None)` for blank lines and `;` comments, `Ok(Some(_))` for a
@@ -43,7 +87,7 @@ pub fn parse_ppl_line(line: &str) -> Result<Option<Participant>, String> {
     if trimmed.is_empty() || trimmed.starts_with(';') {
         return Ok(None);
     }
-    let parts: Vec<&str> = trimmed.split(',').collect();
+    let parts = split_ppl_fields(trimmed);
     if parts.len() < 3 {
         return Err(format!(
             "participant record needs at least bib,last,first; got {} field(s)",
@@ -51,16 +95,12 @@ pub fn parse_ppl_line(line: &str) -> Result<Option<Participant>, String> {
         ));
     }
     let bib = parts[0]
-        .trim()
         .parse::<i64>()
-        .map_err(|_| format!("invalid bib `{}`", parts[0].trim()))?;
-    let last = parts[1].trim().to_owned();
-    let first = parts[2].trim().to_owned();
-    let affiliation = parts
-        .get(3)
-        .map(|s| s.trim().to_owned())
-        .unwrap_or_default();
-    let gender = match parts.get(5).map(|s| s.trim()) {
+        .map_err(|_| format!("invalid bib `{}`", parts[0]))?;
+    let last = parts[1].clone();
+    let first = parts[2].clone();
+    let affiliation = parts.get(3).cloned().unwrap_or_default();
+    let gender = match parts.get(5).map(String::as_str) {
         Some("M" | "m") => "M",
         Some("F" | "f") => "F",
         _ => "X",
@@ -235,5 +275,27 @@ mod tests {
         // Leading zeros / whitespace normalize to the same i64 bib.
         assert_eq!(parse_ppl_line(" 01 ,A,B").unwrap().unwrap().bib, 1);
         assert_eq!(parse_bibchip_line("01,0580").unwrap().unwrap().0, 1);
+    }
+
+    #[test]
+    fn quoted_ppl_fields_are_unquoted() {
+        let p = parse_ppl_line(r#"1,"Arnold","Debra","",,F,1"#)
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.bib, 1);
+        assert_eq!(p.last, "Arnold");
+        assert_eq!(p.first, "Debra");
+        assert_eq!(p.affiliation, "");
+        assert_eq!(p.gender, "F");
+
+        let with_comma_and_escaped_quotes =
+            parse_ppl_line(r#"2, "Smith, Jr." , "John ""The Flash""" , "Hamilton, ON" ,, "m""#)
+                .unwrap()
+                .unwrap();
+        assert_eq!(with_comma_and_escaped_quotes.bib, 2);
+        assert_eq!(with_comma_and_escaped_quotes.last, "Smith, Jr.");
+        assert_eq!(with_comma_and_escaped_quotes.first, r#"John "The Flash""#);
+        assert_eq!(with_comma_and_escaped_quotes.affiliation, "Hamilton, ON");
+        assert_eq!(with_comma_and_escaped_quotes.gender, "M");
     }
 }

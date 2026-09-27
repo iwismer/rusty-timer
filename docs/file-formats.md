@@ -2,7 +2,7 @@
 
 ## Participant File (.ppl)
 
-Plain-text CSV with no header row and no quoting. Each line is one participant.
+Plain-text CSV with no header row (fields may be unquoted or double-quoted, e.g. Race Director exports). Each line is one participant.
 
 | Column | Field | Required | Notes |
 |--------|-------|----------|-------|
