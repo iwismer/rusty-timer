@@ -9,6 +9,7 @@ import {
   toControlPayload,
   toReadersPayload,
   toUpsPayload,
+  toClockPayload,
   toUpdatePayload,
   toP2pPayload,
   validateGeneral,
@@ -17,6 +18,7 @@ import {
   validateJournal,
   validateUps,
   validateStatusHttp,
+  validateClock,
   validateReaders,
   defaultFallbackPort,
   type ForwarderConfigFormState,
@@ -48,6 +50,7 @@ function makeForm(overrides: Partial<ForwarderConfigFormState> = {}): ForwarderC
     journalSqlitePath: "",
     journalPruneWatermarkPct: "",
     statusHttpBind: "",
+    clockTimezone: "",
     upsEnabled: false,
     upsDaemonAddr: "",
     upsPollIntervalSecs: "",
@@ -657,6 +660,42 @@ describe("validateStatusHttp", () => {
 
   it("rejects port out of range", () => {
     expect(validateStatusHttp(makeForm({ statusHttpBind: "127.0.0.1:99999" }))).toBeTruthy();
+  });
+});
+
+describe("clock config", () => {
+  it("reads clock.timezone in fromConfig", () => {
+    expect(fromConfig({ clock: { timezone: "Europe/London" } }).clockTimezone).toBe(
+      "Europe/London",
+    );
+  });
+
+  it("defaults clockTimezone to empty", () => {
+    expect(fromConfig({}).clockTimezone).toBe("");
+  });
+
+  it("serializes a timezone", () => {
+    expect(toClockPayload(makeForm({ clockTimezone: "America/Toronto" }))).toEqual({
+      timezone: "America/Toronto",
+    });
+  });
+
+  it("serializes a blank timezone as null", () => {
+    expect(toClockPayload(makeForm({ clockTimezone: "  " }))).toEqual({
+      timezone: null,
+    });
+  });
+
+  it("validateClock accepts blank and IANA names", () => {
+    expect(validateClock(makeForm({ clockTimezone: "" }))).toBeNull();
+    expect(validateClock(makeForm({ clockTimezone: "America/Toronto" }))).toBeNull();
+    expect(validateClock(makeForm({ clockTimezone: "UTC" }))).toBeNull();
+  });
+
+  it("validateClock rejects names with spaces or malformed segments", () => {
+    expect(validateClock(makeForm({ clockTimezone: "America/New York" }))).toBeTruthy();
+    expect(validateClock(makeForm({ clockTimezone: "/Toronto" }))).toBeTruthy();
+    expect(validateClock(makeForm({ clockTimezone: "America/" }))).toBeTruthy();
   });
 });
 

@@ -647,7 +647,10 @@ impl StatusStore {
     }
 
     /// Return the shared reader-control service used by HTTP and P2P control paths.
-    pub fn reader_control_service(&self) -> crate::reader_control_service::ReaderControlService {
+    pub fn reader_control_service(
+        &self,
+        config_state: Option<Arc<crate::config_service::ConfigState>>,
+    ) -> crate::reader_control_service::ReaderControlService {
         crate::reader_control_service::ReaderControlService::new(
             self.subsystem.clone(),
             self.control_clients.clone(),
@@ -656,6 +659,7 @@ impl StatusStore {
             self.ui_tx.clone(),
             self.status_event_tx.clone(),
             self.logger.clone(),
+            config_state,
         )
     }
 

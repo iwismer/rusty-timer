@@ -67,6 +67,7 @@
     ensureRecord(parsed, "p2p");
     ensureRecord(parsed, "journal");
     ensureRecord(parsed, "status_http");
+    ensureRecord(parsed, "clock");
     ensureRecord(parsed, "control");
     ensureRecord(parsed, "update");
 
@@ -322,6 +323,18 @@
                   class="mt-1 {inputClass}"
                   type="text"
                   bind:value={config.status_http.bind}
+                />
+              </label>
+            </Card>
+
+            <Card title="Clock">
+              <label class="block text-sm font-medium text-text-secondary">
+                Timezone
+                <input
+                  class="mt-1 {inputClass}"
+                  type="text"
+                  placeholder="America/Toronto"
+                  bind:value={config.clock.timezone}
                 />
               </label>
             </Card>

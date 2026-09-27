@@ -96,6 +96,7 @@ pub struct StatusConfig {
 pub struct StatusServer {
     local_addr: SocketAddr,
     store: StatusStore,
+    config_state: Option<Arc<ConfigState>>,
 }
 
 struct AppState<J: JournalAccess + Send + 'static> {
@@ -128,6 +129,7 @@ impl<J: JournalAccess + Send + 'static> AppState<J> {
             self.ui_tx.clone(),
             self.status_event_tx.clone(),
             self.logger.clone(),
+            self.config_state.clone(),
         )
     }
 }
@@ -179,7 +181,7 @@ impl StatusServer {
 
     /// Return the shared reader-control service used by HTTP and P2P control paths.
     pub fn reader_control_service(&self) -> crate::reader_control_service::ReaderControlService {
-        self.store.reader_control_service()
+        self.store.reader_control_service(self.config_state.clone())
     }
 
     /// Return a clone of the shared UI logger Arc.
@@ -418,7 +420,11 @@ impl StatusServer {
             }
         });
 
-        Ok(StatusServer { local_addr, store })
+        Ok(StatusServer {
+            local_addr,
+            store,
+            config_state: None,
+        })
     }
 
     /// Start the status HTTP server with config editing support.
@@ -438,7 +444,7 @@ impl StatusServer {
             subsystem: store.subsystem_arc(),
             journal,
             version: Arc::new(cfg.forwarder_version),
-            config_state: Some(config_state),
+            config_state: Some(config_state.clone()),
             restart_signal: Some(restart_signal),
             ui_tx: store.ui_sender(),
             status_event_tx: store.status_event_sender(),
@@ -455,7 +461,11 @@ impl StatusServer {
             }
         });
 
-        Ok(StatusServer { local_addr, store })
+        Ok(StatusServer {
+            local_addr,
+            store,
+            config_state: Some(config_state),
+        })
     }
 }
 
@@ -1405,6 +1415,7 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             "/api/v1/config/status_http",
             post(post_config_status_http_handler::<J>),
         )
+        .route("/api/v1/config/clock", post(post_config_clock_handler::<J>))
         .route(
             "/api/v1/config/control",
             post(post_config_control_handler::<J>),
@@ -1843,6 +1854,13 @@ async fn post_config_status_http_handler<J: JournalAccess + Send + 'static>(
     body: Bytes,
 ) -> Response {
     post_config_section_handler("status_http", state, body, None).await
+}
+
+async fn post_config_clock_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    post_config_section_handler("clock", state, body, None).await
 }
 
 async fn post_config_ups_handler<J: JournalAccess + Send + 'static>(

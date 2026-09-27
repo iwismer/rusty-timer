@@ -1,5 +1,6 @@
 //! Shared reader-control operations used by HTTP and P2P control paths.
 
+use crate::config_service::ConfigState;
 use crate::reader_control::{ControlClient, DownloadTracker};
 use crate::status_store::{ForwarderStatusEvent, SubsystemStatus};
 use ipico_core::control;
@@ -22,6 +23,7 @@ pub struct ReaderControlService {
     ui_tx: broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
     status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
     logger: Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+    config_state: Option<Arc<ConfigState>>,
 }
 
 impl ReaderControlService {
@@ -35,6 +37,7 @@ impl ReaderControlService {
         ui_tx: broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
         status_event_tx: broadcast::Sender<ForwarderStatusEvent>,
         logger: Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+        config_state: Option<Arc<ConfigState>>,
     ) -> Self {
         Self {
             subsystem,
@@ -44,6 +47,7 @@ impl ReaderControlService {
             ui_tx,
             status_event_tx,
             logger,
+            config_state,
         }
     }
 
@@ -87,6 +91,22 @@ impl ReaderControlService {
         .await
     }
 
+    /// Resolve the configured `[clock]` timezone, if any.
+    ///
+    /// Returns `None` when no config state is attached or the section is unset;
+    /// the caller then falls back to the forwarder host's local time.
+    async fn clock_timezone(&self) -> Result<Option<chrono_tz::Tz>, String> {
+        let Some(config_state) = self.config_state.as_ref() else {
+            return Ok(None);
+        };
+        let Some(name) = crate::config_service::read_clock_timezone(config_state).await else {
+            return Ok(None);
+        };
+        crate::config::parse_timezone_name(&name)
+            .map(Some)
+            .map_err(|e| format!("[clock].timezone is invalid: {e}"))
+    }
+
     pub async fn sync_clock(
         &self,
         reader_ip: &str,
@@ -94,7 +114,8 @@ impl ReaderControlService {
         let client = self.client(reader_ip)?;
 
         let (one_way, _probes) = estimate_one_way_latency(&client).await?;
-        let wall_now = chrono::Local::now();
+        let clock_tz = self.clock_timezone().await?;
+        let (wall_now, zone_label) = clock_wall_now(clock_tz);
         let (target_boundary, pre_set_wait) = compute_sync_timing(wall_now, one_way, SYNC_DELAY_MS);
         if !pre_set_wait.is_zero() {
             tokio::time::sleep(pre_set_wait).await;
@@ -127,7 +148,7 @@ impl ReaderControlService {
             .await
             .map_err(|e| format!("set ok but verify failed: {e}"))?;
         let reader_iso = dt.to_iso_string();
-        let verify_now = chrono::Local::now();
+        let (verify_now, _) = clock_wall_now(clock_tz);
         let drift_ms = match chrono::NaiveDateTime::parse_from_str(
             &reader_iso,
             "%Y-%m-%dT%H:%M:%S%.3f",
@@ -158,9 +179,10 @@ impl ReaderControlService {
             .await;
 
         self.logger.log(format!(
-            "reader {} clock synced to {} (one-way latency: {:.1}ms, pre-set wait: {:.0}ms, sync delay: {}ms)",
+            "reader {} clock synced to {} in {} (one-way latency: {:.1}ms, pre-set wait: {:.0}ms, sync delay: {}ms)",
             reader_ip,
             reader_iso,
+            zone_label,
             one_way.as_secs_f64() * 1000.0,
             pre_set_wait.as_secs_f64() * 1000.0,
             SYNC_DELAY_MS,
@@ -421,18 +443,46 @@ pub async fn estimate_one_way_latency(
     Ok((median_rtt / 2, rtts.len()))
 }
 
+/// Current wall time in the configured timezone, or the host's local time when
+/// no `[clock].timezone` is configured.
+///
+/// Returns the instant plus a human-readable zone label for logs. The same
+/// clock is used to align the SET_DATE_TIME send and to compute drift, so the
+/// reader is always compared against the wall clock it was set to.
+fn clock_wall_now(tz: Option<chrono_tz::Tz>) -> (chrono::DateTime<chrono::FixedOffset>, String) {
+    match tz {
+        Some(tz) => {
+            let now = chrono::Utc::now().with_timezone(&tz);
+            (
+                now.fixed_offset(),
+                format!("{} (UTC{})", tz.name(), now.offset()),
+            )
+        }
+        None => {
+            let now = chrono::Local::now();
+            (
+                now.fixed_offset(),
+                format!(
+                    "host local (UTC{}, no [clock] timezone configured)",
+                    now.offset()
+                ),
+            )
+        }
+    }
+}
+
 /// Compute the target second boundary and pre-SET wait duration for clock sync.
 ///
 /// Given the current wall time, one-way latency estimate, and the fixed sync delay,
 /// returns `(target_boundary, pre_set_wait)` where:
-/// - `target_boundary` is the `DateTime<Local>` whole-second that the rollover should align with
+/// - `target_boundary` is the `DateTime<Tz>` whole-second that the rollover should align with
 /// - `pre_set_wait` is how long to sleep before sending SET_DATE_TIME
 #[must_use]
-pub fn compute_sync_timing(
-    wall_now: chrono::DateTime<chrono::Local>,
+pub fn compute_sync_timing<Tz: chrono::TimeZone>(
+    wall_now: chrono::DateTime<Tz>,
     one_way: std::time::Duration,
     sync_delay_ms: u64,
-) -> (chrono::DateTime<chrono::Local>, std::time::Duration) {
+) -> (chrono::DateTime<Tz>, std::time::Duration) {
     use chrono::Timelike;
 
     let arrival_offset = chrono::Duration::from_std(one_way).unwrap_or_else(|_| {
@@ -443,7 +493,7 @@ pub fn compute_sync_timing(
         chrono::Duration::zero()
     });
     let sync_delay = chrono::Duration::milliseconds(sync_delay_ms as i64);
-    let wall_at_rollover_if_now = wall_now + arrival_offset + sync_delay;
+    let wall_at_rollover_if_now = wall_now.clone() + arrival_offset + sync_delay;
     let rollover_frac = wall_at_rollover_if_now.nanosecond() as f64 / 1_000_000_000.0;
 
     let target = if rollover_frac >= 0.5 {
@@ -456,10 +506,10 @@ pub fn compute_sync_timing(
         .expect("nanosecond 0 is always valid");
 
     let mut target_boundary = target_boundary_initial;
-    let mut ideal_send = target_boundary - arrival_offset - sync_delay;
+    let mut ideal_send = target_boundary.clone() - arrival_offset - sync_delay;
     if ideal_send < wall_now {
         target_boundary += chrono::Duration::seconds(1);
-        ideal_send = target_boundary - arrival_offset - sync_delay;
+        ideal_send = target_boundary.clone() - arrival_offset - sync_delay;
     }
     let pre_set_wait = ideal_send
         .signed_duration_since(wall_now)
@@ -530,6 +580,39 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Timelike};
 
+    #[test]
+    fn clock_wall_now_uses_configured_timezone() {
+        let tz = crate::config::parse_timezone_name("America/Toronto").expect("valid zone");
+        let (dt, label) = clock_wall_now(Some(tz));
+        let expected = chrono::Utc::now().with_timezone(&tz);
+        assert!((dt.timestamp() - expected.timestamp()).abs() <= 2);
+        assert!(label.starts_with("America/Toronto"), "label: {label}");
+    }
+
+    #[test]
+    fn clock_wall_now_falls_back_to_host_local() {
+        let (_dt, label) = clock_wall_now(None);
+        assert!(label.contains("host local"), "label: {label}");
+    }
+
+    #[test]
+    fn compute_sync_timing_works_in_configured_zone() {
+        let tz = crate::config::parse_timezone_name("America/Toronto").expect("valid zone");
+        let wall_now = tz
+            .with_ymd_and_hms(2026, 6, 22, 12, 0, 0)
+            .single()
+            .expect("valid zoned time")
+            + chrono::Duration::milliseconds(100);
+        let (target, _wait) = compute_sync_timing(
+            wall_now,
+            std::time::Duration::from_millis(25),
+            SYNC_DELAY_MS,
+        );
+        assert_eq!(target.nanosecond(), 0);
+        assert_eq!(target.hour(), 12);
+        assert_eq!(target.timezone(), tz);
+    }
+
     #[tokio::test]
     async fn apply_epoch_metadata_updates_status_and_broadcasts_reader_status() {
         let subsystem = Arc::new(Mutex::new(crate::status_store::SubsystemStatus::ready()));
@@ -570,6 +653,7 @@ mod tests {
             ui_tx,
             status_event_tx,
             logger,
+            None,
         );
 
         service

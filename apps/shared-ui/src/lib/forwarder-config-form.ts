@@ -78,6 +78,7 @@ export interface ForwarderConfigFormState {
   journalSqlitePath: string;
   journalPruneWatermarkPct: string;
   statusHttpBind: string;
+  clockTimezone: string;
   upsEnabled: boolean;
   upsDaemonAddr: string;
   upsPollIntervalSecs: string;
@@ -143,6 +144,7 @@ export function fromConfig(cfg: Record<string, unknown>): ForwarderConfigFormSta
         ? String(journal.prune_watermark_pct)
         : "",
     statusHttpBind: asString(statusHttp.bind),
+    clockTimezone: asString(asRecord(cfg.clock).timezone),
     upsEnabled: ups.enabled === true,
     upsDaemonAddr: asString(ups.daemon_addr),
     upsPollIntervalSecs:
@@ -194,6 +196,12 @@ export function toStatusHttpPayload(
   form: ForwarderConfigFormState,
 ): Record<string, unknown> {
   return { bind: form.statusHttpBind || null };
+}
+
+export function toClockPayload(
+  form: ForwarderConfigFormState,
+): Record<string, unknown> {
+  return { timezone: form.clockTimezone.trim() || null };
 }
 
 export function toControlPayload(
@@ -292,6 +300,18 @@ export function validateStatusHttp(
   const bind = form.statusHttpBind.trim();
   if (bind && !isValidIpv4Bind(bind)) {
     return "Bind address must be a valid IPv4 address with port (e.g. 0.0.0.0:8080).";
+  }
+  return null;
+}
+
+export function validateClock(form: ForwarderConfigFormState): string | null {
+  const tz = form.clockTimezone.trim();
+  if (!tz) return null; // optional: falls back to the host's local time
+  if (tz.includes(" ") || tz.includes("\n") || tz.includes("\r")) {
+    return "Timezone must be an IANA name without spaces (e.g. America/Toronto).";
+  }
+  if (!/^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+)*$/.test(tz)) {
+    return "Timezone must be an IANA name (e.g. America/Toronto).";
   }
   return null;
 }

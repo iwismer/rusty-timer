@@ -37,6 +37,7 @@ pub struct ForwarderConfig {
     pub control: ControlConfig,
     pub update: UpdateConfig,
     pub ups: UpsConfig,
+    pub clock: ClockConfig,
     pub p2p: P2pConfig,
     pub readers: Vec<ReaderConfig>,
     #[cfg(any(feature = "eink", feature = "lcd"))]
@@ -94,6 +95,22 @@ pub struct UpsConfig {
     pub upstream_heartbeat_secs: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ClockConfig {
+    /// IANA timezone the reader clock is set to (e.g. `America/Toronto`).
+    ///
+    /// Read timestamps carry no timezone, so the reader RTC must run on the
+    /// event's local wall clock. `None` falls back to the forwarder host's
+    /// local time, preserving legacy behaviour.
+    pub timezone: Option<String>,
+}
+
+/// Parse an IANA timezone name (e.g. `America/Toronto`) into a [`chrono_tz::Tz`].
+pub fn parse_timezone_name(name: &str) -> Result<chrono_tz::Tz, String> {
+    name.parse::<chrono_tz::Tz>()
+        .map_err(|_| format!("invalid IANA timezone '{name}' (expected e.g. \"America/Toronto\")"))
+}
+
 #[derive(Debug, Clone)]
 pub struct P2pConfig {
     pub enabled: bool,
@@ -138,6 +155,7 @@ pub struct RawConfig {
     pub control: Option<RawControlConfig>,
     pub update: Option<RawUpdateConfig>,
     pub ups: Option<RawUpsConfig>,
+    pub clock: Option<RawClockConfig>,
     pub p2p: Option<RawP2pConfig>,
     pub readers: Option<Vec<RawReaderConfig>>,
     #[cfg(any(feature = "eink", feature = "lcd"))]
@@ -191,6 +209,11 @@ pub struct RawUpsConfig {
     pub daemon_addr: Option<String>,
     pub poll_interval_secs: Option<u64>,
     pub upstream_heartbeat_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawClockConfig {
+    pub timezone: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -467,6 +490,21 @@ pub fn load_config_from_str(
         },
     };
 
+    // Clock defaults. `None` means "use the forwarder host's local time".
+    let clock = match raw.clock {
+        Some(c) => {
+            let timezone = c
+                .timezone
+                .map(|tz| tz.trim().to_owned())
+                .filter(|tz| !tz.is_empty());
+            if let Some(ref tz) = timezone {
+                parse_timezone_name(tz).map_err(ConfigError::InvalidValue)?;
+            }
+            ClockConfig { timezone }
+        }
+        None => ClockConfig { timezone: None },
+    };
+
     // Validate readers
     let raw_readers = raw
         .readers
@@ -522,6 +560,7 @@ pub fn load_config_from_str(
         control,
         update,
         ups,
+        clock,
         p2p,
         readers,
         #[cfg(any(feature = "eink", feature = "lcd"))]
@@ -786,6 +825,37 @@ target = "192.168.1.100"
         let (toml, _dir) = minimal_toml("[update]");
         let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
         assert_eq!(cfg.update.mode, rt_updater::UpdateMode::CheckAndDownload);
+    }
+
+    #[test]
+    fn clock_section_absent_defaults_to_none() {
+        let (toml, _dir) = minimal_toml("");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert_eq!(cfg.clock.timezone, None);
+    }
+
+    #[test]
+    fn clock_section_parses_iana_timezone() {
+        let (toml, _dir) = minimal_toml("[clock]\ntimezone = \"America/Toronto\"");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert_eq!(cfg.clock.timezone.as_deref(), Some("America/Toronto"));
+    }
+
+    #[test]
+    fn clock_section_treats_blank_timezone_as_unset() {
+        let (toml, _dir) = minimal_toml("[clock]\ntimezone = \"  \"");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert_eq!(cfg.clock.timezone, None);
+    }
+
+    #[test]
+    fn clock_section_rejects_unknown_timezone() {
+        let (toml, _dir) = minimal_toml("[clock]\ntimezone = \"Mars/Olympus\"");
+        let err = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid IANA timezone"),
+            "error: {err}"
+        );
     }
 
     #[test]

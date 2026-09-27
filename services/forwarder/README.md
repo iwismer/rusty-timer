@@ -103,6 +103,25 @@ Remote (P2P) config writes may not modify `[auth]`, `[p2p]`, or `[control]`; tho
 | `poll_interval_secs` | `u64` | No | `5` | Local UPS poll interval; must be `1` through `60`. |
 | `upstream_heartbeat_secs` | `u64` | No | `60` | Minimum upstream heartbeat interval; must be `10` through `300`. |
 
+### `[clock]`
+
+Controls the timezone the reader's real-time clock is set to by the
+**Sync Clock** action. IPICO reads (and the Race Director DBF/tag files built
+from them) carry naive local timestamps with no timezone, so the reader clock
+must run on the event's local wall clock.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `timezone` | `String` | No | forwarder host's local time | IANA timezone for the reader clock (e.g. `America/Toronto`). |
+
+When unset, the forwarder falls back to its own host's local time, which is
+only correct if the host is itself set to the event's timezone. Set this
+explicitly whenever the forwarder runs in another timezone (or a UTC
+container), otherwise Sync Clock sets the reader to the wrong time.
+
+After changing `[clock]`, run Sync Clock on the reader for the change to take
+effect.
+
 ### `[[readers]]`
 
 At least one reader entry is required.
@@ -129,6 +148,9 @@ display_name = "Start Line"
 
 [auth]
 token_file = "/etc/rusty-timer/forwarder.token"
+
+[clock]
+timezone = "America/Toronto"
 
 [journal]
 sqlite_path = "/var/lib/rusty-timer/forwarder.sqlite3"

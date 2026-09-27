@@ -6,7 +6,7 @@ describe('getForwarderConfigSectionRows', () => {
     expect(getForwarderConfigSectionRows()).toEqual([
       ['general', 'p2p'],
       ['auth', 'journal'],
-      ['status_http'],
+      ['status_http', 'clock'],
       ['readers', 'ups'],
     ]);
   });

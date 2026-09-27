@@ -338,6 +338,7 @@ mod tests {
             ui_tx,
             status_event_tx,
             logger,
+            None,
         );
         let tempdir = tempfile::tempdir().expect("tempdir");
         let journal =

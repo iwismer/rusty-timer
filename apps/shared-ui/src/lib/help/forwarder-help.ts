@@ -232,6 +232,25 @@ export const FORWARDER_HELP = {
       "If the status port conflicts with another service, change it to an unused port.",
     ],
   },
+  clock: {
+    title: "Clock",
+    overview: "Sets the timezone the reader's real-time clock is synchronised to, so read timestamps and Race Director times match the event's local time.",
+    fields: {
+      timezone: {
+        label: "Timezone",
+        summary: "IANA timezone used when setting the reader clock.",
+        detailHtml: "IPICO reads carry naive local timestamps with no timezone, so the reader clock must run on the event's local wall clock. When you use <strong>Sync Clock</strong>, the forwarder sets the reader RTC to the current time in this timezone.<br><br>Use an IANA name such as <code>America/Toronto</code>. Leave blank to use the forwarder host's local time.",
+        default: "Forwarder host's local time",
+        range: "IANA timezone name (e.g. America/Toronto, Europe/London)",
+        recommended: "Always set this to the event's timezone. A forwarder deployed in another timezone (or a UTC container) otherwise sets the reader to the wrong time.",
+      },
+    },
+    tips: [
+      "Timestamps in IPICO reads, TAGDATA files, and Race Director carry no timezone \u2014 they are local wall-clock values, so the reader clock must match the event, not UTC.",
+      "After changing this, run Sync Clock on the reader for the change to take effect.",
+    ],
+    seeAlso: [{ sectionKey: "readers", label: "Reader Devices" }],
+  },
   ups: {
     title: "UPS (PiSugar)",
     overview: "Configure PiSugar UPS monitoring so the forwarder can report battery state and warn when external power is unplugged.",

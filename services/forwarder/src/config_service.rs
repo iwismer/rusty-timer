@@ -416,6 +416,21 @@ pub async fn read_config_json(
         })
 }
 
+/// Read the configured `[clock].timezone` value, if any.
+///
+/// Empty or absent means "unset" (`None`). Used by the reader clock-sync path
+/// so a manual sync sets the reader RTC to the event's timezone rather than the
+/// forwarder host's local time.
+pub async fn read_clock_timezone(config_state: &ConfigState) -> Option<String> {
+    let _lock = config_state.write_lock.lock().await;
+    let toml_str = std::fs::read_to_string(&config_state.path).ok()?;
+    let raw: crate::config::RawConfig = toml::from_str(&toml_str).ok()?;
+    raw.clock
+        .and_then(|c| c.timezone)
+        .map(|tz| tz.trim().to_owned())
+        .filter(|tz| !tz.is_empty())
+}
+
 /// Serialize the current config to a JSON string (identical to the body
 /// `GET /api/v1/config` returns) plus the current `restart_needed` state.
 ///
@@ -603,7 +618,7 @@ async fn update_config_file(
 /// payload, and calls `update_config_file` to persist the change.
 ///
 /// Recognised sections: `"general"`, `"auth"`, `"journal"`, `"status_http"`,
-/// `"control"`, `"update"`, `"p2p"`, `"ups"`, `"readers"`, and `"screen"`.
+/// `"clock"`, `"control"`, `"update"`, `"p2p"`, `"ups"`, `"readers"`, and `"screen"`.
 /// Screen config changes require a restart to apply.
 pub async fn apply_section_update(
     section: &str,
@@ -690,6 +705,19 @@ pub async fn apply_section_update(
             }
             update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.status_http = Some(crate::config::RawStatusHttpConfig { bind });
+                Ok(())
+            })
+            .await
+        }
+        "clock" => {
+            let timezone = optional_string_field(payload, "timezone")?
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty());
+            if let Some(ref tz) = timezone {
+                crate::config::parse_timezone_name(tz).map_err(bad_request_error)?;
+            }
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
+                raw.clock = Some(crate::config::RawClockConfig { timezone });
                 Ok(())
             })
             .await
@@ -1026,6 +1054,93 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    #[tokio::test]
+    async fn read_clock_timezone_returns_configured_value() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        write!(file, "[clock]\ntimezone = \"Europe/London\"\n").expect("write");
+        let cs = ConfigState::new(file.path().to_path_buf());
+        assert_eq!(
+            read_clock_timezone(&cs).await.as_deref(),
+            Some("Europe/London")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_clock_timezone_returns_none_when_absent() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let cs = ConfigState::new(file.path().to_path_buf());
+        assert_eq!(read_clock_timezone(&cs).await, None);
+    }
+
+    #[tokio::test]
+    async fn apply_clock_section_persists_valid_timezone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token_path = dir.path().join("token");
+        std::fs::write(&token_path, "test-token\n").expect("write token");
+        let config_path = dir.path().join("forwarder.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "schema_version = 1\n[auth]\ntoken_file = \"{}\"\n[[readers]]\ntarget = \"192.168.1.100:10000\"\n",
+                token_path.display()
+            ),
+        )
+        .expect("write config");
+        let cs = ConfigState::new(config_path.clone());
+        let subsystem = Arc::new(Mutex::new(SubsystemStatus::ready()));
+        let (ui_tx, _rx) = tokio::sync::broadcast::channel(16);
+
+        apply_section_update(
+            "clock",
+            &serde_json::json!({ "timezone": "America/Toronto" }),
+            &cs,
+            &subsystem,
+            &ui_tx,
+            None,
+        )
+        .await
+        .expect("apply clock section");
+
+        let written = std::fs::read_to_string(&config_path).expect("read config");
+        assert!(written.contains("America/Toronto"), "config: {written}");
+        assert_eq!(
+            read_clock_timezone(&cs).await.as_deref(),
+            Some("America/Toronto")
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_clock_section_rejects_unknown_timezone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token_path = dir.path().join("token");
+        std::fs::write(&token_path, "test-token\n").expect("write token");
+        let config_path = dir.path().join("forwarder.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "schema_version = 1\n[auth]\ntoken_file = \"{}\"\n[[readers]]\ntarget = \"192.168.1.100:10000\"\n",
+                token_path.display()
+            ),
+        )
+        .expect("write config");
+        let cs = ConfigState::new(config_path);
+        let subsystem = Arc::new(Mutex::new(SubsystemStatus::ready()));
+        let (ui_tx, _rx) = tokio::sync::broadcast::channel(16);
+
+        let (status, body) = apply_section_update(
+            "clock",
+            &serde_json::json!({ "timezone": "Mars/Olympus" }),
+            &cs,
+            &subsystem,
+            &ui_tx,
+            None,
+        )
+        .await
+        .expect_err("unknown timezone must be rejected");
+        assert_eq!(status, 400);
+        assert!(body.contains("invalid IANA timezone"), "body: {body}");
+    }
     #[cfg(unix)]
     #[test]
     fn power_action_execution_does_not_use_sudo_fallback() {

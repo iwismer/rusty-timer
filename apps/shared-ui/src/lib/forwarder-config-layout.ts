@@ -4,6 +4,7 @@ export type ForwarderConfigSection =
   | 'auth'
   | 'journal'
   | 'status_http'
+  | 'clock'
   | 'readers'
   | 'ups';
 
@@ -11,7 +12,7 @@ export function getForwarderConfigSectionRows(): ForwarderConfigSection[][] {
   return [
     ['general', 'p2p'],
     ['auth', 'journal'],
-    ['status_http'],
+    ['status_http', 'clock'],
     ['readers', 'ups'],
   ];
 }
@@ -57,6 +58,19 @@ export const upsSectionLayout: SectionLayout = {
       type: 'number',
       min: 10,
       max: 300,
+    },
+  ],
+};
+
+export const clockSectionLayout: SectionLayout = {
+  key: 'clock',
+  label: 'Clock',
+  fields: [
+    {
+      key: 'timezone',
+      label: 'Timezone',
+      type: 'text',
+      placeholder: 'America/Toronto',
     },
   ],
 };

@@ -8,6 +8,7 @@
     toAuthPayload,
     toJournalPayload,
     toStatusHttpPayload,
+    toClockPayload,
     toControlPayload,
     toUpsPayload,
     toUpdatePayload,
@@ -18,6 +19,7 @@
     validateJournal,
     validateUps,
     validateStatusHttp,
+    validateClock,
     validateReaders,
     defaultFallbackPort,
     blankSingleReader,
@@ -64,6 +66,7 @@
   let journalSqlitePath = $state("");
   let journalPruneWatermarkPct = $state("");
   let statusHttpBind = $state("");
+  let clockTimezone = $state("");
   let upsEnabled = $state(false);
   let upsDaemonAddr = $state("");
   let upsPollIntervalSecs = $state("");
@@ -183,6 +186,7 @@
     journalSqlitePath = form.journalSqlitePath;
     journalPruneWatermarkPct = form.journalPruneWatermarkPct;
     statusHttpBind = form.statusHttpBind;
+    clockTimezone = form.clockTimezone;
     upsEnabled = form.upsEnabled;
     upsDaemonAddr = form.upsDaemonAddr;
     upsPollIntervalSecs = form.upsPollIntervalSecs;
@@ -203,6 +207,7 @@
       journalSqlitePath,
       journalPruneWatermarkPct,
       statusHttpBind,
+      clockTimezone,
       upsEnabled,
       upsDaemonAddr,
       upsPollIntervalSecs,
@@ -281,6 +286,10 @@
   function saveStatusHttp() {
     saveSectionWithValidation("status_http", validateStatusHttp, toStatusHttpPayload);
   }
+  function saveClock() {
+    saveSectionWithValidation("clock", validateClock, toClockPayload);
+  }
+
   function saveUps() {
     saveSectionWithValidation("ups", validateUps, toUpsPayload);
   }
@@ -834,6 +843,39 @@
                   : 'text-status-err'}"
               >
                 {sectionMessages["status_http"].text}
+              </p>
+            {/if}
+          </Card>
+
+          <!-- Clock -->
+          <Card title="Clock" helpSection="clock" helpContext="forwarder">
+            <label class="block text-sm font-medium text-text-secondary">
+              Timezone <HelpTip fieldKey="timezone" sectionKey="clock" context="forwarder" />
+              <input
+                type="text"
+                bind:value={clockTimezone}
+                placeholder="America/Toronto"
+                class="mt-1 {inputClass}"
+              />
+              <p class={hintClass}>
+                IANA timezone the reader clock is set to on Sync Clock. Leave blank to use the
+                forwarder host's local time.
+              </p>
+            </label>
+            <button
+              class={saveBtnClass}
+              onclick={saveClock}
+              disabled={savingSection["clock"]}
+            >
+              {savingSection["clock"] ? "Saving..." : "Save Clock"}
+            </button>
+            {#if sectionMessages["clock"]}
+              <p
+                class="text-xs mt-1 m-0 {sectionMessages['clock'].ok
+                  ? 'text-status-ok'
+                  : 'text-status-err'}"
+              >
+                {sectionMessages["clock"].text}
               </p>
             {/if}
           </Card>
