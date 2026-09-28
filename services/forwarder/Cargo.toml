@@ -48,6 +48,7 @@ async-stream = "0.3"
 rust-embed = { version = "8", optional = true }
 rt-screen = { path = "../../crates/rt-screen", optional = true }
 chrono-tz = "0.10"
+socket2 = "0.6"
 
 [dev-dependencies]
 tempfile = "3"

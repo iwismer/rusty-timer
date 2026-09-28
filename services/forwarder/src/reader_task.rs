@@ -19,6 +19,28 @@ use tracing::{debug, info, warn};
 // Helpers
 // ---------------------------------------------------------------------------
 
+pub(crate) fn configure_reader_socket(stream: &TcpStream) -> std::io::Result<()> {
+    let sock = socket2::SockRef::from(stream);
+
+    let mut keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(5))
+        .with_interval(Duration::from_secs(2));
+
+    #[cfg(not(any(target_os = "openbsd", target_os = "netbsd")))]
+    {
+        keepalive = keepalive.with_retries(3);
+    }
+
+    sock.set_tcp_keepalive(&keepalive)?;
+
+    #[cfg(target_os = "linux")]
+    {
+        sock.set_tcp_user_timeout(Some(Duration::from_secs(10)))?;
+    }
+
+    Ok(())
+}
+
 pub(crate) async fn mark_reader_disconnected(status: &StatusStore, reader_ip: &str) {
     status
         .update_reader_state(reader_ip, ReaderConnectionState::Disconnected)
@@ -219,7 +241,12 @@ pub async fn run_reader(
         )
         .await
         {
-            Ok(Ok(s)) => s,
+            Ok(Ok(s)) => {
+                if let Err(e) = configure_reader_socket(&s) {
+                    warn!(reader_ip = %reader_ip, error = %e, "failed to configure reader socket keepalive");
+                }
+                s
+            }
             other => {
                 let e = match other {
                     Ok(Err(e)) => e.to_string(),
@@ -241,8 +268,8 @@ pub async fn run_reader(
                         info!(reader_ip = %reader_ip, "reconnect requested during connect backoff");
                         backoff_secs = 1;
                     }
-                    _ = shutdown_rx.changed() => {
-                        if *shutdown_rx.borrow() {
+                    res = shutdown_rx.changed() => {
+                        if res.is_err() || *shutdown_rx.borrow() {
                             status.deregister_reconnect_notify(&target_addr);
                             return;
                         }
@@ -281,8 +308,8 @@ pub async fn run_reader(
                     _ = reconnect_notify.notified() => {
                         backoff_secs = 1;
                     }
-                    _ = shutdown_rx.changed() => {
-                        if *shutdown_rx.borrow() {
+                    res = shutdown_rx.changed() => {
+                        if res.is_err() || *shutdown_rx.borrow() {
                             status.deregister_reconnect_notify(&target_addr);
                             return;
                         }
@@ -298,6 +325,7 @@ pub async fn run_reader(
 
         // Set up control channels
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let (abort_tx, mut abort_rx) = tokio::sync::mpsc::channel::<String>(1);
         let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
         let control_client = Arc::new(control_client);
         status.register_control_client(&target_addr, control_client.clone());
@@ -310,10 +338,14 @@ pub async fn run_reader(
         // Writer task: drains command channel to TCP socket
         let mut writer = write_half;
         let writer_reader_ip = reader_ip.clone();
+        let writer_abort_tx = abort_tx.clone();
         let writer_handle = tokio::spawn(async move {
             while let Some(frame) = cmd_rx.recv().await {
                 if let Err(e) = writer.write_all(&frame).await {
                     warn!(reader_ip = %writer_reader_ip, "control write failed: {e}");
+                    let _ = writer_abort_tx
+                        .send(format!("control write failed: {e}"))
+                        .await;
                     drop(cmd_rx); // Close channel immediately so cmd_tx.send() fails
                     return;
                 }
@@ -330,10 +362,13 @@ pub async fn run_reader(
         let poll_status = status.clone();
         let poll_target_addr = target_addr.clone();
         let poll_download_tracker = download_tracker.clone();
+        let poll_abort_tx = abort_tx.clone();
+        drop(abort_tx);
         let poll_handle = tokio::spawn(async move {
             // Run initial connection sequence
             let reader_info = crate::reader_control::run_connect_sequence(&poll_client).await;
-            if reader_info.connect_failures == 6 {
+            let control_supported = reader_info.connect_failures < 6;
+            if !control_supported {
                 poll_logger.log_at(
                     rt_ui_log::UiLogLevel::Error,
                     format!(
@@ -358,8 +393,10 @@ pub async fn run_reader(
 
             // Transition to 10s polling
             let mut interval = tokio::time::interval(Duration::from_secs(10));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval.tick().await; // skip first immediate tick
             let mut info = reader_info;
+            let mut consecutive_poll_failures = 0u32;
             let mut last_download_progress = 0u32;
             let mut last_download_reads = 0u32;
             let mut last_progress_time = tokio::time::Instant::now();
@@ -368,10 +405,29 @@ pub async fn run_reader(
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        crate::reader_control::run_status_poll(&poll_client, &mut info).await;
-                        poll_status
-                            .update_reader_info_unless_disconnected(&poll_target_addr, info.clone())
-                            .await;
+                        if control_supported {
+                            let successes = crate::reader_control::run_status_poll(&poll_client, &mut info).await;
+                            poll_status
+                                .update_reader_info_unless_disconnected(&poll_target_addr, info.clone())
+                                .await;
+
+                            if successes == 0 {
+                                consecutive_poll_failures += 1;
+                                warn!(
+                                    reader_ip = %poll_reader_ip,
+                                    consecutive_failures = consecutive_poll_failures,
+                                    "reader status poll failed"
+                                );
+                                if consecutive_poll_failures >= 2 {
+                                    let _ = poll_abort_tx
+                                        .send("status poll timeout (unreachable)".to_string())
+                                        .await;
+                                    break;
+                                }
+                            } else {
+                                consecutive_poll_failures = 0;
+                            }
+                        }
 
                         // Check download progress
                         let is_downloading = {
@@ -473,12 +529,28 @@ pub async fn run_reader(
         loop {
             frame_buf.clear();
 
-            // Wait for a line or shutdown
+            // Wait for a line, abort signal, or shutdown
             let read_result = tokio::select! {
                 result = reader.read_until(b'\n', &mut frame_buf) => result,
-                _ = shutdown_rx.changed() => {
-                    if *shutdown_rx.borrow() {
+                abort_reason = abort_rx.recv() => {
+                    let reason = abort_reason.unwrap_or_else(|| "connection lost".to_string());
+                    logger.log_at(
+                        UiLogLevel::Warn,
+                        format!("reader {} disconnected: {}; reconnecting", reader_ip, reason),
+                    );
+                    fail_active_download(
+                        &download_tracker,
+                        format!("reader {} disconnected during download: {}", reader_ip, reason),
+                    )
+                    .await;
+                    disconnect_and_notify(&status, &target_addr).await;
+                    break;
+                }
+                res = shutdown_rx.changed() => {
+                    if res.is_err() || *shutdown_rx.borrow() {
                         info!(reader_ip = %reader_ip, "reader task stopping (shutdown)");
+                        writer_handle.abort();
+                        poll_handle.abort();
                         status.deregister_control_client(&target_addr);
                         status.deregister_download_tracker(&target_addr);
                         status.deregister_reconnect_notify(&target_addr);
@@ -628,8 +700,8 @@ pub async fn run_reader(
                 info!(reader_ip = %reader_ip, "reconnect requested during backoff");
                 backoff_secs = 1;
             }
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
+            res = shutdown_rx.changed() => {
+                if res.is_err() || *shutdown_rx.borrow() {
                     status.deregister_reconnect_notify(&target_addr);
                     return;
                 }
@@ -791,5 +863,19 @@ mod tests {
                     && !entry.contains("journal append recovered")),
             "healthy append should not log retry/recovery: {entries:?}"
         );
+    }
+
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn test_configure_reader_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+
+        assert!(configure_reader_socket(&client).is_ok());
+        assert!(configure_reader_socket(&server).is_ok());
     }
 }

@@ -735,11 +735,14 @@ pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
 }
 
 /// Poll extended status, CONFIG3 (read mode), tag format, and clock, updating info in place.
-pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) {
+/// Returns the number of successful queries in this poll cycle.
+pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) -> usize {
+    let mut successes = 0;
     match client.get_extended_status().await {
         Ok(ext) => {
             info.estimated_stored_reads = Some(ext.estimated_stored_reads());
             info.recording = Some(ext.recording_state.is_recording());
+            successes += 1;
         }
         Err(e) => {
             warn!("status poll: get_extended_status failed: {e}");
@@ -749,14 +752,21 @@ pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) {
     match client.get_config3().await {
         Ok((mode, timeout)) => {
             info.config = Some(Config3Info { mode, timeout });
+            successes += 1;
         }
         Err(e) => {
             warn!("status poll: get_config3 failed: {e}");
         }
     }
 
-    let _ = poll_tag_message_format(client, info).await;
-    let _ = poll_clock(client, info).await;
+    if poll_tag_message_format(client, info).await.is_ok() {
+        successes += 1;
+    }
+    if poll_clock(client, info).await.is_ok() {
+        successes += 1;
+    }
+
+    successes
 }
 
 /// Poll reader status, but preserve cached values when an individual poll fails.
@@ -1055,8 +1065,8 @@ mod tests {
                 recording: Some(true),
                 ..Default::default()
             };
-            run_status_poll(&client, &mut info).await;
-            info
+            let successes = run_status_poll(&client, &mut info).await;
+            (successes, info)
         });
 
         let ext_status_cmd = cmd_rx.recv().await.expect("ext status command");
@@ -1088,7 +1098,8 @@ mod tests {
         );
         assert!(sink.feed(b"zz not-a-frame").await);
 
-        let info = task.await.expect("poll task");
+        let (successes, info) = task.await.expect("poll task");
+        assert_eq!(successes, 1);
         assert_eq!(
             info.config.as_ref().map(|c| c.mode),
             Some(control::ReadMode::Event)
