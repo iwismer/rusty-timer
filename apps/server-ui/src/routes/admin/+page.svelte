@@ -335,7 +335,7 @@
           </div>
           <pre
             class="mt-3 overflow-x-auto rounded bg-surface-1 p-3 text-xs text-text-primary"><code
-              >{createdToken.token}</code
+              class="break-all whitespace-pre-wrap">{createdToken.token}</code
             ></pre>
         </div>
       {/if}
@@ -385,7 +385,7 @@
                   <td
                     class={tableCellClass(
                       false,
-                      "font-mono text-xs text-text-muted",
+                      "font-mono text-xs text-text-muted break-all",
                     )}>{token.token_id}</td
                   >
                   <td class={tableCellClass()}>
@@ -477,7 +477,7 @@
               <p class="text-xs text-text-muted mt-1 mb-0">
                 {displayKind(device)}
               </p>
-              <p class="text-xs text-text-muted font-mono mt-1 mb-0">
+              <p class="text-xs text-text-muted font-mono mt-1 mb-0 break-all">
                 {device.endpoint_id}
               </p>
             </div>
@@ -525,7 +525,7 @@
             <p class="text-xs text-text-muted mt-1 mb-0">
               {displayKind(device)}
             </p>
-            <p class="text-xs text-text-muted font-mono mt-1 mb-0">
+            <p class="text-xs text-text-muted font-mono mt-1 mb-0 break-all">
               {device.endpoint_id}
             </p>
           </div>

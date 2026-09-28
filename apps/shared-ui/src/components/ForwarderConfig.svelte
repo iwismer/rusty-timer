@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-  import type { ConfigApi } from "../lib/config-types";
+  import { onMount } from 'svelte';
+  import type { ConfigApi } from '../lib/config-types';
   import {
     fromConfig,
     toGeneralPayload,
@@ -27,16 +27,13 @@
     type ReaderEntry,
     type SingleReaderEntry,
     type ForwarderConfigFormState,
-  } from "../lib/forwarder-config-form";
-  import {
-    controlPowerActionsEnabled,
-    saveSuccessMessage,
-  } from "../lib/forwarder-config-logic";
-  import Card from "./Card.svelte";
-  import AlertBanner from "./AlertBanner.svelte";
-  import StatusBadge from "./StatusBadge.svelte";
-  import ConfirmDialog from "./ConfirmDialog.svelte";
-  import HelpTip from "./HelpTip.svelte";
+  } from '../lib/forwarder-config-form';
+  import { controlPowerActionsEnabled, saveSuccessMessage } from '../lib/forwarder-config-logic';
+  import Card from './Card.svelte';
+  import AlertBanner from './AlertBanner.svelte';
+  import StatusBadge from './StatusBadge.svelte';
+  import ConfirmDialog from './ConfirmDialog.svelte';
+  import HelpTip from './HelpTip.svelte';
 
   let {
     configApi,
@@ -58,20 +55,20 @@
   let showAdvanced = $state(false);
 
   // Form fields
-  let generalDisplayName = $state("");
+  let generalDisplayName = $state('');
   let p2pEnabled = $state(false);
-  let p2pServerUrl = $state("");
-  let p2pServerTokenFile = $state("");
-  let authTokenFile = $state("");
-  let journalSqlitePath = $state("");
-  let journalPruneWatermarkPct = $state("");
-  let statusHttpBind = $state("");
-  let clockTimezone = $state("");
+  let p2pServerUrl = $state('');
+  let p2pServerTokenFile = $state('');
+  let authTokenFile = $state('');
+  let journalSqlitePath = $state('');
+  let journalPruneWatermarkPct = $state('');
+  let statusHttpBind = $state('');
+  let clockTimezone = $state('');
   let upsEnabled = $state(false);
-  let upsDaemonAddr = $state("");
-  let upsPollIntervalSecs = $state("");
-  let upsUpstreamHeartbeatSecs = $state("");
-  let updateMode = $state("");
+  let upsDaemonAddr = $state('');
+  let upsPollIntervalSecs = $state('');
+  let upsUpstreamHeartbeatSecs = $state('');
+  let updateMode = $state('');
   let checkingUpdate = $state(false);
   let checkMessage = $state<string | null>(null);
   let persistedAllowPowerActions = $state(false);
@@ -81,23 +78,23 @@
     controlPowerActionsEnabled({
       persistedAllowPowerActions,
       currentAllowPowerActions: controlAllowPowerActions,
-    }),
+    })
   );
   let powerActionsDisabledReason = $derived(
     powerActionsEnabled
       ? undefined
       : !controlAllowPowerActions
-        ? "Enable and save control power actions first"
-        : "Save Control to apply power-action setting",
+        ? 'Enable and save control power actions first'
+        : 'Save Control to apply power-action setting'
   );
 
-  type ControlAction = "restartService" | "restartDevice" | "shutdownDevice";
+  type ControlAction = 'restartService' | 'restartDevice' | 'shutdownDevice';
   type ControlActionDetail = {
     title: string;
     message: string;
     confirmLabel: string;
     successMessage: string;
-    variant: "warn" | "err";
+    variant: 'warn' | 'err';
   };
 
   const controlActionBusy = $state<Record<ControlAction, boolean>>({
@@ -108,51 +105,47 @@
 
   const controlActionDetails: Record<ControlAction, ControlActionDetail> = {
     restartService: {
-      title: "Restart forwarder service?",
+      title: 'Restart forwarder service?',
       message:
-        "Dangerous action: this will restart the forwarder service and briefly interrupt reads and forwarding.",
-      confirmLabel: "Restart Service",
-      successMessage: "Restart forwarder service initiated.",
-      variant: "err" as const,
+        'Dangerous action: this will restart the forwarder service and briefly interrupt reads and forwarding.',
+      confirmLabel: 'Restart Service',
+      successMessage: 'Restart forwarder service initiated.',
+      variant: 'err' as const,
     },
     restartDevice: {
-      title: "Restart forwarder device?",
+      title: 'Restart forwarder device?',
       message:
-        "Dangerous action: this reboots the entire forwarder device and interrupts all timing activity until it comes back.",
-      confirmLabel: "Restart Device",
-      successMessage: "Restart forwarder device initiated.",
-      variant: "err" as const,
+        'Dangerous action: this reboots the entire forwarder device and interrupts all timing activity until it comes back.',
+      confirmLabel: 'Restart Device',
+      successMessage: 'Restart forwarder device initiated.',
+      variant: 'err' as const,
     },
     shutdownDevice: {
-      title: "Shutdown forwarder device?",
+      title: 'Shutdown forwarder device?',
       message:
-        "Good practice before unplugging: shut down the forwarder device first to avoid corruption or lost data.",
-      confirmLabel: "Shutdown Device",
-      successMessage: "Shutdown forwarder device initiated.",
-      variant: "warn" as const,
+        'Good practice before unplugging: shut down the forwarder device first to avoid corruption or lost data.',
+      confirmLabel: 'Shutdown Device',
+      successMessage: 'Shutdown forwarder device initiated.',
+      variant: 'warn' as const,
     },
   };
 
   let pendingControlAction = $state<ControlAction | null>(null);
   let confirmControlActionOpen = $state(false);
   let confirmControlActionBusy = $derived(
-    pendingControlAction ? controlActionBusy[pendingControlAction] : false,
+    pendingControlAction ? controlActionBusy[pendingControlAction] : false
   );
   let confirmControlActionTitle = $derived(
-    pendingControlAction ? controlActionDetails[pendingControlAction].title : "",
+    pendingControlAction ? controlActionDetails[pendingControlAction].title : ''
   );
   let confirmControlActionMessage = $derived(
-    pendingControlAction ? controlActionDetails[pendingControlAction].message : "",
+    pendingControlAction ? controlActionDetails[pendingControlAction].message : ''
   );
   let confirmControlActionLabel = $derived(
-    pendingControlAction
-      ? controlActionDetails[pendingControlAction].confirmLabel
-      : "Confirm",
+    pendingControlAction ? controlActionDetails[pendingControlAction].confirmLabel : 'Confirm'
   );
-  let confirmControlActionVariant: "warn" | "err" = $derived(
-    pendingControlAction
-      ? controlActionDetails[pendingControlAction].variant
-      : "err",
+  let confirmControlActionVariant: 'warn' | 'err' = $derived(
+    pendingControlAction ? controlActionDetails[pendingControlAction].variant : 'err'
   );
 
   onMount(async () => {
@@ -165,7 +158,7 @@
     try {
       const result = await configApi.getConfig();
       if (!result.ok) {
-        throw new Error(result.error ?? "Failed to load config");
+        throw new Error(result.error ?? 'Failed to load config');
       }
       restartNeeded = result.restart_needed;
       applyFormState(fromConfig(result.config));
@@ -218,11 +211,8 @@
     };
   }
 
-  async function saveSection(
-    section: string,
-    payload: Record<string, unknown>,
-  ): Promise<boolean> {
-    sectionMessages[section] = { ok: false, text: "Saving..." };
+  async function saveSection(section: string, payload: Record<string, unknown>): Promise<boolean> {
+    sectionMessages[section] = { ok: false, text: 'Saving...' };
     savingSection[section] = true;
     try {
       const result = await configApi.saveSection(section, payload);
@@ -236,7 +226,7 @@
       } else {
         sectionMessages[section] = {
           ok: false,
-          text: result.error ?? "Unknown error",
+          text: result.error ?? 'Unknown error',
         };
         return false;
       }
@@ -251,7 +241,7 @@
   function saveSectionWithValidation(
     section: string,
     validator: ((form: ForwarderConfigFormState) => string | null) | null,
-    payloadFn: (form: ForwarderConfigFormState) => Record<string, unknown>,
+    payloadFn: (form: ForwarderConfigFormState) => Record<string, unknown>
   ) {
     const form = currentFormState();
     if (validator) {
@@ -272,39 +262,39 @@
   }
 
   function saveGeneral() {
-    saveSectionWithValidation("general", validateGeneral, toGeneralPayload);
+    saveSectionWithValidation('general', validateGeneral, toGeneralPayload);
   }
   function saveP2p() {
-    saveSectionWithValidation("p2p", validateP2p, toP2pPayload);
+    saveSectionWithValidation('p2p', validateP2p, toP2pPayload);
   }
   function saveAuth() {
-    saveSectionWithValidation("auth", validateAuth, toAuthPayload);
+    saveSectionWithValidation('auth', validateAuth, toAuthPayload);
   }
   function saveJournal() {
-    saveSectionWithValidation("journal", validateJournal, toJournalPayload);
+    saveSectionWithValidation('journal', validateJournal, toJournalPayload);
   }
   function saveStatusHttp() {
-    saveSectionWithValidation("status_http", validateStatusHttp, toStatusHttpPayload);
+    saveSectionWithValidation('status_http', validateStatusHttp, toStatusHttpPayload);
   }
   function saveClock() {
-    saveSectionWithValidation("clock", validateClock, toClockPayload);
+    saveSectionWithValidation('clock', validateClock, toClockPayload);
   }
 
   function saveUps() {
-    saveSectionWithValidation("ups", validateUps, toUpsPayload);
+    saveSectionWithValidation('ups', validateUps, toUpsPayload);
   }
   async function saveControl() {
-    const saved = await saveSection("control", toControlPayload(currentFormState()));
+    const saved = await saveSection('control', toControlPayload(currentFormState()));
     if (saved) {
       persistedAllowPowerActions = controlAllowPowerActions;
     }
   }
   function saveReaders() {
-    saveSectionWithValidation("readers", validateReaders, toReadersPayload);
+    saveSectionWithValidation('readers', validateReaders, toReadersPayload);
   }
 
   function saveUpdate() {
-    saveSectionWithValidation("update", null, toUpdatePayload);
+    saveSectionWithValidation('update', null, toUpdatePayload);
   }
 
   async function handleCheckUpdate() {
@@ -313,12 +303,12 @@
     checkMessage = null;
     try {
       const result = await configApi.checkForUpdate();
-      if (result.status === "up_to_date") {
-        checkMessage = "Up to date.";
-      } else if (result.status === "available" || result.status === "downloaded") {
+      if (result.status === 'up_to_date') {
+        checkMessage = 'Up to date.';
+      } else if (result.status === 'available' || result.status === 'downloaded') {
         checkMessage = null;
-      } else if (result.status === "failed") {
-        checkMessage = result.error ?? "Update check failed.";
+      } else if (result.status === 'failed') {
+        checkMessage = result.error ?? 'Update check failed.';
       }
     } catch (e) {
       checkMessage = String(e);
@@ -351,14 +341,14 @@
   }
 
   async function invokeControlAction(
-    action: ControlAction,
+    action: ControlAction
   ): Promise<{ ok: boolean; error?: string }> {
     switch (action) {
-      case "restartService":
+      case 'restartService':
         return configApi.restartService();
-      case "restartDevice":
+      case 'restartDevice':
         return configApi.restartDevice();
-      case "shutdownDevice":
+      case 'shutdownDevice':
         return configApi.shutdownDevice();
       default:
         return { ok: false, error: `Unsupported control action: ${action}` };
@@ -381,13 +371,13 @@
           ok: true,
           text: controlActionDetails[action].successMessage,
         };
-        if (action === "restartService") {
+        if (action === 'restartService') {
           restartNeeded = false;
         }
       } else {
         controlActionMessage = {
           ok: false,
-          text: result.error ?? "Unknown error",
+          text: result.error ?? 'Unknown error',
         };
       }
     } catch (e) {
@@ -400,29 +390,26 @@
   }
 
   const inputClass =
-    "w-full px-2 py-1.5 text-sm rounded-md border border-border bg-surface-0 text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent";
+    'w-full px-2 py-1.5 text-sm rounded-md border border-border bg-surface-0 text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent';
   const selectClass =
-    "w-full px-2 py-1.5 text-sm rounded-md border border-border bg-surface-0 text-text-primary focus:outline-none focus:border-accent";
+    'w-full px-2 py-1.5 text-sm rounded-md border border-border bg-surface-0 text-text-primary focus:outline-none focus:border-accent';
   const saveBtnClass =
-    "mt-2 px-3 py-1.5 text-xs font-medium rounded-md bg-accent text-white border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
+    'mt-2 px-3 py-1.5 text-xs font-medium rounded-md bg-accent text-white border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed';
   const secondaryBtnClass =
-    "mt-2 px-3 py-1.5 text-xs font-medium rounded-md bg-surface-2 text-text-primary border border-border cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed";
+    'mt-2 px-3 py-1.5 text-xs font-medium rounded-md bg-surface-2 text-text-primary border border-border cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed';
   const dangerousActionBtnClass =
-    "px-3 py-1.5 text-xs font-medium rounded-md bg-status-err-bg text-status-err border border-status-err-border cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed";
-  const hintClass = "text-xs text-text-muted mt-1";
+    'px-3 py-1.5 text-xs font-medium rounded-md bg-status-err-bg text-status-err border border-status-err-border cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed';
+  const hintClass = 'text-xs text-text-muted mt-1';
 </script>
 
 <div>
   {#if displayName !== undefined}
-    <div class="flex items-center gap-3 mb-4">
-      <h1 class="text-lg font-bold text-text-primary m-0">
+    <div class="flex flex-wrap items-center gap-3 mb-4">
+      <h1 class="text-lg font-bold text-text-primary m-0 break-all min-w-0">
         Configure: {displayName}
       </h1>
       {#if isOnline !== undefined}
-        <StatusBadge
-          label={isOnline ? "online" : "offline"}
-          state={isOnline ? "ok" : "err"}
-        />
+        <StatusBadge label={isOnline ? 'online' : 'offline'} state={isOnline ? 'ok' : 'err'} />
       {/if}
     </div>
   {/if}
@@ -433,20 +420,16 @@
         variant="warn"
         message="Restart needed — some changes require a forwarder restart to take effect."
         actionLabel={controlActionBusy.restartService
-          ? "Restarting..."
-          : "Restart Forwarder Service"}
+          ? 'Restarting...'
+          : 'Restart Forwarder Service'}
         actionBusy={controlActionBusy.restartService}
-        onAction={() => requestControlAction("restartService")}
+        onAction={() => requestControlAction('restartService')}
       />
     </div>
   {/if}
 
   {#if controlActionMessage}
-    <p
-      class="text-sm mb-4 m-0 {controlActionMessage.ok
-        ? 'text-status-ok'
-        : 'text-status-err'}"
-    >
+    <p class="text-sm mb-4 m-0 {controlActionMessage.ok ? 'text-status-ok' : 'text-status-err'}">
       {controlActionMessage.text}
     </p>
   {/if}
@@ -464,24 +447,24 @@
         <!-- General -->
         <Card title="General" helpSection="general" helpContext="forwarder">
           <label class="block text-sm font-medium text-text-secondary">
-            Display Name <HelpTip fieldKey="display_name" sectionKey="general" context="forwarder" />
+            Display Name <HelpTip
+              fieldKey="display_name"
+              sectionKey="general"
+              context="forwarder"
+            />
             <input type="text" bind:value={generalDisplayName} class="mt-1 {inputClass}" />
             <p class={hintClass}>Optional. Used to identify this forwarder.</p>
           </label>
-          <button
-            class={saveBtnClass}
-            onclick={saveGeneral}
-            disabled={savingSection["general"]}
-          >
-            {savingSection["general"] ? "Saving..." : "Save General"}
+          <button class={saveBtnClass} onclick={saveGeneral} disabled={savingSection['general']}>
+            {savingSection['general'] ? 'Saving...' : 'Save General'}
           </button>
-          {#if sectionMessages["general"]}
+          {#if sectionMessages['general']}
             <p
               class="text-xs mt-1 m-0 {sectionMessages['general'].ok
                 ? 'text-status-ok'
                 : 'text-status-err'}"
             >
-              {sectionMessages["general"].text}
+              {sectionMessages['general'].text}
             </p>
           {/if}
         </Card>
@@ -498,28 +481,31 @@
             <label class="block text-sm font-medium text-text-secondary">
               Server URL <HelpTip fieldKey="server_url" sectionKey="p2p" context="forwarder" />
               <input type="text" bind:value={p2pServerUrl} class="mt-1 {inputClass}" />
-              <p class={hintClass}>HTTPS URL used for registration and allow-list distribution. Reads still flow directly over iroh.</p>
+              <p class={hintClass}>
+                HTTPS URL used for registration and allow-list distribution. Reads still flow
+                directly over iroh.
+              </p>
             </label>
             <label class="block text-sm font-medium text-text-secondary">
-              Server Token File <HelpTip fieldKey="server_token_file" sectionKey="p2p" context="forwarder" />
+              Server Token File <HelpTip
+                fieldKey="server_token_file"
+                sectionKey="p2p"
+                context="forwarder"
+              />
               <input type="text" bind:value={p2pServerTokenFile} class="mt-1 {inputClass}" />
               <p class={hintClass}>Path to file containing the server bearer token.</p>
             </label>
           </div>
-          <button
-            class={saveBtnClass}
-            onclick={saveP2p}
-            disabled={savingSection["p2p"]}
-          >
-            {savingSection["p2p"] ? "Saving..." : "Save P2P"}
+          <button class={saveBtnClass} onclick={saveP2p} disabled={savingSection['p2p']}>
+            {savingSection['p2p'] ? 'Saving...' : 'Save P2P'}
           </button>
-          {#if sectionMessages["p2p"]}
+          {#if sectionMessages['p2p']}
             <p
               class="text-xs mt-1 m-0 {sectionMessages['p2p'].ok
                 ? 'text-status-ok'
                 : 'text-status-err'}"
             >
-              {sectionMessages["p2p"].text}
+              {sectionMessages['p2p'].text}
             </p>
           {/if}
         </Card>
@@ -528,24 +514,47 @@
       <!-- Readers -->
       <Card title="Readers" helpSection="readers" helpContext="forwarder">
         <p class={hintClass}>
-          IPICO reader devices this forwarder connects to. Reader port defaults to 10000. At least one reader is required.
+          IPICO reader devices this forwarder connects to. Reader port defaults to 10000. At least
+          one reader is required.
         </p>
         <div class="overflow-x-auto">
           <table class="w-full text-sm border-collapse">
             <thead>
               <tr class="border-b-2 border-border">
                 <th class="text-left py-2 px-2 text-xs font-medium text-text-muted" colspan="2">
-                  IP Address <HelpTip fieldKey="reader_ip" sectionKey="readers" context="forwarder" />
+                  IP Address <HelpTip
+                    fieldKey="reader_ip"
+                    sectionKey="readers"
+                    context="forwarder"
+                  />
                 </th>
                 <th class="text-left py-2 px-2 text-xs font-medium text-text-muted w-24">
-                  Reader Port <HelpTip fieldKey="reader_port" sectionKey="readers" context="forwarder" />
+                  Reader Port <HelpTip
+                    fieldKey="reader_port"
+                    sectionKey="readers"
+                    context="forwarder"
+                  />
                 </th>
-                <th class="text-left py-2 px-2 text-xs font-medium text-text-muted">Enabled <HelpTip fieldKey="enabled" sectionKey="readers" context="forwarder" /></th>
+                <th class="text-left py-2 px-2 text-xs font-medium text-text-muted"
+                  >Enabled <HelpTip
+                    fieldKey="enabled"
+                    sectionKey="readers"
+                    context="forwarder"
+                  /></th
+                >
                 <th class="text-left py-2 px-2 text-xs font-medium text-text-muted w-28">
-                  Default Local Port <HelpTip fieldKey="default_local_port" sectionKey="readers" context="forwarder" />
+                  Default Local Port <HelpTip
+                    fieldKey="default_local_port"
+                    sectionKey="readers"
+                    context="forwarder"
+                  />
                 </th>
                 <th class="text-left py-2 px-2 text-xs font-medium text-text-muted w-28">
-                  Local Port Override <HelpTip fieldKey="local_port_override" sectionKey="readers" context="forwarder" />
+                  Local Port Override <HelpTip
+                    fieldKey="local_port_override"
+                    sectionKey="readers"
+                    context="forwarder"
+                  />
                 </th>
                 <th class="py-2 px-2"></th>
               </tr>
@@ -577,7 +586,7 @@
                         />
                       </span>
                     </td>
-                  <!-- Safe: guarded by {#if reader.is_range} above; Svelte doesn't narrow in {:else} -->
+                    <!-- Safe: guarded by {#if reader.is_range} above; Svelte doesn't narrow in {:else} -->
                   {:else}
                     <td class="py-1.5 px-2" colspan="2">
                       <input
@@ -609,14 +618,32 @@
                   </td>
                   <td class="py-1.5 px-2 w-28">
                     {#if reader.is_range}
-                      <input type="text" disabled value="—" aria-label="Reader {i + 1} default local port" class="{inputClass} opacity-50" />
+                      <input
+                        type="text"
+                        disabled
+                        value="—"
+                        aria-label="Reader {i + 1} default local port"
+                        class="{inputClass} opacity-50"
+                      />
                     {:else}
-                      <input type="text" disabled value={defaultFallbackPort((reader as SingleReaderEntry).ip) || "—"} aria-label="Reader {i + 1} default local port" class="{inputClass} opacity-50" />
+                      <input
+                        type="text"
+                        disabled
+                        value={defaultFallbackPort((reader as SingleReaderEntry).ip) || '—'}
+                        aria-label="Reader {i + 1} default local port"
+                        class="{inputClass} opacity-50"
+                      />
                     {/if}
                   </td>
                   <td class="py-1.5 px-2 w-28">
                     {#if reader.is_range}
-                      <input type="number" disabled placeholder="N/A" aria-label="Reader {i + 1} port override" class={inputClass} />
+                      <input
+                        type="number"
+                        disabled
+                        placeholder="N/A"
+                        aria-label="Reader {i + 1} port override"
+                        class={inputClass}
+                      />
                     {:else}
                       <input
                         type="number"
@@ -643,7 +670,9 @@
           </table>
         </div>
         <p class="text-xs text-text-muted mt-2">
-          Ranges expand the last octet, e.g. Start IP <code>192.168.0.150</code> with End Octet <code>160</code> connects to .150 through .160. Local port overrides are only supported for single-reader rows.
+          Ranges expand the last octet, e.g. Start IP <code>192.168.0.150</code> with End Octet
+          <code>160</code> connects to .150 through .160. Local port overrides are only supported for
+          single-reader rows.
         </p>
         <div class="flex gap-2 mt-2">
           <button
@@ -658,21 +687,17 @@
           >
             + Add Range
           </button>
-          <button
-            class={saveBtnClass}
-            onclick={saveReaders}
-            disabled={savingSection["readers"]}
-          >
-            {savingSection["readers"] ? "Saving..." : "Save Readers"}
+          <button class={saveBtnClass} onclick={saveReaders} disabled={savingSection['readers']}>
+            {savingSection['readers'] ? 'Saving...' : 'Save Readers'}
           </button>
         </div>
-        {#if sectionMessages["readers"]}
+        {#if sectionMessages['readers']}
           <p
             class="text-xs mt-1 m-0 {sectionMessages['readers'].ok
               ? 'text-status-ok'
               : 'text-status-err'}"
           >
-            {sectionMessages["readers"].text}
+            {sectionMessages['readers'].text}
           </p>
         {/if}
       </Card>
@@ -684,68 +709,58 @@
 
         <label class="mt-3 block text-sm font-medium text-text-secondary">
           <span class="inline-flex items-center gap-2">
-            <input
-              type="checkbox"
-              bind:checked={controlAllowPowerActions}
-              class="accent-accent"
+            <input type="checkbox" bind:checked={controlAllowPowerActions} class="accent-accent" />
+            Allow restart/shutdown actions for the forwarder device <HelpTip
+              fieldKey="allow_power_actions"
+              sectionKey="controls"
+              context="forwarder"
             />
-            Allow restart/shutdown actions for the forwarder device <HelpTip fieldKey="allow_power_actions" sectionKey="controls" context="forwarder" />
           </span>
           <p class={hintClass}>
             Required for "Restart Forwarder Device" and "Shutdown Forwarder Device".
           </p>
         </label>
-        <button
-          class={saveBtnClass}
-          onclick={saveControl}
-          disabled={savingSection["control"]}
-        >
-          {savingSection["control"] ? "Saving..." : "Save Control"}
+        <button class={saveBtnClass} onclick={saveControl} disabled={savingSection['control']}>
+          {savingSection['control'] ? 'Saving...' : 'Save Control'}
         </button>
-        {#if sectionMessages["control"]}
+        {#if sectionMessages['control']}
           <p
             class="text-xs mt-1 m-0 {sectionMessages['control'].ok
               ? 'text-status-ok'
               : 'text-status-err'}"
           >
-            {sectionMessages["control"].text}
+            {sectionMessages['control'].text}
           </p>
         {/if}
       </Card>
 
       <Card title="Dangerous Actions" helpSection="dangerous_actions" helpContext="forwarder">
-        <p class="{hintClass} mt-0">
-          Confirm before using these actions in production.
-        </p>
+        <p class="{hintClass} mt-0">Confirm before using these actions in production.</p>
         <div class="flex flex-wrap gap-2 mt-3">
           <button
             class={dangerousActionBtnClass}
-            onclick={() => requestControlAction("restartService")}
+            onclick={() => requestControlAction('restartService')}
             disabled={controlActionBusy.restartService}
           >
             {controlActionBusy.restartService
-              ? "Restarting Service..."
-              : "Restart Forwarder Service"}
+              ? 'Restarting Service...'
+              : 'Restart Forwarder Service'}
           </button>
           <button
             class={dangerousActionBtnClass}
-            onclick={() => requestControlAction("restartDevice")}
+            onclick={() => requestControlAction('restartDevice')}
             disabled={controlActionBusy.restartDevice || !powerActionsEnabled}
             title={powerActionsDisabledReason}
           >
-            {controlActionBusy.restartDevice
-              ? "Restarting Device..."
-              : "Restart Forwarder Device"}
+            {controlActionBusy.restartDevice ? 'Restarting Device...' : 'Restart Forwarder Device'}
           </button>
           <button
             class={dangerousActionBtnClass}
-            onclick={() => requestControlAction("shutdownDevice")}
+            onclick={() => requestControlAction('shutdownDevice')}
             disabled={controlActionBusy.shutdownDevice || !powerActionsEnabled}
             title={powerActionsDisabledReason}
           >
-            {controlActionBusy.shutdownDevice
-              ? "Shutting Down..."
-              : "Shutdown Forwarder Device"}
+            {controlActionBusy.shutdownDevice ? 'Shutting Down...' : 'Shutdown Forwarder Device'}
           </button>
         </div>
       </Card>
@@ -756,7 +771,7 @@
           onclick={() => (showAdvanced = !showAdvanced)}
           class="text-sm font-medium text-accent hover:underline"
         >
-          {showAdvanced ? "▼" : "▶"} Advanced Settings
+          {showAdvanced ? '▼' : '▶'} Advanced Settings
         </button>
       </div>
 
@@ -766,24 +781,24 @@
           <!-- Auth -->
           <Card title="Auth" helpSection="auth" helpContext="forwarder">
             <label class="block text-sm font-medium text-text-secondary">
-              Token File Path <HelpTip fieldKey="token_file" sectionKey="auth" context="forwarder" />
+              Token File Path <HelpTip
+                fieldKey="token_file"
+                sectionKey="auth"
+                context="forwarder"
+              />
               <input type="text" bind:value={authTokenFile} class="mt-1 {inputClass}" />
               <p class={hintClass}>Path to file containing authentication token.</p>
             </label>
-            <button
-              class={saveBtnClass}
-              onclick={saveAuth}
-              disabled={savingSection["auth"]}
-            >
-              {savingSection["auth"] ? "Saving..." : "Save Auth"}
+            <button class={saveBtnClass} onclick={saveAuth} disabled={savingSection['auth']}>
+              {savingSection['auth'] ? 'Saving...' : 'Save Auth'}
             </button>
-            {#if sectionMessages["auth"]}
+            {#if sectionMessages['auth']}
               <p
                 class="text-xs mt-1 m-0 {sectionMessages['auth'].ok
                   ? 'text-status-ok'
                   : 'text-status-err'}"
               >
-                {sectionMessages["auth"].text}
+                {sectionMessages['auth'].text}
               </p>
             {/if}
           </Card>
@@ -794,30 +809,44 @@
           <Card title="Journal" helpSection="journal" helpContext="forwarder">
             <div class="space-y-3">
               <label class="block text-sm font-medium text-text-secondary">
-                SQLite Path <HelpTip fieldKey="sqlite_path" sectionKey="journal" context="forwarder" />
+                SQLite Path <HelpTip
+                  fieldKey="sqlite_path"
+                  sectionKey="journal"
+                  context="forwarder"
+                />
                 <input type="text" bind:value={journalSqlitePath} class="mt-1 {inputClass}" />
-                <p class={hintClass}>Optional. Path to SQLite journal. Default if unset: in-memory.</p>
+                <p class={hintClass}>
+                  Optional. Path to SQLite journal. Default if unset: in-memory.
+                </p>
               </label>
               <label class="block text-sm font-medium text-text-secondary">
-                Prune Watermark % <HelpTip fieldKey="prune_watermark_pct" sectionKey="journal" context="forwarder" />
-                <input type="number" bind:value={journalPruneWatermarkPct} min="0" max="100" class="mt-1 {inputClass}" />
-                <p class={hintClass}>Trigger journal pruning at this percentage full. Default if unset: 80%.</p>
+                Prune Watermark % <HelpTip
+                  fieldKey="prune_watermark_pct"
+                  sectionKey="journal"
+                  context="forwarder"
+                />
+                <input
+                  type="number"
+                  bind:value={journalPruneWatermarkPct}
+                  min="0"
+                  max="100"
+                  class="mt-1 {inputClass}"
+                />
+                <p class={hintClass}>
+                  Trigger journal pruning at this percentage full. Default if unset: 80%.
+                </p>
               </label>
             </div>
-            <button
-              class={saveBtnClass}
-              onclick={saveJournal}
-              disabled={savingSection["journal"]}
-            >
-              {savingSection["journal"] ? "Saving..." : "Save Journal"}
+            <button class={saveBtnClass} onclick={saveJournal} disabled={savingSection['journal']}>
+              {savingSection['journal'] ? 'Saving...' : 'Save Journal'}
             </button>
-            {#if sectionMessages["journal"]}
+            {#if sectionMessages['journal']}
               <p
                 class="text-xs mt-1 m-0 {sectionMessages['journal'].ok
                   ? 'text-status-ok'
                   : 'text-status-err'}"
               >
-                {sectionMessages["journal"].text}
+                {sectionMessages['journal'].text}
               </p>
             {/if}
           </Card>
@@ -827,22 +856,25 @@
             <label class="block text-sm font-medium text-text-secondary">
               Bind Address <HelpTip fieldKey="bind" sectionKey="status_http" context="forwarder" />
               <input type="text" bind:value={statusHttpBind} class="mt-1 {inputClass}" />
-              <p class={hintClass}>IP:port to listen on for status HTTP server. Example: 0.0.0.0:8080. Default if unset: 0.0.0.0:8080.</p>
+              <p class={hintClass}>
+                IP:port to listen on for status HTTP server. Example: 0.0.0.0:8080. Default if
+                unset: 0.0.0.0:8080.
+              </p>
             </label>
             <button
               class={saveBtnClass}
               onclick={saveStatusHttp}
-              disabled={savingSection["status_http"]}
+              disabled={savingSection['status_http']}
             >
-              {savingSection["status_http"] ? "Saving..." : "Save Status HTTP"}
+              {savingSection['status_http'] ? 'Saving...' : 'Save Status HTTP'}
             </button>
-            {#if sectionMessages["status_http"]}
+            {#if sectionMessages['status_http']}
               <p
                 class="text-xs mt-1 m-0 {sectionMessages['status_http'].ok
                   ? 'text-status-ok'
                   : 'text-status-err'}"
               >
-                {sectionMessages["status_http"].text}
+                {sectionMessages['status_http'].text}
               </p>
             {/if}
           </Card>
@@ -862,20 +894,16 @@
                 forwarder host's local time.
               </p>
             </label>
-            <button
-              class={saveBtnClass}
-              onclick={saveClock}
-              disabled={savingSection["clock"]}
-            >
-              {savingSection["clock"] ? "Saving..." : "Save Clock"}
+            <button class={saveBtnClass} onclick={saveClock} disabled={savingSection['clock']}>
+              {savingSection['clock'] ? 'Saving...' : 'Save Clock'}
             </button>
-            {#if sectionMessages["clock"]}
+            {#if sectionMessages['clock']}
               <p
                 class="text-xs mt-1 m-0 {sectionMessages['clock'].ok
                   ? 'text-status-ok'
                   : 'text-status-err'}"
               >
-                {sectionMessages["clock"].text}
+                {sectionMessages['clock'].text}
               </p>
             {/if}
           </Card>
@@ -885,26 +913,52 @@
               <label class="block text-sm font-medium text-text-secondary">
                 <span class="inline-flex items-center gap-2">
                   <input type="checkbox" bind:checked={upsEnabled} class="accent-accent" />
-                  Enable UPS monitoring <HelpTip fieldKey="enabled" sectionKey="ups" context="forwarder" />
+                  Enable UPS monitoring <HelpTip
+                    fieldKey="enabled"
+                    sectionKey="ups"
+                    context="forwarder"
+                  />
                 </span>
               </label>
               <label class="block text-sm font-medium text-text-secondary">
-                Daemon Address <HelpTip fieldKey="daemon_addr" sectionKey="ups" context="forwarder" />
+                Daemon Address <HelpTip
+                  fieldKey="daemon_addr"
+                  sectionKey="ups"
+                  context="forwarder"
+                />
                 <input
                   type="text"
                   bind:value={upsDaemonAddr}
                   placeholder="127.0.0.1:8423"
                   class="mt-1 {inputClass}"
                 />
-                <p class={hintClass}>Optional. Leave blank to use the PiSugar default daemon address.</p>
+                <p class={hintClass}>
+                  Optional. Leave blank to use the PiSugar default daemon address.
+                </p>
               </label>
               <label class="block text-sm font-medium text-text-secondary">
-                Poll Interval (seconds) <HelpTip fieldKey="poll_interval_secs" sectionKey="ups" context="forwarder" />
-                <input type="number" bind:value={upsPollIntervalSecs} min="1" max="60" class="mt-1 {inputClass}" />
-                <p class={hintClass}>Optional. Leave blank to use the default 5-second polling interval.</p>
+                Poll Interval (seconds) <HelpTip
+                  fieldKey="poll_interval_secs"
+                  sectionKey="ups"
+                  context="forwarder"
+                />
+                <input
+                  type="number"
+                  bind:value={upsPollIntervalSecs}
+                  min="1"
+                  max="60"
+                  class="mt-1 {inputClass}"
+                />
+                <p class={hintClass}>
+                  Optional. Leave blank to use the default 5-second polling interval.
+                </p>
               </label>
               <label class="block text-sm font-medium text-text-secondary">
-                Heartbeat Interval (seconds) <HelpTip fieldKey="upstream_heartbeat_secs" sectionKey="ups" context="forwarder" />
+                Heartbeat Interval (seconds) <HelpTip
+                  fieldKey="upstream_heartbeat_secs"
+                  sectionKey="ups"
+                  context="forwarder"
+                />
                 <input
                   type="number"
                   bind:value={upsUpstreamHeartbeatSecs}
@@ -912,23 +966,21 @@
                   max="300"
                   class="mt-1 {inputClass}"
                 />
-                <p class={hintClass}>Optional. Leave blank to use the default 60-second upstream heartbeat.</p>
+                <p class={hintClass}>
+                  Optional. Leave blank to use the default 60-second upstream heartbeat.
+                </p>
               </label>
             </div>
-            <button
-              class={saveBtnClass}
-              onclick={saveUps}
-              disabled={savingSection["ups"]}
-            >
-              {savingSection["ups"] ? "Saving..." : "Save UPS"}
+            <button class={saveBtnClass} onclick={saveUps} disabled={savingSection['ups']}>
+              {savingSection['ups'] ? 'Saving...' : 'Save UPS'}
             </button>
-            {#if sectionMessages["ups"]}
+            {#if sectionMessages['ups']}
               <p
                 class="text-xs mt-1 m-0 {sectionMessages['ups'].ok
                   ? 'text-status-ok'
                   : 'text-status-err'}"
               >
-                {sectionMessages["ups"].text}
+                {sectionMessages['ups'].text}
               </p>
             {/if}
           </Card>
@@ -943,15 +995,13 @@
                 <option value="check-only">Check Only (notify but don't download)</option>
                 <option value="disabled">Disabled</option>
               </select>
-              <p class={hintClass}>How the forwarder checks for and applies updates. Default if unset: automatic.</p>
+              <p class={hintClass}>
+                How the forwarder checks for and applies updates. Default if unset: automatic.
+              </p>
             </label>
             <div class="flex items-center gap-2">
-              <button
-                class={saveBtnClass}
-                onclick={saveUpdate}
-                disabled={savingSection["update"]}
-              >
-                {savingSection["update"] ? "Saving..." : "Save Update"}
+              <button class={saveBtnClass} onclick={saveUpdate} disabled={savingSection['update']}>
+                {savingSection['update'] ? 'Saving...' : 'Save Update'}
               </button>
               {#if configApi.checkForUpdate}
                 <button
@@ -959,17 +1009,17 @@
                   onclick={handleCheckUpdate}
                   disabled={checkingUpdate}
                 >
-                  {checkingUpdate ? "Checking..." : "Check Now"}
+                  {checkingUpdate ? 'Checking...' : 'Check Now'}
                 </button>
               {/if}
             </div>
-            {#if sectionMessages["update"]}
+            {#if sectionMessages['update']}
               <p
                 class="text-xs mt-1 m-0 {sectionMessages['update'].ok
                   ? 'text-status-ok'
                   : 'text-status-err'}"
               >
-                {sectionMessages["update"].text}
+                {sectionMessages['update'].text}
               </p>
             {/if}
             {#if checkMessage}

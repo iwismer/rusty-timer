@@ -605,7 +605,9 @@
       >
         <dl class="grid gap-2 text-sm" style="grid-template-columns: auto 1fr;">
           <dt class="text-text-muted">Forwarder ID</dt>
-          <dd class="font-mono text-text-primary">{status.forwarder_id}</dd>
+          <dd class="font-mono text-text-primary break-all min-w-0">
+            {status.forwarder_id}
+          </dd>
           <dt class="text-text-muted">Version</dt>
           <dd class="font-mono text-text-primary">{status.version}</dd>
           <dt class="text-text-muted">Readiness</dt>

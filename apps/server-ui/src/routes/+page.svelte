@@ -139,12 +139,17 @@
                 <td class={tableCellClass(false, "text-text-primary")}>
                   {streamForwarderNames[stream.endpoint_id] ??
                     stream.endpoint_id}
-                  <span class="block text-xs text-text-muted font-mono">
+                  <span
+                    class="block text-xs text-text-muted font-mono break-all"
+                  >
                     {stream.endpoint_id}
                   </span>
                 </td>
-                <td class={tableCellClass(false, "text-text-primary font-mono")}
-                  >{stream.stream_id}</td
+                <td
+                  class={tableCellClass(
+                    false,
+                    "text-text-primary font-mono break-all",
+                  )}>{stream.stream_id}</td
                 >
                 <td class={tableCellClass(false, "text-text-primary font-mono")}
                   >{stream.epoch}</td
@@ -170,7 +175,9 @@
               <tr class={tableRowClass}>
                 <td class={tableCellClass(false, "text-text-primary")}>
                   {forwarder.display_name ?? forwarder.endpoint_id}
-                  <span class="block text-xs text-text-muted font-mono">
+                  <span
+                    class="block text-xs text-text-muted font-mono break-all"
+                  >
                     {forwarder.endpoint_id}
                   </span>
                 </td>
@@ -213,8 +220,11 @@
           <tbody>
             {#each status.devices as device (device.endpoint_id)}
               <tr class={tableRowClass}>
-                <td class={tableCellClass(false, "text-text-primary font-mono")}
-                  >{device.endpoint_id}</td
+                <td
+                  class={tableCellClass(
+                    false,
+                    "text-text-primary font-mono break-all",
+                  )}>{device.endpoint_id}</td
                 >
                 <td class={tableCellClass(false, "text-text-primary")}
                   >{kindLabel(device.device_kind)}</td

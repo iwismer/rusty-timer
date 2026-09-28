@@ -432,7 +432,7 @@
           </div>
           <pre
             class="mt-3 overflow-x-auto rounded bg-surface-1 p-3 text-xs text-text-primary"><code
-              >{createdToken.token}</code
+              class="break-all whitespace-pre-wrap">{createdToken.token}</code
             ></pre>
         </div>
       {/if}
@@ -479,7 +479,7 @@
                   <td
                     class={tableCellClass(
                       false,
-                      "font-mono text-xs text-text-muted",
+                      "font-mono text-xs text-text-muted break-all",
                     )}>{token.token_id}</td
                   >
                   <td class={tableCellClass()}>

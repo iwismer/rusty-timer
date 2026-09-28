@@ -1,21 +1,16 @@
 <script lang="ts">
-  import { tick } from "svelte";
-  import {
-    LOG_LEVELS,
-    type LogLevel,
-    parseLogLevel,
-    filterEntries,
-  } from "../lib/log-filter";
+  import { tick } from 'svelte';
+  import { LOG_LEVELS, type LogLevel, parseLogLevel, filterEntries } from '../lib/log-filter';
 
   let {
     entries = [],
-    maxHeight = "300px",
+    maxHeight = '300px',
   }: {
     entries?: string[];
     maxHeight?: string;
   } = $props();
 
-  let selectedLevel = $state<LogLevel>("info");
+  let selectedLevel = $state<LogLevel>('info');
   let listEl: HTMLUListElement | undefined = $state();
 
   let filteredEntries = $derived(filterEntries(entries, selectedLevel));
@@ -44,23 +39,21 @@
 
   function levelColor(level: LogLevel): string {
     switch (level) {
-      case "error":
-        return "text-status-err";
-      case "warn":
-        return "text-status-warn";
-      case "debug":
-      case "trace":
-        return "text-text-muted";
+      case 'error':
+        return 'text-status-err';
+      case 'warn':
+        return 'text-status-warn';
+      case 'debug':
+      case 'trace':
+        return 'text-text-muted';
       default:
-        return "text-text-secondary";
+        return 'text-text-secondary';
     }
   }
 </script>
 
 <section data-testid="logs-section" class="flex flex-col {maxHeight === 'none' ? 'h-full' : ''}">
-  <div
-    class="flex items-center justify-between px-4 py-2 border-b border-border shrink-0"
-  >
+  <div class="flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
     <h2 class="text-sm font-semibold text-text-primary m-0">Logs</h2>
     <div class="flex items-center gap-3">
       <label class="flex items-center gap-1.5 text-xs text-text-muted">
@@ -81,19 +74,18 @@
     </div>
   </div>
   {#if filteredEntries.length === 0}
-    <p class="px-4 py-6 text-sm text-text-muted text-center m-0">
-      No log entries.
-    </p>
+    <p class="px-4 py-6 text-sm text-text-muted text-center m-0">No log entries.</p>
   {:else}
     <ul
       bind:this={listEl}
-      class="font-mono text-xs overflow-y-auto list-none p-0 m-0 {maxHeight === 'none' ? 'flex-1 min-h-0' : ''}"
+      class="font-mono text-xs overflow-y-auto overflow-x-auto list-none p-0 m-0 {maxHeight ===
+      'none'
+        ? 'flex-1 min-h-0'
+        : ''}"
       style={maxHeight !== 'none' ? `max-height: ${maxHeight}` : ''}
     >
       {#each filteredEntries as entry}
-        <li
-          class="px-4 py-1 border-b border-border {levelColor(parseLogLevel(entry))}"
-        >
+        <li class="px-4 py-1 border-b border-border break-all {levelColor(parseLogLevel(entry))}">
           {entry}
         </li>
       {/each}
