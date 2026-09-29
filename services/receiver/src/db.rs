@@ -352,7 +352,7 @@ impl Db {
         let announcer_enabled = self.load_announcer_enabled()?;
         let announcer_max_list_size = self.load_announcer_max_list_size()?;
         let rd_import = self.load_rd_import_config()?;
-        let tx = self.conn.transaction()?;
+        let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM profile")?;
         tx.execute(
             "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, dbf_flush_interval_ms, announcer_enabled, announcer_max_list_size, rd_import_enabled, rd_import_dir, rd_import_interval_secs) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
@@ -507,7 +507,7 @@ impl Db {
     /// smallest free digit in 0..=9; when all ten are taken the index is NULL
     /// and DBF delivery skips the stream.
     pub fn replace_stream_subscriptions(&mut self, subs: &[StreamSubscription]) -> DbResult<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.transaction()?;
         let existing: std::collections::HashMap<(String, String), i64> = {
             let mut stmt = tx.prepare(
                 "SELECT forwarder_endpoint_id, stream_id, dbf_reader_index
@@ -549,7 +549,7 @@ impl Db {
         &mut self,
         participants: &[crate::participants::Participant],
     ) -> DbResult<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM participants")?;
         for p in participants {
             tx.execute(
@@ -565,7 +565,7 @@ impl Db {
     /// Replace all division-code -> name entries (upload-replaces-all). Only
     /// Race Director imports populate this; other import sources clear it.
     pub fn replace_divisions(&mut self, divisions: &[(i32, String)]) -> DbResult<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM divisions")?;
         for (divno, name) in divisions {
             tx.execute(
@@ -588,7 +588,7 @@ impl Db {
         chips: &[(i64, String)],
         divisions: &[(i32, String)],
     ) -> DbResult<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM participants; DELETE FROM bib_chips; DELETE FROM divisions")?;
         for p in participants {
             tx.execute(
@@ -615,7 +615,7 @@ impl Db {
 
     /// Replace all bib->chip assignments with `chips` (upload-replaces-all).
     pub fn replace_bib_chips(&mut self, chips: &[(i64, String)]) -> DbResult<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM bib_chips")?;
         for (bib, chip_id) in chips {
             tx.execute(
@@ -1525,7 +1525,7 @@ impl Db {
     /// epoch override, reset local stream data, reconnect the consumer)
     /// depends on them surviving the reset.
     pub fn reset_stream_data(&mut self, stream_id: &str) -> DbResult<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.transaction()?;
         for sql in [
             "DELETE FROM received_events WHERE stream_id = ?1",
             "DELETE FROM gap_markers WHERE stream_id = ?1",
@@ -1540,7 +1540,7 @@ impl Db {
     }
 
     pub fn clear_data(&mut self) -> DbResult<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM cursors")?;
         tx.execute_batch("DELETE FROM received_events")?;
         tx.execute_batch("DELETE FROM announcer_source_fence")?;
@@ -1557,7 +1557,7 @@ impl Db {
     }
 
     pub fn factory_reset(&mut self) -> DbResult<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM cursors")?;
         tx.execute_batch("DELETE FROM received_events")?;
         tx.execute_batch("DELETE FROM announcer_source_fence")?;
@@ -2754,6 +2754,39 @@ mod tests {
         assert_eq!(raw.1, "11111111-1111-1111-1111-111111111111");
         assert_eq!(raw.2, None);
         assert_eq!(raw.3, None);
+    }
+
+    #[test]
+    fn replace_stream_subscriptions_rides_out_concurrent_write_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub_lock.sqlite3");
+        let mut db1 = Db::open(&path).unwrap();
+        let mut db2 = Db::open(&path).unwrap();
+
+        let (tx_held_tx, tx_held_rx) = std::sync::mpsc::channel();
+        let writer_handle = std::thread::spawn(move || {
+            let tx = db1.transaction().unwrap();
+            tx_held_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            tx.commit().unwrap();
+        });
+
+        tx_held_rx.recv().unwrap();
+
+        db2.replace_stream_subscriptions(&[StreamSubscription {
+            forwarder_endpoint_id: "ep-1".to_owned(),
+            stream_id: "s-1".to_owned(),
+            local_port_override: Some(9900),
+            event_type: EventType::Start,
+            forwarder_id: None,
+            reader_ip: None,
+        }])
+        .expect("replace_stream_subscriptions must ride out concurrent write transaction");
+
+        writer_handle.join().unwrap();
+        let subs = db2.load_stream_subscriptions().unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].local_port_override, Some(9900));
     }
 
     #[test]
