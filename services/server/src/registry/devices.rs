@@ -20,6 +20,7 @@ pub struct DeviceRecord {
     /// forwarder's self-pushed catalog name. `None` for legacy devices that
     /// enrolled without an enrollment token and never pushed a name.
     pub display_name: Option<String>,
+    pub last_seen_unix_ms: Option<i64>,
 }
 
 /// Test-only: seed a device row with a hashed token (no `token_id`, so it does
@@ -40,13 +41,14 @@ pub(crate) fn register_device(
     conn.execute(
         "INSERT INTO devices (
              endpoint_id, device_kind, approval_state,
-             token_hash, created_unix_ms, updated_unix_ms
+             token_hash, created_unix_ms, updated_unix_ms, last_seen_unix_ms
          )
-         VALUES (?1, ?2, 'pending', ?3, ?4, ?4)
+         VALUES (?1, ?2, 'pending', ?3, ?4, ?4, ?4)
          ON CONFLICT(endpoint_id) DO UPDATE SET
              device_kind = excluded.device_kind,
              token_hash = excluded.token_hash,
-             updated_unix_ms = excluded.updated_unix_ms",
+             updated_unix_ms = excluded.updated_unix_ms,
+             last_seen_unix_ms = excluded.last_seen_unix_ms",
         params![endpoint_id, device_kind.as_str(), token_hash, now],
     )?;
 
@@ -121,12 +123,13 @@ pub(crate) fn register_device_minted(
     tx.execute(
         "INSERT INTO devices (
              endpoint_id, device_kind, approval_state,
-             token_hash, created_unix_ms, updated_unix_ms
+             token_hash, created_unix_ms, updated_unix_ms, last_seen_unix_ms
          )
-         VALUES (?1, ?2, 'pending', ?3, ?4, ?4)
+         VALUES (?1, ?2, 'pending', ?3, ?4, ?4, ?4)
          ON CONFLICT(endpoint_id) DO UPDATE SET
              device_kind = excluded.device_kind,
-             updated_unix_ms = excluded.updated_unix_ms",
+             updated_unix_ms = excluded.updated_unix_ms,
+             last_seen_unix_ms = excluded.last_seen_unix_ms",
         params![endpoint_id, device_kind.as_str(), Vec::<u8>::new(), now],
     )?;
     let device_token = mint_device_token_into(&tx, endpoint_id)?;
@@ -235,7 +238,7 @@ pub fn register_device_with_voucher(
         // not silently yield an active token.
         tx.execute(
             "UPDATE devices
-             SET device_kind = ?2, approval_state = 'pending', updated_unix_ms = ?3
+             SET device_kind = ?2, approval_state = 'pending', updated_unix_ms = ?3, last_seen_unix_ms = ?3
              WHERE endpoint_id = ?1",
             params![endpoint_id, device_kind.as_str(), now],
         )?;
@@ -243,9 +246,9 @@ pub fn register_device_with_voucher(
         tx.execute(
             "INSERT INTO devices (
                  endpoint_id, device_kind, approval_state,
-                 token_hash, created_unix_ms, updated_unix_ms
+                 token_hash, created_unix_ms, updated_unix_ms, last_seen_unix_ms
              )
-             VALUES (?1, ?2, 'pending', ?3, ?4, ?4)",
+             VALUES (?1, ?2, 'pending', ?3, ?4, ?4, ?4)",
             params![endpoint_id, device_kind.as_str(), Vec::<u8>::new(), now],
         )?;
     }
@@ -274,9 +277,9 @@ pub(crate) fn seed_active_device(
     conn.execute(
         "INSERT INTO devices (
              endpoint_id, device_kind, approval_state,
-             token_hash, token_id, created_unix_ms, updated_unix_ms
+             token_hash, token_id, created_unix_ms, updated_unix_ms, last_seen_unix_ms
          )
-         VALUES (?1, ?2, 'active', ?3, ?4, ?5, ?5)",
+         VALUES (?1, ?2, 'active', ?3, ?4, ?5, ?5, ?5)",
         params![
             endpoint_id,
             device_kind.as_str(),
@@ -327,6 +330,22 @@ pub fn set_device_display_name(
     conn.execute(
         "UPDATE devices SET display_name = ?2 WHERE endpoint_id = ?1",
         params![endpoint_id, trimmed],
+    )?;
+    Ok(())
+}
+
+/// Update a device's `last_seen_unix_ms` to `now`.
+///
+/// Throttled so that rapid polling (e.g. receiver 1s discovery loop) does not
+/// write to SQLite on every single hit; writes at most once every 5 seconds.
+pub fn touch_device_last_seen(conn: &Connection, endpoint_id: &str) -> rusqlite::Result<()> {
+    let now = Utc::now().timestamp_millis();
+    conn.execute(
+        "UPDATE devices
+         SET last_seen_unix_ms = ?2
+         WHERE endpoint_id = ?1
+           AND (last_seen_unix_ms IS NULL OR ?2 - last_seen_unix_ms > 5000)",
+        params![endpoint_id, now],
     )?;
     Ok(())
 }

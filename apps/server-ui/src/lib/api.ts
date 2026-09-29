@@ -8,6 +8,7 @@ export interface DeviceRecord {
   device_kind: DeviceKind;
   approval_state: ApprovalState;
   display_name: string | null;
+  last_seen_unix_ms?: number | null;
 }
 
 export interface ForwarderStreamRecord {

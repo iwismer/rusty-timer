@@ -35,13 +35,14 @@ pub struct AnnouncerRow {
     pub division: Option<String>,
 }
 
-/// A registered device record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceRecord {
     pub endpoint_id: String,
     pub device_kind: DeviceKind,
     pub approval_state: ApprovalState,
     pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_unix_ms: Option<i64>,
 }
 
 /// A registered forwarder's latest pushed identity.

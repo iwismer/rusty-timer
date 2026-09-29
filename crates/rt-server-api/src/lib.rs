@@ -241,6 +241,7 @@ mod tests {
                 device_kind: DeviceKind::Receiver,
                 approval_state: ApprovalState::Active,
                 display_name: None,
+                last_seen_unix_ms: None,
             }],
             forwarders: vec![crate::status::ForwarderRecord {
                 endpoint_id: "fwd-1".to_owned(),

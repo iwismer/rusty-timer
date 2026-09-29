@@ -10,7 +10,8 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
              token_hash BLOB NOT NULL,
              created_unix_ms INTEGER NOT NULL,
              updated_unix_ms INTEGER NOT NULL,
-             display_name TEXT
+             display_name TEXT,
+             last_seen_unix_ms INTEGER
          );
          CREATE TABLE IF NOT EXISTS forwarders (
              endpoint_id TEXT PRIMARY KEY,
@@ -64,6 +65,10 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // the TTL was introduced).
     if !column_exists(conn, "enrollment_tokens", "expires_unix_ms")? {
         conn.execute_batch("ALTER TABLE enrollment_tokens ADD COLUMN expires_unix_ms INTEGER;")?;
+    }
+
+    if !column_exists(conn, "devices", "last_seen_unix_ms")? {
+        conn.execute_batch("ALTER TABLE devices ADD COLUMN last_seen_unix_ms INTEGER;")?;
     }
 
     Ok(())

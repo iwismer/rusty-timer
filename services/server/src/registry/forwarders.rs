@@ -75,12 +75,13 @@ pub fn upsert_forwarder_catalog(
     tx.execute(
         "INSERT INTO devices (
              endpoint_id, device_kind, approval_state,
-             token_hash, created_unix_ms, updated_unix_ms
+             token_hash, created_unix_ms, updated_unix_ms, last_seen_unix_ms
          )
-         VALUES (?1, 'forwarder', 'pending', ?2, ?3, ?3)
+         VALUES (?1, 'forwarder', 'pending', ?2, ?3, ?3, ?3)
          ON CONFLICT(endpoint_id) DO UPDATE SET
              device_kind = 'forwarder',
-             updated_unix_ms = excluded.updated_unix_ms",
+             updated_unix_ms = excluded.updated_unix_ms,
+             last_seen_unix_ms = excluded.last_seen_unix_ms",
         params![endpoint_id, Vec::<u8>::new(), now],
     )?;
 

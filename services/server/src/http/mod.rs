@@ -104,6 +104,7 @@ pub(crate) fn authorize_active_device_kind(
         Ok(Some(record))
             if record.device_kind == kind && record.approval_state == ApprovalState::Active =>
         {
+            let _ = registry::touch_device_last_seen(&conn, &record.endpoint_id);
             Ok(())
         }
         Ok(_) => Err(StatusCode::UNAUTHORIZED),
@@ -130,6 +131,7 @@ pub(crate) fn authorize_forwarder_catalog(
         Ok(Some(record))
             if record.device_kind == DeviceKind::Forwarder && record.endpoint_id == endpoint_id =>
         {
+            let _ = registry::touch_device_last_seen(&conn, &record.endpoint_id);
             Ok(())
         }
         Ok(_) => Err(StatusCode::UNAUTHORIZED),
@@ -152,7 +154,10 @@ pub(crate) fn authorize_forwarder_self(
     };
     let conn = state.conn.lock().expect("registry mutex poisoned");
     match registry::authenticate_device(&conn, raw) {
-        Ok(Some(record)) if record.device_kind == DeviceKind::Forwarder => Ok(record.endpoint_id),
+        Ok(Some(record)) if record.device_kind == DeviceKind::Forwarder => {
+            let _ = registry::touch_device_last_seen(&conn, &record.endpoint_id);
+            Ok(record.endpoint_id)
+        }
         Ok(_) => Err(StatusCode::UNAUTHORIZED),
         Err(err) => {
             tracing::error!(error = %err, "device authentication failed");

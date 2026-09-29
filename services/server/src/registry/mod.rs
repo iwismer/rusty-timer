@@ -19,7 +19,7 @@ pub use announcer_store::{
 };
 pub use devices::{
     ApprovalState, DeviceKind, DeviceRecord, MintedRegistration, approve_device, get_device,
-    list_devices, register_device_with_voucher, set_device_display_name,
+    list_devices, register_device_with_voucher, set_device_display_name, touch_device_last_seen,
 };
 #[cfg(test)]
 pub(crate) use devices::{register_device, register_device_minted, seed_active_device};
@@ -36,7 +36,7 @@ pub use forwarders::{
 pub use schema::migrate;
 pub use tokens::{authenticate_device, hash_token, verify_token};
 
-/// Map a row of `(endpoint_id, device_kind, approval_state, display_name)` into
+/// Map a row of `(endpoint_id, device_kind, approval_state, display_name, last_seen_unix_ms)` into
 /// a [`DeviceRecord`]. Shared by the device list and single-device fetch so
 /// both surface the same human-friendly name resolution.
 pub(crate) fn device_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRecord> {
@@ -61,6 +61,7 @@ pub(crate) fn device_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Devic
         device_kind,
         approval_state,
         display_name: row.get(3)?,
+        last_seen_unix_ms: row.get(4)?,
     })
 }
 
@@ -79,7 +80,8 @@ pub(crate) const DEVICE_SELECT_WITH_NAME: &str =
                  ORDER BY et.used_unix_ms DESC LIMIT 1),
                 d.display_name,
                 f.display_name
-            ) AS display_name
+            ) AS display_name,
+            COALESCE(d.last_seen_unix_ms, f.last_seen_unix_ms) AS last_seen_unix_ms
      FROM devices d
      LEFT JOIN forwarders f ON f.endpoint_id = d.endpoint_id";
 

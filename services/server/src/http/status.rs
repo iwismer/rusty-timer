@@ -157,6 +157,7 @@ fn device_to_wire(record: DeviceRecord) -> wire::DeviceRecord {
         device_kind: record.device_kind,
         approval_state: record.approval_state,
         display_name: record.display_name,
+        last_seen_unix_ms: record.last_seen_unix_ms,
     }
 }
 

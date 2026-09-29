@@ -232,4 +232,35 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
+
+    #[tokio::test]
+    async fn receiver_discovery_updates_last_seen() {
+        let state = test_state();
+        let token = {
+            let conn = state.conn.lock().unwrap();
+            let minted = crate::registry::register_device_minted(
+                &conn,
+                "rx-active-poll",
+                crate::registry::DeviceKind::Receiver,
+            )
+            .unwrap();
+            crate::registry::approve_device(&conn, "rx-active-poll")
+                .unwrap()
+                .unwrap();
+            minted.device_token
+        };
+
+        let resp = router(state.clone())
+            .oneshot(forwarders_request(&token))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let conn = state.conn.lock().unwrap();
+        let device = crate::registry::get_device(&conn, "rx-active-poll")
+            .unwrap()
+            .expect("device exists");
+        assert!(device.last_seen_unix_ms.is_some());
+        assert!(device.last_seen_unix_ms.unwrap() > 0);
+    }
 }
