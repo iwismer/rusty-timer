@@ -4,6 +4,7 @@
 //! `control_api.rs`, which re-exports every item here so external callers keep
 //! using `control_api::*` paths.
 
+pub mod export;
 pub mod forwarders;
 pub mod imports;
 pub mod profile;

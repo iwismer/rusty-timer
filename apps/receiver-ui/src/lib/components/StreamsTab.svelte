@@ -21,6 +21,7 @@
     openHelp,
   } from "$lib/store.svelte";
   import type { StreamEntry } from "$lib/api";
+  import ExportTagdataModal from "$lib/components/ExportTagdataModal.svelte";
   import { btnPrimary, btnSecondary } from "$lib/ui-classes";
   import {
     deriveStreamDisplayStatus,
@@ -31,6 +32,8 @@
 
   let tableWidth = $state(0);
   let expandedKey = $state<string | null>(null);
+  let exportModalOpen = $state(false);
+  let exportInitialStreamId = $state<string | null>(null);
 
   // Fixed column widths (approx)
   const READS_COL = 70;
@@ -194,22 +197,36 @@
     </div>
   {/if}
 
-  {#if store.streams?.streams.some((stream) => !stream.subscribed)}
-    <div class="flex justify-end gap-2 px-4 py-2 border-b border-border">
+  {#if store.streams && store.streams.streams.length > 0}
+    <div
+      class="flex justify-end items-center gap-2 px-4 py-2 border-b border-border"
+    >
       <button
-        data-testid="subscribe-all-btn"
-        class={btnPrimary}
-        onclick={() => void subscribeAllAvailable()}
-        disabled={store.streamActionBusy}
+        data-testid="export-tagdata-btn"
+        class={btnSecondary}
+        onclick={() => {
+          exportInitialStreamId = null;
+          exportModalOpen = true;
+        }}
       >
-        Subscribe All
+        Export TAGDATA
       </button>
-      <HelpTip
-        fieldKey="subscribe_all"
-        sectionKey="streams"
-        context="receiver"
-        onOpenModal={openHelp}
-      />
+      {#if store.streams.streams.some((stream) => !stream.subscribed)}
+        <button
+          data-testid="subscribe-all-btn"
+          class={btnPrimary}
+          onclick={() => void subscribeAllAvailable()}
+          disabled={store.streamActionBusy}
+        >
+          Subscribe All
+        </button>
+        <HelpTip
+          fieldKey="subscribe_all"
+          sectionKey="streams"
+          context="receiver"
+          onOpenModal={openHelp}
+        />
+      {/if}
     </div>
   {/if}
 
@@ -646,6 +663,21 @@
                         onOpenModal={openHelp}
                       />
 
+                      <button
+                        data-testid="export-stream-tagdata-{key}"
+                        class={btnSecondary}
+                        class:!px-2.5={true}
+                        class:!py-1={true}
+                        class:!text-xs={true}
+                        onclick={(e) => {
+                          e.stopPropagation();
+                          exportInitialStreamId = key;
+                          exportModalOpen = true;
+                        }}
+                      >
+                        Export TAGDATA
+                      </button>
+
                       {#if stream.subscribed}
                         <label
                           class="inline-flex items-center gap-1.5 text-xs text-text-muted"
@@ -685,3 +717,11 @@
     </div>
   {/if}
 </div>
+
+<ExportTagdataModal
+  open={exportModalOpen}
+  initialStreamId={exportInitialStreamId}
+  onclose={() => {
+    exportModalOpen = false;
+  }}
+/>

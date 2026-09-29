@@ -386,6 +386,10 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
             )
             .await?)
         }
+        "get_export_epochs" => {
+            ok(control_api::get_export_epochs(state, arg(args, "stream_id")?).await?)
+        }
+        "export_tagdata" => ok(control_api::export_tagdata(state, arg(args, "request")?).await?),
         other => Err(BridgeError::Unknown(other.to_owned())),
     }
 }

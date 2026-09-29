@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub mod config;
 pub mod config_service;
 pub mod discovery;
+pub mod export;
 pub mod local_fanout;
 pub mod p2p;
 pub mod pisugar_client;

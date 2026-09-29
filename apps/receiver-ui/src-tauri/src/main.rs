@@ -761,6 +761,26 @@ async fn update_subscription_event_type(
     .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn get_export_epochs(
+    state: State<'_, Arc<AppState>>,
+    stream_id: Option<String>,
+) -> CmdResult<control_api::ExportEpochsResponse> {
+    control_api::get_export_epochs(&state, stream_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn export_tagdata(
+    state: State<'_, Arc<AppState>>,
+    request: control_api::ExportTagdataRequest,
+) -> CmdResult<control_api::ExportTagdataResponse> {
+    control_api::export_tagdata(&state, request)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Event bridge: forward ReceiverUiEvent -> Tauri frontend events
 // ---------------------------------------------------------------------------

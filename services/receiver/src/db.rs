@@ -890,6 +890,90 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Load raw events for export, optionally filtered by `stream_id` and/or `epoch`,
+    /// ordered chronologically by `(received_unix_ms, seq)`.
+    pub fn load_raw_export_events(
+        &self,
+        stream_id: Option<&str>,
+        epoch: Option<i64>,
+    ) -> DbResult<Vec<ReceivedEvent>> {
+        let (sql, params_vec): (String, Vec<rusqlite::types::Value>) = match (stream_id, epoch) {
+            (Some(s), Some(e)) => {
+                let alt = s
+                    .split_once('/')
+                    .map(|(ep, wire)| format!("{ep}\u{1f}{wire}"))
+                    .unwrap_or_else(|| s.to_string());
+                (
+                    "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
+                     FROM received_events
+                     WHERE (stream_id = ?1 OR stream_id = ?2) AND epoch = ?3
+                     ORDER BY received_unix_ms ASC, seq ASC".to_string(),
+                    vec![s.to_string().into(), alt.into(), e.into()],
+                )
+            }
+            (Some(s), None) => {
+                let alt = s
+                    .split_once('/')
+                    .map(|(ep, wire)| format!("{ep}\u{1f}{wire}"))
+                    .unwrap_or_else(|| s.to_string());
+                (
+                    "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
+                     FROM received_events
+                     WHERE stream_id = ?1 OR stream_id = ?2
+                     ORDER BY received_unix_ms ASC, seq ASC".to_string(),
+                    vec![s.to_string().into(), alt.into()],
+                )
+            }
+            (None, Some(e)) => (
+                "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
+                 FROM received_events
+                 WHERE epoch = ?1
+                 ORDER BY received_unix_ms ASC, seq ASC".to_string(),
+                vec![e.into()],
+            ),
+            (None, None) => (
+                "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
+                 FROM received_events
+                 ORDER BY received_unix_ms ASC, seq ASC".to_string(),
+                vec![],
+            ),
+        };
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(params_vec),
+            received_event_from_row,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Load distinct epochs present in `received_events`, newest first.
+    pub fn load_distinct_received_epochs(&self, stream_id: Option<&str>) -> DbResult<Vec<i64>> {
+        let mut epochs = Vec::new();
+        if let Some(stream) = stream_id {
+            let alt = stream
+                .split_once('/')
+                .map(|(ep, wire)| format!("{ep}\u{1f}{wire}"))
+                .unwrap_or_else(|| stream.to_string());
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT epoch FROM received_events WHERE stream_id = ?1 OR stream_id = ?2 ORDER BY epoch DESC",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![stream, alt], |row| row.get(0))?;
+            for ep in rows {
+                epochs.push(ep?);
+            }
+        } else {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT DISTINCT epoch FROM received_events ORDER BY epoch DESC")?;
+            let rows = stmt.query_map([], |row| row.get(0))?;
+            for ep in rows {
+                epochs.push(ep?);
+            }
+        }
+        Ok(epochs)
+    }
+
     /// Mark a single durable event as written to the DBF file. Only updates rows
     /// whose marker is still NULL, so this is safe to call repeatedly without
     /// overwriting an earlier delivery timestamp. Returns whether a row changed.
@@ -3314,5 +3398,74 @@ mod tests {
         assert_eq!(rows[0].latest_available_seq, 20);
         assert_eq!(rows[0].reason, "retention-window");
         assert_eq!(rows[0].created_unix_ms, 1_700_000_001_000);
+    }
+
+    #[test]
+    fn export_raw_events_and_epochs_queries() {
+        let db = Db::open_in_memory().unwrap();
+        let s1 = "s1";
+        let s2 = "s2";
+
+        db.insert_received_event(&ReceivedEventInsert {
+            stream_id: s1,
+            seq: 1,
+            epoch: 1,
+            raw_frame: b"raw1",
+            read_kind: "tag",
+            reader_timestamp: Some("2026-07-05T09:00:00Z"),
+            received_unix_ms: 100,
+            dbf_delivered_unix_ms: None,
+            chip_id: None,
+        })
+        .unwrap();
+
+        db.insert_received_event(&ReceivedEventInsert {
+            stream_id: s1,
+            seq: 2,
+            epoch: 2,
+            raw_frame: b"raw2",
+            read_kind: "tag",
+            reader_timestamp: Some("2026-07-05T09:01:00Z"),
+            received_unix_ms: 200,
+            dbf_delivered_unix_ms: None,
+            chip_id: None,
+        })
+        .unwrap();
+
+        db.insert_received_event(&ReceivedEventInsert {
+            stream_id: s2,
+            seq: 1,
+            epoch: 2,
+            raw_frame: b"raw3",
+            read_kind: "tag",
+            reader_timestamp: Some("2026-07-05T09:02:00Z"),
+            received_unix_ms: 300,
+            dbf_delivered_unix_ms: None,
+            chip_id: None,
+        })
+        .unwrap();
+
+        // Epochs
+        assert_eq!(db.load_distinct_received_epochs(None).unwrap(), vec![2, 1]);
+        assert_eq!(
+            db.load_distinct_received_epochs(Some(s1)).unwrap(),
+            vec![2, 1]
+        );
+        assert_eq!(db.load_distinct_received_epochs(Some(s2)).unwrap(), vec![2]);
+
+        // Raw export events
+        assert_eq!(db.load_raw_export_events(None, None).unwrap().len(), 3);
+        assert_eq!(db.load_raw_export_events(Some(s1), None).unwrap().len(), 2);
+        assert_eq!(db.load_raw_export_events(Some(s2), None).unwrap().len(), 1);
+        assert_eq!(db.load_raw_export_events(None, Some(1)).unwrap().len(), 1);
+        assert_eq!(db.load_raw_export_events(None, Some(2)).unwrap().len(), 2);
+        assert_eq!(
+            db.load_raw_export_events(Some(s1), Some(1)).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            db.load_raw_export_events(Some(s2), Some(1)).unwrap().len(),
+            0
+        );
     }
 }

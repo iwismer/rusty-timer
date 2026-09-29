@@ -748,3 +748,37 @@ export async function updateSubscriptionEventType(
     body: { event_type: eventType },
   });
 }
+
+export interface ExportEpochsResponse {
+  epochs: number[];
+}
+
+export interface ExportTagdataRequest {
+  stream_id?: string | null;
+  epoch?: number | null;
+  mode?: "merged" | "separate";
+  destination_dir?: string | null;
+}
+
+export interface ExportTagdataResponse {
+  read_count: number;
+  filename: string;
+  written_paths: string[];
+  content?: string | null;
+  zip_base64?: string | null;
+}
+
+export async function getExportEpochs(
+  streamId?: string | null,
+): Promise<ExportEpochsResponse> {
+  return invoke<ExportEpochsResponse>("get_export_epochs", {
+    stream_id: streamId ?? null,
+    streamId: streamId ?? null,
+  });
+}
+
+export async function exportTagdata(
+  request: ExportTagdataRequest,
+): Promise<ExportTagdataResponse> {
+  return invoke<ExportTagdataResponse>("export_tagdata", { request });
+}

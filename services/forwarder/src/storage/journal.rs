@@ -104,6 +104,16 @@ pub struct JournalEvent {
     pub received_at: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct RawExportEvent {
+    pub stream_key: String,
+    pub epoch: i64,
+    pub seq: i64,
+    pub raw_frame: Vec<u8>,
+    pub reader_timestamp: Option<String>,
+    pub received_unix_ms: i64,
+}
+
 /// Error type for journal operations.
 #[derive(Debug)]
 pub enum JournalError {
@@ -587,6 +597,69 @@ impl Journal {
         self.conn
             .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
             .map_err(Into::into)
+    }
+
+    /// Load raw events for export, optionally filtered by stream key and/or epoch.
+    pub fn export_raw_reads(
+        &self,
+        stream_key: Option<&str>,
+        epoch: Option<i64>,
+    ) -> Result<Vec<RawExportEvent>, JournalError> {
+        let mut sql = String::from(
+            "SELECT stream_id, epoch, seq, raw_frame, reader_timestamp, received_unix_ms \
+             FROM events \
+             WHERE 1=1",
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(key) = stream_key {
+            sql.push_str(" AND stream_id = ?");
+            params_vec.push(Box::new(key.to_string()));
+        }
+        if let Some(ep) = epoch {
+            sql.push_str(" AND epoch = ?");
+            params_vec.push(Box::new(ep));
+        }
+        sql.push_str(" ORDER BY received_unix_ms ASC, seq ASC");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rusqlite_params: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| &**b).collect();
+        let rows = stmt.query_map(&*rusqlite_params, |row| {
+            Ok(RawExportEvent {
+                stream_key: row.get(0)?,
+                epoch: row.get(1)?,
+                seq: row.get(2)?,
+                raw_frame: row.get(3)?,
+                reader_timestamp: row.get(4)?,
+                received_unix_ms: row.get(5)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for r in rows {
+            result.push(r?);
+        }
+        Ok(result)
+    }
+
+    /// Return distinct epochs recorded in events, optionally filtered by stream key.
+    pub fn distinct_epochs(&self, stream_key: Option<&str>) -> Result<Vec<i64>, JournalError> {
+        let (sql, params_vec): (String, Vec<Box<dyn rusqlite::ToSql>>) = match stream_key {
+            Some(key) => (
+                "SELECT DISTINCT epoch FROM events WHERE stream_id = ? ORDER BY epoch ASC".into(),
+                vec![Box::new(key.to_string())],
+            ),
+            None => (
+                "SELECT DISTINCT epoch FROM events ORDER BY epoch ASC".into(),
+                Vec::new(),
+            ),
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rusqlite_params: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| &**b).collect();
+        let rows = stmt.query_map(&*rusqlite_params, |row| row.get(0))?;
+        let mut result = Vec::new();
+        for r in rows {
+            result.push(r?);
+        }
+        Ok(result)
     }
 
     /// Test-only ack-cursor pruning helper retained for legacy integration

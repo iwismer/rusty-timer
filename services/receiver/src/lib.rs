@@ -7,6 +7,7 @@ pub mod control_bridge;
 pub mod db;
 pub mod dbf_writer;
 pub mod error;
+pub mod export;
 pub mod headless;
 pub mod local_proxy;
 pub mod p2p_forwarder;

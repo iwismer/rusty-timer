@@ -2196,6 +2196,7 @@ pub struct UpsStatusPayload {
 // Handler functions (plain async, no Axum)
 // ---------------------------------------------------------------------------
 
+pub use crate::control::export::*;
 pub use crate::control::forwarders::*;
 pub use crate::control::imports::*;
 pub use crate::control::profile::*;
@@ -2353,6 +2354,8 @@ macro_rules! receiver_command_list {
                 stream_id: "String",
                 publish: "bool"
             ) -> "()",
+            get_export_epochs(stream_id: "Option<String>") -> "ExportEpochsResponse",
+            export_tagdata(request: "ExportTagdataRequest") -> "ExportTagdataResponse",
         }
     };
 }

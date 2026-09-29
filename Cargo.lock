@@ -2157,6 +2157,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zip 4.6.1",
 ]
 
 [[package]]
@@ -5417,6 +5418,7 @@ name = "receiver"
 version = "0.24.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "dbase",
@@ -5447,6 +5449,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zip 4.6.1",
 ]
 
 [[package]]

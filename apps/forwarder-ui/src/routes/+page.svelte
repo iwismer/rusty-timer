@@ -16,6 +16,7 @@
     buttonClass,
   } from "@rusty-timer/shared-ui";
   import type { ForwarderStatus } from "$lib/api";
+  import ExportModal from "$lib/ExportModal.svelte";
   import {
     computeElapsedSecondsSince,
     formatLastSeen,
@@ -64,6 +65,8 @@
   let readerClockBaseLocal = $state<Record<string, number>>({});
   let lastSeenBase = $state<Record<string, number | null>>({});
   let lastSeenReceivedAt = $state<Record<string, number>>({});
+  let exportModalOpen = $state(false);
+  let exportInitialReaderIp = $state<string | null>(null);
 
   const btnPrimary = buttonClass("primary");
 
@@ -685,9 +688,20 @@
     <Card headerBg helpSection="readers" helpContext="forwarder">
       {#snippet header()}
         <h2 class="text-sm font-semibold text-text-primary m-0">Readers</h2>
-        <span class="ml-auto text-xs text-text-muted mr-1">
-          {readersSummary.label}
-        </span>
+        <div class="ml-auto flex items-center gap-3">
+          <span class="text-xs text-text-muted">
+            {readersSummary.label}
+          </span>
+          <button
+            class={buttonClass("secondary", "xs")}
+            onclick={() => {
+              exportInitialReaderIp = null;
+              exportModalOpen = true;
+            }}
+          >
+            Export TAGDATA
+          </button>
+        </div>
       {/snippet}
 
       {#if status.readers.length === 0}
@@ -704,8 +718,17 @@
                   label={reader.state}
                   state={readerBadgeState(reader.state)}
                 />
-                {#if reader.state !== "connected"}
-                  <div class="ml-auto flex gap-2">
+                <div class="ml-auto flex gap-2">
+                  <button
+                    class={buttonClass("secondary", "xs")}
+                    onclick={() => {
+                      exportInitialReaderIp = reader.ip;
+                      exportModalOpen = true;
+                    }}
+                  >
+                    Export
+                  </button>
+                  {#if reader.state !== "connected"}
                     <button
                       class={buttonClass("secondary", "xs")}
                       onclick={() => {
@@ -717,8 +740,8 @@
                     >
                       Reconnect
                     </button>
-                  </div>
-                {/if}
+                  {/if}
+                </div>
               {/snippet}
 
               <ReaderControlPanel
@@ -803,6 +826,17 @@
     <p class="text-sm text-text-muted">Loading...</p>
   {/if}
 </main>
+
+{#if status}
+  <ExportModal
+    open={exportModalOpen}
+    readers={status.readers}
+    initialReaderIp={exportInitialReaderIp}
+    onclose={() => {
+      exportModalOpen = false;
+    }}
+  />
+{/if}
 
 <HelpDialog
   open={readModeHelpOpen}

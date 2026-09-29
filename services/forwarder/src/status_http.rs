@@ -55,8 +55,8 @@ use crate::status_store::{
 use crate::status_store::{ReaderStatus, broadcast_dirty_read_counts};
 use crate::storage::journal::Journal;
 use axum::Router;
-use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::body::{Body, Bytes};
+use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -499,6 +499,20 @@ pub trait JournalAccess {
 
     /// Count total events for a stream_key.
     fn event_count(&self, stream_key: &str) -> Result<i64, String>;
+
+    /// Export raw reader frames, optionally filtered by stream key and/or epoch.
+    fn export_raw_reads(
+        &self,
+        _stream_key: Option<&str>,
+        _epoch: Option<i64>,
+    ) -> Result<Vec<crate::storage::journal::RawExportEvent>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Return distinct epochs recorded in events, optionally filtered by stream key.
+    fn distinct_epochs(&self, _stream_key: Option<&str>) -> Result<Vec<i64>, String> {
+        Ok(Vec::new())
+    }
 }
 
 #[derive(Debug)]
@@ -545,6 +559,18 @@ impl JournalAccess for Journal {
 
     fn event_count(&self, stream_key: &str) -> Result<i64, String> {
         Journal::event_count(self, stream_key).map_err(|e| e.to_string())
+    }
+
+    fn export_raw_reads(
+        &self,
+        stream_key: Option<&str>,
+        epoch: Option<i64>,
+    ) -> Result<Vec<crate::storage::journal::RawExportEvent>, String> {
+        Journal::export_raw_reads(self, stream_key, epoch).map_err(|e| e.to_string())
+    }
+
+    fn distinct_epochs(&self, stream_key: Option<&str>) -> Result<Vec<i64>, String> {
+        Journal::distinct_epochs(self, stream_key).map_err(|e| e.to_string())
     }
 }
 
@@ -1492,6 +1518,8 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             "/api/v1/readers/{ip}/reconnect",
             post(reconnect_handler::<J>),
         )
+        .route("/api/v1/export/tagdata", get(export_tagdata_handler::<J>))
+        .route("/api/v1/export/epochs", get(export_epochs_handler::<J>))
         .fallback(crate::ui_server::serve_ui)
         .with_state(state)
 }
@@ -1509,6 +1537,92 @@ async fn readyz_handler<J: JournalAccess + Send + 'static>(
     } else {
         let reason = ss.reason.clone().unwrap_or_else(|| "not ready".to_owned());
         text_response(StatusCode::SERVICE_UNAVAILABLE, reason)
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct ExportTagdataQuery {
+    reader: Option<String>,
+    epoch: Option<String>,
+    mode: Option<String>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct ExportEpochsQuery {
+    reader: Option<String>,
+}
+
+async fn export_epochs_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Query(params): Query<ExportEpochsQuery>,
+) -> Response {
+    let reader_filter = match params.reader.as_deref() {
+        None | Some("") | Some("all") => None,
+        Some(r) => Some(r),
+    };
+    let journal = state.journal.lock().await;
+    let epochs = match journal.distinct_epochs(reader_filter) {
+        Ok(eps) => eps,
+        Err(e) => return text_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({ "epochs": epochs }).to_string(),
+    )
+}
+
+async fn export_tagdata_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Query(params): Query<ExportTagdataQuery>,
+) -> Response {
+    let reader_filter = match params.reader.as_deref() {
+        None | Some("") | Some("all") => None,
+        Some(r) => Some(r),
+    };
+    let epoch_filter = match params.epoch.as_deref() {
+        None | Some("") | Some("all") => None,
+        Some(ep) => match ep.parse::<i64>() {
+            Ok(v) => Some(v),
+            Err(_) => return text_response(StatusCode::BAD_REQUEST, "invalid epoch parameter"),
+        },
+    };
+
+    let journal = state.journal.lock().await;
+    let events = match journal.export_raw_reads(reader_filter, epoch_filter) {
+        Ok(evs) => evs,
+        Err(e) => return text_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    drop(journal);
+
+    if params.mode.as_deref() == Some("separate") {
+        match crate::export::render_separate_tagdata_zip(&events) {
+            Ok(zip_bytes) => Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/zip")
+                .header(
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"TAGDATA.ZIP\"",
+                )
+                .body(Body::from(zip_bytes))
+                .unwrap(),
+            Err(e) => text_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("zip creation failed: {e}"),
+            ),
+        }
+    } else {
+        let tagdata_text = crate::export::render_merged_tagdata(&events);
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .header(
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"TAGDATA.TXT\"",
+            )
+            .body(Body::from(tagdata_text))
+            .unwrap()
     }
 }
 

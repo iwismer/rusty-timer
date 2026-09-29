@@ -322,3 +322,38 @@ export async function setRecording(
 export async function reconnectReader(ip: string): Promise<{ ok: boolean }> {
   return apiFetch(`/api/v1/readers/${ip}/reconnect`, { method: "POST" });
 }
+
+export interface ExportEpochsResponse {
+  epochs: number[];
+}
+
+export async function getExportEpochs(reader?: string): Promise<number[]> {
+  const query = reader ? `?reader=${encodeURIComponent(reader)}` : "";
+  const res = await apiFetch<ExportEpochsResponse>(
+    `/api/v1/export/epochs${query}`,
+  );
+  return res.epochs;
+}
+
+export function getExportTagdataUrl(options: {
+  reader?: string;
+  epoch?: number | string;
+  mode?: "merged" | "separate";
+}): string {
+  const params = new URLSearchParams();
+  if (options.reader && options.reader !== "all") {
+    params.set("reader", options.reader);
+  }
+  if (
+    options.epoch !== undefined &&
+    options.epoch !== null &&
+    options.epoch !== "all"
+  ) {
+    params.set("epoch", String(options.epoch));
+  }
+  if (options.mode) {
+    params.set("mode", options.mode);
+  }
+  const qs = params.toString();
+  return `/api/v1/export/tagdata${qs ? `?${qs}` : ""}`;
+}

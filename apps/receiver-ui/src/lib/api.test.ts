@@ -564,4 +564,42 @@ describe("sse client", () => {
     });
     destroySSE();
   });
+
+  it("getExportEpochs sends stream_id argument and returns epochs", async () => {
+    const { getExportEpochs } = await import("./api");
+    mockInvoke.mockResolvedValue({ epochs: [3, 2, 1] });
+    const res = await getExportEpochs("stream-1");
+    expect(mockInvoke).toHaveBeenCalledWith("get_export_epochs", {
+      stream_id: "stream-1",
+      streamId: "stream-1",
+    });
+    expect(res.epochs).toEqual([3, 2, 1]);
+  });
+
+  it("exportTagdata sends request argument and returns result", async () => {
+    const { exportTagdata } = await import("./api");
+    mockInvoke.mockResolvedValue({
+      read_count: 42,
+      filename: "TAGDATA.TXT",
+      written_paths: ["C:\\Winrace\\Files\\TAGDATA.TXT"],
+      content: "aa...",
+      zip_base64: null,
+    });
+    const res = await exportTagdata({
+      stream_id: "stream-1",
+      epoch: 2,
+      mode: "merged",
+      destination_dir: "C:\\Winrace\\Files",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("export_tagdata", {
+      request: {
+        stream_id: "stream-1",
+        epoch: 2,
+        mode: "merged",
+        destination_dir: "C:\\Winrace\\Files",
+      },
+    });
+    expect(res.read_count).toBe(42);
+    expect(res.filename).toBe("TAGDATA.TXT");
+  });
 });
