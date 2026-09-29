@@ -178,15 +178,18 @@ impl ReaderControlService {
         self.update_cached_reader_info(reader_ip, info.clone())
             .await;
 
-        self.logger.log(format!(
-            "reader {} clock synced to {} in {} (one-way latency: {:.1}ms, pre-set wait: {:.0}ms, sync delay: {}ms)",
-            reader_ip,
-            reader_iso,
-            zone_label,
-            one_way.as_secs_f64() * 1000.0,
-            pre_set_wait.as_secs_f64() * 1000.0,
-            SYNC_DELAY_MS,
-        ));
+        self.logger.log_info(
+            "FWD:READER",
+            format!(
+                "reader {} clock synced to {} in {} (one-way latency: {:.1}ms, pre-set wait: {:.0}ms, sync delay: {}ms)",
+                reader_ip,
+                reader_iso,
+                zone_label,
+                one_way.as_secs_f64() * 1000.0,
+                pre_set_wait.as_secs_f64() * 1000.0,
+                SYNC_DELAY_MS,
+            ),
+        );
         Ok(info)
     }
 

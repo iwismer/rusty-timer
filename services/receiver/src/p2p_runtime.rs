@@ -1395,9 +1395,19 @@ async fn start_stream_worker(
             )
             .await
             {
-                Ok(proxy) => Some(proxy),
+                Ok(proxy) => {
+                    state.ui.logger.log_info(
+                        "RECV:PROXY",
+                        format!("bound durable local proxy for stream {stream_id_for_log} on port {port}"),
+                    );
+                    Some(proxy)
+                }
                 Err(e) => {
                     warn!(error = %e, stream_id = %stream_id_for_log, port, "failed to bind durable local proxy; skipping proxy");
+                    state.ui.logger.log_warn(
+                        "RECV:PROXY",
+                        format!("failed to bind durable local proxy for stream {stream_id_for_log} on port {port}: {e}"),
+                    );
                     None
                 }
             }

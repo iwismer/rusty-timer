@@ -198,6 +198,10 @@ async fn run_forwarder_connection(
         match session {
             Ok(session) => {
                 next_delay = backoff.initial;
+                reporter.app_state().ui.logger.log_info(
+                    "RECV:P2P",
+                    format!("forwarder {endpoint_id} control connection established"),
+                );
                 reporter
                     .app_state()
                     .store_forwarder_catalog(&endpoint_id, &session.catalog)
@@ -215,6 +219,17 @@ async fn run_forwarder_connection(
             }
             Err(error) => {
                 warn!(%endpoint_id, %error, "forwarder control connection failed; retrying");
+                reporter
+                    .app_state()
+                    .ui
+                    .logger
+                    .log_warn(
+                        "RECV:P2P",
+                        format!(
+                            "forwarder {endpoint_id} control connection failed: {error}; retrying in {}s",
+                            next_delay.as_secs()
+                        ),
+                    );
             }
         }
 
@@ -497,6 +512,10 @@ async fn run_connected_forwarder(
     // `_config_registration_guard` on normal exit, panic, or task abort.
     drop(pending_config);
     drop(pending_reader);
+    reporter.app_state().ui.logger.log_warn(
+        "RECV:P2P",
+        format!("forwarder {endpoint_id} control connection closed; cleaning up sessions"),
+    );
     reporter
         .app_state()
         .clear_forwarder_live_status(endpoint_id)
@@ -753,6 +772,13 @@ async fn handle_control_frame(
         }
         Some(control_f2c::Msg::ProtocolError(error)) => {
             warn!(%endpoint_id, code = error.code, message = %error.message, "forwarder sent protocol error");
+            reporter.app_state().ui.logger.log_warn(
+                "RECV:P2P",
+                format!(
+                    "forwarder {endpoint_id} sent protocol error (code {}): {}",
+                    error.code, error.message
+                ),
+            );
         }
         // Route config responses by request_id to the awaiting command. A pure
         // map lookup plus a non-blocking `oneshot` send — never blocks the
@@ -988,10 +1014,24 @@ async fn reap_finished_data_task(
         Ok(Err(err)) if err.is_retryable() => {
             panic_exits.remove(stream_key);
             warn!(%endpoint_id, stream_id = %task.stream.stream_id, error = %err, "forwarder data subscription ended with transient error");
+            reporter.app_state().ui.logger.log_warn(
+                "RECV:DATA",
+                format!(
+                    "forwarder {endpoint_id} stream {} subscription transient error: {err}",
+                    task.stream.stream_id
+                ),
+            );
         }
         Ok(Err(err)) => {
             panic_exits.remove(stream_key);
             error!(%endpoint_id, stream_id = %task.stream.stream_id, error = %err, "forwarder data subscription failed terminally; suppressing respawn until reconnect or subscription config change");
+            reporter.app_state().ui.logger.log_error(
+                "RECV:DATA",
+                format!(
+                    "forwarder {endpoint_id} stream {} subscription failed terminally: {err}",
+                    task.stream.stream_id
+                ),
+            );
             let seq = match &err {
                 crate::p2p_session::P2pSessionError::ConflictingDuplicate { seq, .. } => {
                     u64::try_from(*seq).ok()

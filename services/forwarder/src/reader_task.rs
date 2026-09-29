@@ -111,22 +111,25 @@ pub(crate) async fn append_with_retry(
         match append_result {
             Ok(value) => {
                 if failed_attempts > 0 {
-                    logger.log(format!(
-                        "reader {reader_ip} journal append recovered after {failed_attempts} failed attempts"
-                    ));
+                    logger.log_info(
+                        "FWD:JOURNAL",
+                        format!(
+                            "reader {reader_ip} journal append recovered after {failed_attempts} failed attempts"
+                        ),
+                    );
                 }
                 return Some(value);
             }
             Err(JournalAppendError::Append(error)) => {
                 failed_attempts += 1;
                 if failed_attempts == 1 {
-                    logger.log_at(
-                        UiLogLevel::Error,
+                    logger.log_error(
+                        "FWD:JOURNAL",
                         format!("reader {reader_ip} journal append failed: {error}; retrying"),
                     );
                 } else if last_retry_log.elapsed() >= Duration::from_secs(60) {
-                    logger.log_at(
-                        UiLogLevel::Warn,
+                    logger.log_warn(
+                        "FWD:JOURNAL",
                         format!(
                             "reader {reader_ip} still retrying journal append after {failed_attempts} failed attempts; last error: {error}"
                         ),
@@ -253,8 +256,8 @@ pub async fn run_reader(
                     Err(_) => "connect timeout (5s)".to_string(),
                     _ => unreachable!(),
                 };
-                logger.log_at(
-                    UiLogLevel::Warn,
+                logger.log_warn(
+                    "FWD:READER",
                     format!(
                         "reader {} connect failed: {}; retrying in {}s",
                         reader_ip, e, backoff_secs
@@ -279,7 +282,7 @@ pub async fn run_reader(
                 continue;
             }
         };
-        logger.log(format!("reader {} connected", reader_ip));
+        logger.log_info("FWD:READER", format!("reader {} connected", reader_ip));
         backoff_secs = 1;
         status
             .update_reader_state(&target_addr, ReaderConnectionState::Connected)
@@ -369,24 +372,27 @@ pub async fn run_reader(
             let reader_info = crate::reader_control::run_connect_sequence(&poll_client).await;
             let control_supported = reader_info.connect_failures < 6;
             if !control_supported {
-                poll_logger.log_at(
-                    rt_ui_log::UiLogLevel::Error,
+                poll_logger.log_error(
+                    "FWD:READER",
                     format!(
                         "Reader {}: control protocol non-functional — all 6 connect queries failed",
                         poll_reader_ip,
                     ),
                 );
             }
-            poll_logger.log(format!(
-                "reader {} identified: fw={}, stored_reads={}",
-                poll_reader_ip,
-                reader_info
-                    .hardware
-                    .as_ref()
-                    .map(|h| h.fw_version.as_str())
-                    .unwrap_or("?"),
-                reader_info.estimated_stored_reads.unwrap_or(0),
-            ));
+            poll_logger.log_info(
+                "FWD:READER",
+                format!(
+                    "reader {} identified: fw={}, stored_reads={}",
+                    poll_reader_ip,
+                    reader_info
+                        .hardware
+                        .as_ref()
+                        .map(|h| h.fw_version.as_str())
+                        .unwrap_or("?"),
+                    reader_info.estimated_stored_reads.unwrap_or(0),
+                ),
+            );
             poll_status
                 .update_reader_info_unless_disconnected(&poll_target_addr, reader_info.clone())
                 .await;
@@ -534,8 +540,8 @@ pub async fn run_reader(
                 result = reader.read_until(b'\n', &mut frame_buf) => result,
                 abort_reason = abort_rx.recv() => {
                     let reason = abort_reason.unwrap_or_else(|| "connection lost".to_string());
-                    logger.log_at(
-                        UiLogLevel::Warn,
+                    logger.log_warn(
+                        "FWD:READER",
                         format!("reader {} disconnected: {}; reconnecting", reader_ip, reason),
                     );
                     fail_active_download(
@@ -562,8 +568,8 @@ pub async fn run_reader(
 
             match read_result {
                 Err(e) => {
-                    logger.log_at(
-                        UiLogLevel::Warn,
+                    logger.log_warn(
+                        "FWD:READER",
                         format!("reader {} read error: {}; reconnecting", reader_ip, e),
                     );
                     fail_active_download(
@@ -575,8 +581,8 @@ pub async fn run_reader(
                     break;
                 }
                 Ok(0) => {
-                    logger.log_at(
-                        UiLogLevel::Warn,
+                    logger.log_warn(
+                        "FWD:READER",
                         format!("reader {} connection closed; reconnecting", reader_ip),
                     );
                     fail_active_download(
@@ -601,8 +607,8 @@ pub async fn run_reader(
             let raw_line = match std::str::from_utf8(raw_payload) {
                 Ok(s) => s.to_owned(),
                 Err(_) => {
-                    logger.log_at(
-                        UiLogLevel::Warn,
+                    logger.log_warn(
+                        "FWD:READER",
                         format!("reader {} skipped non-utf8 frame", reader_ip),
                     );
                     continue;
@@ -631,9 +637,14 @@ pub async fn run_reader(
                 ),
                 Err(_) => {
                     // Line is not a valid IPICO read — log and skip
-                    logger.log_at(
-                        UiLogLevel::Warn,
-                        format!("reader {} skipped unparseable line", reader_ip),
+                    let snippet = if raw_line.len() > 64 {
+                        format!("{}...", &raw_line[..64])
+                    } else {
+                        raw_line.clone()
+                    };
+                    logger.log_warn(
+                        "FWD:READER",
+                        format!("reader {} skipped unparseable line: {}", reader_ip, snippet),
                     );
                     continue;
                 }

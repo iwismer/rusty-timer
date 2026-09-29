@@ -641,8 +641,8 @@ fn log_control_action_failure(
     body: &str,
 ) {
     let error = control_action_error_message(body);
-    logger.log_at(
-        rt_ui_log::UiLogLevel::Error,
+    logger.log_error(
+        "FWD:CONTROL",
         format!(
             "control action '{}' failed (HTTP {}): {}",
             action, status_code, error
@@ -1625,10 +1625,10 @@ async fn set_current_epoch_name_handler<J: JournalAccess + Send + 'static>(
     match result {
         Ok(metadata) => {
             state.store.apply_epoch_metadata(&reader_ip, metadata).await;
-            state.logger.log(format!(
-                "set current epoch name for {} via local API",
-                reader_ip
-            ));
+            state.logger.log_info(
+                "FWD:STREAM",
+                format!("set current epoch name for {} via local API", reader_ip),
+            );
             json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string())
         }
         Err(EpochAdvanceError::NotFound) => {

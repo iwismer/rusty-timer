@@ -93,7 +93,7 @@ impl<T: Clone + Send> UiLogger<T> {
         let sanitized = sanitize_ui_log_message(&msg.to_string());
         let entry = format!(
             "{} [{}] {}",
-            chrono::Utc::now().format("%H:%M:%S"),
+            chrono::Utc::now().format("%H:%M:%S%.3f"),
             level,
             sanitized,
         );
@@ -118,6 +118,26 @@ impl<T: Clone + Send> UiLogger<T> {
     /// Format a timestamped log entry at INFO level. Shorthand for `log_at(Info, msg)`.
     pub fn log(&self, msg: impl Display) {
         self.log_at(UiLogLevel::Info, msg);
+    }
+
+    /// Format a timestamped, level-tagged entry with a source component tag (e.g. "SERVER:WS").
+    pub fn log_source(&self, level: UiLogLevel, source: &str, msg: impl Display) {
+        self.log_at(level, format!("[{source}] {msg}"));
+    }
+
+    /// Format a timestamped entry with a source component tag at INFO level.
+    pub fn log_info(&self, source: &str, msg: impl Display) {
+        self.log_source(UiLogLevel::Info, source, msg);
+    }
+
+    /// Format a timestamped entry with a source component tag at WARN level.
+    pub fn log_warn(&self, source: &str, msg: impl Display) {
+        self.log_source(UiLogLevel::Warn, source, msg);
+    }
+
+    /// Format a timestamped entry with a source component tag at ERROR level.
+    pub fn log_error(&self, source: &str, msg: impl Display) {
+        self.log_source(UiLogLevel::Error, source, msg);
     }
 
     /// Return a snapshot of buffered entries. Returns empty vec if no buffer.
@@ -145,6 +165,16 @@ mod tests {
         assert!(entry.ends_with(" hello world"), "unexpected: {entry}");
         assert_eq!(&entry[2..3], ":");
         assert_eq!(&entry[5..6], ":");
+        assert_eq!(&entry[8..9], ".");
+    }
+
+    #[test]
+    fn log_source_includes_source_tag() {
+        let (tx, mut rx) = broadcast::channel::<String>(4);
+        let logger = UiLogger::new(tx, |entry| entry);
+        logger.log_warn("SERVER:WS", "forwarder disconnected: EOF");
+        let entry = rx.try_recv().unwrap();
+        assert!(entry.contains("[WARN] [SERVER:WS] forwarder disconnected: EOF"));
     }
 
     #[test]

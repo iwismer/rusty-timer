@@ -21,7 +21,7 @@
 
 use std::time::Duration;
 
-use rt_ui_log::{UiLogLevel, UiLogger};
+use rt_ui_log::UiLogger;
 
 use crate::storage::journal::{Journal, JournalError, RegistryStreamRestore};
 use crate::ui_events::ForwarderUiEvent;
@@ -180,9 +180,12 @@ fn restore_one_stream(
             "restored stream identity from server registry high-water"
         );
         if let Some(logger) = logger {
-            logger.log(format!(
-                "stream {key}: restored epoch {epoch} / next seq {next_seq} from server registry"
-            ));
+            logger.log_info(
+                "FWD:RESTORE",
+                format!(
+                    "stream {key}: restored epoch {epoch} / next seq {next_seq} from server registry"
+                ),
+            );
         }
         return Ok(StreamRestoreOutcome::Restored { epoch, next_seq });
     }
@@ -200,7 +203,10 @@ fn restore_one_stream(
                 "no server registry record for stream; seeding fresh at seq 1 (expected first boot)"
             );
             if let Some(logger) = logger {
-                logger.log(format!("stream {key}: first boot, starting at seq 1"));
+                logger.log_info(
+                    "FWD:RESTORE",
+                    format!("stream {key}: first boot, starting at seq 1"),
+                );
             }
             Ok(StreamRestoreOutcome::SeededFirstBoot)
         }
@@ -211,9 +217,10 @@ fn restore_one_stream(
                  (first boot)"
             );
             if let Some(logger) = logger {
-                logger.log(format!(
-                    "stream {key}: first boot with new p2p identity, starting at seq 1"
-                ));
+                logger.log_info(
+                    "FWD:RESTORE",
+                    format!("stream {key}: first boot with new p2p identity, starting at seq 1"),
+                );
             }
             Ok(StreamRestoreOutcome::SeededFirstBoot)
         }
@@ -225,8 +232,8 @@ fn restore_one_stream(
                  dedup may silently discard its reads"
             );
             if let Some(logger) = logger {
-                logger.log_at(
-                    UiLogLevel::Warn,
+                logger.log_warn(
+                    "FWD:RESTORE",
                     format!(
                         "stream {key}: seeded at seq 1 without a server high-water source; if \
                          this host previously forwarded this stream, receivers may discard its \
@@ -244,8 +251,8 @@ fn restore_one_stream(
                  discard its reads"
             );
             if let Some(logger) = logger {
-                logger.log_at(
-                    UiLogLevel::Error,
+                logger.log_error(
+                    "FWD:RESTORE",
                     format!(
                         "stream {key}: server registry unavailable, seeded at seq 1 — if this \
                          host previously forwarded this stream, receivers may silently discard \

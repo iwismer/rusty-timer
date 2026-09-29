@@ -138,9 +138,10 @@ impl RemoteConfigHandler for ForwarderRemoteConfigHandler {
             .await
             {
                 Ok(()) => {
-                    self.ui_logger.log(format!(
-                        "Config updated remotely by receiver {peer} (restart required)"
-                    ));
+                    self.ui_logger.log_info(
+                        "FWD:CONFIG",
+                        format!("Config updated remotely by receiver {peer} (restart required)"),
+                    );
                     ConfigSetResponse {
                         request_id: request.request_id,
                         ok: true,
@@ -151,8 +152,8 @@ impl RemoteConfigHandler for ForwarderRemoteConfigHandler {
                 Err(error) => {
                     // UiLogger::log_at also echoes to tracing at warn level, so
                     // no separate tracing::warn! here (it would double-log).
-                    self.ui_logger.log_at(
-                        rt_ui_log::UiLogLevel::Warn,
+                    self.ui_logger.log_warn(
+                        "FWD:CONFIG",
                         format!("Remote config write from receiver {peer} rejected: {error}"),
                     );
                     let restart_needed = self.subsystem.lock().await.restart_needed();

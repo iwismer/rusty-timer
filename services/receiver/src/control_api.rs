@@ -1763,7 +1763,7 @@ impl AppState {
             ConnectionState::Connected => "Connected",
             ConnectionState::Disconnecting => "Disconnecting",
         };
-        self.ui.logger.log(label);
+        self.ui.logger.log_info("RECV:STATE", label);
     }
 
     /// Update connection state, broadcast status change, and emit a log entry.
