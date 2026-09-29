@@ -132,11 +132,86 @@
     return server.message;
   }
 
-  function reachableLabel(server: ServerDeviceStatus): string {
-    if (!server.configured) return "Not configured";
-    if (server.reachable === true) return "Reachable";
-    if (server.reachable === false) return "Unreachable";
-    return "Reachability unknown";
+  type LastSeenAnchor = {
+    secs: number | null;
+    state: string;
+    localMs: number;
+  };
+  const forwarderLastSeenAnchors: Record<string, LastSeenAnchor> = {};
+
+  $effect(() => {
+    const connections = store.connections;
+    if (!connections) return;
+    for (const forwarder of connections.forwarders) {
+      const key = forwarder.endpoint_id;
+      const prev = forwarderLastSeenAnchors[key];
+      const currentSecs = forwarder.last_seen_secs ?? null;
+      const currentState = forwarder.state;
+
+      if (!prev || prev.secs !== currentSecs || prev.state !== currentState) {
+        forwarderLastSeenAnchors[key] = {
+          secs: currentSecs,
+          state: currentState,
+          localMs: Date.now(),
+        };
+      }
+    }
+  });
+
+  function forwarderLastSeenDisplay(
+    forwarder: ForwarderConnectionStatus,
+  ): string {
+    if (
+      forwarder.last_seen_secs === null ||
+      forwarder.last_seen_secs === undefined
+    ) {
+      return formatLastSeen(null);
+    }
+    if (forwarder.state === "connected" || forwarder.state === "subscribed") {
+      return formatLastSeen(0);
+    }
+    const anchor = forwarderLastSeenAnchors[forwarder.endpoint_id];
+    const baseSecs = anchor?.secs ?? forwarder.last_seen_secs;
+    const baseLocal = anchor?.localMs ?? Date.now();
+    const elapsed = Math.max(0, Math.floor((clockNow - baseLocal) / 1000));
+    return formatLastSeen(baseSecs + elapsed);
+  }
+
+  function serverReachabilityDisplay(server: ServerDeviceStatus): StateDisplay {
+    if (!server.configured) {
+      return {
+        label: "Not configured",
+        dotClass: "bg-status-warn",
+        textClass: "text-status-warn",
+      };
+    }
+    if (server.reachable === true) {
+      return {
+        label: "Reachable",
+        dotClass: "bg-status-ok",
+        textClass: "text-status-ok",
+      };
+    }
+    if (server.reachable === false) {
+      return {
+        label: "Unreachable",
+        dotClass: "bg-status-err",
+        textClass: "text-status-err",
+      };
+    }
+    return {
+      label: "Reachability unknown",
+      dotClass: "bg-status-warn",
+      textClass: "text-status-warn",
+    };
+  }
+
+  function serverAddressDisplay(server: ServerDeviceStatus): string | null {
+    const address =
+      server.server_address || store.savedServerUrl || store.editServerUrl;
+    if (!address) return null;
+    const trimmed = address.trim();
+    return trimmed.length > 0 ? trimmed : null;
   }
 
   function forwarderStateDisplay(
@@ -212,21 +287,26 @@
   }
 
   function showConnect(forwarder: ForwarderConnectionStatus): boolean {
-    return !forwarder.pending && forwarder.state === "disconnected";
+    return (
+      !forwarder.pending &&
+      (forwarder.state === "disconnected" || forwarder.state === "unavailable")
+    );
   }
 
   function showDisconnect(forwarder: ForwarderConnectionStatus): boolean {
+    if (forwarder.state === "unavailable") return false;
     return forwarder.pending || forwarder.state !== "disconnected";
   }
 
   function showReconnect(forwarder: ForwarderConnectionStatus): boolean {
+    if (forwarder.state === "unavailable") return false;
     return forwarder.pending || forwarder.state !== "disconnected";
   }
 
-  function showReconnectBeforeDisconnect(
-    forwarder: ForwarderConnectionStatus,
-  ): boolean {
-    return !forwarder.pending && forwarder.state === "unavailable";
+  function showStreamCounts(forwarder: ForwarderConnectionStatus): boolean {
+    return (
+      forwarder.state !== "unavailable" && forwarder.state !== "disconnected"
+    );
   }
 
   function readerLabel(reader: ReaderLiveStatus): string {
@@ -343,6 +423,7 @@
 
 <div class="mx-auto max-w-[760px] px-6 py-6">
   {#if store.connections}
+    {@const serverDisplay = serverReachabilityDisplay(store.connections.server)}
     <section
       data-testid="connections-server-card"
       class="rounded-lg border border-border bg-surface-1 p-4"
@@ -358,12 +439,19 @@
               onOpenModal={openHelp}
             />
           </p>
-          <p class="mt-1 text-sm text-text-primary">
-            {reachableLabel(store.connections.server)}
-          </p>
-          {#if store.connections.server.endpoint_id}
-            <p class="mt-1 font-mono text-xs text-text-muted">
-              {store.connections.server.endpoint_id}
+          <span
+            data-testid="server-reachability-state"
+            class="mt-1 flex items-center gap-2 text-sm font-medium {serverDisplay.textClass}"
+          >
+            <span class="h-2 w-2 rounded-full {serverDisplay.dotClass}"></span>
+            {serverDisplay.label}
+          </span>
+          {#if serverAddressDisplay(store.connections.server)}
+            <p
+              data-testid="server-address"
+              class="mt-1 font-mono text-xs text-text-muted"
+            >
+              {serverAddressDisplay(store.connections.server)}
             </p>
           {/if}
           {#if approvalLabel(store.connections.server)}
@@ -435,10 +523,20 @@
                   ></span>
                   {stateDisplay.label}
                 </span>
-                <span class="text-xs text-text-muted">
-                  {forwarder.subscribed_count} subscribed / {forwarder.available_count}
-                  available
-                </span>
+                {#if showStreamCounts(forwarder)}
+                  <span class="text-xs text-text-muted">
+                    {forwarder.subscribed_count} subscribed / {forwarder.available_count}
+                    available
+                  </span>
+                {/if}
+                {#if forwarderLastSeenDisplay(forwarder)}
+                  <span
+                    data-testid={`forwarder-last-seen-${forwarder.endpoint_id}`}
+                    class="text-xs text-text-muted"
+                  >
+                    Last seen {forwarderLastSeenDisplay(forwarder)}
+                  </span>
+                {/if}
                 <HelpTip
                   fieldKey="forwarder_state"
                   sectionKey="connections"
@@ -468,7 +566,7 @@
                 {forwarder.endpoint_id}
               </p>
 
-              {#if forwarder.remote_config_available === true || showConnect(forwarder) || showReconnectBeforeDisconnect(forwarder) || showDisconnect(forwarder) || (showReconnect(forwarder) && !showReconnectBeforeDisconnect(forwarder))}
+              {#if forwarder.remote_config_available === true || showConnect(forwarder) || showDisconnect(forwarder) || showReconnect(forwarder)}
                 <div class="mt-3 flex flex-wrap items-center gap-2">
                   {#if forwarder.remote_config_available === true}
                     <button
@@ -505,20 +603,6 @@
                       onOpenModal={openHelp}
                     />
                   {/if}
-                  {#if showReconnectBeforeDisconnect(forwarder)}
-                    <button
-                      data-testid={`forwarder-reconnect-${forwarder.endpoint_id}`}
-                      class={btnSecondary}
-                      onclick={() =>
-                        void runForwarderAction(
-                          forwarder.endpoint_id,
-                          reconnectForwarder,
-                        )}
-                      disabled={busyByEndpoint[forwarder.endpoint_id]}
-                    >
-                      Reconnect
-                    </button>
-                  {/if}
                   {#if showDisconnect(forwarder)}
                     <button
                       data-testid={`forwarder-disconnect-${forwarder.endpoint_id}`}
@@ -539,7 +623,7 @@
                       onOpenModal={openHelp}
                     />
                   {/if}
-                  {#if showReconnect(forwarder) && !showReconnectBeforeDisconnect(forwarder)}
+                  {#if showReconnect(forwarder)}
                     <button
                       data-testid={`forwarder-reconnect-${forwarder.endpoint_id}`}
                       class={btnSecondary}

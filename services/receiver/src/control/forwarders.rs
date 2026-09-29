@@ -36,6 +36,8 @@ pub struct ForwarderConnectionStatus {
     /// affordances.
     pub remote_config_available: bool,
     pub reader_control_available: bool,
+    #[serde(default)]
+    pub last_seen_secs: Option<u64>,
 }
 
 /// Result of [`get_forwarder_config`]: the forwarder's full config document and
@@ -134,6 +136,7 @@ pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
             .or_default() += 1;
     }
 
+    let last_seen_map = state.forwarders.forwarder_last_seen.lock().unwrap().clone();
     let forwarders = assemble_forwarder_connection_statuses(
         endpoints,
         &discovered,
@@ -144,6 +147,7 @@ pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
         &local_ports,
         &config_endpoints,
         &reader_control_endpoints,
+        &last_seen_map,
     );
 
     ConnectionsResponse { server, forwarders }
@@ -164,6 +168,7 @@ pub(crate) fn assemble_forwarder_connection_statuses(
     local_ports: &HashMap<(String, String), Option<u16>>,
     config_endpoints: &[String],
     reader_control_endpoints: &[String],
+    last_seen_by_endpoint: &HashMap<String, std::time::Instant>,
 ) -> Vec<ForwarderConnectionStatus> {
     let mut forwarders = Vec::with_capacity(endpoints.len());
     for endpoint_id in endpoints {
@@ -175,6 +180,16 @@ pub(crate) fn assemble_forwarder_connection_statuses(
         let intent = *intents.get(&endpoint_id).unwrap_or(&true);
         let snapshot = derive_forwarder_state(runtime, intent);
         let live_status = live_statuses.get(&endpoint_id).cloned().unwrap_or_default();
+        let readers = sorted_reader_statuses(&live_status, local_ports, &endpoint_id);
+        let last_seen_secs = if snapshot.state == ForwarderConnState::Subscribed
+            || snapshot.state == ForwarderConnState::Connected
+        {
+            Some(0)
+        } else {
+            last_seen_by_endpoint
+                .get(&endpoint_id)
+                .map(|last_seen| last_seen.elapsed().as_secs())
+        };
         forwarders.push(ForwarderConnectionStatus {
             endpoint_id: endpoint_id.clone(),
             display_name: discovered_forwarder.and_then(|forwarder| forwarder.display_name.clone()),
@@ -182,12 +197,13 @@ pub(crate) fn assemble_forwarder_connection_statuses(
             pending: snapshot.pending,
             subscribed_count: subscribed_counts.get(&endpoint_id).copied().unwrap_or(0),
             available_count: discovered_forwarder.map_or(0, |forwarder| forwarder.streams.len()),
-            readers: sorted_reader_statuses(&live_status, local_ports, &endpoint_id),
+            readers,
             ups: live_status.ups,
             failed_stream_ids: live_status.failed_streams.into_keys().collect(),
             restart_needed: None,
             remote_config_available: config_endpoints.contains(&endpoint_id),
             reader_control_available: reader_control_endpoints.contains(&endpoint_id),
+            last_seen_secs,
         });
     }
     forwarders

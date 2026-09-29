@@ -483,6 +483,7 @@ pub struct ForwarderControl {
     /// corresponding DB write succeeds. Never held across an await.
     pub(crate) disconnected_intents: Arc<StdMutex<HashSet<String>>>,
     pub(crate) forwarder_live_status: Arc<StdMutex<HashMap<String, ForwarderLiveStatus>>>,
+    pub(crate) forwarder_last_seen: Arc<StdMutex<HashMap<String, Instant>>>,
     /// Per-forwarder remote-config request channels, keyed by endpoint id. An
     /// entry exists only while that forwarder has a live control session whose
     /// negotiated `HelloOk` advertised `CAP_REMOTE_CONFIG`; the
@@ -702,6 +703,7 @@ impl AppState {
                 forwarder_runtime: Arc::new(StdMutex::new(HashMap::new())),
                 disconnected_intents: Arc::new(StdMutex::new(disconnected_intents)),
                 forwarder_live_status: Arc::new(StdMutex::new(HashMap::new())),
+                forwarder_last_seen: Arc::new(StdMutex::new(HashMap::new())),
                 forwarder_config_tx: StdMutex::new(HashMap::new()),
                 forwarder_reader_control_tx: StdMutex::new(HashMap::new()),
                 last_connections_fingerprint: StdMutex::new(None),
@@ -845,14 +847,25 @@ impl AppState {
         self.bump_connect_attempt(None, false);
     }
 
+    pub(crate) fn record_forwarder_last_seen(&self, endpoint_id: &str) {
+        let mut last_seen = self.forwarders.forwarder_last_seen.lock().unwrap();
+        last_seen.insert(endpoint_id.to_owned(), Instant::now());
+    }
+
     pub(crate) fn update_forwarder_runtime_sync(
         &self,
         endpoint_id: &str,
         update: impl FnOnce(&mut ForwarderRuntimeStatus),
     ) {
-        let mut statuses = self.forwarders.forwarder_runtime.lock().unwrap();
-        let status = statuses.entry(endpoint_id.to_owned()).or_default();
-        update(status);
+        let is_active = {
+            let mut statuses = self.forwarders.forwarder_runtime.lock().unwrap();
+            let status = statuses.entry(endpoint_id.to_owned()).or_default();
+            update(status);
+            status.control_up || status.data_sessions > 0
+        };
+        if is_active {
+            self.record_forwarder_last_seen(endpoint_id);
+        }
     }
 
     /// Mirror a forwarder intent into the sync-fallback cache. Call only
@@ -1002,6 +1015,7 @@ impl AppState {
         endpoint_id: &str,
         status: ReaderStatus,
     ) {
+        self.record_forwarder_last_seen(endpoint_id);
         let stream_id = decode_stream_id(status.stream_id);
         // Volatile counters are excluded from the connections fingerprint (see
         // `fingerprint_reader_statuses`), so push them to the UI as a targeted
@@ -1493,6 +1507,7 @@ impl AppState {
     }
 
     pub(crate) async fn clear_forwarder_live_status(&self, endpoint_id: &str) {
+        self.record_forwarder_last_seen(endpoint_id);
         {
             self.forwarders
                 .forwarder_live_status
@@ -2959,6 +2974,13 @@ mod tests {
         let mut subscribed_counts = HashMap::new();
         subscribed_counts.insert("endpoint-b".to_owned(), 2usize);
         let local_ports = HashMap::new();
+        let mut last_seen_by_endpoint = HashMap::new();
+        last_seen_by_endpoint.insert(
+            "endpoint-a".to_owned(),
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(15))
+                .unwrap(),
+        );
 
         let forwarders = assemble_forwarder_connection_statuses(
             endpoints,
@@ -2970,18 +2992,45 @@ mod tests {
             &local_ports,
             &["endpoint-c".to_owned()],
             &[],
+            &last_seen_by_endpoint,
         );
 
         assert_eq!(forwarders.len(), 3);
         assert_eq!(forwarders[0].endpoint_id, "endpoint-a");
         assert_eq!(forwarders[0].state, ForwarderConnState::Disconnected);
+        assert!(forwarders[0].last_seen_secs.unwrap() >= 15);
+
         assert_eq!(forwarders[1].endpoint_id, "endpoint-b");
         assert_eq!(forwarders[1].state, ForwarderConnState::Unavailable);
         assert_eq!(forwarders[1].subscribed_count, 2);
+        assert_eq!(forwarders[1].last_seen_secs, None);
+
         assert_eq!(forwarders[2].endpoint_id, "endpoint-c");
         assert_eq!(forwarders[2].state, ForwarderConnState::Connected);
+        assert_eq!(forwarders[2].last_seen_secs, Some(0));
         assert!(forwarders[2].remote_config_available);
         assert!(!forwarders[2].reader_control_available);
+
+        // Verify JSON serialization includes `last_seen_secs: null` for endpoint-b (never seen)
+        let json_b = serde_json::to_value(&forwarders[1]).unwrap();
+        assert_eq!(json_b["last_seen_secs"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn server_device_status_for_url_includes_server_address() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        let status = crate::control::status::server_device_status_for_url(
+            &state,
+            "https://timing.example.com",
+        )
+        .await;
+        assert_eq!(
+            status.server_address.as_deref(),
+            Some("https://timing.example.com")
+        );
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["server_address"], "https://timing.example.com");
     }
 
     #[tokio::test]

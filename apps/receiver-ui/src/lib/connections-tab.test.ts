@@ -197,6 +197,139 @@ describe("ConnectionsTab", () => {
     );
   });
 
+  it("renders the server address instead of server id and shows reachable status in green", () => {
+    mockState.store.connections.server = {
+      configured: true,
+      endpoint_id: "server-node-1",
+      server_address: "https://custom-server.example.com",
+      reachable: true,
+      approval_state: "active",
+      waiting_for_approval: false,
+      message: null,
+    };
+
+    render(ConnectionsTab);
+
+    const serverCard = screen.getByTestId("connections-server-card");
+    expect(screen.getByTestId("server-address")).toHaveTextContent(
+      "https://custom-server.example.com",
+    );
+    expect(serverCard).not.toHaveTextContent("server-node-1");
+
+    const reachability = screen.getByTestId("server-reachability-state");
+    expect(reachability).toHaveTextContent("Reachable");
+    expect(reachability).toHaveClass("text-status-ok");
+  });
+
+  it("renders server unreachable status as red and unknown/unconfigured as yellow", () => {
+    mockState.store.connections.server = {
+      configured: true,
+      endpoint_id: "server-node-1",
+      server_address: "https://server.example.com",
+      reachable: false,
+      approval_state: null,
+      waiting_for_approval: false,
+      message: "Connection refused",
+    };
+
+    const { unmount } = render(ConnectionsTab);
+
+    const unreachableState = screen.getByTestId("server-reachability-state");
+    expect(unreachableState).toHaveTextContent("Unreachable");
+    expect(unreachableState).toHaveClass("text-status-err");
+
+    unmount();
+
+    mockState.store.connections.server = {
+      configured: true,
+      endpoint_id: "server-node-1",
+      server_address: "https://server.example.com",
+      reachable: null,
+      approval_state: null,
+      waiting_for_approval: false,
+      message: null,
+    };
+
+    const { unmount: unmountUnknown } = render(ConnectionsTab);
+
+    const unknownState = screen.getByTestId("server-reachability-state");
+    expect(unknownState).toHaveTextContent("Reachability unknown");
+    expect(unknownState).toHaveClass("text-status-warn");
+
+    unmountUnknown();
+
+    mockState.store.connections.server = {
+      configured: false,
+      endpoint_id: null,
+      server_address: null,
+      reachable: null,
+      approval_state: null,
+      waiting_for_approval: false,
+      message: null,
+    };
+
+    render(ConnectionsTab);
+
+    const unconfiguredState = screen.getByTestId("server-reachability-state");
+    expect(unconfiguredState).toHaveTextContent("Not configured");
+    expect(unconfiguredState).toHaveClass("text-status-warn");
+  });
+
+  it("renders time last seen for forwarders", () => {
+    mockState.store.connections.forwarders = [
+      {
+        endpoint_id: "endpoint-seen",
+        display_name: "Seen Forwarder",
+        state: "disconnected",
+        pending: false,
+        subscribed_count: 0,
+        available_count: 0,
+        readers: [],
+        ups: null,
+        restart_needed: null,
+        remote_config_available: false,
+        last_seen_secs: 42,
+      },
+      {
+        endpoint_id: "endpoint-never",
+        display_name: "Never Forwarder",
+        state: "disconnected",
+        pending: false,
+        subscribed_count: 0,
+        available_count: 0,
+        readers: [],
+        ups: null,
+        restart_needed: null,
+        remote_config_available: false,
+        last_seen_secs: null,
+      },
+      {
+        endpoint_id: "endpoint-undefined",
+        display_name: "Undefined Forwarder",
+        state: "disconnected",
+        pending: false,
+        subscribed_count: 0,
+        available_count: 0,
+        readers: [],
+        ups: null,
+        restart_needed: null,
+        remote_config_available: false,
+      },
+    ];
+
+    render(ConnectionsTab);
+
+    expect(
+      screen.getByTestId("forwarder-last-seen-endpoint-seen"),
+    ).toHaveTextContent("Last seen 42s ago");
+    expect(
+      screen.getByTestId("forwarder-last-seen-endpoint-never"),
+    ).toHaveTextContent("Last seen never");
+    expect(
+      screen.getByTestId("forwarder-last-seen-endpoint-undefined"),
+    ).toHaveTextContent("Last seen never");
+  });
+
   it("renders UPS live status without duplicate forwarder reader summary pills", () => {
     mockState.store.connections.forwarders = [
       {
@@ -585,15 +718,15 @@ describe("ConnectionsTab", () => {
     expect(mockState.reconnectForwarder).toHaveBeenCalledWith("endpoint-3");
   });
 
-  it("shows reconnect before disconnect for unavailable forwarders", () => {
+  it("shows connect button and hides reconnect/disconnect and stream counts for unavailable forwarders", () => {
     mockState.store.connections.forwarders = [
       {
         endpoint_id: "endpoint-unavailable",
         display_name: "Unavailable Forwarder",
         state: "unavailable",
         pending: false,
-        subscribed_count: 0,
-        available_count: 0,
+        subscribed_count: 2,
+        available_count: 3,
         readers: [] as import("./api").ReaderLiveStatus[],
         ups: null as import("./api").UpsStatusPayload | null,
         restart_needed: null,
@@ -609,7 +742,10 @@ describe("ConnectionsTab", () => {
         .getAllByRole("button")
         .map((b) => b.textContent)
         .filter((text) => text !== "?"),
-    ).toEqual(["Reconnect", "Disconnect"]);
+    ).toEqual(["Connect"]);
+    expect(
+      within(row).queryByText("2 subscribed / 3 available"),
+    ).not.toBeInTheDocument();
   });
 
   it("shows reconnect but disables other controls for disconnected readers", async () => {

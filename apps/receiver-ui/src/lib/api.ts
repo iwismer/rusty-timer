@@ -151,6 +151,7 @@ export type ConnectionState =
 export interface ServerDeviceStatus {
   configured: boolean;
   endpoint_id: string | null;
+  server_address?: string | null;
   reachable: boolean | null;
   approval_state: string | null;
   waiting_for_approval: boolean;
@@ -232,6 +233,7 @@ export interface ForwarderConnectionStatus {
   restart_needed: boolean | null;
   remote_config_available: boolean;
   reader_control_available?: boolean;
+  last_seen_secs?: number | null;
 }
 
 export interface ConnectionsResponse {

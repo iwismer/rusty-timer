@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 pub struct ServerDeviceStatus {
     pub configured: bool,
     pub endpoint_id: Option<String>,
+    #[serde(default)]
+    pub server_address: Option<String>,
     pub reachable: Option<bool>,
     pub approval_state: Option<String>,
     pub waiting_for_approval: bool,
@@ -18,6 +20,7 @@ impl ServerDeviceStatus {
         Self {
             configured: false,
             endpoint_id: None,
+            server_address: None,
             reachable: None,
             approval_state: None,
             waiting_for_approval: false,
@@ -101,6 +104,7 @@ pub(crate) async fn server_device_status_for_url(
         return ServerDeviceStatus {
             configured: true,
             endpoint_id: None,
+            server_address: Some(server_url.to_owned()),
             reachable: None,
             approval_state: None,
             waiting_for_approval: true,
@@ -115,6 +119,7 @@ pub(crate) async fn server_device_status_for_url(
             return ServerDeviceStatus {
                 configured: true,
                 endpoint_id: Some(endpoint_id),
+                server_address: Some(server_url.to_owned()),
                 reachable: Some(false),
                 approval_state: None,
                 waiting_for_approval: false,
@@ -129,6 +134,7 @@ pub(crate) async fn server_device_status_for_url(
                 return ServerDeviceStatus {
                     configured: true,
                     endpoint_id: Some(endpoint_id),
+                    server_address: Some(server_url.to_owned()),
                     reachable: Some(false),
                     approval_state: None,
                     waiting_for_approval: false,
@@ -140,6 +146,7 @@ pub(crate) async fn server_device_status_for_url(
             return ServerDeviceStatus {
                 configured: true,
                 endpoint_id: Some(endpoint_id),
+                server_address: Some(server_url.to_owned()),
                 reachable: Some(false),
                 approval_state: None,
                 waiting_for_approval: false,
@@ -158,6 +165,7 @@ pub(crate) async fn server_device_status_for_url(
             ServerDeviceStatus {
                 configured: true,
                 endpoint_id: Some(endpoint_id),
+                server_address: Some(server_url.to_owned()),
                 reachable: Some(true),
                 approval_state: Some(device.approval_state),
                 waiting_for_approval,
@@ -168,6 +176,7 @@ pub(crate) async fn server_device_status_for_url(
         None => ServerDeviceStatus {
             configured: true,
             endpoint_id: Some(endpoint_id),
+            server_address: Some(server_url.to_owned()),
             reachable: Some(true),
             approval_state: None,
             waiting_for_approval: true,

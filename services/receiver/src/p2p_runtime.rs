@@ -2634,6 +2634,7 @@ mod tests {
         let pending = crate::control_api::ServerDeviceStatus {
             configured: true,
             endpoint_id: Some("receiver-ep".to_owned()),
+            server_address: None,
             reachable: Some(true),
             approval_state: Some("pending".to_owned()),
             waiting_for_approval: true,
@@ -2644,6 +2645,7 @@ mod tests {
         let unregistered = crate::control_api::ServerDeviceStatus {
             configured: true,
             endpoint_id: Some("receiver-ep".to_owned()),
+            server_address: None,
             reachable: Some(true),
             approval_state: None,
             waiting_for_approval: true,
@@ -2654,6 +2656,7 @@ mod tests {
         let active = crate::control_api::ServerDeviceStatus {
             configured: true,
             endpoint_id: Some("receiver-ep".to_owned()),
+            server_address: None,
             reachable: Some(true),
             approval_state: Some("active".to_owned()),
             waiting_for_approval: false,
