@@ -760,7 +760,7 @@ impl Journal {
         retention_state(&self.conn, stream_key)
     }
 
-    pub fn clear_stream(&mut self, stream_key: &str) -> Result<(), JournalError> {
+    pub fn clear_stream(&mut self, stream_key: &str) -> Result<(i64, usize), JournalError> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -768,7 +768,7 @@ impl Journal {
         let next_seq = next_seq(&tx, stream_key)?;
         let next_epoch = current_epoch + 1;
 
-        tx.execute(
+        let deleted = tx.execute(
             "DELETE FROM events WHERE stream_id = ?1",
             params![stream_key],
         )?;
@@ -791,7 +791,27 @@ impl Journal {
             params![stream_key, next_seq],
         )?;
         tx.commit()?;
-        Ok(())
+        Ok((next_epoch, deleted))
+    }
+
+    pub fn clear_all_streams(&mut self) -> Result<(Vec<(String, i64)>, usize), JournalError> {
+        let streams: Vec<String> = {
+            let mut stmt = self.conn.prepare("SELECT stream_id FROM streams")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            let mut streams = Vec::new();
+            for r in rows {
+                streams.push(r?);
+            }
+            streams
+        };
+        let mut total_deleted = 0;
+        let mut results = Vec::new();
+        for stream in &streams {
+            let (next_epoch, deleted) = self.clear_stream(stream)?;
+            total_deleted += deleted;
+            results.push((stream.clone(), next_epoch));
+        }
+        Ok((results, total_deleted))
     }
 
     fn current_epoch(&self, stream_key: &str) -> Result<i64, JournalError> {

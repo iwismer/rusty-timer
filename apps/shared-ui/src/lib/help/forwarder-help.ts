@@ -496,9 +496,15 @@ export const FORWARDER_HELP = {
       },
       clear_records: {
         label: "Clear Records",
-        summary: "Erases all stored records from the reader's onboard memory.",
-        detailHtml: "Permanently erases all chip reads stored in the reader's internal memory. This takes approximately 10 seconds to complete.<br><br><strong>This action is irreversible.</strong> Always use <strong>Download Reads</strong> first if you need to recover the stored data before clearing. Clear records after each event to ensure the reader's storage is ready for the next race.",
+        summary: "Erases all stored records from the physical IPICO reader's onboard hardware memory.",
+        detailHtml: "Permanently erases all chip reads stored in the physical IPICO reader's internal EEPROM memory. This takes approximately 10 seconds to complete.<br><br><strong>This only clears hardware memory on the reader</strong> — it does not delete chip reads already captured in the forwarder or receiver software databases (to delete forwarder database reads, use <strong>Clear Stored Reads</strong>). Always use <strong>Download Reads</strong> first if you need to recover stored data from the reader before clearing.",
         recommended: "Always download reads before clearing. Clear records at the end of each race day.",
+      },
+      clear_reads: {
+        label: "Clear Stored Reads",
+        summary: "Purges all previous chip reads from the forwarder's local database and advances the epoch.",
+        detailHtml: "Permanently deletes all stored chip reads for this reader from the forwarder's journal and advances the stream epoch. Connected receivers will receive a gap notice jumping them past the cleared sequence numbers.<br><br><strong>Use this at the start of a new race or event</strong> to start with a clean slate, if a receiver is significantly behind and needs to skip backlog, or if test reads need to be wiped.<br><br>Note: This does not affect the physical IPICO reader's onboard hardware memory (see <strong>Clear Records</strong>).",
+        recommended: "Use at the start of an event or after testing to purge test reads from the forwarder.",
       },
     },
     tips: [

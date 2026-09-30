@@ -171,6 +171,7 @@ describe("api client", () => {
       readerStopDownload,
       readerRefresh,
       readerReconnect,
+      readerClearReads,
     } = await import("./api");
     const result = { success: true, message: "", reader_info: null };
     mockInvoke.mockResolvedValue(result);
@@ -187,6 +188,7 @@ describe("api client", () => {
     await readerStopDownload("endpoint-1", "stream-a");
     await readerRefresh("endpoint-1", "stream-a");
     await readerReconnect("endpoint-1", "stream-a");
+    await readerClearReads("endpoint-1", "stream-a");
 
     expect(mockInvoke).toHaveBeenNthCalledWith(1, "reader_get_info", {
       endpointId: "endpoint-1",
@@ -241,6 +243,36 @@ describe("api client", () => {
     expect(mockInvoke).toHaveBeenNthCalledWith(12, "reader_reconnect", {
       endpointId: "endpoint-1",
       streamId: "stream-a",
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(13, "reader_clear_reads", {
+      endpointId: "endpoint-1",
+      streamId: "stream-a",
+    });
+  });
+
+  it("resetAllStreamsData calls admin_reset_all_streams_data", async () => {
+    const { resetAllStreamsData } = await import("./api");
+    mockInvoke.mockResolvedValue({ reset_count: 3 });
+
+    const result = await resetAllStreamsData();
+    expect(result).toEqual({ reset_count: 3 });
+    expect(mockInvoke).toHaveBeenCalledWith("admin_reset_all_streams_data");
+  });
+
+  it("clearStreamBoth calls readerClearReads and resetStreamData", async () => {
+    const { clearStreamBoth } = await import("./api");
+    mockInvoke.mockResolvedValue(undefined);
+
+    await clearStreamBoth("endpoint-1", "stream-a");
+    expect(mockInvoke).toHaveBeenCalledWith("reader_clear_reads", {
+      endpointId: "endpoint-1",
+      streamId: "stream-a",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("admin_reset_stream_data", {
+      body: {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-a",
+      },
     });
   });
 

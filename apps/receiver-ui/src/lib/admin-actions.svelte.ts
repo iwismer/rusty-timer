@@ -156,7 +156,7 @@ export class AdminActions {
 
   // --- Bulk actions ---
   async bulkAction(
-    action: () => Promise<{ deleted: number } | void>,
+    action: () => Promise<{ deleted?: number; reset_count?: number } | void>,
     label: string,
     actionId: string,
     afterMutateOpts?: { forceHydrateMode?: boolean },
@@ -165,8 +165,20 @@ export class AdminActions {
     this.feedback = null;
     try {
       const result = await action();
-      if (result && typeof result === "object" && "deleted" in result) {
-        this.setFeedback(`${label}: ${result.deleted} item(s) removed.`, true);
+      if (result && typeof result === "object") {
+        if ("reset_count" in result && typeof result.reset_count === "number") {
+          this.setFeedback(
+            `${label}: ${result.reset_count} stream(s) reset.`,
+            true,
+          );
+        } else if ("deleted" in result && typeof result.deleted === "number") {
+          this.setFeedback(
+            `${label}: ${result.deleted} item(s) removed.`,
+            true,
+          );
+        } else {
+          this.setFeedback(`${label}: done.`, true);
+        }
       } else {
         this.setFeedback(`${label}: done.`, true);
       }

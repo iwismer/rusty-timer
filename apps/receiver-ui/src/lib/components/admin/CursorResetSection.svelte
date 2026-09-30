@@ -17,6 +17,8 @@
 
   const btnWarn = buttonClass("warn", "xs");
   const btnWarnSm = buttonClass("warn", "sm");
+  const btnDanger = buttonClass("danger", "xs");
+  const btnDangerSm = buttonClass("danger", "sm");
 
   let {
     actions,
@@ -113,7 +115,7 @@
         {/each}
       </tbody>
     </table>
-    <div class="mt-3 flex justify-end">
+    <div class="mt-3 flex justify-end gap-2 items-center">
       <button
         onclick={() =>
           actions.bulkAction(
@@ -130,6 +132,27 @@
       </button>
       <HelpTip
         fieldKey="reset_all_cursors"
+        sectionKey="cursor_reset"
+        context="receiver-admin"
+        onOpenModal={openHelp}
+      />
+      <button
+        data-testid="reset-all-streams-data-btn"
+        onclick={() =>
+          actions.bulkAction(
+            () => api.resetAllStreamsData(),
+            "Reset all streams data",
+            "reset-all-streams-data",
+          )}
+        disabled={actions.inFlightAction === "reset-all-streams-data"}
+        class={btnDanger}
+      >
+        {actions.inFlightAction === "reset-all-streams-data"
+          ? "Resetting..."
+          : "Reset All Streams Data"}
+      </button>
+      <HelpTip
+        fieldKey="reset_all_streams_data"
         sectionKey="cursor_reset"
         context="receiver-admin"
         onOpenModal={openHelp}
@@ -217,7 +240,7 @@
         {/each}
       </tbody>
     </table>
-    <div class="mt-4 flex justify-end">
+    <div class="mt-4 flex justify-end gap-2 items-center">
       <button
         onclick={() =>
           actions.bulkAction(
@@ -231,6 +254,21 @@
         {actions.inFlightAction === "reset-all-cursors"
           ? "Resetting..."
           : "Reset All Cursors"}
+      </button>
+      <button
+        data-testid="reset-all-streams-data-mobile-btn"
+        onclick={() =>
+          actions.bulkAction(
+            () => api.resetAllStreamsData(),
+            "Reset all streams data",
+            "reset-all-streams-data",
+          )}
+        disabled={actions.inFlightAction === "reset-all-streams-data"}
+        class={btnDangerSm}
+      >
+        {actions.inFlightAction === "reset-all-streams-data"
+          ? "Resetting..."
+          : "Reset All Streams Data"}
       </button>
     </div>
   {/if}

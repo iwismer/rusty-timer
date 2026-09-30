@@ -2315,6 +2315,7 @@ macro_rules! receiver_command_list {
                 enabled: "bool"
             ) -> "ReaderControlResult",
             reader_clear_records(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
+            reader_clear_reads(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
             reader_start_download(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
             reader_stop_download(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
             reader_refresh(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
@@ -2325,6 +2326,7 @@ macro_rules! receiver_command_list {
             admin_reset_all_cursors() -> "serde_json::Value",
             admin_reset_earliest_epoch(body: "StreamRef") -> "()",
             admin_reset_stream_data(body: "StreamRef") -> "()",
+            admin_reset_all_streams_data() -> "serde_json::Value",
             admin_reset_all_earliest_epochs() -> "serde_json::Value",
             admin_purge_subscriptions() -> "serde_json::Value",
             admin_update_port(body: "UpdatePortRequest") -> "()",

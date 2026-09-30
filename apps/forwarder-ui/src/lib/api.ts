@@ -208,6 +208,33 @@ export async function setCurrentEpochName(
   });
 }
 
+export interface ClearReadsResponse {
+  cleared: boolean;
+  new_epoch?: number;
+  purged_reads: number;
+}
+
+export interface ClearAllReadsResponse {
+  cleared: boolean;
+  streams_cleared: number;
+  purged_reads: number;
+  streams: Array<{ stream_key: string; new_epoch: number }>;
+}
+
+export async function clearReads(
+  readerIp: string,
+): Promise<ClearReadsResponse> {
+  return apiFetch(`/api/v1/streams/${readerIp}/clear-reads`, {
+    method: "POST",
+  });
+}
+
+export async function clearAllReads(): Promise<ClearAllReadsResponse> {
+  return apiFetch("/api/v1/streams/all/clear-reads", {
+    method: "POST",
+  });
+}
+
 export async function getUpdateStatus(): Promise<UpdateStatusResponse> {
   return apiFetch<UpdateStatusResponse>("/update/status");
 }

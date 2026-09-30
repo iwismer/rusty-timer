@@ -723,6 +723,9 @@ fn action_to_request(
             request.command = "advance_epoch".to_owned();
             request.epoch_name = name;
         }
+        rt_domain::ReaderControlAction::ClearReads => {
+            request.command = "clear_reads".to_owned();
+        }
     }
     request
 }

@@ -155,6 +155,24 @@ export const RECEIVER_HELP = {
         detailHtml:
           'Subscribes to all streams currently listed as <strong>Available</strong>. This is equivalent to pressing Subscribe on each stream individually.',
       },
+      replay_all_reads: {
+        label: 'Replay All Reads',
+        summary: 'Resends all retained chip reads from forwarders for all subscribed streams.',
+        detailHtml:
+          'Resets the receiver’s local data and cursors for all subscribed streams to sequence 0. Forwarders will replay all retained reads from the beginning of their journals.<br><br>Use this if your timing software was restarted or missed reads and you need a full replay.',
+      },
+      replay_reads: {
+        label: 'Replay Reads',
+        summary: 'Resends all retained chip reads from the forwarder for this stream.',
+        detailHtml:
+          'Clears the receiver’s local stored reads and cursor for this stream and requests the forwarder to resend all retained reads starting from sequence 0.<br><br>Use this if the stream got out of sync or your timing software needs to reprocess this feed.',
+      },
+      clear_both: {
+        label: 'Clear Both',
+        summary: 'Purges stored reads from forwarder and clears local receiver data for a clean slate.',
+        detailHtml:
+          'Deletes all previous chip reads from the forwarder’s journal (advancing the epoch) AND resets the receiver’s local data for this stream.<br><br><strong>Use this at the start of a new race or event</strong> to start completely clean on both ends without old test reads.',
+      },
     },
     tips: [
       'Click a stream row to expand it and see detailed metrics, epoch controls, and per-stream actions.',

@@ -84,6 +84,33 @@
 
   <hr class="border-border" />
 
+  <!-- Reset All Streams Data -->
+  <section>
+    <h3 class="text-sm font-semibold text-text-primary mb-1">
+      Reset All Streams Data
+    </h3>
+    <p class="text-xs text-text-muted m-0 mb-3">
+      Clear received reads and cursors for all streams, prompting forwarders to
+      replay from sequence 0.
+    </p>
+    <button
+      onclick={() =>
+        actions.bulkAction(
+          () => api.resetAllStreamsData(),
+          "Reset all streams data",
+          "reset-all-streams-data",
+        )}
+      disabled={actions.inFlightAction === "reset-all-streams-data"}
+      class={btnWarn}
+    >
+      {actions.inFlightAction === "reset-all-streams-data"
+        ? "Resetting..."
+        : "Reset All Streams Data"}
+    </button>
+  </section>
+
+  <hr class="border-border" />
+
   <!-- Reset Profile -->
   <section>
     <h3 class="text-sm font-semibold text-text-primary mb-1">Reset Profile</h3>
@@ -248,6 +275,28 @@
       {actions.inFlightAction === "purge-subs"
         ? "Purging..."
         : "Purge All Subscriptions"}
+    </button>
+  </Card>
+
+  <!-- Reset All Streams Data -->
+  <Card title="Reset All Streams Data" borderStatus="warn">
+    <p class="text-sm text-text-muted m-0 mb-4">
+      Clear received reads and cursors for all streams. Forwarders will replay
+      all retained reads starting from sequence 0.
+    </p>
+    <button
+      onclick={() =>
+        actions.bulkAction(
+          () => api.resetAllStreamsData(),
+          "Reset all streams data",
+          "reset-all-streams-data",
+        )}
+      disabled={actions.inFlightAction === "reset-all-streams-data"}
+      class={btnWarnSm}
+    >
+      {actions.inFlightAction === "reset-all-streams-data"
+        ? "Resetting..."
+        : "Reset All Streams Data"}
     </button>
   </Card>
 

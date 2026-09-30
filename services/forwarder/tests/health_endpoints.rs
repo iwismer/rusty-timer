@@ -371,6 +371,109 @@ async fn advance_epoch_preserves_old_epoch_events() {
 }
 
 #[tokio::test]
+async fn clear_reads_endpoint_purges_events_and_bumps_epoch() {
+    use forwarder::storage::journal::Journal;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use tokio::sync::Mutex;
+
+    let dir = tempdir().expect("tempdir failed");
+    let db_path = dir.path().join("test_clear.sqlite3");
+    let mut journal = Journal::open(&db_path).expect("journal open failed");
+    journal
+        .ensure_stream_state("192.168.1.20", 1)
+        .expect("ensure stream failed");
+
+    // Insert events in epoch 1
+    journal
+        .insert_event("192.168.1.20", 1, 1, None, b"READ1", "raw")
+        .expect("insert failed");
+    journal
+        .insert_event("192.168.1.20", 1, 2, None, b"READ2", "raw")
+        .expect("insert failed");
+
+    let shared_journal = Arc::new(Mutex::new(journal));
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let subsystem = SubsystemStatus::ready();
+    let server = StatusServer::start_with_journal(cfg, subsystem, shared_journal.clone())
+        .await
+        .expect("start failed");
+    let addr = server.local_addr();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Clear reads
+    let (status, body) = http_post(addr, "/api/v1/streams/192.168.1.20/clear-reads", "").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("\"cleared\":true"));
+    assert!(body.contains("\"new_epoch\":2"));
+    assert!(body.contains("\"purged_reads\":2"));
+
+    // Events must be deleted and epoch bumped to 2
+    let mut j = shared_journal.lock().await;
+    let count = j.event_count("192.168.1.20").expect("count failed");
+    assert_eq!(count, 0, "events must be purged after clear-reads");
+    let (epoch, next_seq) = j
+        .current_epoch_and_next_seq("192.168.1.20")
+        .expect("epoch query");
+    assert_eq!(epoch, 2);
+    assert_eq!(next_seq, 3);
+}
+
+#[tokio::test]
+async fn clear_all_reads_endpoint_purges_all_streams() {
+    use forwarder::storage::journal::Journal;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use tokio::sync::Mutex;
+
+    let dir = tempdir().expect("tempdir failed");
+    let db_path = dir.path().join("test_clear_all.sqlite3");
+    let mut journal = Journal::open(&db_path).expect("journal open failed");
+    journal
+        .ensure_stream_state("192.168.1.20", 1)
+        .expect("ensure stream 1 failed");
+    journal
+        .ensure_stream_state("192.168.1.21", 1)
+        .expect("ensure stream 2 failed");
+
+    journal
+        .insert_event("192.168.1.20", 1, 1, None, b"READ1", "raw")
+        .expect("insert failed");
+    journal
+        .insert_event("192.168.1.21", 1, 1, None, b"READ2", "raw")
+        .expect("insert failed");
+
+    let shared_journal = Arc::new(Mutex::new(journal));
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let subsystem = SubsystemStatus::ready();
+    let server = StatusServer::start_with_journal(cfg, subsystem, shared_journal.clone())
+        .await
+        .expect("start failed");
+    let addr = server.local_addr();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, body) = http_post(addr, "/api/v1/streams/all/clear-reads", "").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("\"cleared\":true"));
+    assert!(body.contains("\"streams_cleared\":2"));
+    assert!(body.contains("\"purged_reads\":2"));
+
+    let j = shared_journal.lock().await;
+    assert_eq!(j.event_count("192.168.1.20").expect("count failed"), 0);
+    assert_eq!(j.event_count("192.168.1.21").expect("count failed"), 0);
+}
+
+#[tokio::test]
 async fn advance_epoch_unknown_stream_returns_404() {
     let cfg = StatusConfig {
         bind: "127.0.0.1:0".to_owned(),
@@ -684,6 +787,19 @@ impl forwarder::status_http::JournalAccess for NoJournalForNameApi {
     fn event_count(&self, _stream_key: &str) -> Result<i64, String> {
         Ok(0)
     }
+
+    fn clear_reads(
+        &mut self,
+        _stream_key: &str,
+    ) -> Result<(i64, usize), forwarder::status_http::EpochAdvanceError> {
+        Err(forwarder::status_http::EpochAdvanceError::NotFound)
+    }
+
+    fn clear_all_reads(
+        &mut self,
+    ) -> Result<(Vec<(String, i64)>, usize), forwarder::status_http::EpochAdvanceError> {
+        Ok((Vec::new(), 0))
+    }
 }
 
 #[tokio::test]
@@ -885,6 +1001,14 @@ async fn status_page_does_not_query_journal_for_totals() {
         fn event_count(&self, _stream_key: &str) -> Result<i64, String> {
             self.event_count_calls.fetch_add(1, Ordering::Relaxed);
             Ok(42)
+        }
+
+        fn clear_reads(&mut self, _stream_key: &str) -> Result<(i64, usize), EpochAdvanceError> {
+            Ok((1, 0))
+        }
+
+        fn clear_all_reads(&mut self) -> Result<(Vec<(String, i64)>, usize), EpochAdvanceError> {
+            Ok((Vec::new(), 0))
         }
     }
 

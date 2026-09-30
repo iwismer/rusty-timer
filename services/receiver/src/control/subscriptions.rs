@@ -311,6 +311,27 @@ pub async fn admin_reset_stream_data(
     Ok(())
 }
 
+pub async fn admin_reset_all_streams_data(
+    state: &AppState,
+) -> Result<serde_json::Value, ReceiverError> {
+    let mut count = 0;
+    {
+        let mut db = state.storage.db.lock().await;
+        let subscriptions = db
+            .load_stream_subscriptions()
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+        for sub in subscriptions {
+            let local_stream_key = LocalStreamKey::new(&sub.forwarder_endpoint_id, &sub.stream_id);
+            db.reset_stream_data(local_stream_key.as_str())
+                .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+            count += 1;
+        }
+    }
+    let _ = state.request_reconnect_if_connected().await;
+    state.emit_streams_snapshot().await;
+    Ok(serde_json::json!({ "reset_count": count }))
+}
+
 pub async fn admin_reset_all_earliest_epochs(
     state: &AppState,
 ) -> Result<serde_json::Value, ReceiverError> {

@@ -293,6 +293,12 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
             arg(args, "stream_id")?,
         )
         .await?),
+        "reader_clear_reads" => ok(control_api::reader_clear_reads(
+            state,
+            arg(args, "endpoint_id")?,
+            arg(args, "stream_id")?,
+        )
+        .await?),
         "reader_start_download" => ok(control_api::reader_start_download(
             state,
             arg(args, "endpoint_id")?,
@@ -328,6 +334,9 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
         }
         "admin_reset_stream_data" => {
             ok(control_api::admin_reset_stream_data(state, arg(args, "body")?).await?)
+        }
+        "admin_reset_all_streams_data" => {
+            ok(control_api::admin_reset_all_streams_data(state).await?)
         }
         "admin_reset_all_earliest_epochs" => {
             ok(control_api::admin_reset_all_earliest_epochs(state).await?)

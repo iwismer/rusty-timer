@@ -180,6 +180,33 @@ async fn dispatch_action(
                 ..DispatchOutcome::default()
             })
         }
+        rt_domain::ReaderControlAction::ClearReads => {
+            let (new_epoch, _purged) = journal
+                .lock()
+                .await
+                .clear_stream(reader_key)
+                .map_err(|e| e.to_string())?;
+            let metadata = journal
+                .lock()
+                .await
+                .current_epoch_metadata(reader_key)
+                .map_err(|e| e.to_string())?
+                .unwrap_or(crate::storage::journal::CurrentEpochMetadata {
+                    epoch: new_epoch,
+                    created_unix_ms: None,
+                    start_seq: 1,
+                    name: None,
+                });
+            service
+                .apply_epoch_metadata(reader_key, metadata.clone())
+                .await;
+            Ok(DispatchOutcome {
+                current_epoch: Some(metadata.epoch),
+                current_epoch_created_unix_ms: metadata.created_unix_ms,
+                current_epoch_name: metadata.name,
+                ..DispatchOutcome::default()
+            })
+        }
     }
 }
 
@@ -225,6 +252,7 @@ pub(crate) fn request_to_action(
         "advance_epoch" => Ok(rt_domain::ReaderControlAction::AdvanceEpoch {
             name: crate::status_http::normalize_epoch_name(request.epoch_name.as_deref())?,
         }),
+        "clear_reads" => Ok(rt_domain::ReaderControlAction::ClearReads),
         other => Err(format!("unsupported reader control command: {other}")),
     }
 }

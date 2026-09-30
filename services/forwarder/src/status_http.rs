@@ -513,6 +513,14 @@ pub trait JournalAccess {
     fn distinct_epochs(&self, _stream_key: Option<&str>) -> Result<Vec<i64>, String> {
         Ok(Vec::new())
     }
+
+    /// Clear all stored reads and advance the epoch for a stream.
+    /// Returns (new_epoch, purged_reads_count) on success.
+    fn clear_reads(&mut self, stream_key: &str) -> Result<(i64, usize), EpochAdvanceError>;
+
+    /// Clear all stored reads and advance epochs for all streams.
+    /// Returns (stream_epochs, total_purged_reads_count) on success.
+    fn clear_all_reads(&mut self) -> Result<(Vec<(String, i64)>, usize), EpochAdvanceError>;
 }
 
 #[derive(Debug)]
@@ -572,6 +580,21 @@ impl JournalAccess for Journal {
     fn distinct_epochs(&self, stream_key: Option<&str>) -> Result<Vec<i64>, String> {
         Journal::distinct_epochs(self, stream_key).map_err(|e| e.to_string())
     }
+
+    fn clear_reads(&mut self, stream_key: &str) -> Result<(i64, usize), EpochAdvanceError> {
+        self.clear_stream(stream_key).map_err(|e| {
+            if e.to_string().contains("returned no rows") {
+                EpochAdvanceError::NotFound
+            } else {
+                EpochAdvanceError::Storage(e.to_string())
+            }
+        })
+    }
+
+    fn clear_all_reads(&mut self) -> Result<(Vec<(String, i64)>, usize), EpochAdvanceError> {
+        self.clear_all_streams()
+            .map_err(|e| EpochAdvanceError::Storage(e.to_string()))
+    }
 }
 
 /// Sentinel "no journal" implementation: every advance returns NotFound.
@@ -603,6 +626,14 @@ impl JournalAccess for NoJournal {
 
     fn event_count(&self, _stream_key: &str) -> Result<i64, String> {
         Ok(0)
+    }
+
+    fn clear_reads(&mut self, _stream_key: &str) -> Result<(i64, usize), EpochAdvanceError> {
+        Err(EpochAdvanceError::NotFound)
+    }
+
+    fn clear_all_reads(&mut self) -> Result<(Vec<(String, i64)>, usize), EpochAdvanceError> {
+        Ok((Vec::new(), 0))
     }
 }
 
@@ -1420,6 +1451,10 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             post(advance_epoch_handler::<J>),
         )
         .route(
+            "/api/v1/streams/{reader_ip}/clear-reads",
+            post(clear_reads_handler::<J>),
+        )
+        .route(
             "/api/v1/streams/{reader_ip}/current-epoch/name",
             put(set_current_epoch_name_handler::<J>),
         )
@@ -1702,6 +1737,77 @@ async fn advance_epoch_handler<J: JournalAccess + Send + 'static>(
             text_response(StatusCode::NOT_FOUND, "stream not found")
         }
         Err(EpochAdvanceError::Storage(e)) => text_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+async fn clear_reads_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(reader_ip): Path<String>,
+) -> Response {
+    if reader_ip == "all" {
+        let result = state.journal.lock().await.clear_all_reads();
+        match result {
+            Ok((streams, total_purged)) => {
+                for (stream_key, _) in &streams {
+                    if let Ok(Some(metadata)) = state
+                        .journal
+                        .lock()
+                        .await
+                        .current_epoch_metadata(stream_key)
+                    {
+                        state.store.apply_epoch_metadata(stream_key, metadata).await;
+                    }
+                }
+                state
+                    .logger
+                    .log("reads cleared and epochs advanced for all streams via API".to_owned());
+                let streams_cleared = streams.len();
+                let body = serde_json::json!({
+                    "cleared": true,
+                    "streams_cleared": streams_cleared,
+                    "purged_reads": total_purged,
+                    "streams": streams.into_iter().map(|(k, e)| serde_json::json!({"stream_key": k, "new_epoch": e})).collect::<Vec<_>>()
+                }).to_string();
+                json_response(StatusCode::OK, body)
+            }
+            Err(EpochAdvanceError::NotFound) => {
+                text_response(StatusCode::NOT_FOUND, "no streams found")
+            }
+            Err(EpochAdvanceError::Storage(e)) => {
+                text_response(StatusCode::INTERNAL_SERVER_ERROR, e)
+            }
+        }
+    } else {
+        let result = state.journal.lock().await.clear_reads(&reader_ip);
+        match result {
+            Ok((new_epoch, purged)) => {
+                if let Ok(Some(metadata)) = state
+                    .journal
+                    .lock()
+                    .await
+                    .current_epoch_metadata(&reader_ip)
+                {
+                    state.store.apply_epoch_metadata(&reader_ip, metadata).await;
+                }
+                state.logger.log(format!(
+                    "reads cleared and epoch advanced for {} via API",
+                    reader_ip
+                ));
+                let body = serde_json::json!({
+                    "cleared": true,
+                    "new_epoch": new_epoch,
+                    "purged_reads": purged
+                })
+                .to_string();
+                json_response(StatusCode::OK, body)
+            }
+            Err(EpochAdvanceError::NotFound) => {
+                text_response(StatusCode::NOT_FOUND, "stream not found")
+            }
+            Err(EpochAdvanceError::Storage(e)) => {
+                text_response(StatusCode::INTERNAL_SERVER_ERROR, e)
+            }
+        }
     }
 }
 

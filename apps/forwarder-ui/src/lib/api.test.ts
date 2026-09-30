@@ -158,6 +158,42 @@ describe("forwarder api client", () => {
     );
   });
 
+  it("clearReads calls correct endpoint", async () => {
+    const { clearReads } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, { cleared: true, new_epoch: 2, purged_reads: 42 }),
+    );
+    const result = await clearReads("192.168.1.10");
+    expect(result).toEqual({ cleared: true, new_epoch: 2, purged_reads: 42 });
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/streams/192.168.1.10/clear-reads",
+      expect.objectContaining({
+        method: "POST",
+      }),
+    );
+  });
+
+  it("clearAllReads calls correct endpoint", async () => {
+    const { clearAllReads } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, {
+        cleared: true,
+        streams_cleared: 1,
+        purged_reads: 42,
+        streams: [{ stream_key: "192.168.1.10", new_epoch: 2 }],
+      }),
+    );
+    const result = await clearAllReads();
+    expect(result.cleared).toBe(true);
+    expect(result.streams_cleared).toBe(1);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/streams/all/clear-reads",
+      expect.objectContaining({
+        method: "POST",
+      }),
+    );
+  });
+
   it("setCurrentEpochName sends null when clearing", async () => {
     const { setCurrentEpochName } = await import("./api");
     mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));

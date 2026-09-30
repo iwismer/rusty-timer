@@ -151,6 +151,12 @@ impl JournalAccess for NoopJournal {
     fn event_count(&self, _stream_key: &str) -> Result<i64, String> {
         Ok(0)
     }
+    fn clear_reads(&mut self, _stream_key: &str) -> Result<(i64, usize), EpochAdvanceError> {
+        Err(EpochAdvanceError::NotFound)
+    }
+    fn clear_all_reads(&mut self) -> Result<(Vec<(String, i64)>, usize), EpochAdvanceError> {
+        Ok((Vec::new(), 0))
+    }
 }
 
 #[tokio::test]

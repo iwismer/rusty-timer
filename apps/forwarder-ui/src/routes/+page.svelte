@@ -9,6 +9,7 @@
     Card,
     AlertBanner,
     LogViewer,
+    ConfirmDialog,
     HelpDialog,
     BatteryIndicator,
     ReaderControlPanel,
@@ -189,9 +190,30 @@
   // Reader control handlers. These throw on failure so the shared
   // ReaderControlPanel can surface the error via its own feedback banner;
   // success feedback is likewise rendered by the panel.
+  let confirmClearAllOpen = $state(false);
+  let clearAllBusy = $state(false);
+
   async function handleAdvanceEpoch(readerIp: string, name: string | null) {
     await api.advanceEpoch(readerIp, name);
     await loadAll();
+  }
+
+  async function handleClearReads(readerIp: string) {
+    await api.clearReads(readerIp);
+    await loadAll();
+  }
+
+  async function handleClearAllReads() {
+    clearAllBusy = true;
+    try {
+      await api.clearAllReads();
+      confirmClearAllOpen = false;
+      await loadAll();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      clearAllBusy = false;
+    }
   }
 
   async function handleSetCurrentEpochName(
@@ -701,6 +723,17 @@
           >
             Export TAGDATA
           </button>
+          {#if (status?.readers.length ?? 0) > 0}
+            <button
+              class="px-2 py-1 text-xs rounded-md bg-surface-0 text-red-600 border border-red-300 dark:border-red-900 cursor-pointer hover:bg-red-50 dark:hover:bg-red-950/30 disabled:opacity-50"
+              onclick={() => {
+                confirmClearAllOpen = true;
+              }}
+              disabled={clearAllBusy}
+            >
+              Clear All Stored Reads
+            </button>
+          {/if}
         </div>
       {/snippet}
 
@@ -778,6 +811,7 @@
                 onSetEpochName={(name) =>
                   handleSetCurrentEpochName(reader.ip, name)}
                 onAdvanceEpoch={(name) => handleAdvanceEpoch(reader.ip, name)}
+                onClearReads={() => handleClearReads(reader.ip)}
                 onSyncClock={() => handleSyncClock(reader.ip)}
                 onSetReadMode={(mode, timeout) =>
                   handleSetReadMode(reader.ip, mode, timeout)}
@@ -857,5 +891,18 @@
   onClose={() => {
     readerLiveHelpOpen = false;
     readerLiveHelpField = undefined;
+  }}
+/>
+
+<ConfirmDialog
+  open={confirmClearAllOpen}
+  title="Clear All Stored Reads"
+  message="Permanently delete all stored reads for ALL readers from the forwarder database? New epochs will be started for all streams. This action cannot be undone."
+  confirmLabel="Clear All Reads"
+  variant="err"
+  busy={clearAllBusy}
+  onConfirm={handleClearAllReads}
+  onCancel={() => {
+    confirmClearAllOpen = false;
   }}
 />

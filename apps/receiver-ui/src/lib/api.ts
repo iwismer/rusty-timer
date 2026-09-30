@@ -525,6 +525,16 @@ export async function readerAdvanceEpoch(
   });
 }
 
+export async function readerClearReads(
+  endpointId: string,
+  streamId: string,
+): Promise<ReaderControlResult> {
+  return invoke<ReaderControlResult>("reader_clear_reads", {
+    endpointId,
+    streamId,
+  });
+}
+
 export async function readerSetReadMode(
   endpointId: string,
   streamId: string,
@@ -662,6 +672,21 @@ export async function resetStreamData(stream: {
       forwarder_endpoint_id: stream.forwarder_endpoint_id,
       stream_id: stream.stream_id,
     },
+  });
+}
+
+export async function resetAllStreamsData(): Promise<{ reset_count: number }> {
+  return invoke("admin_reset_all_streams_data");
+}
+
+export async function clearStreamBoth(
+  endpointId: string,
+  streamId: string,
+): Promise<void> {
+  await readerClearReads(endpointId, streamId);
+  await resetStreamData({
+    forwarder_endpoint_id: endpointId,
+    stream_id: streamId,
   });
 }
 

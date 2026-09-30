@@ -579,6 +579,17 @@ async fn reader_clear_records(
 }
 
 #[tauri::command]
+async fn reader_clear_reads(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+    stream_id: String,
+) -> CmdResult<control_api::ReaderControlResult> {
+    control_api::reader_clear_reads(&state, endpoint_id, stream_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn reader_start_download(
     state: State<'_, Arc<AppState>>,
     endpoint_id: String,
@@ -665,6 +676,15 @@ async fn admin_reset_stream_data(
     body: control_api::StreamRef,
 ) -> CmdResult<()> {
     control_api::admin_reset_stream_data(&state, body)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn admin_reset_all_streams_data(
+    state: State<'_, Arc<AppState>>,
+) -> CmdResult<serde_json::Value> {
+    control_api::admin_reset_all_streams_data(&state)
         .await
         .map_err(|e| e.to_string())
 }

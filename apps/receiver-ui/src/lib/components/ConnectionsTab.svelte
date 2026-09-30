@@ -28,6 +28,7 @@
     connectForwarder,
     disconnectForwarder,
     readerAdvanceEpoch,
+    readerClearReads,
     readerClearRecords,
     readerReconnect,
     readerRefresh,
@@ -709,6 +710,18 @@
                                 forwarder.endpoint_id,
                                 reader.stream_id,
                                 name,
+                              ),
+                            {
+                              forwarder_endpoint_id: forwarder.endpoint_id,
+                              stream_id: reader.stream_id,
+                            },
+                          )}
+                        onClearReads={() =>
+                          runReaderCommand(
+                            () =>
+                              readerClearReads(
+                                forwarder.endpoint_id,
+                                reader.stream_id,
                               ),
                             {
                               forwarder_endpoint_id: forwarder.endpoint_id,

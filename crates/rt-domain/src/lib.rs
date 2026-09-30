@@ -135,6 +135,7 @@ pub enum ReaderControlAction {
     Reconnect,
     SetEpochName { name: Option<String> },
     AdvanceEpoch { name: Option<String> },
+    ClearReads,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,4 +214,18 @@ pub struct ReaderStatusChanged {
     pub stream_id: Uuid,
     pub reader_ip: String,
     pub connected: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clear_reads_action_serde() {
+        let action = ReaderControlAction::ClearReads;
+        let json = serde_json::to_string(&action).unwrap();
+        assert_eq!(json, r#"{"type":"clear_reads"}"#);
+        let parsed: ReaderControlAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, action);
+    }
 }

@@ -517,6 +517,20 @@ pub async fn reader_advance_epoch(
     .await
 }
 
+pub async fn reader_clear_reads(
+    state: &AppState,
+    endpoint_id: String,
+    stream_id: String,
+) -> Result<ReaderControlResult, ReceiverError> {
+    reader_control_command(
+        state,
+        endpoint_id,
+        stream_id,
+        rt_domain::ReaderControlAction::ClearReads,
+    )
+    .await
+}
+
 pub async fn reader_set_read_mode(
     state: &AppState,
     endpoint_id: String,

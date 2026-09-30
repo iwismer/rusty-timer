@@ -3,6 +3,7 @@
   import {
     AlertBanner,
     BatteryIndicator,
+    ConfirmDialog,
     HelpTip,
   } from "@rusty-timer/shared-ui";
   import { resizeWidth } from "$lib/actions/resizeWidth";
@@ -18,9 +19,15 @@
     changeEarliestEpoch,
     selectedEarliestEpochValue,
     formatEarliestEpochOption,
+    refreshStreamsAndEpochOptions,
     openHelp,
   } from "$lib/store.svelte";
-  import type { StreamEntry } from "$lib/api";
+  import {
+    type StreamEntry,
+    resetStreamData,
+    resetAllStreamsData,
+    clearStreamBoth,
+  } from "$lib/api";
   import ExportTagdataModal from "$lib/components/ExportTagdataModal.svelte";
   import { btnPrimary, btnSecondary } from "$lib/ui-classes";
   import {
@@ -140,6 +147,61 @@
     return alias ? alias : null;
   }
 
+  let confirmReplayAllOpen = $state(false);
+  let replayAllBusy = $state(false);
+  let confirmingReplayStream = $state<StreamEntry | null>(null);
+  let replayingStreamKey = $state<string | null>(null);
+  let confirmingClearBothStream = $state<StreamEntry | null>(null);
+  let clearingBothStreamKey = $state<string | null>(null);
+  let actionError = $state<string | null>(null);
+
+  async function handleReplayAll() {
+    confirmReplayAllOpen = false;
+    replayAllBusy = true;
+    actionError = null;
+    try {
+      await resetAllStreamsData();
+      await refreshStreamsAndEpochOptions();
+    } catch (e) {
+      actionError = `Failed to replay all streams: ${String(e)}`;
+    } finally {
+      replayAllBusy = false;
+    }
+  }
+
+  async function handleReplayStream(stream: StreamEntry) {
+    const key = streamIdentity(stream);
+    confirmingReplayStream = null;
+    replayingStreamKey = key;
+    actionError = null;
+    try {
+      await resetStreamData({
+        forwarder_endpoint_id: stream.forwarder_endpoint_id,
+        stream_id: stream.stream_id,
+      });
+      await refreshStreamsAndEpochOptions();
+    } catch (e) {
+      actionError = `Failed to replay stream ${streamPrimaryLabel(stream)}: ${String(e)}`;
+    } finally {
+      replayingStreamKey = null;
+    }
+  }
+
+  async function handleClearBoth(stream: StreamEntry) {
+    const key = streamIdentity(stream);
+    confirmingClearBothStream = null;
+    clearingBothStreamKey = key;
+    actionError = null;
+    try {
+      await clearStreamBoth(stream.forwarder_endpoint_id, stream.stream_id);
+      await refreshStreamsAndEpochOptions();
+    } catch (e) {
+      actionError = `Failed to clear stream ${streamPrimaryLabel(stream)}: ${String(e)}`;
+    } finally {
+      clearingBothStreamKey = null;
+    }
+  }
+
   function formatOptional(value: string | null | undefined): string {
     return value ?? "\u2014";
   }
@@ -197,9 +259,21 @@
     </div>
   {/if}
 
-  {#if store.streams && store.streams.streams.length > 0}
+  {#if actionError}
+    <div class="px-4 py-2">
+      <AlertBanner
+        variant="err"
+        message={actionError}
+        onDismiss={() => {
+          actionError = null;
+        }}
+      />
+    </div>
+  {/if}
+
+  {#if store.streams?.streams && store.streams.streams.length > 0}
     <div
-      class="flex justify-end items-center gap-2 px-4 py-2 border-b border-border"
+      class="flex justify-end gap-2 px-4 py-2 border-b border-border items-center"
     >
       <button
         data-testid="export-tagdata-btn"
@@ -222,6 +296,24 @@
         </button>
         <HelpTip
           fieldKey="subscribe_all"
+          sectionKey="streams"
+          context="receiver"
+          onOpenModal={openHelp}
+        />
+      {/if}
+      {#if store.streams.streams.some((stream) => stream.subscribed)}
+        <button
+          data-testid="replay-all-btn"
+          class={btnSecondary}
+          onclick={() => {
+            confirmReplayAllOpen = true;
+          }}
+          disabled={store.streamActionBusy || replayAllBusy}
+        >
+          {replayAllBusy ? "Replaying..." : "Replay All Reads"}
+        </button>
+        <HelpTip
+          fieldKey="replay_all_reads"
           sectionKey="streams"
           context="receiver"
           onOpenModal={openHelp}
@@ -679,6 +771,53 @@
                       </button>
 
                       {#if stream.subscribed}
+                        <button
+                          data-testid="replay-stream-{key}"
+                          class={btnSecondary}
+                          class:!px-2.5={true}
+                          class:!py-1={true}
+                          class:!text-xs={true}
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            confirmingReplayStream = stream;
+                          }}
+                          disabled={replayingStreamKey === key ||
+                            clearingBothStreamKey === key}
+                          title="Clear local stream data and replay all retained reads from the forwarder"
+                        >
+                          {replayingStreamKey === key
+                            ? "Replaying..."
+                            : "Replay Reads"}
+                        </button>
+                        <HelpTip
+                          fieldKey="replay_reads"
+                          sectionKey="streams"
+                          context="receiver"
+                          onOpenModal={openHelp}
+                        />
+
+                        <button
+                          data-testid="clear-both-stream-{key}"
+                          class="px-2.5 py-1 text-xs rounded-md bg-surface-0 text-red-600 border border-red-300 dark:border-red-900 cursor-pointer hover:bg-red-50 dark:hover:bg-red-950/30 disabled:opacity-50"
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            confirmingClearBothStream = stream;
+                          }}
+                          disabled={replayingStreamKey === key ||
+                            clearingBothStreamKey === key}
+                          title="Purge stored reads from forwarder and reset receiver local data (start clean state)"
+                        >
+                          {clearingBothStreamKey === key
+                            ? "Clearing..."
+                            : "Clear Both"}
+                        </button>
+                        <HelpTip
+                          fieldKey="clear_both"
+                          sectionKey="streams"
+                          context="receiver"
+                          onOpenModal={openHelp}
+                        />
+
                         <label
                           class="inline-flex items-center gap-1.5 text-xs text-text-muted"
                           title="Publish this stream's finish reads to the announcer board"
@@ -716,6 +855,51 @@
       </table>
     </div>
   {/if}
+
+  <ConfirmDialog
+    open={confirmReplayAllOpen}
+    title="Replay All Reads"
+    message="Replay all retained reads from forwarders for all subscribed streams? The receiver will reset local data and cursors to 0. Existing DBF files will not be deleted."
+    confirmLabel="Replay All Reads"
+    variant="warn"
+    busy={replayAllBusy}
+    onConfirm={handleReplayAll}
+    onCancel={() => {
+      confirmReplayAllOpen = false;
+    }}
+  />
+
+  <ConfirmDialog
+    open={confirmingReplayStream !== null}
+    title="Replay Reads"
+    message={`Replay all retained reads for ${confirmingReplayStream ? streamPrimaryLabel(confirmingReplayStream) : "this stream"} from the forwarder? Local stream data and cursor will be reset to 0.`}
+    confirmLabel="Replay Reads"
+    variant="warn"
+    busy={replayingStreamKey !== null}
+    onConfirm={() => {
+      if (confirmingReplayStream)
+        void handleReplayStream(confirmingReplayStream);
+    }}
+    onCancel={() => {
+      confirmingReplayStream = null;
+    }}
+  />
+
+  <ConfirmDialog
+    open={confirmingClearBothStream !== null}
+    title="Clear Both (Clean State)"
+    message={`Purge all stored reads from the forwarder AND reset local receiver data for ${confirmingClearBothStream ? streamPrimaryLabel(confirmingClearBothStream) : "this stream"}? A new epoch will be started on the forwarder. This cannot be undone.`}
+    confirmLabel="Clear Both"
+    variant="err"
+    busy={clearingBothStreamKey !== null}
+    onConfirm={() => {
+      if (confirmingClearBothStream)
+        void handleClearBoth(confirmingClearBothStream);
+    }}
+    onCancel={() => {
+      confirmingClearBothStream = null;
+    }}
+  />
 </div>
 
 <ExportTagdataModal

@@ -1,5 +1,6 @@
 <script lang="ts">
   import AlertBanner from './AlertBanner.svelte';
+  import ConfirmDialog from './ConfirmDialog.svelte';
   import HelpTip from './HelpTip.svelte';
   import {
     formatReadMode,
@@ -73,6 +74,7 @@
     onOpenHelpModal = undefined,
     onSetEpochName = undefined,
     onAdvanceEpoch = undefined,
+    onClearReads = undefined,
     onSyncClock,
     onSetReadMode,
     onSetTto,
@@ -140,6 +142,8 @@
     onSetEpochName?: (name: string | null) => Promise<void>;
     /** Advance to the next epoch. Epoch row renders when provided. */
     onAdvanceEpoch?: (name: string | null) => Promise<void>;
+    /** Clear all stored reads for this reader from forwarder journal. */
+    onClearReads?: () => Promise<void>;
     onSyncClock: () => Promise<void>;
     onSetReadMode: (mode: string, timeout: number) => Promise<void>;
     onSetTto: (enabled: boolean) => Promise<void>;
@@ -163,6 +167,8 @@
   // initial collapsed state; the user owns the toggle afterwards.
   let detailsOpen = $state(!(detailsCollapsible && defaultCollapsed));
 
+  let confirmClearReadsOpen = $state(false);
+
   let detailsShown = $derived(!detailsCollapsible || detailsOpen);
 
   let currentReadMode = $derived(readModeDraft ?? readerInfo?.config?.mode ?? 'raw');
@@ -171,7 +177,9 @@
   );
   let showTimeout = $derived(shouldShowTimeoutInput(currentReadMode));
 
-  let showEpochRow = $derived(onSetEpochName !== undefined || onAdvanceEpoch !== undefined);
+  let showEpochRow = $derived(
+    onSetEpochName !== undefined || onAdvanceEpoch !== undefined || onClearReads !== undefined
+  );
   let showSummaryRow = $derived(
     readsSession != null ||
       readsEpoch != null ||
@@ -318,6 +326,18 @@
             : 'Advanced to next epoch and saved name',
       });
     }, 'Advance Epoch');
+  }
+
+  async function handleClearReads() {
+    if (!onClearReads) return;
+    confirmClearReadsOpen = false;
+    await wrap(async () => {
+      await onClearReads!();
+      setFeedback({
+        kind: 'ok',
+        message: 'Cleared stored reads and advanced epoch',
+      });
+    }, 'Clear Stored Reads');
   }
 
   let isDisabled = $derived(disabled || busy);
@@ -522,6 +542,23 @@
               onOpenModal={openHelp}
             />{/if}
         {/if}
+        {#if onClearReads}
+          <button
+            onclick={() => {
+              confirmClearReadsOpen = true;
+            }}
+            class="px-2 py-1 text-xs rounded-md bg-surface-0 text-red-600 border border-red-300 dark:border-red-900 cursor-pointer hover:bg-red-50 dark:hover:bg-red-950/30 disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={epochControlDisabled}
+          >
+            Clear Stored Reads
+          </button>
+          {#if onOpenHelpModal}<HelpTip
+              fieldKey="clear_reads"
+              sectionKey="reader_live"
+              context={helpContext}
+              onOpenModal={openHelp}
+            />{/if}
+        {/if}
       </div>
     </div>
   {/if}
@@ -720,6 +757,7 @@
           <button
             class="px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
             onclick={handleClearRecords}
+            title="Erases onboard memory on physical IPICO hardware reader. Does not delete forwarder software reads."
             disabled={controlDisabled}>Clear Records</button
           >{#if onOpenHelpModal}<HelpTip
               fieldKey="clear_records"
@@ -773,4 +811,17 @@
       />
     </div>
   {/if}
+
+  <ConfirmDialog
+    open={confirmClearReadsOpen}
+    title="Clear Stored Reads"
+    message={`Permanently delete all stored reads for ${readerIp} from the forwarder database? A new epoch will be started. This action cannot be undone.`}
+    confirmLabel="Clear Reads"
+    variant="err"
+    busy={busy}
+    onConfirm={handleClearReads}
+    onCancel={() => {
+      confirmClearReadsOpen = false;
+    }}
+  />
 </div>
