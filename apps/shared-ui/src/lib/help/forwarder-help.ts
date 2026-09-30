@@ -400,6 +400,11 @@ export const FORWARDER_HELP = {
         summary: "Chip reads from this reader recorded in the current epoch.",
         detailHtml: "The number of chip reads recorded under the reader's current epoch. The count starts at zero when the epoch is advanced and persists across service restarts, so it reflects the full epoch even after a mid-race restart. Use this to track reads for the active race or wave segment.",
       },
+      unique_chips: {
+        label: "Unique Chips (Epoch)",
+        summary: "Number of distinct chips detected by this reader in the current epoch.",
+        detailHtml: "The number of distinct timing chips detected by this reader under the current epoch. Multiple reads from the same chip (such as repeated reads as an athlete crosses a timing mat) are counted only once. Resets to zero when the epoch is advanced and persists across service restarts.",
+      },
       reads_total: {
         label: "Reads (Total)",
         summary: "Total chip reads from this reader recorded in the journal, across all sessions.",
@@ -487,23 +492,23 @@ export const FORWARDER_HELP = {
           "<li><strong>Recording off</strong>: The reader streams reads but does not save them to onboard storage.</li>" +
           "</ul>" +
           "Onboard recording is independent of the live data stream — reads continue through the forwarder regardless. Use recording as a safety net: if connectivity is lost mid-race, reads are preserved on the reader and can be retrieved later with <strong>Download Reads</strong>.",
-        recommended: "Turn recording on before each race as a safety net. Download and clear records after each event.",
+        recommended: "Turn recording on before each race as a safety net. Download and clear memory after each event.",
       },
       download_reads: {
         label: "Download Reads",
         summary: "Downloads all chip reads stored in the reader's onboard memory to the forwarder.",
-        detailHtml: "Transfers all records stored in the reader's onboard memory to the forwarder. A progress bar shows the download status. Downloaded reads are journaled and replayed to receivers just like live reads.<br><br>This is the primary recovery path after a reader or network outage: use Download Reads once connectivity is restored to retrieve any reads that were captured to onboard storage.<br><br>Only one download can run at a time per reader. After a successful download, use <strong>Clear Records</strong> to free the reader's storage for the next race.",
+        detailHtml: "Transfers all records stored in the reader's onboard memory to the forwarder. A progress bar shows the download status. Downloaded reads are journaled and replayed to receivers just like live reads.<br><br>This is the primary recovery path after a reader or network outage: use Download Reads once connectivity is restored to retrieve any reads that were captured to onboard storage.<br><br>Only one download can run at a time per reader. After a successful download, use <strong>Clear Memory</strong> to free the reader's storage for the next race.",
       },
       clear_records: {
-        label: "Clear Records",
+        label: "Clear Memory",
         summary: "Erases all stored records from the physical IPICO reader's onboard hardware memory.",
         detailHtml: "Permanently erases all chip reads stored in the physical IPICO reader's internal EEPROM memory. This takes approximately 10 seconds to complete.<br><br><strong>This only clears hardware memory on the reader</strong> — it does not delete chip reads already captured in the forwarder or receiver software databases (to delete forwarder database reads, use <strong>Clear Stored Reads</strong>). Always use <strong>Download Reads</strong> first if you need to recover stored data from the reader before clearing.",
-        recommended: "Always download reads before clearing. Clear records at the end of each race day.",
+        recommended: "Always download reads before clearing. Clear memory at the end of each race day.",
       },
       clear_reads: {
         label: "Clear Stored Reads",
         summary: "Purges all previous chip reads from the forwarder's local database and advances the epoch.",
-        detailHtml: "Permanently deletes all stored chip reads for this reader from the forwarder's journal and advances the stream epoch. Connected receivers will receive a gap notice jumping them past the cleared sequence numbers.<br><br><strong>Use this at the start of a new race or event</strong> to start with a clean slate, if a receiver is significantly behind and needs to skip backlog, or if test reads need to be wiped.<br><br>Note: This does not affect the physical IPICO reader's onboard hardware memory (see <strong>Clear Records</strong>).",
+        detailHtml: "Permanently deletes all stored chip reads for this reader from the forwarder's journal and advances the stream epoch. Connected receivers will receive a gap notice jumping them past the cleared sequence numbers.<br><br><strong>Use this at the start of a new race or event</strong> to start with a clean slate, if a receiver is significantly behind and needs to skip backlog, or if test reads need to be wiped.<br><br>Note: This does not affect the physical IPICO reader's onboard hardware memory (see <strong>Clear Memory</strong>).",
         recommended: "Use at the start of an event or after testing to purge test reads from the forwarder.",
       },
     },
@@ -511,7 +516,7 @@ export const FORWARDER_HELP = {
       "Use 'Advance Epoch' at the start of each race or wave to cleanly separate reads in the data stream.",
       "If Reads (Session) stops increasing while the reader is connected, check that chips are in range of the timing mat and that the reader is in the correct read mode.",
       "Last Seen shows 'never' until the first chip read arrives in the current session. This is normal before a race starts.",
-      "Sync the clock before each race. Always download reads before clearing records.",
+      "Sync the clock before each race. Always download reads before clearing memory.",
     ],
     seeAlso: [
       { sectionKey: "readers", label: "Reader Devices" },

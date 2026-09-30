@@ -64,14 +64,18 @@
       class="px-4 py-3 border-b border-border flex flex-wrap items-center gap-3 rounded-t-lg {headerBgClass}"
     >
       {#if header}
-        {@render header()}
+        <div class="flex flex-1 flex-wrap items-center gap-3 min-w-0">
+          {@render header()}
+        </div>
       {:else if title}
         <h2 class="text-sm font-semibold text-text-primary">{title}</h2>
       {/if}
       {#if helpSection && helpContext}
         <button
           onclick={() => openHelp()}
-          class="ml-auto inline-flex items-center justify-center w-5 h-5 rounded-full border border-border text-text-muted hover:text-accent hover:border-accent text-xs font-bold cursor-pointer bg-transparent transition-colors"
+          class="{header
+            ? ''
+            : 'ml-auto '}inline-flex shrink-0 items-center justify-center w-5 h-5 rounded-full border border-border text-text-muted hover:text-accent hover:border-accent text-xs font-bold cursor-pointer bg-transparent transition-colors"
           aria-label="Help for {title ?? helpSection}"
           type="button">?</button
         >

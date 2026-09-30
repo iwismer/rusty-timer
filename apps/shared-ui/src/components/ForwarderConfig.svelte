@@ -802,54 +802,6 @@
               </p>
             {/if}
           </Card>
-        </div>
-
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
-          <!-- Journal -->
-          <Card title="Journal" helpSection="journal" helpContext="forwarder">
-            <div class="space-y-3">
-              <label class="block text-sm font-medium text-text-secondary">
-                SQLite Path <HelpTip
-                  fieldKey="sqlite_path"
-                  sectionKey="journal"
-                  context="forwarder"
-                />
-                <input type="text" bind:value={journalSqlitePath} class="mt-1 {inputClass}" />
-                <p class={hintClass}>
-                  Optional. Path to SQLite journal. Default if unset: in-memory.
-                </p>
-              </label>
-              <label class="block text-sm font-medium text-text-secondary">
-                Prune Watermark % <HelpTip
-                  fieldKey="prune_watermark_pct"
-                  sectionKey="journal"
-                  context="forwarder"
-                />
-                <input
-                  type="number"
-                  bind:value={journalPruneWatermarkPct}
-                  min="0"
-                  max="100"
-                  class="mt-1 {inputClass}"
-                />
-                <p class={hintClass}>
-                  Trigger journal pruning at this percentage full. Default if unset: 80%.
-                </p>
-              </label>
-            </div>
-            <button class={saveBtnClass} onclick={saveJournal} disabled={savingSection['journal']}>
-              {savingSection['journal'] ? 'Saving...' : 'Save Journal'}
-            </button>
-            {#if sectionMessages['journal']}
-              <p
-                class="text-xs mt-1 m-0 {sectionMessages['journal'].ok
-                  ? 'text-status-ok'
-                  : 'text-status-err'}"
-              >
-                {sectionMessages['journal'].text}
-              </p>
-            {/if}
-          </Card>
 
           <!-- Status HTTP -->
           <Card title="Status HTTP" helpSection="status_http" helpContext="forwarder">
@@ -908,6 +860,95 @@
             {/if}
           </Card>
 
+          <!-- Update -->
+          <Card title="Update" helpSection="update" helpContext="forwarder">
+            <label class="block text-sm font-medium text-text-secondary">
+              Update Mode <HelpTip fieldKey="update_mode" sectionKey="update" context="forwarder" />
+              <select bind:value={updateMode} class="mt-1 {selectClass}">
+                <option value="">Default (automatic)</option>
+                <option value="check-and-download">Automatic (check and download)</option>
+                <option value="check-only">Check Only (notify but don't download)</option>
+                <option value="disabled">Disabled</option>
+              </select>
+              <p class={hintClass}>
+                How the forwarder checks for and applies updates. Default if unset: automatic.
+              </p>
+            </label>
+            <div class="flex items-center gap-2">
+              <button class={saveBtnClass} onclick={saveUpdate} disabled={savingSection['update']}>
+                {savingSection['update'] ? 'Saving...' : 'Save Update'}
+              </button>
+              {#if configApi.checkForUpdate}
+                <button
+                  class={secondaryBtnClass}
+                  onclick={handleCheckUpdate}
+                  disabled={checkingUpdate}
+                >
+                  {checkingUpdate ? 'Checking...' : 'Check Now'}
+                </button>
+              {/if}
+            </div>
+            {#if sectionMessages['update']}
+              <p
+                class="text-xs mt-1 m-0 {sectionMessages['update'].ok
+                  ? 'text-status-ok'
+                  : 'text-status-err'}"
+              >
+                {sectionMessages['update'].text}
+              </p>
+            {/if}
+            {#if checkMessage}
+              <p class="text-xs mt-1 m-0 text-text-muted">{checkMessage}</p>
+            {/if}
+          </Card>
+
+          <!-- Journal -->
+          <Card title="Journal" helpSection="journal" helpContext="forwarder">
+            <div class="space-y-3">
+              <label class="block text-sm font-medium text-text-secondary">
+                SQLite Path <HelpTip
+                  fieldKey="sqlite_path"
+                  sectionKey="journal"
+                  context="forwarder"
+                />
+                <input type="text" bind:value={journalSqlitePath} class="mt-1 {inputClass}" />
+                <p class={hintClass}>
+                  Optional. Path to SQLite journal. Default if unset: in-memory.
+                </p>
+              </label>
+              <label class="block text-sm font-medium text-text-secondary">
+                Prune Watermark % <HelpTip
+                  fieldKey="prune_watermark_pct"
+                  sectionKey="journal"
+                  context="forwarder"
+                />
+                <input
+                  type="number"
+                  bind:value={journalPruneWatermarkPct}
+                  min="0"
+                  max="100"
+                  class="mt-1 {inputClass}"
+                />
+                <p class={hintClass}>
+                  Trigger journal pruning at this percentage full. Default if unset: 80%.
+                </p>
+              </label>
+            </div>
+            <button class={saveBtnClass} onclick={saveJournal} disabled={savingSection['journal']}>
+              {savingSection['journal'] ? 'Saving...' : 'Save Journal'}
+            </button>
+            {#if sectionMessages['journal']}
+              <p
+                class="text-xs mt-1 m-0 {sectionMessages['journal'].ok
+                  ? 'text-status-ok'
+                  : 'text-status-err'}"
+              >
+                {sectionMessages['journal'].text}
+              </p>
+            {/if}
+          </Card>
+
+          <!-- UPS (PiSugar) -->
           <Card title="UPS (PiSugar)" helpSection="ups" helpContext="forwarder">
             <div class="space-y-3">
               <label class="block text-sm font-medium text-text-secondary">
@@ -982,48 +1023,6 @@
               >
                 {sectionMessages['ups'].text}
               </p>
-            {/if}
-          </Card>
-
-          <!-- Update -->
-          <Card title="Update" helpSection="update" helpContext="forwarder">
-            <label class="block text-sm font-medium text-text-secondary">
-              Update Mode <HelpTip fieldKey="update_mode" sectionKey="update" context="forwarder" />
-              <select bind:value={updateMode} class="mt-1 {selectClass}">
-                <option value="">Default (automatic)</option>
-                <option value="check-and-download">Automatic (check and download)</option>
-                <option value="check-only">Check Only (notify but don't download)</option>
-                <option value="disabled">Disabled</option>
-              </select>
-              <p class={hintClass}>
-                How the forwarder checks for and applies updates. Default if unset: automatic.
-              </p>
-            </label>
-            <div class="flex items-center gap-2">
-              <button class={saveBtnClass} onclick={saveUpdate} disabled={savingSection['update']}>
-                {savingSection['update'] ? 'Saving...' : 'Save Update'}
-              </button>
-              {#if configApi.checkForUpdate}
-                <button
-                  class={secondaryBtnClass}
-                  onclick={handleCheckUpdate}
-                  disabled={checkingUpdate}
-                >
-                  {checkingUpdate ? 'Checking...' : 'Check Now'}
-                </button>
-              {/if}
-            </div>
-            {#if sectionMessages['update']}
-              <p
-                class="text-xs mt-1 m-0 {sectionMessages['update'].ok
-                  ? 'text-status-ok'
-                  : 'text-status-err'}"
-              >
-                {sectionMessages['update'].text}
-              </p>
-            {/if}
-            {#if checkMessage}
-              <p class="text-xs mt-1 m-0 text-text-muted">{checkMessage}</p>
             {/if}
           </Card>
         </div>

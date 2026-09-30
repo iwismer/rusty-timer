@@ -710,7 +710,7 @@
     <Card headerBg helpSection="readers" helpContext="forwarder">
       {#snippet header()}
         <h2 class="text-sm font-semibold text-text-primary m-0">Readers</h2>
-        <div class="ml-auto flex items-center gap-3">
+        <div class="ml-auto flex flex-wrap items-center gap-3">
           <span class="text-xs text-text-muted">
             {readersSummary.label}
           </span>
@@ -784,6 +784,7 @@
                 readerState={reader.state}
                 readsSession={reader.reads_session}
                 readsEpoch={reader.reads_epoch}
+                uniqueChips={reader.unique_chips}
                 readsTotal={reader.reads_total}
                 localPortLabel="Local Port"
                 localPortValue={String(reader.local_port)}

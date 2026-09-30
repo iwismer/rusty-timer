@@ -13,7 +13,6 @@
     openHelp,
   } from "$lib/store.svelte";
   import { inputClass, btnPrimary, btnSecondary } from "$lib/ui-classes";
-  import ReceiverModeConfig from "$lib/components/ReceiverModeConfig.svelte";
 
   function getDbfDirty(): boolean {
     return (
@@ -105,16 +104,31 @@
       onclick={() => saveProfile()}
       disabled={!getConfigDirty() || store.saving}
     >
-      {store.saving ? "Saving\u2026" : "Save"}
+      {store.saving ? "Saving…" : "Save"}
     </button>
   </div>
-
-  <ReceiverModeConfig />
 
   <section class="mt-6 rounded-lg border border-border bg-surface-1 p-4">
     <p class="text-xs font-medium text-text-muted mb-3">Race Director</p>
 
-    <div>
+    <label class="block text-xs font-medium text-text-muted">
+      Folder
+      <HelpTip
+        fieldKey="rd_import_dir"
+        sectionKey="rd_import"
+        context="receiver"
+        onOpenModal={openHelp}
+      />
+      <input
+        data-testid="rd-import-dir-input"
+        class="{inputClass} mt-1"
+        value={store.editRdImportDir}
+        oninput={(e) => (store.editRdImportDir = e.currentTarget.value)}
+        placeholder="C:\Winrace\Files"
+      />
+    </label>
+
+    <div class="mt-5 border-t border-border pt-4">
       <p class="text-xs font-medium text-text-muted mb-3">
         Pull participant/chip data from Race Director
       </p>
@@ -136,23 +150,6 @@
           sectionKey="rd_import"
           context="receiver"
           onOpenModal={openHelp}
-        />
-      </label>
-
-      <label class="block text-xs font-medium text-text-muted mt-3">
-        Folder
-        <HelpTip
-          fieldKey="rd_import_dir"
-          sectionKey="rd_import"
-          context="receiver"
-          onOpenModal={openHelp}
-        />
-        <input
-          data-testid="rd-import-dir-input"
-          class="{inputClass} mt-1"
-          value={store.editRdImportDir}
-          oninput={(e) => (store.editRdImportDir = e.currentTarget.value)}
-          placeholder="C:\Winrace\Files"
         />
       </label>
 

@@ -13,7 +13,6 @@ import portOverridesSection from "./admin/PortOverridesSection.svelte?raw";
 import announcerTab from "./AnnouncerTab.svelte?raw";
 import configTab from "./ConfigTab.svelte?raw";
 import connectionsTab from "./ConnectionsTab.svelte?raw";
-import receiverModeConfig from "./ReceiverModeConfig.svelte?raw";
 import statusBar from "./StatusBar.svelte?raw";
 import streamsTab from "./StreamsTab.svelte?raw";
 
@@ -45,10 +44,7 @@ const components: Record<string, SourceUnit[]> = {
     { name: "DangerActionsSection.svelte", source: dangerActionsSection },
   ],
   AnnouncerTab: [{ name: "AnnouncerTab.svelte", source: announcerTab }],
-  ConfigTab: [
-    { name: "ConfigTab.svelte", source: configTab },
-    { name: "ReceiverModeConfig.svelte", source: receiverModeConfig },
-  ],
+  ConfigTab: [{ name: "ConfigTab.svelte", source: configTab }],
   ConnectionsTab: [
     { name: "ConnectionsTab.svelte", source: connectionsTab },
     {
@@ -178,17 +174,6 @@ describe("receiver UI help coverage", () => {
       expect(getSection(context, section)).toBeDefined();
     },
   );
-
-  it("wires config help through nested ReceiverModeConfig", () => {
-    const configLookups = extractHelpTips(components.ConfigTab);
-    expect(configLookups).toContainEqual(
-      expect.objectContaining({
-        context: "receiver",
-        section: "receiver_mode",
-        field: "mode",
-      }),
-    );
-  });
 
   it("wires reset stream data to receiver-admin cursor reset help", () => {
     expect(helpTipLookups).toContainEqual(

@@ -54,4 +54,8 @@ describe('computePopoverStyle', () => {
     expect(helpTipSource).toContain('whitespace-normal');
     expect(helpTipSource).toContain('break-words');
   });
+
+  it('forces tooltip text to be left-aligned even inside right-aligned containers', () => {
+    expect(helpTipSource).toContain('text-left');
+  });
 });

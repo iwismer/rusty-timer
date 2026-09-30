@@ -117,7 +117,7 @@
 
     {#if showingPopover}
       <div
-        class="fixed z-50 w-72 p-3 rounded-lg border border-border bg-surface-1 shadow-lg text-sm whitespace-normal break-words"
+        class="fixed z-50 w-72 p-3 rounded-lg border border-border bg-surface-1 shadow-lg text-sm whitespace-normal break-words text-left"
         style={popoverStyle}
         role="tooltip"
         onmouseenter={cancelHide}
@@ -133,12 +133,14 @@
           <p class="text-xs text-text-muted m-0">Valid: {field.range}</p>
         {/if}
         {#if field.recommended}
-          <p class="text-xs font-medium text-status-ok m-0">Recommended: {field.recommended}</p>
+          <p class="text-xs font-medium text-status-ok m-0">
+            Recommended: {field.recommended}
+          </p>
         {/if}
         {#if onOpenModal || contextOpenHelp}
           <button
             onclick={handleClick}
-            class="mt-2 text-xs text-accent hover:underline cursor-pointer bg-transparent border-none p-0"
+            class="mt-2 text-xs text-accent hover:underline cursor-pointer bg-transparent border-none p-0 text-left block"
             type="button"
           >
             More details...

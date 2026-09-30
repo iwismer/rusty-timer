@@ -35,32 +35,7 @@ export const RECEIVER_HELP = {
       'Save your config before connecting for the first time.',
       "If the receiver can't connect, verify the server URL, token, and allow-list entry for this endpoint.",
     ],
-    seeAlso: [{ sectionKey: 'receiver_mode', label: 'Receiver Mode' }],
-  },
-  receiver_mode: {
-    title: 'Receiver Mode',
-    overview:
-      'The receiver mode determines how streams are subscribed and how epoch controls behave. Choose the mode that matches your timing workflow.',
-    fields: {
-      mode: {
-        label: 'Mode',
-        summary: 'Operating mode for stream subscriptions.',
-        detailHtml:
-          '<strong>Live</strong> mode auto-subscribes to available streams. New streams are added automatically as forwarders connect. This is the default for standard race timing.<br><br>' +
-          'To re-send historical data to your timing software (for example after a crash), use the per-stream <strong>From epoch</strong> control together with <strong>Admin &gt; Reset local stream data</strong> — see the Streams tab help.',
-        default: 'Live',
-        range: 'Live',
-        recommended: 'Use Live mode for standard race timing.',
-      },
-    },
-    tips: [
-      'Use Live mode for standard race timing. It auto-subscribes to all available streams.',
-      'Changing modes takes effect immediately. Active subscriptions may change.',
-    ],
-    seeAlso: [
-      { sectionKey: 'streams', label: 'Available Streams' },
-      { sectionKey: 'config', label: 'Receiver Configuration' },
-    ],
+    seeAlso: [{ sectionKey: 'connections', label: 'Connections' }],
   },
   streams: {
     title: 'Available Streams',
@@ -169,7 +144,8 @@ export const RECEIVER_HELP = {
       },
       clear_both: {
         label: 'Clear Both',
-        summary: 'Purges stored reads from forwarder and clears local receiver data for a clean slate.',
+        summary:
+          'Purges stored reads from forwarder and clears local receiver data for a clean slate.',
         detailHtml:
           'Deletes all previous chip reads from the forwarder’s journal (advancing the epoch) AND resets the receiver’s local data for this stream.<br><br><strong>Use this at the start of a new race or event</strong> to start completely clean on both ends without old test reads.',
       },
@@ -181,10 +157,7 @@ export const RECEIVER_HELP = {
       "The 'degraded' indicator means the receiver reported a local issue with this stream. Reads may still flow; check the receiver logs and forwarder status page.",
       "Use <strong>Admin &gt; Port Overrides</strong> to customize which local port each stream uses if the defaults don't match your timing software setup.",
     ],
-    seeAlso: [
-      { sectionKey: 'receiver_mode', label: 'Receiver Mode' },
-      { sectionKey: 'announcer', label: 'Announcer' },
-    ],
+    seeAlso: [{ sectionKey: 'announcer', label: 'Announcer' }],
   },
   connections: {
     title: 'Connections',

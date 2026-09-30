@@ -31,7 +31,7 @@ describe('reader help icon placement', () => {
   });
 
   it('keeps button action help after the button it describes', () => {
-    for (const label of ['Sync Clock', 'Refresh', 'Download Reads', 'Clear Records']) {
+    for (const label of ['Sync Clock', 'Refresh', 'Download Reads', 'Clear Memory']) {
       const index = readerControlPanel.indexOf(`>${label}</button`);
       expect(index, `${label} button should exist`).toBeGreaterThanOrEqual(0);
       const following = readerControlPanel.slice(index, index + 220);

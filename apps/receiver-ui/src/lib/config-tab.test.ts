@@ -41,18 +41,12 @@ const mockState = vi.hoisted(() => {
       editRdImportIntervalSecs: 15,
       rdImportIntervalSecs: 15,
       rdImportSaving: false,
-      modeDraft: "live",
-      modeBusy: false,
     },
     getConfigDirty: vi.fn(() => false),
-    getModeDirty: vi.fn(() => false),
     saveProfile: vi.fn(),
     saveDbfConfig: vi.fn(),
     clearDbfFile: vi.fn(),
     saveRdImportConfig: vi.fn(),
-    applyMode: vi.fn(),
-    markModeEdited: vi.fn(),
-    setModeDraft: vi.fn(),
     setEditReceiverId: vi.fn(),
     setEditServerUrl: vi.fn(),
     setEditToken: vi.fn(),
@@ -62,14 +56,10 @@ const mockState = vi.hoisted(() => {
 vi.mock("$lib/store.svelte", () => ({
   store: mockState.store,
   getConfigDirty: mockState.getConfigDirty,
-  getModeDirty: mockState.getModeDirty,
   saveProfile: mockState.saveProfile,
   saveDbfConfig: mockState.saveDbfConfig,
   clearDbfFile: mockState.clearDbfFile,
   saveRdImportConfig: mockState.saveRdImportConfig,
-  applyMode: mockState.applyMode,
-  markModeEdited: mockState.markModeEdited,
-  setModeDraft: mockState.setModeDraft,
   setEditReceiverId: mockState.setEditReceiverId,
   setEditServerUrl: mockState.setEditServerUrl,
   setEditToken: mockState.setEditToken,
@@ -105,10 +95,7 @@ describe("ConfigTab", () => {
     mockState.store.editRdImportIntervalSecs = 15;
     mockState.store.rdImportIntervalSecs = 15;
     mockState.store.rdImportSaving = false;
-    mockState.store.modeDraft = "live";
-    mockState.store.modeBusy = false;
     mockState.getConfigDirty.mockReturnValue(false);
-    mockState.getModeDirty.mockReturnValue(false);
   });
 
   it("renders server config inputs without connection status", () => {
@@ -179,15 +166,45 @@ describe("ConfigTab", () => {
   it("renders Race Director import and output config controls", () => {
     render(ConfigTab);
 
-    expect(screen.getByText("Race Director")).toBeInTheDocument();
-    expect(screen.getByTestId("rd-import-enabled-toggle")).not.toBeChecked();
-    expect(screen.getByTestId("rd-import-dir-input")).toHaveValue(
-      "C:\\Winrace\\Files",
-    );
-    expect(screen.getByTestId("rd-import-interval-input")).toHaveValue(15);
+    const title = screen.getByText("Race Director");
+    const dirInput = screen.getByTestId("rd-import-dir-input");
+    const importToggle = screen.getByTestId("rd-import-enabled-toggle");
+    const intervalInput = screen.getByTestId("rd-import-interval-input");
+    const dbfToggle = screen.getByTestId("dbf-enabled-toggle");
+
+    expect(title).toBeInTheDocument();
+    expect(importToggle).not.toBeChecked();
+    expect(dirInput).toHaveValue("C:\\Winrace\\Files");
+    expect(intervalInput).toHaveValue(15);
     expect(screen.getByTestId("save-rd-import-btn")).toBeDisabled();
 
-    expect(screen.getByTestId("dbf-enabled-toggle")).not.toBeChecked();
+    // Verify ordering: title -> folder -> import toggle -> poll interval -> dbf toggle
+    expect(
+      Boolean(
+        title.compareDocumentPosition(dirInput) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ).toBe(true);
+    expect(
+      Boolean(
+        dirInput.compareDocumentPosition(importToggle) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ).toBe(true);
+    expect(
+      Boolean(
+        importToggle.compareDocumentPosition(intervalInput) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ).toBe(true);
+    expect(
+      Boolean(
+        intervalInput.compareDocumentPosition(dbfToggle) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ).toBe(true);
+
+    expect(dbfToggle).not.toBeChecked();
     expect(screen.queryByTestId("dbf-path-input")).not.toBeInTheDocument();
     expect(screen.getByTestId("save-dbf-btn")).toBeDisabled();
     expect(screen.getByTestId("clear-dbf-btn")).toBeEnabled();
@@ -239,31 +256,5 @@ describe("ConfigTab", () => {
 
     expect(mockState.saveRdImportConfig).toHaveBeenCalledOnce();
     expect(mockState.saveDbfConfig).not.toHaveBeenCalled();
-  });
-
-  it("renders receiver mode controls with a separate apply button", () => {
-    mockState.getModeDirty.mockReturnValue(true);
-
-    render(ConfigTab);
-
-    expect(screen.getByTestId("mode-select")).toHaveValue("live");
-    expect(screen.getByTestId("save-mode-btn")).toBeEnabled();
-    expect(screen.getByTestId("save-config-btn")).toBeDisabled();
-  });
-
-  it("tracks receiver mode edits separately from profile config", async () => {
-    mockState.getModeDirty.mockReturnValue(true);
-
-    render(ConfigTab);
-
-    await fireEvent.change(screen.getByTestId("mode-select"), {
-      target: { value: "live" },
-    });
-    await fireEvent.click(screen.getByTestId("save-mode-btn"));
-
-    expect(mockState.setModeDraft).toHaveBeenCalledWith("live");
-    expect(mockState.markModeEdited).toHaveBeenCalledOnce();
-    expect(mockState.applyMode).toHaveBeenCalledOnce();
-    expect(mockState.saveProfile).not.toHaveBeenCalled();
   });
 });
