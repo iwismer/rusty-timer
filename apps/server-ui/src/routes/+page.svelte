@@ -395,12 +395,12 @@
                   </div>
                 </div>
 
-                <!-- Streams summary -->
+                <!-- Readers summary -->
                 <div
                   class="pt-2 border-t border-border/50 flex flex-wrap items-center gap-1.5"
                 >
                   <span class="text-xs text-text-muted font-medium"
-                    >Streams:</span
+                    >Readers:</span
                   >
                   {#if fwd.streams.length === 0}
                     <span class="text-xs text-text-muted italic"
