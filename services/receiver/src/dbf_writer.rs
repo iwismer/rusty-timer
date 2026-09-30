@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
 
-use dbase::{FieldIOError, TableWriterBuilder, WritableRecord};
+use dbase::{FieldError, TableWriterBuilder, WritableRecord};
 use ipico_core::read::ChipRead;
 
 use crate::db::{Db, DbError, EventType, ReceivedEvent};
@@ -94,7 +94,7 @@ impl WritableRecord for DbfRecord {
     fn write_using<W: Write>(
         &self,
         field_writer: &mut dbase::FieldWriter<'_, W>,
-    ) -> Result<(), FieldIOError> {
+    ) -> Result<(), FieldError> {
         field_writer.write_next_field_value(&self.event.as_str())?;
         field_writer.write_next_field_value(&self.division.as_str())?;
         field_writer.write_next_field_value(&self.chip.as_str())?;

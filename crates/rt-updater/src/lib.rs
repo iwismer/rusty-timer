@@ -370,7 +370,7 @@ fn download_blocking(
     {
         let mut out = std::fs::File::create(&tmp_archive)?;
         self_update::Download::from_url(&asset.browser_download_url)
-            .set_header(reqwest::header::ACCEPT, "application/octet-stream".parse()?)
+            .request_header("Accept", "application/octet-stream")
             .download_to(&mut out)?;
         out.flush()?;
     }
@@ -418,7 +418,7 @@ fn verify_sha256(
     // Download the sidecar.
     let mut sha_buf: Vec<u8> = Vec::new();
     self_update::Download::from_url(&sha_asset.browser_download_url)
-        .set_header(reqwest::header::ACCEPT, "application/octet-stream".parse()?)
+        .request_header("Accept", "application/octet-stream")
         .download_to(&mut sha_buf)?;
 
     let sha_text = String::from_utf8(sha_buf)?;

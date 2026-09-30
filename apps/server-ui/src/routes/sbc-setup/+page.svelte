@@ -575,8 +575,7 @@
           <textarea
             class="min-h-24 {inputClass}"
             bind:value={form.sshPublicKey}
-            placeholder="ssh-ed25519 …"
-          ></textarea>
+            placeholder="ssh-ed25519 …"></textarea>
         </label>
       </div>
     </Card>
@@ -757,8 +756,7 @@
           <textarea
             class="min-h-24 {inputClass}"
             bind:value={form.readerTargets}
-            placeholder="192.168.1.10:10000"
-          ></textarea>
+            placeholder="192.168.1.10:10000"></textarea>
           <span class="mt-1 block text-xs text-text-muted"
             >Separate entries with newlines, commas, or semicolons.</span
           >

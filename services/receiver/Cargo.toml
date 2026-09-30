@@ -27,7 +27,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1"
 thiserror = "2"
-dirs = "6"
+dirs = "7"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "blocking"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 getrandom = "0.4"
@@ -35,13 +35,13 @@ ipico-core = { path = "../../crates/ipico-core" }
 rt-iroh = { path = "../../crates/rt-iroh" }
 rt-p2p-protocol = { path = "../../crates/rt-p2p-protocol" }
 prost = "0.14"
-dbase = { version = "0.7", features = ["serde", "yore"] }
+dbase = { version = "0.8", features = ["serde", "yore"] }
 fs2 = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 tempfile = "3"
 axum = { version = "0.8" }
-zip = { version = "4.6", default-features = false }
-base64 = "0.22"
+zip = { version = "8.6", default-features = false }
+base64 = "0.23"
 
 [dev-dependencies]
 rusqlite = { version = "0.40", features = ["bundled"] }
