@@ -130,6 +130,7 @@ describe("server UI help wiring", () => {
         "auth_token",
         "display_name",
         "reader_targets",
+        "timezone",
       ],
       sbc_advanced: ["status_bind", "setup_script_url", "ups_enabled"],
       sbc_download_actions: [

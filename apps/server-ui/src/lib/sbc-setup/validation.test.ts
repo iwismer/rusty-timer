@@ -8,6 +8,7 @@ import {
   validateIpv4Cidr,
   validateSshKey,
   validateStatusBind,
+  validateTimezone,
   validateUsername,
   validateWifiCountry,
 } from "./validation";
@@ -72,5 +73,14 @@ describe("sbc setup validation", () => {
     expect(validateStatusBind("0.0.0.0:70000")).toBeInstanceOf(Error);
     expect(validateWifiCountry("ca")).toBe("CA");
     expect(validateWifiCountry("can")).toBeInstanceOf(Error);
+  });
+
+  it("validates timezones", () => {
+    expect(validateTimezone("America/Toronto")).toBe("America/Toronto");
+    expect(validateTimezone("UTC")).toBe("UTC");
+    expect(validateTimezone("Europe/London")).toBe("Europe/London");
+    expect(validateTimezone("")).toBeInstanceOf(Error);
+    expect(validateTimezone("America/New York")).toBeInstanceOf(Error);
+    expect(validateTimezone("/Toronto")).toBeInstanceOf(Error);
   });
 });

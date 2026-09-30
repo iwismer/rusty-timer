@@ -158,3 +158,17 @@ export function validateWifiCountry(value: string): string | Error {
   }
   return raw;
 }
+
+export function validateTimezone(value: string): string | Error {
+  const raw = value.trim();
+  if (!raw) return new Error("Timezone is required");
+  if (raw.includes(" ") || raw.includes("\n") || raw.includes("\r")) {
+    return new Error(
+      "Timezone must be an IANA name without spaces (e.g. America/Toronto)",
+    );
+  }
+  if (!/^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+)*$/.test(raw)) {
+    return new Error("Timezone must be an IANA name (e.g. America/Toronto)");
+  }
+  return raw;
+}

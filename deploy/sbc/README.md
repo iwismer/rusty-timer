@@ -263,6 +263,7 @@ The wizard will prompt you for:
 | Auth token | *(hidden input)* | Enrollment voucher used to register with the server and mint a per-device token |
 | Reader target(s) | `192.168.1.100:10000` | IP:PORT of each IPICO reader; enter one per line, blank line to finish |
 | Status HTTP bind address | `0.0.0.0:80` | Press Enter to accept the default |
+| Default timezone | `America/Toronto` | Press Enter to accept the detected host timezone or default |
 | PiSugar UPS | `y` | Optional. Installs PiSugar support, enables I2C, asks for shutdown settings/model, and adds `[ups]` monitoring to the forwarder config. |
 
 SBC setup writes this control block by default:
@@ -283,8 +284,15 @@ down the device. The setup script installs
 forwarder. It is provisioned `true` by default to keep field devices remotely
 manageable.
 
+SBC setup also configures `[clock].timezone` with the selected IANA timezone
+(and syncs the host timezone using `timedatectl` where available) so reader
+clock sync matches the local event time.
+
 For non-interactive installs:
 
+- Set `RT_SETUP_TIMEZONE` (e.g. `America/Toronto`) to configure the forwarder's
+  default timezone. Defaults to the host system timezone, or `America/Toronto` if
+  undetectable.
 - Set `RT_SETUP_ALLOW_POWER_ACTIONS=0` to disable power actions. This flag
   fails safe to `false` on an unrecognized value.
 - Set `RT_SETUP_ALLOW_REMOTE_CONFIG=0` (or `false`/`no`/`off`) to disable

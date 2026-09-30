@@ -83,6 +83,7 @@ describe('server help coverage', () => {
       'auth_token',
       'display_name',
       'reader_targets',
+      'timezone',
     ]);
     expectFields(SERVER_HELP.sbc_advanced, ['status_bind', 'setup_script_url', 'ups_enabled']);
     expectFields(SERVER_HELP.sbc_download_actions, [

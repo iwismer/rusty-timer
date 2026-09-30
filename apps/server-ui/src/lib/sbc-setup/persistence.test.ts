@@ -30,6 +30,7 @@ const baseForm: SbcSetupFormData = {
   readerTargets: "192.168.1.10:10000",
   statusBind: "0.0.0.0:80",
   displayName: "Start Line",
+  timezone: "America/Toronto",
   setupScriptUrl: "https://example.com/rt-setup.sh",
   upsEnabled: true,
 };

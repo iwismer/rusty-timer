@@ -30,6 +30,7 @@ DEFAULT_GATEWAY = "192.168.1.1"
 DEFAULT_DNS = "8.8.8.8,8.8.4.4"
 DEFAULT_WIFI_COUNTRY = "US"
 DEFAULT_STATUS_BIND = "0.0.0.0:80"
+DEFAULT_TIMEZONE = "America/Toronto"
 DEFAULT_SETUP_SCRIPT_URL = (
     "https://raw.githubusercontent.com/iwismer/rusty-timer/main/deploy/sbc/rt-setup.sh"
 )
@@ -39,6 +40,7 @@ USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 READER_TARGET_RE = re.compile(
     r"^(?:\d{1,3}\.){3}\d{1,3}(?:-\d{1,3})?:\d{1,5}$"
 )
+TIMEZONE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_+-]*(?:/[A-Za-z0-9_+-]+)*$")
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,7 @@ class SbcCloudInitConfig:
     auth_token: str | None = None
     reader_targets: tuple[str, ...] = ()
     status_bind: str = DEFAULT_STATUS_BIND
+    timezone: str = DEFAULT_TIMEZONE
     setup_script_url: str = DEFAULT_SETUP_SCRIPT_URL
     setup_done_marker: str = DEFAULT_DONE_MARKER
     ups_enabled: bool = False
@@ -171,6 +174,17 @@ def validate_wifi_country(value: str) -> str:
     return country
 
 
+def validate_timezone(value: str) -> str:
+    tz = value.strip()
+    if not tz:
+        raise ValueError("timezone is required")
+    if not TIMEZONE_RE.fullmatch(tz):
+        raise ValueError(
+            "timezone must be an IANA name without spaces (e.g. America/Toronto)"
+        )
+    return tz
+
+
 def parse_reader_targets(value: str) -> tuple[str, ...]:
     normalized = value.replace("\n", ",").replace(";", ",")
     entries = [part.strip() for part in normalized.split(",") if part.strip()]
@@ -244,6 +258,11 @@ def collect_config(auto_first_boot: bool) -> SbcCloudInitConfig:
         parse_dns_servers,
         "DNS server list",
     )
+    timezone = prompt_until_valid(
+        lambda: ask_with_default("Default timezone", DEFAULT_TIMEZONE),
+        validate_timezone,
+        "default timezone",
+    )
     wifi_ssid: str | None = None
     wifi_password: str | None = None
     wifi_country: str | None = None
@@ -269,6 +288,7 @@ def collect_config(auto_first_boot: bool) -> SbcCloudInitConfig:
             static_ipv4_cidr=static_ipv4_cidr,
             gateway_ipv4=gateway_ipv4,
             dns_servers=dns_servers,
+            timezone=timezone,
             wifi_ssid=wifi_ssid,
             wifi_password=wifi_password,
             wifi_country=wifi_country,
@@ -305,6 +325,7 @@ def collect_config(auto_first_boot: bool) -> SbcCloudInitConfig:
         static_ipv4_cidr=static_ipv4_cidr,
         gateway_ipv4=gateway_ipv4,
         dns_servers=dns_servers,
+        timezone=timezone,
         wifi_ssid=wifi_ssid,
         wifi_password=wifi_password,
         wifi_country=wifi_country,
@@ -333,6 +354,7 @@ def render_setup_env_content(config: SbcCloudInitConfig) -> str:
         f"RT_SETUP_AUTH_TOKEN={shell_quote(config.auth_token)}",
         f"RT_SETUP_READER_TARGETS={shell_quote(reader_targets_csv)}",
         f"RT_SETUP_STATUS_BIND={shell_quote(config.status_bind)}",
+        f"RT_SETUP_TIMEZONE={shell_quote(config.timezone)}",
         f"RT_SETUP_DONE_MARKER={shell_quote(config.setup_done_marker)}",
     ]
     if config.ups_enabled:
@@ -351,6 +373,7 @@ def render_user_data(config: SbcCloudInitConfig) -> str:
     text = (
         "#cloud-config\n"
         f"hostname: {config.hostname}\n"
+        f"timezone: {config.timezone}\n"
         "manage_etc_hosts: true\n"
         "enable_ssh: true\n"
         "ssh_pwauth: false\n"

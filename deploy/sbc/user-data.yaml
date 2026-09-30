@@ -20,6 +20,8 @@
 
 # CHANGEME: Set a unique hostname for this device (e.g. rt-fwd-01)
 hostname: rt-fwd-01
+# CHANGEME: Timezone for system and forwarder clock sync (e.g. America/Toronto)
+timezone: America/Toronto
 manage_etc_hosts: true
 enable_ssh: true
 ssh_pwauth: false

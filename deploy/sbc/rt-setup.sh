@@ -118,6 +118,38 @@ default_forwarder_display_name() {
   printf '%s\n' "${current_host}"
 }
 
+is_valid_timezone() {
+  local tz="${1:-}"
+  if [[ -z "${tz}" ]]; then
+    return 1
+  fi
+  if [[ ! "${tz}" =~ ^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+)*$ ]]; then
+    return 1
+  fi
+  if [[ -d /usr/share/zoneinfo ]]; then
+    [[ -f "/usr/share/zoneinfo/${tz}" ]] || return 1
+  fi
+  return 0
+}
+
+default_forwarder_timezone() {
+  local tz=""
+  if command -v timedatectl >/dev/null 2>&1; then
+    tz="$(timedatectl show --property=Timezone --value 2>/dev/null || true)"
+  fi
+  if [[ -z "${tz}" && -f /etc/timezone ]]; then
+    tz="$(cat /etc/timezone 2>/dev/null || true)"
+  fi
+  if [[ -z "${tz}" && -L /etc/localtime ]]; then
+    tz="$(readlink /etc/localtime 2>/dev/null | sed -n 's#.*/zoneinfo/##p' || true)"
+  fi
+  if [[ -n "${tz}" ]] && is_valid_timezone "${tz}"; then
+    printf '%s\n' "${tz}"
+    return 0
+  fi
+  printf 'America/Toronto\n'
+}
+
 toml_escape_string() {
   printf '%s' "${1:-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
@@ -795,6 +827,36 @@ configure() {
   local control_allow_remote_config
   control_allow_remote_config="$(allow_remote_config_toml_value)"
 
+  # Forwarder timezone
+  local forwarder_timezone="${RT_SETUP_TIMEZONE:-}"
+  if is_noninteractive_mode; then
+    if [[ -n "${forwarder_timezone}" ]]; then
+      if ! is_valid_timezone "${forwarder_timezone}"; then
+        echo "Error: invalid timezone in RT_SETUP_TIMEZONE: ${forwarder_timezone}" >&2
+        exit 1
+      fi
+    else
+      forwarder_timezone="$(default_forwarder_timezone)"
+    fi
+  else
+    local default_tz
+    default_tz="$(default_forwarder_timezone)"
+    while true; do
+      read -rp "Default timezone [${default_tz}]: " input_tz
+      forwarder_timezone="${input_tz:-${default_tz}}"
+      if is_valid_timezone "${forwarder_timezone}"; then
+        break
+      fi
+      echo "Invalid timezone '${forwarder_timezone}'. Expected IANA timezone (e.g. America/Toronto)."
+    done
+  fi
+  local escaped_forwarder_timezone
+  escaped_forwarder_timezone="$(toml_escape_string "${forwarder_timezone}")"
+
+  if command -v timedatectl >/dev/null 2>&1; then
+    timedatectl set-timezone "${forwarder_timezone}" 2>/dev/null || true
+  fi
+
   # Generate config file
   cat > "${CONFIG_DIR}/forwarder.toml" <<EOF
 schema_version = 1
@@ -822,6 +884,9 @@ allow_remote_config = ${control_allow_remote_config}
 
 [update]
 mode = "check-only"
+
+[clock]
+timezone = "${escaped_forwarder_timezone}"
 EOF
 
   # Append reader targets

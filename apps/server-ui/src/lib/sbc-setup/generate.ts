@@ -34,6 +34,7 @@ function renderSetupEnv(config: SbcSetupFormData): string {
     `RT_SETUP_AUTH_TOKEN=${shellQuote(config.authToken)}`,
     `RT_SETUP_READER_TARGETS=${shellQuote(normalizedReaderTargets(config.readerTargets))}`,
     `RT_SETUP_STATUS_BIND=${shellQuote(config.statusBind)}`,
+    `RT_SETUP_TIMEZONE=${shellQuote(config.timezone || "America/Toronto")}`,
     `RT_SETUP_DONE_MARKER=${shellQuote("/var/lib/rusty-timer/.first-boot-setup-done")}`,
   ];
   if (config.upsEnabled) {
@@ -64,6 +65,7 @@ export function generateUserData(config: SbcSetupFormData): string {
   return (
     "#cloud-config\n" +
     `hostname: ${config.hostname}\n` +
+    `timezone: ${config.timezone || "America/Toronto"}\n` +
     "manage_etc_hosts: true\n" +
     "enable_ssh: true\n" +
     "ssh_pwauth: false\n" +

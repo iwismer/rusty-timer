@@ -225,6 +225,21 @@ unset -f chown netplan
 setup_script="$(cat "${SCRIPT_PATH}")"
 assert_contains "${setup_script}" $'[p2p]\nenabled = true\nsecret_key_path' "generated forwarder config should enable P2P on SBC installs"
 assert_contains "${setup_script}" $'[control]\nallow_power_actions = ${control_allow_power_actions}\nallow_remote_config = ${control_allow_remote_config}' "generated [control] section should provision allow_remote_config alongside allow_power_actions"
+assert_contains "${setup_script}" $'[clock]\ntimezone = "${escaped_forwarder_timezone}"' "generated forwarder config should provision [clock] timezone"
+
+# --- timezone validation helpers ---
+if is_valid_timezone "America/Toronto"; then tz_valid=1; else tz_valid=0; fi
+assert_eq "1" "${tz_valid}" "America/Toronto should be a valid timezone"
+if is_valid_timezone "UTC"; then tz_valid=1; else tz_valid=0; fi
+assert_eq "1" "${tz_valid}" "UTC should be a valid timezone"
+if is_valid_timezone "Mars/Olympus"; then tz_valid=1; else tz_valid=0; fi
+assert_eq "0" "${tz_valid}" "Mars/Olympus should be rejected"
+if is_valid_timezone "America/New York"; then tz_valid=1; else tz_valid=0; fi
+assert_eq "0" "${tz_valid}" "Timezone with spaces should be rejected"
+if is_valid_timezone ""; then tz_valid=1; else tz_valid=0; fi
+assert_eq "0" "${tz_valid}" "Empty timezone should be rejected"
+
+assert_nonempty "$(default_forwarder_timezone)" "default_forwarder_timezone should return non-empty value"
 
 tmp_cfg="$(mktemp)"
 cat > "${tmp_cfg}" <<'EOF'

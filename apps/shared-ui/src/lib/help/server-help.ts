@@ -384,6 +384,13 @@ export const SERVER_HELP = {
           'Enter targets as <code>IP:PORT</code> or an end-octet range like <code>192.168.1.10-12:10000</code>. Separate entries with newlines, commas, or semicolons. Most IPICO Lite readers use port 10000; Elite readers may use 10100.',
         default: '192.168.1.10:10000',
       },
+      timezone: {
+        label: 'Timezone',
+        summary: 'IANA timezone for the forwarder and reader real-time clock synchronization.',
+        detailHtml:
+          "Sets the forwarder's default timezone so that reader RTC syncs and IPICO timestamps match local event time. Use an IANA name like <code>America/Toronto</code> or <code>America/New_York</code>.",
+        default: 'America/Toronto',
+      },
     },
     tips: [
       'Double-check reader IPs at the venue before flashing devices.',

@@ -14,6 +14,7 @@ export interface SbcSetupFormData {
   readerTargets: string;
   statusBind: string;
   displayName: string;
+  timezone: string;
   setupScriptUrl: string;
   upsEnabled: boolean;
 }

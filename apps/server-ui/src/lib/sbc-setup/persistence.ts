@@ -47,6 +47,7 @@ export function readSbcSetupPreference(): SbcSetupStored | null {
     return {
       form: {
         ...parsed.form,
+        timezone: parsed.form.timezone || "America/Toronto",
         authToken: "",
         wifiPassword: "",
       } as SbcSetupFormData,

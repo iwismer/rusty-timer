@@ -40,6 +40,7 @@
     validateIpv4Cidr,
     validateSshKey,
     validateStatusBind,
+    validateTimezone,
     validateUsername,
     validateWifiCountry,
   } from "$lib/sbc-setup/validation";
@@ -60,6 +61,7 @@
     readerTargets: "192.168.1.10:10000",
     statusBind: "0.0.0.0:80",
     displayName: "Start Line",
+    timezone: "America/Toronto",
     setupScriptUrl: DEFAULT_SETUP_SCRIPT_URL,
     upsEnabled: false,
   };
@@ -195,6 +197,7 @@
     pushValidation(parseReaderTargets(form.readerTargets), errors);
     pushValidation(validateStatusBind(form.statusBind), errors);
     if (!form.displayName.trim()) errors.push("Display name is required.");
+    pushValidation(validateTimezone(form.timezone), errors);
     pushValidation(validateBaseUrl(form.setupScriptUrl), errors);
 
     if (form.wifiEnabled) {
@@ -231,6 +234,7 @@
       readerTargets: form.readerTargets.trim(),
       statusBind: form.statusBind.trim(),
       displayName: form.displayName.trim(),
+      timezone: form.timezone.trim(),
       setupScriptUrl: form.setupScriptUrl.trim() || DEFAULT_SETUP_SCRIPT_URL,
     };
   }
@@ -274,6 +278,7 @@
         ...DEFAULT_FORM,
         ...stored.form,
         serverUrl: stored.form.serverUrl || window.location.origin,
+        timezone: stored.form.timezone || DEFAULT_FORM.timezone,
         setupScriptUrl: stored.form.setupScriptUrl || DEFAULT_SETUP_SCRIPT_URL,
       };
       ipBaseOctet =
@@ -281,6 +286,14 @@
         computeBaseOctet(form.hostname, form.staticIpv4Cidr);
     } else {
       form.serverUrl = window.location.origin;
+      try {
+        const detectedTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        if (detectedTz && !(validateTimezone(detectedTz) instanceof Error)) {
+          form.timezone = detectedTz;
+        }
+      } catch {
+        // keep DEFAULT_FORM.timezone
+      }
     }
     void loadTokens();
   });
@@ -760,6 +773,21 @@
           <span class="mt-1 block text-xs text-text-muted"
             >Separate entries with newlines, commas, or semicolons.</span
           >
+        </label>
+        <label class="block">
+          <span class="block text-xs font-medium text-text-muted mb-1">
+            Timezone
+            <HelpTip
+              fieldKey="timezone"
+              sectionKey="sbc_forwarder_setup"
+              context="server"
+            />
+          </span>
+          <input
+            class={inputClass}
+            bind:value={form.timezone}
+            placeholder="America/Toronto"
+          />
         </label>
       </div>
     </Card>

@@ -28,6 +28,18 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sbc_cloud_init.validate_username("RT Admin")
 
+    def test_validate_timezone_accepts_valid_names(self) -> None:
+        self.assertEqual(
+            "America/Toronto", sbc_cloud_init.validate_timezone("America/Toronto")
+        )
+        self.assertEqual("UTC", sbc_cloud_init.validate_timezone("UTC"))
+
+    def test_validate_timezone_rejects_invalid(self) -> None:
+        with self.assertRaises(ValueError):
+            sbc_cloud_init.validate_timezone("America/New York")
+        with self.assertRaises(ValueError):
+            sbc_cloud_init.validate_timezone("")
+
 
 class RenderTests(unittest.TestCase):
     def test_render_user_data_contains_hostname_and_ssh_key(self) -> None:
@@ -43,6 +55,7 @@ class RenderTests(unittest.TestCase):
         text = sbc_cloud_init.render_user_data(config)
 
         self.assertIn("hostname: rt-fwd-77", text)
+        self.assertIn("timezone: America/Toronto", text)
         self.assertIn("manage_etc_hosts: true", text)
         self.assertIn("enable_ssh: true", text)
         self.assertIn("ssh_pwauth: false", text)
@@ -165,6 +178,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("RT_SETUP_SERVER_URL=https://server.example.com", text)
         self.assertIn("RT_SETUP_AUTH_TOKEN=secret-token", text)
         self.assertIn("RT_SETUP_READER_TARGETS=192.168.1.101:10000,192.168.1.102:10000", text)
+        self.assertIn("RT_SETUP_TIMEZONE=America/Toronto", text)
         self.assertIn("curl -fsSL", text)
         self.assertIn("rt-setup.sh", text)
 
