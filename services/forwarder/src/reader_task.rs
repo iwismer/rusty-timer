@@ -630,25 +630,27 @@ pub async fn run_reader(
             }
 
             // Parse IPICO chip read to validate and extract metadata
-            let (reader_timestamp, parsed_read_type) = match ChipRead::try_from(raw_line.as_str()) {
-                Ok(chip) => (
-                    Some(chip.timestamp.to_string()),
-                    chip.read_type.as_str().to_owned(),
-                ),
-                Err(_) => {
-                    // Line is not a valid IPICO read — log and skip
-                    let snippet = if raw_line.len() > 64 {
-                        format!("{}...", &raw_line[..64])
-                    } else {
-                        raw_line.clone()
-                    };
-                    logger.log_warn(
-                        "FWD:READER",
-                        format!("reader {} skipped unparseable line: {}", reader_ip, snippet),
-                    );
-                    continue;
-                }
-            };
+            let (reader_timestamp, parsed_read_type, tag_id) =
+                match ChipRead::try_from(raw_line.as_str()) {
+                    Ok(chip) => (
+                        Some(chip.timestamp.to_string()),
+                        chip.read_type.as_str().to_owned(),
+                        chip.tag_id,
+                    ),
+                    Err(_) => {
+                        // Line is not a valid IPICO read — log and skip
+                        let snippet = if raw_line.len() > 64 {
+                            format!("{}...", &raw_line[..64])
+                        } else {
+                            raw_line.clone()
+                        };
+                        logger.log_warn(
+                            "FWD:READER",
+                            format!("reader {} skipped unparseable line: {}", reader_ip, snippet),
+                        );
+                        continue;
+                    }
+                };
 
             // Write to journal. Keep status updates out of the DB lock scope.
             let Some((epoch, seq)) = append_with_retry(
@@ -690,7 +692,9 @@ pub async fn run_reader(
                 // Non-fatal: local fanout failure doesn't break P2P path
             }
 
-            status.record_read(&target_addr).await;
+            status
+                .record_read_with_chip(&target_addr, Some(&tag_id))
+                .await;
         }
 
         writer_handle.abort();

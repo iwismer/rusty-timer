@@ -54,6 +54,7 @@
     showHeader = true,
     readsSession = null,
     readsEpoch = null,
+    uniqueChips = null,
     readsTotal = null,
     lastSeenDisplay = undefined,
     localPortLabel = 'Local port',
@@ -98,6 +99,8 @@
     readsSession?: number | null;
     /** Reads recorded in the current epoch; entry hidden when null. */
     readsEpoch?: number | null;
+    /** Distinct chips recorded in the current epoch; entry hidden when null. */
+    uniqueChips?: number | null;
     /** Total reads seen; row hidden when null. */
     readsTotal?: number | null;
     /** Pre-formatted "last seen" string (e.g. "5s ago"); hidden when undefined. */
@@ -183,6 +186,7 @@
   let showSummaryRow = $derived(
     readsSession != null ||
       readsEpoch != null ||
+      uniqueChips != null ||
       readsTotal != null ||
       localPortValue !== undefined ||
       lastSeenDisplay !== undefined ||
@@ -274,8 +278,8 @@
   async function handleClearRecords() {
     await wrap(async () => {
       await onClearRecords();
-      setFeedback({ kind: 'ok', message: 'Clear records requested' });
-    }, 'Clear Records');
+      setFeedback({ kind: 'ok', message: 'Clear memory requested' });
+    }, 'Clear Memory');
   }
 
   async function handleStartDownload() {
@@ -404,6 +408,18 @@
             <span class="font-mono text-text-primary">{readsEpoch.toLocaleString()}</span>
             {#if onOpenHelpModal}<HelpTip
                 fieldKey="reads_epoch"
+                sectionKey="reader_live"
+                context={helpContext}
+                onOpenModal={openHelp}
+              />{/if}
+          </div>
+        {/if}
+        {#if uniqueChips != null}
+          <div class="inline-flex items-baseline gap-1">
+            <span class="text-text-muted">Unique chips (epoch):</span>
+            <span class="font-mono text-text-primary">{uniqueChips.toLocaleString()}</span>
+            {#if onOpenHelpModal}<HelpTip
+                fieldKey="unique_chips"
                 sectionKey="reader_live"
                 context={helpContext}
                 onOpenModal={openHelp}
@@ -758,7 +774,7 @@
             class="px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
             onclick={handleClearRecords}
             title="Erases onboard memory on physical IPICO hardware reader. Does not delete forwarder software reads."
-            disabled={controlDisabled}>Clear Records</button
+            disabled={controlDisabled}>Clear Memory</button
           >{#if onOpenHelpModal}<HelpTip
               fieldKey="clear_records"
               sectionKey="reader_live"

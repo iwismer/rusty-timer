@@ -179,6 +179,9 @@ pub struct ReaderStatus {
     /// First seq recorded in the current epoch, if available.
     #[prost(int64, optional, tag = "12")]
     pub current_epoch_start_seq: ::core::option::Option<i64>,
+    /// Forwarder-authoritative unique chips in the current epoch for this stream.
+    #[prost(int64, optional, tag = "13")]
+    pub unique_chips: ::core::option::Option<i64>,
 }
 /// Static descriptive information about a reader.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

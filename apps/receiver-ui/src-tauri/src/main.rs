@@ -1217,6 +1217,7 @@ mod tests {
                 reads_session: 0,
                 reads_total: 0,
                 reads_epoch: None,
+                unique_chips: None,
                 last_read_unix_ms: None,
                 last_seen_secs: None,
             }),

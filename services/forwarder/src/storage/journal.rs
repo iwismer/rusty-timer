@@ -7,6 +7,7 @@
 use crate::storage::migrations;
 use crate::storage::wake::WakeRegistry;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -579,6 +580,30 @@ impl Journal {
                 |row| row.get(0),
             )
             .map_err(Into::into)
+    }
+
+    /// Load distinct chip IDs for a `(stream_key, stream_epoch)` pair.
+    pub fn load_epoch_chips(
+        &self,
+        stream_key: &str,
+        stream_epoch: i64,
+    ) -> Result<HashSet<String>, JournalError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT raw_frame FROM events WHERE stream_id = ?1 AND epoch = ?2")?;
+        let rows = stmt.query_map(params![stream_key, stream_epoch], |row| {
+            let raw_frame: Vec<u8> = row.get(0)?;
+            Ok(raw_frame)
+        })?;
+        let mut chips = HashSet::new();
+        for raw_frame in rows.flatten() {
+            if let Ok(raw_str) = std::str::from_utf8(&raw_frame)
+                && let Ok(chip) = ipico_core::read::ChipRead::try_from(raw_str)
+            {
+                chips.insert(chip.tag_id);
+            }
+        }
+        Ok(chips)
     }
 
     /// Count total events for a stream key.

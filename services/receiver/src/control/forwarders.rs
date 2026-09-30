@@ -23,6 +23,8 @@ pub struct ForwarderConnectionStatus {
     pub pending: bool,
     pub subscribed_count: usize,
     pub available_count: usize,
+    pub epoch_reads: Option<i64>,
+    pub unique_chips: Option<i64>,
     pub readers: Vec<ReaderLiveStatus>,
     pub ups: Option<UpsStatusPayload>,
     /// Wire stream ids whose data subscription failed terminally on the live
@@ -181,6 +183,24 @@ pub(crate) fn assemble_forwarder_connection_statuses(
         let snapshot = derive_forwarder_state(runtime, intent);
         let live_status = live_statuses.get(&endpoint_id).cloned().unwrap_or_default();
         let readers = sorted_reader_statuses(&live_status, local_ports, &endpoint_id);
+        let (epoch_reads, unique_chips) =
+            readers
+                .iter()
+                .fold((None, None), |(acc_reads, acc_chips), r| {
+                    let next_reads = match (acc_reads, r.reads_epoch) {
+                        (Some(a), Some(b)) => Some(a + b),
+                        (None, Some(b)) => Some(b),
+                        (Some(a), None) => Some(a),
+                        (None, None) => None,
+                    };
+                    let next_chips = match (acc_chips, r.unique_chips) {
+                        (Some(a), Some(b)) => Some(a + b),
+                        (None, Some(b)) => Some(b),
+                        (Some(a), None) => Some(a),
+                        (None, None) => None,
+                    };
+                    (next_reads, next_chips)
+                });
         let last_seen_secs = if snapshot.state == ForwarderConnState::Subscribed
             || snapshot.state == ForwarderConnState::Connected
         {
@@ -197,6 +217,8 @@ pub(crate) fn assemble_forwarder_connection_statuses(
             pending: snapshot.pending,
             subscribed_count: subscribed_counts.get(&endpoint_id).copied().unwrap_or(0),
             available_count: discovered_forwarder.map_or(0, |forwarder| forwarder.streams.len()),
+            epoch_reads,
+            unique_chips,
             readers,
             ups: live_status.ups,
             failed_stream_ids: live_status.failed_streams.into_keys().collect(),

@@ -310,6 +310,26 @@
     );
   }
 
+  function forwarderEpochReads(
+    forwarder: ForwarderConnectionStatus,
+  ): number | null {
+    if (forwarder.epoch_reads != null) return forwarder.epoch_reads;
+    return forwarder.readers.reduce<number | null>((acc, r) => {
+      if (r.reads_epoch == null) return acc;
+      return (acc ?? 0) + r.reads_epoch;
+    }, null);
+  }
+
+  function forwarderUniqueChips(
+    forwarder: ForwarderConnectionStatus,
+  ): number | null {
+    if (forwarder.unique_chips != null) return forwarder.unique_chips;
+    return forwarder.readers.reduce<number | null>((acc, r) => {
+      if (r.unique_chips == null) return acc;
+      return (acc ?? 0) + r.unique_chips;
+    }, null);
+  }
+
   function readerLabel(reader: ReaderLiveStatus): string {
     return reader.stream_id;
   }
@@ -530,6 +550,27 @@
                     available
                   </span>
                 {/if}
+                {#if forwarderEpochReads(forwarder) != null}
+                  <span
+                    data-testid={`forwarder-reads-epoch-${forwarder.endpoint_id}`}
+                    class="text-xs text-text-muted"
+                  >
+                    Reads (epoch): <span class="font-mono text-text-primary"
+                      >{forwarderEpochReads(forwarder)?.toLocaleString()}</span
+                    >
+                  </span>
+                {/if}
+                {#if forwarderUniqueChips(forwarder) != null}
+                  <span
+                    data-testid={`forwarder-unique-chips-${forwarder.endpoint_id}`}
+                    class="text-xs text-text-muted"
+                  >
+                    Unique chips (epoch): <span
+                      class="font-mono text-text-primary"
+                      >{forwarderUniqueChips(forwarder)?.toLocaleString()}</span
+                    >
+                  </span>
+                {/if}
                 {#if forwarderLastSeenDisplay(forwarder)}
                   <span
                     data-testid={`forwarder-last-seen-${forwarder.endpoint_id}`}
@@ -676,6 +717,7 @@
                         readerStateLabel={readerForwarderStateLabel(reader)}
                         readsSession={reader.reads_session ?? null}
                         readsEpoch={reader.reads_epoch ?? null}
+                        uniqueChips={reader.unique_chips ?? null}
                         readsTotal={reader.reads_total ?? null}
                         lastSeenDisplay={lastSeenDisplayForPanel(reader)}
                         currentEpoch={reader.current_epoch ?? null}

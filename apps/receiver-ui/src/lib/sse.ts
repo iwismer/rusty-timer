@@ -107,6 +107,7 @@ export async function initSSE(callbacks: SseCallbacks): Promise<void> {
           stream_id: event.payload.stream_id,
           reads_session: event.payload.reads_session,
           reads_epoch: event.payload.reads_epoch ?? null,
+          unique_chips: event.payload.unique_chips ?? null,
           reads_total: event.payload.reads_total,
           last_read_unix_ms: event.payload.last_read_unix_ms ?? null,
           last_seen_secs: event.payload.last_seen_secs ?? null,

@@ -361,6 +361,15 @@ impl StatusServer {
         self.store.set_reader_epoch_reads(reader_ip, count).await;
     }
 
+    /// Seed a reader's current-epoch unique chips from durable journal state.
+    pub async fn set_reader_epoch_chips(
+        &self,
+        reader_ip: &str,
+        chips: std::collections::HashSet<String>,
+    ) {
+        self.store.set_reader_epoch_chips(reader_ip, chips).await;
+    }
+
     /// Apply journal-authoritative epoch metadata to a reader's status.
     pub async fn apply_epoch_metadata(
         &self,
@@ -825,6 +834,7 @@ struct ReaderStatusJson {
     reads_session: u64,
     reads_total: i64,
     reads_epoch: i64,
+    unique_chips: i64,
     last_seen_secs: Option<u64>,
     local_port: u16,
     current_epoch: Option<i64>,
@@ -867,6 +877,7 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
                 reads_session: r.reads_since_restart,
                 reads_total: r.reads_total,
                 reads_epoch: r.reads_epoch,
+                unique_chips: r.unique_chips,
                 last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                 local_port: r.local_port,
                 current_epoch: r.current_epoch,
@@ -5039,6 +5050,7 @@ target = "192.168.1.100:10000"
                     reads_since_restart: 2,
                     reads_total: 42,
                     reads_epoch: 7,
+                    unique_chips: 0,
                     local_port: 10_001,
                     current_epoch: None,
                     current_epoch_created_unix_ms: None,

@@ -199,6 +199,7 @@ export interface ReaderLiveStatus {
   last_read_unix_ms: number | null;
   reads_session?: number | null;
   reads_epoch?: number | null;
+  unique_chips?: number | null;
   reads_total?: number | null;
   last_seen_secs?: number | null;
   current_epoch?: number | null;
@@ -225,6 +226,8 @@ export interface ForwarderConnectionStatus {
   pending: boolean;
   subscribed_count: number;
   available_count: number;
+  epoch_reads?: number | null;
+  unique_chips?: number | null;
   readers: ReaderLiveStatus[];
   ups: UpsStatusPayload | null;
   /** Wire stream ids whose data subscription failed terminally on the live
@@ -305,6 +308,7 @@ export interface ForwarderReaderCountsUpdate {
   stream_id: string;
   reads_session: number;
   reads_epoch: number | null;
+  unique_chips?: number | null;
   reads_total: number;
   last_read_unix_ms: number | null;
   last_seen_secs: number | null;

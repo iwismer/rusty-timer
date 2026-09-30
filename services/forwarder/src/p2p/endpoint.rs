@@ -402,6 +402,7 @@ fn reader_status_event(stream_id: &str, status: &ReaderStatus) -> ControlEvent {
         current_epoch_created_unix_ms: status.current_epoch_created_unix_ms,
         current_epoch_start_seq: status.current_epoch_start_seq,
         reads_epoch: Some(status.reads_epoch),
+        unique_chips: Some(status.unique_chips),
     })
 }
 

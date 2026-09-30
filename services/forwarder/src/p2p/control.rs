@@ -2255,6 +2255,7 @@ mod tests {
                 current_epoch_created_unix_ms: None,
                 current_epoch_start_seq: None,
                 reads_epoch: None,
+                unique_chips: None,
             }))
             .await
             .expect("control event receiver alive");

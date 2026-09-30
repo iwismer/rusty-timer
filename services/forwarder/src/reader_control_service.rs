@@ -629,6 +629,7 @@ mod tests {
                     reads_since_restart: 0,
                     reads_total: 0,
                     reads_epoch: 0,
+                    unique_chips: 0,
                     local_port: 10_001,
                     current_epoch: None,
                     current_epoch_created_unix_ms: None,

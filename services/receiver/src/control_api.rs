@@ -381,6 +381,8 @@ fn fingerprint_reader_statuses(mut readers: Vec<ReaderLiveStatus>) -> Vec<Reader
     for reader in &mut readers {
         reader.reads_session = None;
         reader.reads_total = None;
+        reader.reads_epoch = None;
+        reader.unique_chips = None;
         reader.last_read_unix_ms = None;
         reader.last_seen_secs = None;
     }
@@ -1030,6 +1032,7 @@ impl AppState {
                     reads_session: status.reads_session,
                     reads_total: status.reads_total,
                     reads_epoch: status.reads_epoch,
+                    unique_chips: status.unique_chips,
                     last_read_unix_ms: (status.last_read_unix_ms != 0)
                         .then_some(status.last_read_unix_ms),
                     last_seen_secs: status.last_seen_secs,
@@ -1043,6 +1046,7 @@ impl AppState {
             reads_session: Some(status.reads_session),
             reads_total: Some(status.reads_total),
             reads_epoch: status.reads_epoch,
+            unique_chips: status.unique_chips,
             last_seen_secs: status.last_seen_secs,
             current_epoch: status.current_epoch,
             current_epoch_created_unix_ms: status.current_epoch_created_unix_ms,
@@ -1100,6 +1104,7 @@ impl AppState {
                         // until the next authoritative status delta arrives,
                         // and the previous epoch's start_seq no longer applies.
                         reader.reads_epoch = Some(0);
+                        reader.unique_chips = Some(0);
                         reader.current_epoch_start_seq = None;
                     }
                     reader.current_epoch = current_epoch;
@@ -1120,6 +1125,7 @@ impl AppState {
                 reads_session: None,
                 reads_total: None,
                 reads_epoch: None,
+                unique_chips: None,
                 last_seen_secs: None,
                 current_epoch,
                 current_epoch_created_unix_ms,
@@ -1180,6 +1186,7 @@ impl AppState {
                 reads_session: None,
                 reads_total: None,
                 reads_epoch: None,
+                unique_chips: None,
                 last_seen_secs: None,
                 current_epoch: None,
                 current_epoch_created_unix_ms: None,
@@ -1238,6 +1245,7 @@ impl AppState {
                 reads_session: None,
                 reads_total: None,
                 reads_epoch: None,
+                unique_chips: None,
                 last_seen_secs: None,
                 current_epoch: None,
                 current_epoch_created_unix_ms: None,
@@ -2172,6 +2180,7 @@ pub struct ReaderLiveStatus {
     pub reads_session: Option<u64>,
     pub reads_total: Option<i64>,
     pub reads_epoch: Option<i64>,
+    pub unique_chips: Option<i64>,
     pub last_seen_secs: Option<u64>,
     pub current_epoch: Option<i64>,
     pub current_epoch_created_unix_ms: Option<i64>,
@@ -2867,6 +2876,7 @@ mod tests {
                 reads_session: 0,
                 reads_total: 0,
                 reads_epoch: None,
+                unique_chips: None,
                 last_read_unix_ms: None,
                 last_seen_secs: None,
             }),
@@ -3113,6 +3123,7 @@ mod tests {
                     reads_session: 12,
                     reads_total: 120,
                     reads_epoch: Some(34),
+                    unique_chips: Some(20),
                     last_seen_secs: Some(3),
                     current_epoch: Some(9),
                     current_epoch_created_unix_ms: Some(1_783_238_640_000),
@@ -3132,6 +3143,7 @@ mod tests {
                     reads_session: 0,
                     reads_total: 0,
                     reads_epoch: None,
+                    unique_chips: None,
                     last_seen_secs: None,
                     current_epoch: None,
                     current_epoch_created_unix_ms: None,
@@ -3200,6 +3212,7 @@ mod tests {
                     reads_session: 13,
                     reads_total: 121,
                     reads_epoch: Some(35),
+                    unique_chips: Some(22),
                     last_seen_secs: Some(1),
                     current_epoch: Some(10),
                     current_epoch_created_unix_ms: Some(1_783_238_700_000),
@@ -3226,6 +3239,8 @@ mod tests {
             .iter()
             .find(|forwarder| forwarder.endpoint_id == "endpoint-a")
             .expect("forwarder should be present");
+        assert_eq!(forwarder.epoch_reads, Some(69));
+        assert_eq!(forwarder.unique_chips, Some(42));
         assert_eq!(forwarder.readers.len(), 2);
         assert_eq!(forwarder.readers[0].stream_id, "stream-a");
         assert!(forwarder.readers[0].connected);
@@ -3233,6 +3248,8 @@ mod tests {
         assert_eq!(forwarder.readers[0].last_read_unix_ms, Some(5678));
         assert_eq!(forwarder.readers[0].reads_session, Some(13));
         assert_eq!(forwarder.readers[0].reads_total, Some(121));
+        assert_eq!(forwarder.readers[0].reads_epoch, Some(35));
+        assert_eq!(forwarder.readers[0].unique_chips, Some(22));
         assert_eq!(forwarder.readers[0].last_seen_secs, Some(1));
         assert_eq!(forwarder.readers[0].current_epoch, Some(10));
         assert_eq!(
@@ -3315,6 +3332,7 @@ mod tests {
                     reads_session: 1,
                     reads_total: 10,
                     reads_epoch: None,
+                    unique_chips: None,
                     last_seen_secs: Some(1),
                     current_epoch: None,
                     current_epoch_created_unix_ms: None,
@@ -3503,6 +3521,7 @@ mod tests {
                 reads_session,
                 reads_total,
                 reads_epoch: None,
+                unique_chips: None,
                 last_seen_secs: Some(reads_session),
                 current_epoch: None,
                 current_epoch_created_unix_ms: None,
@@ -4116,6 +4135,7 @@ mod tests {
                     reads_session: 1,
                     reads_total: 1,
                     reads_epoch: Some(1),
+                    unique_chips: None,
                     last_seen_secs: Some(1),
                     current_epoch: Some(7),
                     current_epoch_created_unix_ms: Some(1_783_238_640_000),

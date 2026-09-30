@@ -48,6 +48,8 @@ pub struct ReaderStatus {
     pub reads_total: i64,
     /// Durable reads recorded in the current epoch.
     pub reads_epoch: i64,
+    /// Forwarder-authoritative unique chips recorded in the current epoch.
+    pub unique_chips: i64,
     /// The local port the forwarder listens on to re-expose reads from this reader.
     pub local_port: u16,
     /// The current epoch id, if available.
@@ -219,6 +221,8 @@ pub struct SubsystemStatus {
     /// Readers whose read counters changed since the last coalesced P2P
     /// status broadcast (see [`spawn_read_count_broadcaster`]).
     pub(crate) read_counts_dirty: HashSet<String>,
+    /// Unique chip IDs observed in the current epoch per reader.
+    pub(crate) epoch_chips: HashMap<String, HashSet<String>>,
 }
 
 impl SubsystemStatus {
@@ -239,6 +243,7 @@ impl SubsystemStatus {
             ups_status: None,
             server_status: None,
             read_counts_dirty: HashSet::new(),
+            epoch_chips: HashMap::new(),
         }
     }
 
@@ -259,6 +264,7 @@ impl SubsystemStatus {
             ups_status: None,
             server_status: None,
             read_counts_dirty: HashSet::new(),
+            epoch_chips: HashMap::new(),
         }
     }
 
@@ -1040,6 +1046,7 @@ impl StatusStore {
                     reads_since_restart: 0,
                     reads_total: 0,
                     reads_epoch: 0,
+                    unique_chips: 0,
                     local_port: *local_port,
                     current_epoch: None,
                     current_epoch_created_unix_ms: None,
@@ -1070,6 +1077,18 @@ impl StatusStore {
             if let Some(r) = ss.readers.get_mut(reader_ip) {
                 r.reads_epoch = count;
             }
+        }
+        self.publish_display_state().await;
+    }
+
+    /// Seed a reader's current-epoch unique chips from durable journal state.
+    pub async fn set_reader_epoch_chips(&self, reader_ip: &str, chips: HashSet<String>) {
+        {
+            let mut ss = self.subsystem.lock().await;
+            if let Some(r) = ss.readers.get_mut(reader_ip) {
+                r.unique_chips = chips.len() as i64;
+            }
+            ss.epoch_chips.insert(reader_ip.to_owned(), chips);
         }
         self.publish_display_state().await;
     }
@@ -1115,6 +1134,7 @@ impl StatusStore {
                         reads_session: r.reads_since_restart,
                         reads_total: r.reads_total,
                         reads_epoch: r.reads_epoch,
+                        unique_chips: r.unique_chips,
                         last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                         local_port: r.local_port,
                         current_epoch: r.current_epoch,
@@ -1140,12 +1160,27 @@ impl StatusStore {
 
     /// Record a successful chip read for a reader.
     pub async fn record_read(&self, reader_ip: &str) {
+        self.record_read_with_chip(reader_ip, None).await;
+    }
+
+    /// Record a successful chip read with an optional chip ID for a reader.
+    pub async fn record_read_with_chip(&self, reader_ip: &str, chip_id: Option<&str>) {
         {
             let mut ss = self.subsystem.lock().await;
+            let unique_chips = if let Some(cid) = chip_id {
+                let set = ss.epoch_chips.entry(reader_ip.to_owned()).or_default();
+                set.insert(cid.to_owned());
+                Some(set.len() as i64)
+            } else {
+                None
+            };
             if let Some(r) = ss.readers.get_mut(reader_ip) {
                 r.reads_since_restart += 1;
                 r.reads_total += 1;
                 r.reads_epoch += 1;
+                if let Some(unique) = unique_chips {
+                    r.unique_chips = unique;
+                }
                 r.last_seen = Some(Instant::now());
                 let _ = self
                     .ui_tx
@@ -1155,6 +1190,7 @@ impl StatusStore {
                         reads_session: r.reads_since_restart,
                         reads_total: r.reads_total,
                         reads_epoch: r.reads_epoch,
+                        unique_chips: r.unique_chips,
                         last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                         local_port: r.local_port,
                         current_epoch: r.current_epoch,
@@ -1186,12 +1222,20 @@ pub(crate) async fn apply_epoch_metadata_to_subsystem(
     metadata: crate::storage::journal::CurrentEpochMetadata,
 ) -> bool {
     let mut ss = subsystem.lock().await;
+    let epoch_changed = ss
+        .readers
+        .get(reader_ip)
+        .is_some_and(|r| r.current_epoch != Some(metadata.epoch));
+    if epoch_changed {
+        ss.epoch_chips.remove(reader_ip);
+    }
     let Some(r) = ss.readers.get_mut(reader_ip) else {
         return false;
     };
-    if r.current_epoch != Some(metadata.epoch) {
-        // Epoch changed: the new epoch starts with zero reads.
+    if epoch_changed {
+        // Epoch changed: the new epoch starts with zero reads and zero unique chips.
         r.reads_epoch = 0;
+        r.unique_chips = 0;
     }
     r.current_epoch = Some(metadata.epoch);
     r.current_epoch_created_unix_ms = metadata.created_unix_ms;
@@ -1203,6 +1247,7 @@ pub(crate) async fn apply_epoch_metadata_to_subsystem(
         reads_session: r.reads_since_restart,
         reads_total: r.reads_total,
         reads_epoch: r.reads_epoch,
+        unique_chips: r.unique_chips,
         last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
         local_port: r.local_port,
         current_epoch: r.current_epoch,
@@ -1430,6 +1475,78 @@ mod tests {
             .expect("reader status should be present");
         assert_eq!(status.reads_epoch, 0);
         assert_eq!(status.current_epoch, Some(5));
+    }
+
+    #[tokio::test]
+    async fn unique_chips_seeds_increments_and_resets_on_epoch_change() {
+        let store = StatusStore::new(SubsystemStatus::ready());
+        store.init_readers(&[("reader-a".to_owned(), 10_001)]).await;
+
+        let mut initial_chips = HashSet::new();
+        initial_chips.insert("CHIP1".to_owned());
+        initial_chips.insert("CHIP2".to_owned());
+        store
+            .set_reader_epoch_chips("reader-a", initial_chips)
+            .await;
+
+        let (_rx, snapshot) = store.status_feed().subscribe_and_snapshot().await;
+        let (_stream_id, status) = snapshot
+            .readers
+            .iter()
+            .find(|(stream_id, _)| stream_id == "reader-a")
+            .expect("reader status should be present");
+        assert_eq!(status.unique_chips, 2);
+
+        // Duplicate chip read does not increment unique count
+        store.record_read_with_chip("reader-a", Some("CHIP1")).await;
+        let (_rx, snapshot) = store.status_feed().subscribe_and_snapshot().await;
+        let (_stream_id, status) = snapshot
+            .readers
+            .iter()
+            .find(|(stream_id, _)| stream_id == "reader-a")
+            .unwrap();
+        assert_eq!(status.unique_chips, 2);
+
+        // Distinct chip read increments unique count
+        store.record_read_with_chip("reader-a", Some("CHIP3")).await;
+        let (_rx, snapshot) = store.status_feed().subscribe_and_snapshot().await;
+        let (_stream_id, status) = snapshot
+            .readers
+            .iter()
+            .find(|(stream_id, _)| stream_id == "reader-a")
+            .unwrap();
+        assert_eq!(status.unique_chips, 3);
+
+        // Record read without chip ID keeps existing count
+        store.record_read("reader-a").await;
+        let (_rx, snapshot) = store.status_feed().subscribe_and_snapshot().await;
+        let (_stream_id, status) = snapshot
+            .readers
+            .iter()
+            .find(|(stream_id, _)| stream_id == "reader-a")
+            .unwrap();
+        assert_eq!(status.unique_chips, 3);
+
+        // Advancing to a new epoch resets unique chips
+        store
+            .apply_epoch_metadata(
+                "reader-a",
+                crate::storage::journal::CurrentEpochMetadata {
+                    epoch: 2,
+                    created_unix_ms: None,
+                    start_seq: 1,
+                    name: None,
+                },
+            )
+            .await;
+
+        let (_rx, snapshot) = store.status_feed().subscribe_and_snapshot().await;
+        let (_stream_id, status) = snapshot
+            .readers
+            .iter()
+            .find(|(stream_id, _)| stream_id == "reader-a")
+            .unwrap();
+        assert_eq!(status.unique_chips, 0);
     }
 
     #[tokio::test]

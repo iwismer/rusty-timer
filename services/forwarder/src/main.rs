@@ -11,6 +11,7 @@ use forwarder::status_store::{ForwarderStatusEvent, ReaderConnectionState, Subsy
 use forwarder::storage::journal::Journal;
 use rt_ui_log::UiLogLevel;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -353,21 +354,32 @@ async fn main() {
             }
         };
         if let Some(metadata) = epoch_metadata {
-            let epoch_reads = {
+            let (epoch_reads, epoch_chips) = {
                 let j = journal.lock().await;
-                match j.count_events_for_epoch(reader_addr, metadata.epoch) {
+                let reads = match j.count_events_for_epoch(reader_addr, metadata.epoch) {
                     Ok(count) => count,
                     Err(e) => {
                         warn!(reader_ip = %reader_addr, error = %e, "failed to load reader epoch read count");
                         0
                     }
-                }
+                };
+                let chips = match j.load_epoch_chips(reader_addr, metadata.epoch) {
+                    Ok(chips) => chips,
+                    Err(e) => {
+                        warn!(reader_ip = %reader_addr, error = %e, "failed to load reader epoch chips");
+                        HashSet::new()
+                    }
+                };
+                (reads, chips)
             };
             status_server
                 .apply_epoch_metadata(reader_addr, metadata)
                 .await;
             status_server
                 .set_reader_epoch_reads(reader_addr, epoch_reads)
+                .await;
+            status_server
+                .set_reader_epoch_chips(reader_addr, epoch_chips)
                 .await;
         }
     }

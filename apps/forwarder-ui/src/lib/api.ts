@@ -37,6 +37,7 @@ export interface ReaderStatus {
   state: "connected" | "connecting" | "disconnected";
   reads_session: number;
   reads_epoch: number;
+  unique_chips?: number;
   reads_total: number;
   last_seen_secs: number | null;
   local_port: number;

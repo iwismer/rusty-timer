@@ -140,6 +140,8 @@ message ReaderStatus {
   optional int64 reads_epoch = 11;
   // First seq recorded in the current epoch, if available.
   optional int64 current_epoch_start_seq = 12;
+  // Forwarder-authoritative unique chips in the current epoch for this stream.
+  optional int64 unique_chips = 13;
 }
 
 // Static descriptive information about a reader.

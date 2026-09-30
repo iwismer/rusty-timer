@@ -513,6 +513,8 @@ describe("ConnectionsTab", () => {
             state: "online",
             last_read_unix_ms: null,
             reads_session: 12,
+            reads_epoch: 120,
+            unique_chips: 45,
             reads_total: 3456,
             last_seen_secs: 5,
             current_epoch: 9,
@@ -547,8 +549,17 @@ describe("ConnectionsTab", () => {
 
     render(ConnectionsTab);
 
+    expect(
+      screen.getByTestId("forwarder-reads-epoch-endpoint-live"),
+    ).toHaveTextContent("Reads (epoch): 120");
+    expect(
+      screen.getByTestId("forwarder-unique-chips-endpoint-live"),
+    ).toHaveTextContent("Unique chips (epoch): 45");
+
     const panel = screen.getByTestId("reader-control-panel");
     expect(panel).toHaveTextContent("Reads (session): 12");
+    expect(panel).toHaveTextContent("Reads (epoch): 120");
+    expect(panel).toHaveTextContent("Unique chips (epoch): 45");
     expect(panel).toHaveTextContent("Reads (total): 3,456");
     expect(panel).toHaveTextContent("Last seen: 5s ago");
     expect(panel).toHaveTextContent("Current epoch: #9");

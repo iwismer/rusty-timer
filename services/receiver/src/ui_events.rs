@@ -13,6 +13,7 @@ pub struct ForwarderReaderCounts {
     pub reads_session: u64,
     pub reads_total: i64,
     pub reads_epoch: Option<i64>,
+    pub unique_chips: Option<i64>,
     pub last_read_unix_ms: Option<i64>,
     pub last_seen_secs: Option<u64>,
 }
@@ -201,6 +202,7 @@ mod tests {
             reads_session: 12,
             reads_total: 345,
             reads_epoch: Some(40),
+            unique_chips: Some(25),
             last_read_unix_ms: Some(1_711_929_600_000),
             last_seen_secs: Some(3),
         });
@@ -210,6 +212,7 @@ mod tests {
         assert_eq!(json["stream_id"], "192.168.1.10:10000");
         assert_eq!(json["reads_session"], 12);
         assert_eq!(json["reads_total"], 345);
+        assert_eq!(json["unique_chips"], 25);
         assert_eq!(json["last_read_unix_ms"], 1_711_929_600_000_i64);
         assert_eq!(json["last_seen_secs"], 3);
     }

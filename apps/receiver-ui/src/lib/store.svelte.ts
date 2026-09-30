@@ -1208,6 +1208,7 @@ function applyForwarderReaderCountsUpdate(
         ...reader,
         reads_session: update.reads_session,
         reads_epoch: update.reads_epoch ?? reader.reads_epoch,
+        unique_chips: update.unique_chips ?? reader.unique_chips,
         reads_total: update.reads_total,
         last_read_unix_ms: update.last_read_unix_ms,
         last_seen_secs: update.last_seen_secs,
