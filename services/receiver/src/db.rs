@@ -524,22 +524,23 @@ impl Db {
         };
         tx.execute_batch("DELETE FROM subscriptions")?;
         let indices = assign_dbf_reader_indices(subs, &existing);
+        let mut stmt = tx.prepare(
+            "INSERT INTO subscriptions
+             (forwarder_endpoint_id, stream_id, local_port_override, event_type, forwarder_id, reader_ip, dbf_reader_index)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
         for (s, idx) in subs.iter().zip(indices) {
-            tx.execute(
-                "INSERT INTO subscriptions
-                 (forwarder_endpoint_id, stream_id, local_port_override, event_type, forwarder_id, reader_ip, dbf_reader_index)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![
-                    &s.forwarder_endpoint_id,
-                    &s.stream_id,
-                    s.local_port_override.map(|p| p as i64),
-                    s.event_type.as_str(),
-                    s.forwarder_id.as_deref(),
-                    s.reader_ip.as_deref(),
-                    idx.map(i64::from),
-                ],
-            )?;
+            stmt.execute(rusqlite::params![
+                &s.forwarder_endpoint_id,
+                &s.stream_id,
+                s.local_port_override.map(|p| p as i64),
+                s.event_type.as_str(),
+                s.forwarder_id.as_deref(),
+                s.reader_ip.as_deref(),
+                idx.map(i64::from),
+            ])?;
         }
+        drop(stmt);
         tx.commit()?;
         Ok(())
     }
@@ -2067,6 +2068,41 @@ fn received_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Received
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore]
+    fn bench_replace_stream_subscriptions() {
+        let mut db = Db::open_in_memory().unwrap();
+        let subs: Vec<StreamSubscription> = (0..1000)
+            .map(|i| StreamSubscription {
+                forwarder_endpoint_id: format!("ep-{}", i % 10),
+                stream_id: format!("stream-{i}"),
+                local_port_override: Some(9000 + (i as u16 % 100)),
+                event_type: if i % 2 == 0 {
+                    EventType::Start
+                } else {
+                    EventType::Finish
+                },
+                forwarder_id: Some(format!("fwd-{}", i % 10)),
+                reader_ip: Some(format!("10.0.0.{}", i % 250)),
+            })
+            .collect();
+
+        // Warmup
+        db.replace_stream_subscriptions(&subs).unwrap();
+
+        let iterations = 20;
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            db.replace_stream_subscriptions(&subs).unwrap();
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "BENCHMARK_RESULT: total = {:?}, avg = {:?}",
+            elapsed,
+            elapsed / iterations
+        );
+    }
 
     #[test]
     fn announcer_flags_persist() {
