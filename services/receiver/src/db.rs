@@ -524,12 +524,14 @@ impl Db {
         };
         tx.execute_batch("DELETE FROM subscriptions")?;
         let indices = assign_dbf_reader_indices(subs, &existing);
-        for (s, idx) in subs.iter().zip(indices) {
-            tx.execute(
+        {
+            let mut stmt = tx.prepare(
                 "INSERT INTO subscriptions
                  (forwarder_endpoint_id, stream_id, local_port_override, event_type, forwarder_id, reader_ip, dbf_reader_index)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![
+            )?;
+            for (s, idx) in subs.iter().zip(indices) {
+                stmt.execute(rusqlite::params![
                     &s.forwarder_endpoint_id,
                     &s.stream_id,
                     s.local_port_override.map(|p| p as i64),
@@ -537,8 +539,8 @@ impl Db {
                     s.forwarder_id.as_deref(),
                     s.reader_ip.as_deref(),
                     idx.map(i64::from),
-                ],
-            )?;
+                ])?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -551,12 +553,21 @@ impl Db {
     ) -> DbResult<()> {
         let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM participants")?;
-        for p in participants {
-            tx.execute(
+        {
+            let mut stmt = tx.prepare(
                 "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender, division)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![p.bib, &p.last, &p.first, &p.affiliation, &p.gender, p.division],
             )?;
+            for p in participants {
+                stmt.execute(rusqlite::params![
+                    p.bib,
+                    &p.last,
+                    &p.first,
+                    &p.affiliation,
+                    &p.gender,
+                    p.division
+                ])?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -567,11 +578,12 @@ impl Db {
     pub fn replace_divisions(&mut self, divisions: &[(i32, String)]) -> DbResult<()> {
         let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM divisions")?;
-        for (divno, name) in divisions {
-            tx.execute(
-                "INSERT OR REPLACE INTO divisions (divno, name) VALUES (?1, ?2)",
-                rusqlite::params![divno, name],
-            )?;
+        {
+            let mut stmt =
+                tx.prepare("INSERT OR REPLACE INTO divisions (divno, name) VALUES (?1, ?2)")?;
+            for (divno, name) in divisions {
+                stmt.execute(rusqlite::params![divno, name])?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -590,24 +602,35 @@ impl Db {
     ) -> DbResult<()> {
         let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM participants; DELETE FROM bib_chips; DELETE FROM divisions")?;
-        for p in participants {
-            tx.execute(
+        {
+            let mut participant_stmt = tx.prepare(
                 "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender, division)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![p.bib, &p.last, &p.first, &p.affiliation, &p.gender, p.division],
             )?;
+            for p in participants {
+                participant_stmt.execute(rusqlite::params![
+                    p.bib,
+                    &p.last,
+                    &p.first,
+                    &p.affiliation,
+                    &p.gender,
+                    p.division
+                ])?;
+            }
         }
-        for (bib, chip_id) in chips {
-            tx.execute(
-                "INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES (?1, ?2)",
-                rusqlite::params![chip_id, bib],
-            )?;
+        {
+            let mut chip_stmt =
+                tx.prepare("INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES (?1, ?2)")?;
+            for (bib, chip_id) in chips {
+                chip_stmt.execute(rusqlite::params![chip_id, bib])?;
+            }
         }
-        for (divno, name) in divisions {
-            tx.execute(
-                "INSERT OR REPLACE INTO divisions (divno, name) VALUES (?1, ?2)",
-                rusqlite::params![divno, name],
-            )?;
+        {
+            let mut div_stmt =
+                tx.prepare("INSERT OR REPLACE INTO divisions (divno, name) VALUES (?1, ?2)")?;
+            for (divno, name) in divisions {
+                div_stmt.execute(rusqlite::params![divno, name])?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -617,11 +640,12 @@ impl Db {
     pub fn replace_bib_chips(&mut self, chips: &[(i64, String)]) -> DbResult<()> {
         let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM bib_chips")?;
-        for (bib, chip_id) in chips {
-            tx.execute(
-                "INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES (?1, ?2)",
-                rusqlite::params![chip_id, bib],
-            )?;
+        {
+            let mut stmt =
+                tx.prepare("INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES (?1, ?2)")?;
+            for (bib, chip_id) in chips {
+                stmt.execute(rusqlite::params![chip_id, bib])?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -3500,5 +3524,32 @@ mod tests {
             db.load_raw_export_events(Some(s2), Some(1)).unwrap().len(),
             0
         );
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_replace_participants_baseline() {
+        let mut db = Db::open_in_memory().unwrap();
+        let participants: Vec<crate::participants::Participant> = (0..5000)
+            .map(|i| crate::participants::Participant {
+                bib: i,
+                last: format!("Last{}", i),
+                first: format!("First{}", i),
+                affiliation: "Team X".to_owned(),
+                gender: if i % 2 == 0 {
+                    "M".to_owned()
+                } else {
+                    "F".to_owned()
+                },
+                division: Some(i as i32 % 10),
+            })
+            .collect();
+
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            db.replace_participants(&participants).unwrap();
+        }
+        let elapsed = start.elapsed();
+        println!("bench_replace_participants 10x 5000: {:?}", elapsed);
     }
 }
