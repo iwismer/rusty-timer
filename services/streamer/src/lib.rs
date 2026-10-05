@@ -42,33 +42,41 @@ pub fn create_tables(conn: &Connection) {
 }
 
 pub fn import_bib_chips(conn: &Connection, bib_chips: &[ChipBib]) {
-    for c in bib_chips {
-        conn.execute(
-            "INSERT OR IGNORE INTO chip (id, bib)
-                    VALUES (?1, ?2)",
-            [&c.id as &dyn ToSql, &c.bib],
-        )
-        .unwrap();
+    let tx = conn.unchecked_transaction().unwrap();
+    {
+        let mut stmt = tx
+            .prepare_cached("INSERT OR IGNORE INTO chip (id, bib) VALUES (?1, ?2)")
+            .unwrap();
+        for c in bib_chips {
+            stmt.execute([&c.id as &dyn ToSql, &c.bib]).unwrap();
+        }
     }
+    tx.commit().unwrap();
 }
 
 pub fn import_participants(conn: &Connection, participants: &[Participant]) {
-    for p in participants {
-        let gender = format!("{}", p.gender);
-        conn.execute(
-            "INSERT OR IGNORE INTO participant (bib, first_name, last_name, gender, affiliation, division)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            [
+    let tx = conn.unchecked_transaction().unwrap();
+    {
+        let mut stmt = tx
+            .prepare_cached(
+                "INSERT OR IGNORE INTO participant (bib, first_name, last_name, gender, affiliation, division)
+                        VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .unwrap();
+        for p in participants {
+            let gender = format!("{}", p.gender);
+            stmt.execute([
                 &p.bib as &dyn ToSql,
                 &p.first_name as &dyn ToSql,
                 &p.last_name as &dyn ToSql,
                 &gender as &dyn ToSql,
                 &p.affiliation as &dyn ToSql,
                 &p.division as &dyn ToSql,
-            ],
-        )
-        .unwrap();
+            ])
+            .unwrap();
+        }
     }
+    tx.commit().unwrap();
 }
 
 pub async fn run(config: StreamerConfig) {
@@ -180,5 +188,55 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_import_bib_chips() {
+        use std::time::Instant;
+
+        let conn = Connection::open_in_memory().unwrap();
+        create_tables(&conn);
+
+        let chips: Vec<ChipBib> = (0..10_000)
+            .map(|i| ChipBib {
+                id: format!("chip-{i}"),
+                bib: i,
+            })
+            .collect();
+
+        let start = Instant::now();
+        import_bib_chips(&conn, &chips);
+        let elapsed = start.elapsed();
+
+        println!("import_bib_chips (10,000 items): {:?}", elapsed);
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_import_participants() {
+        use std::time::Instant;
+
+        let conn = Connection::open_in_memory().unwrap();
+        create_tables(&conn);
+
+        let participants: Vec<Participant> = (0..10_000)
+            .map(|i| Participant {
+                chip_id: Vec::new(),
+                bib: i,
+                first_name: "Jane".to_owned(),
+                last_name: "Doe".to_owned(),
+                gender: Gender::F,
+                age: Some(30),
+                affiliation: Some("Club".to_owned()),
+                division: Some(1),
+            })
+            .collect();
+
+        let start = Instant::now();
+        import_participants(&conn, &participants);
+        let elapsed = start.elapsed();
+
+        println!("import_participants (10,000 items): {:?}", elapsed);
     }
 }
