@@ -1145,7 +1145,10 @@ impl Db {
             let max_seq = seqs[seqs.len() - 1];
             let sql = "UPDATE received_events SET dbf_delivered_unix_ms = ?1
                  WHERE stream_id = ?2 AND dbf_delivered_unix_ms IS NULL AND seq BETWEEN ?3 AND ?4";
-            marked = tx.execute(sql, rusqlite::params![delivered_unix_ms, stream_id, min_seq, max_seq])?;
+            marked = tx.execute(
+                sql,
+                rusqlite::params![delivered_unix_ms, stream_id, min_seq, max_seq],
+            )?;
         } else {
             for chunk in seqs.chunks(500) {
                 let placeholders = std::iter::repeat_n("?", chunk.len())
@@ -1265,16 +1268,22 @@ impl Db {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut marked = 0usize;
         let is_contiguous = seqs.len() == 1
-            || (seqs.first().zip(seqs.last()).is_some_and(|(&first, &last)| {
-                last >= first && (last - first + 1) as usize == seqs.len()
-            }));
+            || (seqs
+                .first()
+                .zip(seqs.last())
+                .is_some_and(|(&first, &last)| {
+                    last >= first && (last - first + 1) as usize == seqs.len()
+                }));
 
         if is_contiguous {
             let min_seq = seqs[0];
             let max_seq = seqs[seqs.len() - 1];
             let sql = "UPDATE received_events SET announcer_pushed_unix_ms = ?1
                  WHERE stream_id = ?2 AND announcer_pushed_unix_ms IS NULL AND seq BETWEEN ?3 AND ?4";
-            marked = tx.execute(sql, rusqlite::params![pushed_unix_ms, stream_id, min_seq, max_seq])?;
+            marked = tx.execute(
+                sql,
+                rusqlite::params![pushed_unix_ms, stream_id, min_seq, max_seq],
+            )?;
         } else {
             for chunk in seqs.chunks(500) {
                 let placeholders = std::iter::repeat_n("?", chunk.len())
