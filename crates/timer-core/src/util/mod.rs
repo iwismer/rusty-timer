@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use std::fs::{File, remove_file};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::Path;
