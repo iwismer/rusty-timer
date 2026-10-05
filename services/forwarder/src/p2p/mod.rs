@@ -1063,7 +1063,7 @@ mod tests {
         let journal_path = dir.path().join("journal.sqlite3");
         let journal = Arc::new(Mutex::new(Journal::open(&journal_path)?));
         let token_file = dir.path().join("server-token");
-        std::fs::write(&token_file, "thin-voucher\n")?;
+        tokio::fs::write(&token_file, "thin-voucher\n").await?;
         let device_token_file = dir.path().join("p2p-device-token");
         let (catalog_pushes, mut catalog_pushes_rx) = tokio::sync::watch::channel(0u64);
         let state = BootstrapRetryServerState {
