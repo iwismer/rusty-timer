@@ -731,15 +731,16 @@ mod tests {
         // can serialize it.
         let dir = tempfile::tempdir()?;
         let token_path = dir.path().join("token");
-        std::fs::write(&token_path, "tok\n")?;
+        tokio::fs::write(&token_path, "tok\n").await?;
         let config_path = dir.path().join("forwarder.toml");
-        std::fs::write(
+        tokio::fs::write(
             &config_path,
             format!(
                 "schema_version = 1\n\n[auth]\ntoken_file = '{}'\n\n[[readers]]\ntarget = \"192.168.1.100\"\n\n[control]\nallow_remote_config = true\n",
                 token_path.display()
             ),
-        )?;
+        )
+        .await?;
 
         let (ui_tx, _ui_rx) = broadcast::channel(16);
         let ui_logger = Arc::new(rt_ui_log::UiLogger::new(ui_tx.clone(), |entry| {
@@ -830,15 +831,16 @@ mod tests {
 
         let dir = tempfile::tempdir()?;
         let token_path = dir.path().join("token");
-        std::fs::write(&token_path, "tok\n")?;
+        tokio::fs::write(&token_path, "tok\n").await?;
         let config_path = dir.path().join("forwarder.toml");
-        std::fs::write(
+        tokio::fs::write(
             &config_path,
             format!(
                 "schema_version = 1\n\n[auth]\ntoken_file = '{}'\n\n[[readers]]\ntarget = \"192.168.1.100\"\n\n[control]\nallow_remote_config = true\n",
                 token_path.display()
             ),
-        )?;
+        )
+        .await?;
 
         let (ui_tx, mut ui_rx) = broadcast::channel(64);
         let ui_logger = Arc::new(rt_ui_log::UiLogger::new(ui_tx.clone(), |entry| {
