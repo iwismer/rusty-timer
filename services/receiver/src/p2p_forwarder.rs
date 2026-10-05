@@ -1275,8 +1275,8 @@ mod tests {
     use rt_iroh::{Endpoint, EndpointBuilder};
     use rt_p2p_protocol::{
         CAP_READER_CONTROL, CAP_REMOTE_CONFIG, ControlF2C, DownloadProgress, EventBatch, Hello,
-        MAX_FRAME_BYTES, ReadRecord, ReaderStatus, StreamCatalog, SubscribeMode, SubscribeOk,
-        control_f2c,
+        MAX_FRAME_BYTES, ReadRecord, ReaderInfo, ReaderStatus, StreamCatalog, SubscribeMode,
+        SubscribeOk, UpsStatus, control_f2c,
     };
     use rt_test_utils::p2p::{ConnectivityFault, ForwarderScript, MockForwarderPeer};
     use rt_test_utils::poll_until;
@@ -2716,5 +2716,107 @@ mod tests {
             result.is_err(),
             "config command without a live session must error"
         );
+    }
+
+    #[tokio::test]
+    async fn handle_control_frame_signals_recompute_notify_for_status_frames() {
+        use tokio::sync::Notify;
+
+        let (state, _shutdown_rx) = AppState::new(
+            crate::db::Db::open_in_memory().unwrap(),
+            "recv-test".to_owned(),
+        );
+        let reporter = Arc::new(SessionStatusReporter::new(Arc::clone(&state)));
+        let endpoint_id = "test-notify-endpoint";
+
+        let server_ep = EndpointBuilder::test([60; 32]).bind().await.unwrap();
+        let client_ep = EndpointBuilder::test([61; 32]).bind().await.unwrap();
+        let server_addr = server_ep.endpoint_addr().await;
+
+        let server_ep_clone = server_ep.clone();
+        let server_task = tokio::spawn(async move {
+            let connection = server_ep_clone.accept().await.unwrap().unwrap();
+            let (_send, _recv) = connection.accept_bi().await.unwrap();
+            // keep connection open until dropped
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let conn = client_ep.connect(server_addr).await.unwrap();
+        let (mut control_send, _recv) = conn.open_bi().await.unwrap();
+
+        let recompute_notify = Notify::new();
+        let mut pending_config = std::collections::HashMap::new();
+        let mut pending_reader = std::collections::HashMap::new();
+
+        let status_frames = vec![
+            ControlF2C {
+                msg: Some(control_f2c::Msg::ReaderStatus(ReaderStatus {
+                    stream_id: STREAM_ID.as_bytes().to_vec(),
+                    connected: true,
+                    state: "connected".to_owned(),
+                    last_read_unix_ms: 0,
+                    reads_session: 0,
+                    reads_total: 0,
+                    last_seen_secs: None,
+                    current_epoch_name: None,
+                    current_epoch: None,
+                    current_epoch_created_unix_ms: None,
+                    current_epoch_start_seq: None,
+                    reads_epoch: None,
+                    unique_chips: None,
+                })),
+            },
+            ControlF2C {
+                msg: Some(control_f2c::Msg::ReaderInfo(ReaderInfo {
+                    stream_id: STREAM_ID.as_bytes().to_vec(),
+                    hardware_reader_id: "R1".to_owned(),
+                    firmware_version: "1.0.0".to_owned(),
+                    model: "decoder".to_owned(),
+                    reader_info_json: None,
+                })),
+            },
+            ControlF2C {
+                msg: Some(control_f2c::Msg::UpsStatus(UpsStatus {
+                    on_battery: false,
+                    battery_percent: 100,
+                    runtime_seconds: 3600,
+                })),
+            },
+            ControlF2C {
+                msg: Some(control_f2c::Msg::DownloadProgress(DownloadProgress {
+                    stream_id: STREAM_ID.as_bytes().to_vec(),
+                    downloaded_bytes: 100,
+                    total_bytes: 1000,
+                    state: "downloading".to_owned(),
+                    reads_received: 10,
+                    progress: 10,
+                    total: 100,
+                    error: String::new(),
+                })),
+            },
+        ];
+
+        for frame in status_frames {
+            let notified_fut = recompute_notify.notified();
+            super::handle_control_frame(
+                endpoint_id,
+                frame,
+                &mut control_send,
+                &reporter,
+                &recompute_notify,
+                &mut pending_config,
+                &mut pending_reader,
+            )
+            .await
+            .expect("handle_control_frame failed");
+
+            tokio::time::timeout(Duration::from_millis(500), notified_fut)
+                .await
+                .expect("recompute_notify was not triggered for status frame");
+        }
+
+        server_task.abort();
+        client_ep.close().await;
+        server_ep.close().await;
     }
 }
