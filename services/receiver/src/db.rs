@@ -1122,9 +1122,9 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Mark a batch of seqs DBF-delivered in **one transaction** (chunked
-    /// `IN` lists) instead of one autocommit fsync per row. Returns the number
-    /// of rows newly marked.
+    /// Mark a batch of seqs DBF-delivered in **one transaction** (single range query
+    /// when contiguous, chunked `IN` lists fallback) instead of one autocommit fsync
+    /// or repeated statement preparation per row/chunk. Returns the number of rows newly marked.
     pub fn mark_dbf_delivered_batch(
         &mut self,
         stream_id: &str,
@@ -1138,22 +1138,32 @@ impl Db {
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut marked = 0usize;
-        for chunk in seqs.chunks(500) {
-            let placeholders = std::iter::repeat_n("?", chunk.len())
-                .collect::<Vec<_>>()
-                .join(",");
-            let sql = format!(
-                "UPDATE received_events SET dbf_delivered_unix_ms = ?1
-                 WHERE stream_id = ?2 AND dbf_delivered_unix_ms IS NULL AND seq IN ({placeholders})"
-            );
-            let mut stmt = tx.prepare(&sql)?;
-            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 2);
-            params.push(&delivered_unix_ms);
-            params.push(&stream_id);
-            for seq in chunk {
-                params.push(seq);
+        let is_contiguous = seqs.windows(2).all(|w| w[1] == w[0] + 1);
+
+        if is_contiguous {
+            let min_seq = seqs[0];
+            let max_seq = seqs[seqs.len() - 1];
+            let sql = "UPDATE received_events SET dbf_delivered_unix_ms = ?1
+                 WHERE stream_id = ?2 AND dbf_delivered_unix_ms IS NULL AND seq BETWEEN ?3 AND ?4";
+            marked = tx.execute(sql, rusqlite::params![delivered_unix_ms, stream_id, min_seq, max_seq])?;
+        } else {
+            for chunk in seqs.chunks(500) {
+                let placeholders = std::iter::repeat_n("?", chunk.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!(
+                    "UPDATE received_events SET dbf_delivered_unix_ms = ?1
+                     WHERE stream_id = ?2 AND dbf_delivered_unix_ms IS NULL AND seq IN ({placeholders})"
+                );
+                let mut stmt = tx.prepare(&sql)?;
+                let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 2);
+                params.push(&delivered_unix_ms);
+                params.push(&stream_id);
+                for seq in chunk {
+                    params.push(seq);
+                }
+                marked += stmt.execute(params.as_slice())?;
             }
-            marked += stmt.execute(params.as_slice())?;
         }
         tx.commit()?;
         Ok(marked)
@@ -1237,10 +1247,10 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Mark a batch of seqs announcer-pushed in **one transaction** (chunked
-    /// `IN` lists) instead of one autocommit fsync per row. Only rows whose
-    /// marker is still NULL are updated. Returns the number of rows newly
-    /// marked.
+    /// Mark a batch of seqs announcer-pushed in **one transaction** (single range query
+    /// when contiguous, chunked `IN` lists fallback) instead of one autocommit fsync
+    /// or repeated statement preparation per row/chunk. Only rows whose marker is
+    /// still NULL are updated. Returns the number of rows newly marked.
     pub fn mark_announcer_pushed_batch(
         &mut self,
         stream_id: &str,
@@ -1254,22 +1264,35 @@ impl Db {
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut marked = 0usize;
-        for chunk in seqs.chunks(500) {
-            let placeholders = std::iter::repeat_n("?", chunk.len())
-                .collect::<Vec<_>>()
-                .join(",");
-            let sql = format!(
-                "UPDATE received_events SET announcer_pushed_unix_ms = ?1
-                 WHERE stream_id = ?2 AND announcer_pushed_unix_ms IS NULL AND seq IN ({placeholders})"
-            );
-            let mut stmt = tx.prepare(&sql)?;
-            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 2);
-            params.push(&pushed_unix_ms);
-            params.push(&stream_id);
-            for seq in chunk {
-                params.push(seq);
+        let is_contiguous = seqs.len() == 1
+            || (seqs.first().zip(seqs.last()).is_some_and(|(&first, &last)| {
+                last >= first && (last - first + 1) as usize == seqs.len()
+            }));
+
+        if is_contiguous {
+            let min_seq = seqs[0];
+            let max_seq = seqs[seqs.len() - 1];
+            let sql = "UPDATE received_events SET announcer_pushed_unix_ms = ?1
+                 WHERE stream_id = ?2 AND announcer_pushed_unix_ms IS NULL AND seq BETWEEN ?3 AND ?4";
+            marked = tx.execute(sql, rusqlite::params![pushed_unix_ms, stream_id, min_seq, max_seq])?;
+        } else {
+            for chunk in seqs.chunks(500) {
+                let placeholders = std::iter::repeat_n("?", chunk.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!(
+                    "UPDATE received_events SET announcer_pushed_unix_ms = ?1
+                     WHERE stream_id = ?2 AND announcer_pushed_unix_ms IS NULL AND seq IN ({placeholders})"
+                );
+                let mut stmt = tx.prepare(&sql)?;
+                let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 2);
+                params.push(&pushed_unix_ms);
+                params.push(&stream_id);
+                for seq in chunk {
+                    params.push(seq);
+                }
+                marked += stmt.execute(params.as_slice())?;
             }
-            marked += stmt.execute(params.as_slice())?;
         }
         tx.commit()?;
         Ok(marked)
@@ -3135,6 +3158,54 @@ mod tests {
     }
 
     #[test]
+    fn mark_announcer_pushed_batch_contiguous_and_non_contiguous() {
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_id = "s-announcer-batch";
+        for seq in 1..=5 {
+            db.insert_received_event(&ReceivedEventInsert {
+                stream_id,
+                seq,
+                epoch: 1,
+                raw_frame: b"frame",
+                read_kind: "chip",
+                reader_timestamp: None,
+                received_unix_ms: 1_700_000_000_000 + seq,
+                dbf_delivered_unix_ms: None,
+                chip_id: None,
+            })
+            .unwrap();
+        }
+
+        // Test non-contiguous batch marking (seqs 1, 3, 5)
+        let marked = db
+            .mark_announcer_pushed_batch(stream_id, &[1, 3, 5], 1_700_000_010_000)
+            .unwrap();
+        assert_eq!(marked, 3);
+
+        // Remaining unpushed should be seqs 2 and 4
+        let unpushed = db.load_unpushed_announcer_events(stream_id).unwrap();
+        assert_eq!(unpushed.len(), 2);
+        assert_eq!(unpushed[0].seq, 2);
+        assert_eq!(unpushed[1].seq, 4);
+
+        // Test contiguous batch marking for remaining seqs 2 and 4 individually or together
+        let marked2 = db
+            .mark_announcer_pushed_batch(stream_id, &[2], 1_700_000_020_000)
+            .unwrap();
+        assert_eq!(marked2, 1);
+
+        let unpushed2 = db.load_unpushed_announcer_events(stream_id).unwrap();
+        assert_eq!(unpushed2.len(), 1);
+        assert_eq!(unpushed2[0].seq, 4);
+
+        // Test empty batch
+        let marked_empty = db
+            .mark_announcer_pushed_batch(stream_id, &[], 1_700_000_030_000)
+            .unwrap();
+        assert_eq!(marked_empty, 0);
+    }
+
+    #[test]
     fn insert_on_conflict_do_nothing() {
         let db = Db::open_in_memory().unwrap();
         let stream_id = "11111111-1111-1111-1111-111111111111";
@@ -3595,5 +3666,52 @@ mod tests {
         eprintln!("replace_participants (10k): {:?}", elapsed_participants);
         eprintln!("replace_bib_chips (10k): {:?}", elapsed_chips);
         eprintln!("replace_rd_data (10k each): {:?}", elapsed_rd_data);
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_mark_announcer_pushed_batch() {
+        let mut db = Db::open_in_memory().unwrap();
+        let stream_id = "bench-stream";
+        let count = 5000i64;
+        for seq in 1..=count {
+            db.insert_received_event(&ReceivedEventInsert {
+                stream_id,
+                seq,
+                epoch: 1,
+                raw_frame: b"bench_frame",
+                read_kind: "chip",
+                reader_timestamp: None,
+                received_unix_ms: 1000 + seq,
+                dbf_delivered_unix_ms: None,
+                chip_id: None,
+            })
+            .unwrap();
+        }
+
+        let seqs: Vec<i64> = (1..=count).collect();
+
+        let iterations = 50;
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            // Reset markers back to NULL so the update has work to do
+            db.conn
+                .execute(
+                    "UPDATE received_events SET announcer_pushed_unix_ms = NULL WHERE stream_id = ?1",
+                    rusqlite::params![stream_id],
+                )
+                .unwrap();
+
+            let marked = db
+                .mark_announcer_pushed_batch(stream_id, &seqs, 1_700_000_000_000)
+                .unwrap();
+            assert_eq!(marked, count as usize);
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "BENCHMARK_ANNOUNCER_PUSHED_BATCH: total = {:?}, avg per iter = {:?}",
+            elapsed,
+            elapsed / iterations
+        );
     }
 }
