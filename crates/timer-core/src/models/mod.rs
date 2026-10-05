@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 mod chip;
 mod message;
 mod participant;
