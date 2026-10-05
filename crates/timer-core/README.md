@@ -13,7 +13,6 @@ Provides the domain models for chip timing and the TCP worker abstractions used 
 - **`ChipRead`** -- A parsed chip read with tag ID, timestamp, and read type.
 - **`ChipBib`** -- Association between a chip tag ID and a bib number.
 - **`Participant`** -- Race participant with name, bib, and gender.
-- **`RaceResult`** -- Computed race result for a participant.
 - **`Message`** -- Internal message type for worker communication.
 - **`Timestamp`** -- Date-time representation for timing data.
 - **`ReadType`** / **`Gender`** -- Supporting enums.
