@@ -2059,7 +2059,11 @@ mod tests {
                 forwarder_endpoint_id: format!("ep-{}", i % 10),
                 stream_id: format!("stream-{i}"),
                 local_port_override: Some(9000 + (i as u16 % 100)),
-                event_type: if i % 2 == 0 { EventType::Start } else { EventType::Finish },
+                event_type: if i % 2 == 0 {
+                    EventType::Start
+                } else {
+                    EventType::Finish
+                },
                 forwarder_id: Some(format!("fwd-{}", i % 10)),
                 reader_ip: Some(format!("10.0.0.{}", i % 250)),
             })
