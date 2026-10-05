@@ -485,7 +485,7 @@ mod tests {
         allow.set_pinned([pinned.endpoint_id()]);
         allow.apply_update([server_only.endpoint_id()])?;
 
-        let cached = parse_endpoint_ids(&std::fs::read_to_string(&cache_path)?)?;
+        let cached = parse_endpoint_ids(&tokio::fs::read_to_string(&cache_path).await?)?;
         assert_eq!(
             cached,
             HashSet::from([server_only.endpoint_id()]),
