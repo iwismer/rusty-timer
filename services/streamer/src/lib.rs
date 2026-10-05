@@ -55,25 +55,81 @@ pub fn import_bib_chips(conn: &Connection, bib_chips: &[ChipBib]) {
 }
 
 pub fn import_participants(conn: &Connection, participants: &[Participant]) {
+    if participants.is_empty() {
+        return;
+    }
+
     let tx = conn.unchecked_transaction().unwrap();
     {
-        let mut stmt = tx
+        const CHUNK_SIZE: usize = 50;
+        const COLS_PER_ROW: usize = 6;
+
+        let mut full_query = String::from(
+            "INSERT OR IGNORE INTO participant (bib, first_name, last_name, gender, affiliation, division) VALUES ",
+        );
+        for i in 0..CHUNK_SIZE {
+            if i > 0 {
+                full_query.push_str(", ");
+            }
+            let p1 = i * COLS_PER_ROW + 1;
+            let p2 = p1 + 1;
+            let p3 = p1 + 2;
+            let p4 = p1 + 3;
+            let p5 = p1 + 4;
+            let p6 = p1 + 5;
+            use std::fmt::Write;
+            write!(full_query, "(?{p1}, ?{p2}, ?{p3}, ?{p4}, ?{p5}, ?{p6})").unwrap();
+        }
+
+        let mut chunk_stmt = tx.prepare_cached(&full_query).unwrap();
+
+        let mut single_stmt = tx
             .prepare_cached(
                 "INSERT OR IGNORE INTO participant (bib, first_name, last_name, gender, affiliation, division)
                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )
             .unwrap();
-        for p in participants {
-            let gender = format!("{}", p.gender);
-            stmt.execute([
-                &p.bib as &dyn ToSql,
-                &p.first_name as &dyn ToSql,
-                &p.last_name as &dyn ToSql,
-                &gender as &dyn ToSql,
-                &p.affiliation as &dyn ToSql,
-                &p.division as &dyn ToSql,
-            ])
-            .unwrap();
+
+        for chunk in participants.chunks(CHUNK_SIZE) {
+            if chunk.len() == CHUNK_SIZE {
+                let mut params: Vec<&dyn ToSql> = Vec::with_capacity(CHUNK_SIZE * COLS_PER_ROW);
+                let mut gender_strs = Vec::with_capacity(CHUNK_SIZE);
+                for p in chunk {
+                    let g = match p.gender {
+                        timer_core::models::Gender::M => "M",
+                        timer_core::models::Gender::F => "F",
+                        timer_core::models::Gender::X => "X",
+                    };
+                    gender_strs.push(g);
+                }
+                for (p, g) in chunk.iter().zip(gender_strs.iter()) {
+                    params.push(&p.bib as &dyn ToSql);
+                    params.push(&p.first_name as &dyn ToSql);
+                    params.push(&p.last_name as &dyn ToSql);
+                    params.push(g as &dyn ToSql);
+                    params.push(&p.affiliation as &dyn ToSql);
+                    params.push(&p.division as &dyn ToSql);
+                }
+                chunk_stmt.execute(params.as_slice()).unwrap();
+            } else {
+                for p in chunk {
+                    let gender = match p.gender {
+                        timer_core::models::Gender::M => "M",
+                        timer_core::models::Gender::F => "F",
+                        timer_core::models::Gender::X => "X",
+                    };
+                    single_stmt
+                        .execute([
+                            &p.bib as &dyn ToSql,
+                            &p.first_name as &dyn ToSql,
+                            &p.last_name as &dyn ToSql,
+                            &gender as &dyn ToSql,
+                            &p.affiliation as &dyn ToSql,
+                            &p.division as &dyn ToSql,
+                        ])
+                        .unwrap();
+                }
+            }
         }
     }
     tx.commit().unwrap();
