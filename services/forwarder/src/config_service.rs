@@ -6,7 +6,6 @@
 //! per-section update logic behind `POST /api/v1/config/{section}`.
 
 use std::future::Future;
-use std::io::Write as _;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -47,13 +46,15 @@ pub(crate) fn require_object_payload(payload: &serde_json::Value) -> Result<(), 
 
 async fn read_allow_power_actions(config_state: &ConfigState) -> Result<bool, (u16, String)> {
     let _lock = config_state.write_lock.lock().await;
-    let toml_str = std::fs::read_to_string(&config_state.path).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
-                .to_string(),
-        )
-    })?;
+    let toml_str = tokio::fs::read_to_string(&config_state.path)
+        .await
+        .map_err(|e| {
+            (
+                500u16,
+                serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
+                    .to_string(),
+            )
+        })?;
     let raw: crate::config::RawConfig = toml::from_str(&toml_str).map_err(|e| {
         (
             500u16,
@@ -318,8 +319,13 @@ pub async fn apply_control_action(
     }
 }
 
-fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    let original_permissions = std::fs::metadata(path).map(|m| m.permissions()).ok();
+async fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt as _;
+
+    let original_permissions = tokio::fs::metadata(path)
+        .await
+        .map(|m| m.permissions())
+        .ok();
 
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
@@ -340,28 +346,31 @@ fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     for attempt in 0..=16 {
         let tmp_name = format!(".{}.tmp.{}.{}", file_name, pid, attempt);
         let tmp_path = parent.join(tmp_name);
-        match std::fs::OpenOptions::new()
+        match tokio::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&tmp_path)
+            .await
         {
             Ok(mut temp_file) => {
-                let result = (|| -> std::io::Result<()> {
-                    temp_file.write_all(content.as_bytes())?;
-                    temp_file.sync_all()?;
+                let result = async {
+                    temp_file.write_all(content.as_bytes()).await?;
+                    temp_file.sync_all().await?;
 
                     if let Some(perms) = &original_permissions {
-                        std::fs::set_permissions(&tmp_path, perms.clone())?;
+                        tokio::fs::set_permissions(&tmp_path, perms.clone()).await?;
                     }
 
-                    std::fs::rename(&tmp_path, path)?;
-                    if let Ok(parent_dir) = std::fs::File::open(parent) {
-                        let _ = parent_dir.sync_all();
+                    tokio::fs::rename(&tmp_path, path).await?;
+                    if let Ok(parent_dir) = tokio::fs::File::open(parent).await {
+                        let _ = parent_dir.sync_all().await;
                     }
-                    Ok(())
-                })();
+                    Ok::<(), std::io::Error>(())
+                }
+                .await;
+
                 if result.is_err() {
-                    let _ = std::fs::remove_file(&tmp_path);
+                    let _ = tokio::fs::remove_file(&tmp_path).await;
                 }
                 return result;
             }
@@ -387,8 +396,9 @@ async fn read_config_value(
 ) -> Result<(serde_json::Value, bool), String> {
     let _lock = config_state.write_lock.lock().await;
 
-    let toml_str =
-        std::fs::read_to_string(&config_state.path).map_err(|e| format!("File read error: {e}"))?;
+    let toml_str = tokio::fs::read_to_string(&config_state.path)
+        .await
+        .map_err(|e| format!("File read error: {e}"))?;
 
     let raw: crate::config::RawConfig =
         toml::from_str(&toml_str).map_err(|e| format!("TOML parse error: {e}"))?;
@@ -423,7 +433,7 @@ pub async fn read_config_json(
 /// forwarder host's local time.
 pub async fn read_clock_timezone(config_state: &ConfigState) -> Option<String> {
     let _lock = config_state.write_lock.lock().await;
-    let toml_str = std::fs::read_to_string(&config_state.path).ok()?;
+    let toml_str = tokio::fs::read_to_string(&config_state.path).await.ok()?;
     let raw: crate::config::RawConfig = toml::from_str(&toml_str).ok()?;
     raw.clock
         .and_then(|c| c.timezone)
@@ -483,8 +493,9 @@ pub async fn write_config_json_restricted(
 
     let _lock = config_state.write_lock.lock().await;
 
-    let current_toml =
-        std::fs::read_to_string(&config_state.path).map_err(|e| format!("File read error: {e}"))?;
+    let current_toml = tokio::fs::read_to_string(&config_state.path)
+        .await
+        .map_err(|e| format!("File read error: {e}"))?;
     let current: crate::config::RawConfig =
         toml::from_str(&current_toml).map_err(|e| format!("TOML parse error: {e}"))?;
 
@@ -525,7 +536,9 @@ async fn write_config_json_locked(
     crate::config::load_config_from_str(&new_toml, &config_state.path)
         .map_err(|e| format!("config validation failed: {e}"))?;
 
-    write_atomic(&config_state.path, &new_toml).map_err(|e| format!("File write error: {e}"))?;
+    write_atomic(&config_state.path, &new_toml)
+        .await
+        .map_err(|e| format!("File write error: {e}"))?;
 
     mark_restart_needed_and_emit(subsystem, ui_tx).await;
     Ok(())
@@ -561,13 +574,15 @@ async fn update_config_file(
 ) -> Result<(), (u16, String)> {
     let _lock = config_state.write_lock.lock().await;
 
-    let toml_str = std::fs::read_to_string(&config_state.path).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
-                .to_string(),
-        )
-    })?;
+    let toml_str = tokio::fs::read_to_string(&config_state.path)
+        .await
+        .map_err(|e| {
+            (
+                500u16,
+                serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
+                    .to_string(),
+            )
+        })?;
 
     let mut raw: crate::config::RawConfig = toml::from_str(&toml_str).map_err(|e| {
         (
@@ -600,13 +615,15 @@ async fn update_config_file(
         )
     })?;
 
-    write_atomic(&config_state.path, &new_toml).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("File write error: {}", e)})
-                .to_string(),
-        )
-    })?;
+    write_atomic(&config_state.path, &new_toml)
+        .await
+        .map_err(|e| {
+            (
+                500u16,
+                serde_json::json!({"ok": false, "error": format!("File write error: {}", e)})
+                    .to_string(),
+            )
+        })?;
 
     mark_restart_needed_and_emit(subsystem, ui_tx).await;
     Ok(())
