@@ -732,53 +732,121 @@ fn apply_batch_inner(
     records: &[PreparedRecord],
     cursor: &mut CursorState,
 ) -> Result<Vec<EventFact>, CommandError> {
+    const CHUNK_SIZE: usize = 64;
     let mut facts = Vec::with_capacity(records.len());
-    let mut insert = tx.prepare_cached(
-        "INSERT INTO received_events
-         (stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms, chip_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8)
-         ON CONFLICT (stream_id, seq) DO NOTHING",
-    )?;
-    for record in records {
-        let changed = insert.execute(rusqlite::params![
-            stream_id,
-            record.seq,
-            record.epoch,
-            record.raw_frame,
-            record.read_kind,
-            record.reader_timestamp,
-            record.received_unix_ms,
-            record.chip_id,
-        ])?;
-        if changed > 0 {
-            facts.push(EventFact {
-                seq: record.seq,
-                epoch: record.epoch,
-                received_unix_ms: record.received_unix_ms,
-                chip_id: record.chip_id.clone(),
-            });
-        } else {
-            // Idempotent dedup: the stored payload must match, otherwise the
-            // forwarder re-sent a conflicting record under the same seq — a
-            // data-integrity violation we must not silently ack past. The
-            // received_unix_ms comparison applies only when the wire carried
-            // an explicit value (see PreparedRecord::received_unix_ms_explicit).
-            let existing = crate::db::load_received_event_conn(tx, stream_id, record.seq)?;
-            if let Some(existing) = existing {
-                let received_unix_ms_conflicts = record.received_unix_ms_explicit
-                    && existing.received_unix_ms != record.received_unix_ms;
-                let conflicts = existing.epoch != record.epoch
-                    || existing.raw_frame != record.raw_frame
-                    || existing.read_kind != record.read_kind
-                    || existing.reader_timestamp != record.reader_timestamp
-                    || received_unix_ms_conflicts;
-                if conflicts {
-                    return Err(CommandError::Conflict { seq: record.seq });
+
+    for chunk in records.chunks(CHUNK_SIZE) {
+        tx.execute_batch("SAVEPOINT chunk_sp")?;
+        let success = (|| -> Result<bool, CommandError> {
+            let mut sql = String::from(
+                "INSERT INTO received_events \
+                 (stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms, chip_id) \
+                 VALUES ",
+            );
+            for i in 0..chunk.len() {
+                if i > 0 {
+                    sql.push_str(", ");
+                }
+                let base = i * 8;
+                use std::fmt::Write;
+                let _ = write!(
+                    sql,
+                    "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, NULL, ?{})",
+                    base + 1,
+                    base + 2,
+                    base + 3,
+                    base + 4,
+                    base + 5,
+                    base + 6,
+                    base + 7,
+                    base + 8
+                );
+            }
+            sql.push_str(" ON CONFLICT (stream_id, seq) DO NOTHING");
+
+            let mut stmt = tx.prepare_cached(&sql)?;
+            let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(chunk.len() * 8);
+            for record in chunk {
+                params.push(&stream_id);
+                params.push(&record.seq);
+                params.push(&record.epoch);
+                params.push(&record.raw_frame);
+                params.push(&record.read_kind);
+                params.push(&record.reader_timestamp);
+                params.push(&record.received_unix_ms);
+                params.push(&record.chip_id);
+            }
+
+            let changed = stmt.execute(rusqlite::params_from_iter(params))?;
+            if changed == chunk.len() {
+                for record in chunk {
+                    facts.push(EventFact {
+                        seq: record.seq,
+                        epoch: record.epoch,
+                        received_unix_ms: record.received_unix_ms,
+                        chip_id: record.chip_id.clone(),
+                    });
+                    cursor.observe(record.seq);
+                }
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        })();
+
+        match success {
+            Ok(true) => {
+                tx.execute_batch("RELEASE SAVEPOINT chunk_sp")?;
+            }
+            Ok(false) | Err(_) => {
+                tx.execute_batch("ROLLBACK TO SAVEPOINT chunk_sp; RELEASE SAVEPOINT chunk_sp;")?;
+                // Fallback to row-by-row insertion for exact conflict checking and dedup
+                let mut insert = tx.prepare_cached(
+                    "INSERT INTO received_events
+                     (stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms, chip_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8)
+                     ON CONFLICT (stream_id, seq) DO NOTHING",
+                )?;
+                for record in chunk {
+                    let changed = insert.execute(rusqlite::params![
+                        stream_id,
+                        record.seq,
+                        record.epoch,
+                        record.raw_frame,
+                        record.read_kind,
+                        record.reader_timestamp,
+                        record.received_unix_ms,
+                        record.chip_id,
+                    ])?;
+                    if changed > 0 {
+                        facts.push(EventFact {
+                            seq: record.seq,
+                            epoch: record.epoch,
+                            received_unix_ms: record.received_unix_ms,
+                            chip_id: record.chip_id.clone(),
+                        });
+                    } else {
+                        let existing =
+                            crate::db::load_received_event_conn(tx, stream_id, record.seq)?;
+                        if let Some(existing) = existing {
+                            let received_unix_ms_conflicts = record.received_unix_ms_explicit
+                                && existing.received_unix_ms != record.received_unix_ms;
+                            let conflicts = existing.epoch != record.epoch
+                                || existing.raw_frame != record.raw_frame
+                                || existing.read_kind != record.read_kind
+                                || existing.reader_timestamp != record.reader_timestamp
+                                || received_unix_ms_conflicts;
+                            if conflicts {
+                                return Err(CommandError::Conflict { seq: record.seq });
+                            }
+                        }
+                    }
+                    cursor.observe(record.seq);
                 }
             }
         }
-        cursor.observe(record.seq);
     }
+
     Ok(facts)
 }
 
@@ -995,6 +1063,36 @@ mod thread_tests {
         assert_eq!(durable.inserted.len(), 2);
         assert_eq!(seqs(&reader, "s1"), vec![1, 2]);
         assert_eq!(cursor(&reader, "s1"), 2);
+
+        drop(writer);
+        thread.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn batch_insert_chunking_and_duplicates() {
+        let (_dir, path) = test_db();
+        let (writer, thread) = spawn_writer(&path, WriterConfig::default()).unwrap();
+
+        // 100 records forces chunking across CHUNK_SIZE=64 boundaries
+        let records: Vec<PreparedRecord> = (1..=100).map(|seq| rec(seq, "bulk")).collect();
+        let durable = writer
+            .persist_batch("s1".to_owned(), records)
+            .await
+            .unwrap();
+        assert_eq!(durable.through_seq, 100);
+        assert_eq!(durable.inserted.len(), 100);
+
+        let reader = read_conn(&path);
+        assert_eq!(seqs(&reader, "s1").len(), 100);
+
+        // Retransmitting 100 records yields 0 facts without failing
+        let records_dup: Vec<PreparedRecord> = (1..=100).map(|seq| rec(seq, "bulk")).collect();
+        let durable_dup = writer
+            .persist_batch("s1".to_owned(), records_dup)
+            .await
+            .unwrap();
+        assert_eq!(durable_dup.through_seq, 100);
+        assert_eq!(durable_dup.inserted.len(), 0);
 
         drop(writer);
         thread.join().unwrap();
