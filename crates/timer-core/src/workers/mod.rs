@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 mod client;
 mod client_connector;
 mod client_pool;
