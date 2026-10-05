@@ -47,13 +47,15 @@ pub(crate) fn require_object_payload(payload: &serde_json::Value) -> Result<(), 
 
 async fn read_allow_power_actions(config_state: &ConfigState) -> Result<bool, (u16, String)> {
     let _lock = config_state.write_lock.lock().await;
-    let toml_str = std::fs::read_to_string(&config_state.path).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
-                .to_string(),
-        )
-    })?;
+    let toml_str = tokio::fs::read_to_string(&config_state.path)
+        .await
+        .map_err(|e| {
+            (
+                500u16,
+                serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
+                    .to_string(),
+            )
+        })?;
     let raw: crate::config::RawConfig = toml::from_str(&toml_str).map_err(|e| {
         (
             500u16,
@@ -387,8 +389,9 @@ async fn read_config_value(
 ) -> Result<(serde_json::Value, bool), String> {
     let _lock = config_state.write_lock.lock().await;
 
-    let toml_str =
-        std::fs::read_to_string(&config_state.path).map_err(|e| format!("File read error: {e}"))?;
+    let toml_str = tokio::fs::read_to_string(&config_state.path)
+        .await
+        .map_err(|e| format!("File read error: {e}"))?;
 
     let raw: crate::config::RawConfig =
         toml::from_str(&toml_str).map_err(|e| format!("TOML parse error: {e}"))?;
@@ -423,7 +426,7 @@ pub async fn read_config_json(
 /// forwarder host's local time.
 pub async fn read_clock_timezone(config_state: &ConfigState) -> Option<String> {
     let _lock = config_state.write_lock.lock().await;
-    let toml_str = std::fs::read_to_string(&config_state.path).ok()?;
+    let toml_str = tokio::fs::read_to_string(&config_state.path).await.ok()?;
     let raw: crate::config::RawConfig = toml::from_str(&toml_str).ok()?;
     raw.clock
         .and_then(|c| c.timezone)
@@ -483,8 +486,9 @@ pub async fn write_config_json_restricted(
 
     let _lock = config_state.write_lock.lock().await;
 
-    let current_toml =
-        std::fs::read_to_string(&config_state.path).map_err(|e| format!("File read error: {e}"))?;
+    let current_toml = tokio::fs::read_to_string(&config_state.path)
+        .await
+        .map_err(|e| format!("File read error: {e}"))?;
     let current: crate::config::RawConfig =
         toml::from_str(&current_toml).map_err(|e| format!("TOML parse error: {e}"))?;
 
@@ -561,13 +565,15 @@ async fn update_config_file(
 ) -> Result<(), (u16, String)> {
     let _lock = config_state.write_lock.lock().await;
 
-    let toml_str = std::fs::read_to_string(&config_state.path).map_err(|e| {
-        (
-            500u16,
-            serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
-                .to_string(),
-        )
-    })?;
+    let toml_str = tokio::fs::read_to_string(&config_state.path)
+        .await
+        .map_err(|e| {
+            (
+                500u16,
+                serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
+                    .to_string(),
+            )
+        })?;
 
     let mut raw: crate::config::RawConfig = toml::from_str(&toml_str).map_err(|e| {
         (
