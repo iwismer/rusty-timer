@@ -13,19 +13,18 @@ struct UiAssets;
 ///
 /// When `embed-ui` is disabled, returns a placeholder page.
 pub async fn serve_ui(method: Method, uri: Uri) -> Response {
-    let raw_path = match rt_ui_http::validate_ui_request(&method, &uri, &["/api", "/update"]) {
+    let _raw_path = match rt_ui_http::validate_ui_request(&method, &uri, &["/api", "/update"]) {
         Ok(path) => path,
         Err(error) => return error.into_response(),
     };
 
     #[cfg(feature = "embed-ui")]
     {
-        rt_ui_http::serve_embedded_ui::<UiAssets>(raw_path)
+        rt_ui_http::serve_embedded_ui::<UiAssets>(_raw_path)
     }
 
     #[cfg(not(feature = "embed-ui"))]
     {
-        let _ = raw_path; // suppress unused warning
         rt_ui_http::non_embedded_placeholder("Forwarder")
     }
 }
