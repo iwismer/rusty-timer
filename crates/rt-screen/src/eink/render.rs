@@ -82,39 +82,40 @@ where
     Text::new(label, Point::new(label_x, label_y), small_style).draw(target)?;
 
     // 5. Right column — status info below the reads section.
-    let section_start_y = label_y + SMALL_CHAR_H as i32 + 4;
-    let mut info_y = section_start_y;
+    let line_spacing = SMALL_CHAR_H as i32 + 2;
+    let mut info_y = label_y + SMALL_CHAR_H as i32 + 4;
+    let mut next_y = || {
+        let y = info_y;
+        info_y += line_spacing;
+        y
+    };
 
     // IP address.
     if let Some(ref ip) = state.local_ip {
-        Text::new(ip, Point::new(RIGHT_X, info_y), small_style).draw(target)?;
-        info_y += SMALL_CHAR_H as i32 + 2;
+        Text::new(ip, Point::new(RIGHT_X, next_y()), small_style).draw(target)?;
     }
 
     // P2P status: indicator square + "P2P".
     {
-        let sq_y = info_y - INDICATOR_SIZE as i32 + 2;
+        let y = next_y();
+        let sq_y = y - INDICATOR_SIZE as i32 + 2;
         draw_filled_square(target, Point::new(RIGHT_X, sq_y), state.p2p_connected)?;
         let text_x = RIGHT_X + INDICATOR_SIZE as i32 + INDICATOR_GAP as i32;
-        Text::new("P2P", Point::new(text_x, info_y), small_style).draw(target)?;
-        info_y += SMALL_CHAR_H as i32 + 2;
+        Text::new("P2P", Point::new(text_x, y), small_style).draw(target)?;
     }
 
     // CPU temperature.
     if let Some(temp) = state.cpu_temp_celsius {
         let temp_str = format!("{temp:.1}C");
-        Text::new(&temp_str, Point::new(RIGHT_X, info_y), small_style).draw(target)?;
-        info_y += SMALL_CHAR_H as i32 + 2;
+        Text::new(&temp_str, Point::new(RIGHT_X, next_y()), small_style).draw(target)?;
     }
 
     // Battery (if present).
     if let Some(bat) = state.battery {
         let charging_char = if bat.charging { "+" } else { "" };
         let bat_str = format!("Bat:{}{}%", charging_char, bat.percent);
-        Text::new(&bat_str, Point::new(RIGHT_X, info_y), small_style).draw(target)?;
-        info_y += SMALL_CHAR_H as i32 + 2;
+        Text::new(&bat_str, Point::new(RIGHT_X, next_y()), small_style).draw(target)?;
     }
-    let _ = info_y; // suppress unused warning when battery is last
 
     // Forwarder name at the bottom of the right column.
     if let Some(ref name) = state.forwarder_name {
