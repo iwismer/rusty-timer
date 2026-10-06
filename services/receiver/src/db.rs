@@ -1895,8 +1895,7 @@ fn insert_participants_batch(
 fn insert_bib_chips_batch(conn: &Connection, chips: &[(i64, String)]) -> DbResult<()> {
     const CHUNK_SIZE: usize = 64;
     for chunk in chips.chunks(CHUNK_SIZE) {
-        let mut sql =
-            String::from("INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES ");
+        let mut sql = String::from("INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES ");
         for i in 0..chunk.len() {
             if i > 0 {
                 sql.push_str(", ");
@@ -1919,8 +1918,7 @@ fn insert_bib_chips_batch(conn: &Connection, chips: &[(i64, String)]) -> DbResul
 fn insert_divisions_batch(conn: &Connection, divisions: &[(i32, String)]) -> DbResult<()> {
     const CHUNK_SIZE: usize = 64;
     for chunk in divisions.chunks(CHUNK_SIZE) {
-        let mut sql =
-            String::from("INSERT OR REPLACE INTO divisions (divno, name) VALUES ");
+        let mut sql = String::from("INSERT OR REPLACE INTO divisions (divno, name) VALUES ");
         for i in 0..chunk.len() {
             if i > 0 {
                 sql.push_str(", ");
