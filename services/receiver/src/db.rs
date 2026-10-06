@@ -552,21 +552,7 @@ impl Db {
     ) -> DbResult<()> {
         let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM participants")?;
-        let mut stmt = tx.prepare(
-            "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender, division)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )?;
-        for p in participants {
-            stmt.execute(rusqlite::params![
-                p.bib,
-                &p.last,
-                &p.first,
-                &p.affiliation,
-                &p.gender,
-                p.division
-            ])?;
-        }
-        drop(stmt);
+        insert_participants_batch(&tx, participants)?;
         tx.commit()?;
         Ok(())
     }
@@ -576,12 +562,7 @@ impl Db {
     pub fn replace_divisions(&mut self, divisions: &[(i32, String)]) -> DbResult<()> {
         let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM divisions")?;
-        let mut stmt =
-            tx.prepare("INSERT OR REPLACE INTO divisions (divno, name) VALUES (?1, ?2)")?;
-        for (divno, name) in divisions {
-            stmt.execute(rusqlite::params![divno, name])?;
-        }
-        drop(stmt);
+        insert_divisions_batch(&tx, divisions)?;
         tx.commit()?;
         Ok(())
     }
@@ -599,36 +580,9 @@ impl Db {
     ) -> DbResult<()> {
         let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM participants; DELETE FROM bib_chips; DELETE FROM divisions")?;
-        {
-            let mut stmt = tx.prepare(
-                "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender, division)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )?;
-            for p in participants {
-                stmt.execute(rusqlite::params![
-                    p.bib,
-                    &p.last,
-                    &p.first,
-                    &p.affiliation,
-                    &p.gender,
-                    p.division
-                ])?;
-            }
-        }
-        {
-            let mut stmt =
-                tx.prepare("INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES (?1, ?2)")?;
-            for (bib, chip_id) in chips {
-                stmt.execute(rusqlite::params![chip_id, bib])?;
-            }
-        }
-        {
-            let mut stmt =
-                tx.prepare("INSERT OR REPLACE INTO divisions (divno, name) VALUES (?1, ?2)")?;
-            for (divno, name) in divisions {
-                stmt.execute(rusqlite::params![divno, name])?;
-            }
-        }
+        insert_participants_batch(&tx, participants)?;
+        insert_bib_chips_batch(&tx, chips)?;
+        insert_divisions_batch(&tx, divisions)?;
         tx.commit()?;
         Ok(())
     }
@@ -637,12 +591,7 @@ impl Db {
     pub fn replace_bib_chips(&mut self, chips: &[(i64, String)]) -> DbResult<()> {
         let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM bib_chips")?;
-        let mut stmt =
-            tx.prepare("INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES (?1, ?2)")?;
-        for (bib, chip_id) in chips {
-            stmt.execute(rusqlite::params![chip_id, bib])?;
-        }
-        drop(stmt);
+        insert_bib_chips_batch(&tx, chips)?;
         tx.commit()?;
         Ok(())
     }
@@ -1900,6 +1849,144 @@ impl Db {
             .optional()?;
         Ok(raw.flatten().filter(|json| !json.trim().is_empty()))
     }
+}
+
+const BATCH_CHUNK_SIZE: usize = 50;
+
+fn insert_bib_chips_batch(conn: &Connection, chips: &[(i64, String)]) -> DbResult<()> {
+    if chips.is_empty() {
+        return Ok(());
+    }
+
+    let mut full_query = String::from("INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES ");
+    for i in 0..BATCH_CHUNK_SIZE {
+        if i > 0 {
+            full_query.push_str(", ");
+        }
+        let p1 = i * 2 + 1;
+        let p2 = p1 + 1;
+        use std::fmt::Write;
+        write!(full_query, "(?{p1}, ?{p2})").unwrap();
+    }
+
+    let mut chunk_stmt = conn.prepare_cached(&full_query)?;
+    let mut single_stmt =
+        conn.prepare_cached("INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES (?1, ?2)")?;
+
+    for chunk in chips.chunks(BATCH_CHUNK_SIZE) {
+        if chunk.len() == BATCH_CHUNK_SIZE {
+            let mut params: Vec<&dyn rusqlite::types::ToSql> =
+                Vec::with_capacity(BATCH_CHUNK_SIZE * 2);
+            for (bib, chip_id) in chunk {
+                params.push(chip_id as &dyn rusqlite::types::ToSql);
+                params.push(bib as &dyn rusqlite::types::ToSql);
+            }
+            chunk_stmt.execute(params.as_slice())?;
+        } else {
+            for (bib, chip_id) in chunk {
+                single_stmt.execute(rusqlite::params![chip_id, bib])?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn insert_divisions_batch(conn: &Connection, divisions: &[(i32, String)]) -> DbResult<()> {
+    if divisions.is_empty() {
+        return Ok(());
+    }
+
+    let mut full_query = String::from("INSERT OR REPLACE INTO divisions (divno, name) VALUES ");
+    for i in 0..BATCH_CHUNK_SIZE {
+        if i > 0 {
+            full_query.push_str(", ");
+        }
+        let p1 = i * 2 + 1;
+        let p2 = p1 + 1;
+        use std::fmt::Write;
+        write!(full_query, "(?{p1}, ?{p2})").unwrap();
+    }
+
+    let mut chunk_stmt = conn.prepare_cached(&full_query)?;
+    let mut single_stmt =
+        conn.prepare_cached("INSERT OR REPLACE INTO divisions (divno, name) VALUES (?1, ?2)")?;
+
+    for chunk in divisions.chunks(BATCH_CHUNK_SIZE) {
+        if chunk.len() == BATCH_CHUNK_SIZE {
+            let mut params: Vec<&dyn rusqlite::types::ToSql> =
+                Vec::with_capacity(BATCH_CHUNK_SIZE * 2);
+            for (divno, name) in chunk {
+                params.push(divno as &dyn rusqlite::types::ToSql);
+                params.push(name as &dyn rusqlite::types::ToSql);
+            }
+            chunk_stmt.execute(params.as_slice())?;
+        } else {
+            for (divno, name) in chunk {
+                single_stmt.execute(rusqlite::params![divno, name])?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn insert_participants_batch(
+    conn: &Connection,
+    participants: &[crate::participants::Participant],
+) -> DbResult<()> {
+    if participants.is_empty() {
+        return Ok(());
+    }
+
+    let mut full_query = String::from(
+        "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender, division) VALUES ",
+    );
+    for i in 0..BATCH_CHUNK_SIZE {
+        if i > 0 {
+            full_query.push_str(", ");
+        }
+        let p1 = i * 6 + 1;
+        let p2 = p1 + 1;
+        let p3 = p1 + 2;
+        let p4 = p1 + 3;
+        let p5 = p1 + 4;
+        let p6 = p1 + 5;
+        use std::fmt::Write;
+        write!(full_query, "(?{p1}, ?{p2}, ?{p3}, ?{p4}, ?{p5}, ?{p6})").unwrap();
+    }
+
+    let mut chunk_stmt = conn.prepare_cached(&full_query)?;
+    let mut single_stmt = conn.prepare_cached(
+        "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender, division)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?;
+
+    for chunk in participants.chunks(BATCH_CHUNK_SIZE) {
+        if chunk.len() == BATCH_CHUNK_SIZE {
+            let mut params: Vec<&dyn rusqlite::types::ToSql> =
+                Vec::with_capacity(BATCH_CHUNK_SIZE * 6);
+            for p in chunk {
+                params.push(&p.bib as &dyn rusqlite::types::ToSql);
+                params.push(&p.last as &dyn rusqlite::types::ToSql);
+                params.push(&p.first as &dyn rusqlite::types::ToSql);
+                params.push(&p.affiliation as &dyn rusqlite::types::ToSql);
+                params.push(&p.gender as &dyn rusqlite::types::ToSql);
+                params.push(&p.division as &dyn rusqlite::types::ToSql);
+            }
+            chunk_stmt.execute(params.as_slice())?;
+        } else {
+            for p in chunk {
+                single_stmt.execute(rusqlite::params![
+                    p.bib,
+                    &p.last,
+                    &p.first,
+                    &p.affiliation,
+                    &p.gender,
+                    p.division
+                ])?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_event_type_column(raw: String, column: usize) -> rusqlite::Result<EventType> {
