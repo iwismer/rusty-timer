@@ -551,12 +551,21 @@ impl Db {
     ) -> DbResult<()> {
         let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM participants")?;
-        for p in participants {
-            tx.execute(
+        {
+            let mut stmt = tx.prepare_cached(
                 "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender, division)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![p.bib, &p.last, &p.first, &p.affiliation, &p.gender, p.division],
             )?;
+            for p in participants {
+                stmt.execute(rusqlite::params![
+                    p.bib,
+                    &p.last,
+                    &p.first,
+                    &p.affiliation,
+                    &p.gender,
+                    p.division
+                ])?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -567,11 +576,12 @@ impl Db {
     pub fn replace_divisions(&mut self, divisions: &[(i32, String)]) -> DbResult<()> {
         let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM divisions")?;
-        for (divno, name) in divisions {
-            tx.execute(
-                "INSERT OR REPLACE INTO divisions (divno, name) VALUES (?1, ?2)",
-                rusqlite::params![divno, name],
-            )?;
+        {
+            let mut stmt = tx
+                .prepare_cached("INSERT OR REPLACE INTO divisions (divno, name) VALUES (?1, ?2)")?;
+            for (divno, name) in divisions {
+                stmt.execute(rusqlite::params![divno, name])?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -590,24 +600,36 @@ impl Db {
     ) -> DbResult<()> {
         let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM participants; DELETE FROM bib_chips; DELETE FROM divisions")?;
-        for p in participants {
-            tx.execute(
+        {
+            let mut stmt_p = tx.prepare_cached(
                 "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender, division)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![p.bib, &p.last, &p.first, &p.affiliation, &p.gender, p.division],
             )?;
+            for p in participants {
+                stmt_p.execute(rusqlite::params![
+                    p.bib,
+                    &p.last,
+                    &p.first,
+                    &p.affiliation,
+                    &p.gender,
+                    p.division
+                ])?;
+            }
         }
-        for (bib, chip_id) in chips {
-            tx.execute(
+        {
+            let mut stmt_c = tx.prepare_cached(
                 "INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES (?1, ?2)",
-                rusqlite::params![chip_id, bib],
             )?;
+            for (bib, chip_id) in chips {
+                stmt_c.execute(rusqlite::params![chip_id, bib])?;
+            }
         }
-        for (divno, name) in divisions {
-            tx.execute(
-                "INSERT OR REPLACE INTO divisions (divno, name) VALUES (?1, ?2)",
-                rusqlite::params![divno, name],
-            )?;
+        {
+            let mut stmt_d = tx
+                .prepare_cached("INSERT OR REPLACE INTO divisions (divno, name) VALUES (?1, ?2)")?;
+            for (divno, name) in divisions {
+                stmt_d.execute(rusqlite::params![divno, name])?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -617,11 +639,13 @@ impl Db {
     pub fn replace_bib_chips(&mut self, chips: &[(i64, String)]) -> DbResult<()> {
         let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM bib_chips")?;
-        for (bib, chip_id) in chips {
-            tx.execute(
+        {
+            let mut stmt = tx.prepare_cached(
                 "INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES (?1, ?2)",
-                rusqlite::params![chip_id, bib],
             )?;
+            for (bib, chip_id) in chips {
+                stmt.execute(rusqlite::params![chip_id, bib])?;
+            }
         }
         tx.commit()?;
         Ok(())

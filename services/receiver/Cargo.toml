@@ -43,6 +43,10 @@ axum = { version = "0.8" }
 zip = { version = "8.6", default-features = false }
 base64 = "0.23"
 
+[[bench]]
+name = "replace_bib_chips_bench"
+harness = false
+
 [dev-dependencies]
 rusqlite = { version = "0.40", features = ["bundled"] }
 rt-test-utils = { path = "../../crates/rt-test-utils" }
