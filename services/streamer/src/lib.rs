@@ -42,13 +42,44 @@ pub fn create_tables(conn: &Connection) {
 }
 
 pub fn import_bib_chips(conn: &Connection, bib_chips: &[ChipBib]) {
+    if bib_chips.is_empty() {
+        return;
+    }
+
     let tx = conn.unchecked_transaction().unwrap();
     {
-        let mut stmt = tx
+        const CHUNK_SIZE: usize = 50;
+        const COLS_PER_ROW: usize = 2;
+
+        let mut full_query = String::from("INSERT OR IGNORE INTO chip (id, bib) VALUES ");
+        for i in 0..CHUNK_SIZE {
+            if i > 0 {
+                full_query.push_str(", ");
+            }
+            let p1 = i * COLS_PER_ROW + 1;
+            let p2 = p1 + 1;
+            use std::fmt::Write;
+            write!(full_query, "(?{p1}, ?{p2})").unwrap();
+        }
+
+        let mut chunk_stmt = tx.prepare_cached(&full_query).unwrap();
+        let mut single_stmt = tx
             .prepare_cached("INSERT OR IGNORE INTO chip (id, bib) VALUES (?1, ?2)")
             .unwrap();
-        for c in bib_chips {
-            stmt.execute([&c.id as &dyn ToSql, &c.bib]).unwrap();
+
+        for chunk in bib_chips.chunks(CHUNK_SIZE) {
+            if chunk.len() == CHUNK_SIZE {
+                let mut params: Vec<&dyn ToSql> = Vec::with_capacity(CHUNK_SIZE * COLS_PER_ROW);
+                for c in chunk {
+                    params.push(&c.id as &dyn ToSql);
+                    params.push(&c.bib as &dyn ToSql);
+                }
+                chunk_stmt.execute(params.as_slice()).unwrap();
+            } else {
+                for c in chunk {
+                    single_stmt.execute([&c.id as &dyn ToSql, &c.bib]).unwrap();
+                }
+            }
         }
     }
     tx.commit().unwrap();
