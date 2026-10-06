@@ -576,12 +576,7 @@ impl Db {
     pub fn replace_divisions(&mut self, divisions: &[(i32, String)]) -> DbResult<()> {
         let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM divisions")?;
-        let mut stmt =
-            tx.prepare("INSERT OR REPLACE INTO divisions (divno, name) VALUES (?1, ?2)")?;
-        for (divno, name) in divisions {
-            stmt.execute(rusqlite::params![divno, name])?;
-        }
-        drop(stmt);
+        insert_divisions_conn(&tx, divisions)?;
         tx.commit()?;
         Ok(())
     }
@@ -622,13 +617,7 @@ impl Db {
                 stmt.execute(rusqlite::params![chip_id, bib])?;
             }
         }
-        {
-            let mut stmt =
-                tx.prepare("INSERT OR REPLACE INTO divisions (divno, name) VALUES (?1, ?2)")?;
-            for (divno, name) in divisions {
-                stmt.execute(rusqlite::params![divno, name])?;
-            }
-        }
+        insert_divisions_conn(&tx, divisions)?;
         tx.commit()?;
         Ok(())
     }
@@ -1914,6 +1903,28 @@ fn parse_event_type_column(raw: String, column: usize) -> rusqlite::Result<Event
             ))
         }
     }
+}
+
+pub fn insert_divisions_conn(conn: &Connection, divisions: &[(i32, String)]) -> DbResult<()> {
+    const CHUNK_SIZE: usize = 100;
+    for chunk in divisions.chunks(CHUNK_SIZE) {
+        let mut sql = String::from("INSERT OR REPLACE INTO divisions (divno, name) VALUES ");
+        for i in 0..chunk.len() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            use std::fmt::Write;
+            let _ = write!(sql, "(?{}, ?{})", i * 2 + 1, i * 2 + 2);
+        }
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(chunk.len() * 2);
+        for (divno, name) in chunk {
+            params.push(divno);
+            params.push(name);
+        }
+        stmt.execute(rusqlite::params_from_iter(params))?;
+    }
+    Ok(())
 }
 
 /// Row-level operations usable both on a plain connection and inside a
