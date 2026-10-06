@@ -1875,7 +1875,8 @@ fn insert_bib_chips_batch(conn: &Connection, chips: &[(i64, String)]) -> DbResul
 
     for chunk in chips.chunks(BATCH_CHUNK_SIZE) {
         if chunk.len() == BATCH_CHUNK_SIZE {
-            let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(BATCH_CHUNK_SIZE * 2);
+            let mut params: Vec<&dyn rusqlite::types::ToSql> =
+                Vec::with_capacity(BATCH_CHUNK_SIZE * 2);
             for (bib, chip_id) in chunk {
                 params.push(chip_id as &dyn rusqlite::types::ToSql);
                 params.push(bib as &dyn rusqlite::types::ToSql);
@@ -1912,7 +1913,8 @@ fn insert_divisions_batch(conn: &Connection, divisions: &[(i32, String)]) -> DbR
 
     for chunk in divisions.chunks(BATCH_CHUNK_SIZE) {
         if chunk.len() == BATCH_CHUNK_SIZE {
-            let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(BATCH_CHUNK_SIZE * 2);
+            let mut params: Vec<&dyn rusqlite::types::ToSql> =
+                Vec::with_capacity(BATCH_CHUNK_SIZE * 2);
             for (divno, name) in chunk {
                 params.push(divno as &dyn rusqlite::types::ToSql);
                 params.push(name as &dyn rusqlite::types::ToSql);
@@ -1960,7 +1962,8 @@ fn insert_participants_batch(
 
     for chunk in participants.chunks(BATCH_CHUNK_SIZE) {
         if chunk.len() == BATCH_CHUNK_SIZE {
-            let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(BATCH_CHUNK_SIZE * 6);
+            let mut params: Vec<&dyn rusqlite::types::ToSql> =
+                Vec::with_capacity(BATCH_CHUNK_SIZE * 6);
             for p in chunk {
                 params.push(&p.bib as &dyn rusqlite::types::ToSql);
                 params.push(&p.last as &dyn rusqlite::types::ToSql);
