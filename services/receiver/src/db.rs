@@ -552,21 +552,7 @@ impl Db {
     ) -> DbResult<()> {
         let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM participants")?;
-        let mut stmt = tx.prepare(
-            "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender, division)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )?;
-        for p in participants {
-            stmt.execute(rusqlite::params![
-                p.bib,
-                &p.last,
-                &p.first,
-                &p.affiliation,
-                &p.gender,
-                p.division
-            ])?;
-        }
-        drop(stmt);
+        insert_participants_tx(&tx, participants)?;
         tx.commit()?;
         Ok(())
     }
@@ -599,22 +585,7 @@ impl Db {
     ) -> DbResult<()> {
         let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM participants; DELETE FROM bib_chips; DELETE FROM divisions")?;
-        {
-            let mut stmt = tx.prepare(
-                "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender, division)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )?;
-            for p in participants {
-                stmt.execute(rusqlite::params![
-                    p.bib,
-                    &p.last,
-                    &p.first,
-                    &p.affiliation,
-                    &p.gender,
-                    p.division
-                ])?;
-            }
-        }
+        insert_participants_tx(&tx, participants)?;
         {
             let mut stmt =
                 tx.prepare("INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES (?1, ?2)")?;
@@ -2043,6 +2014,70 @@ pub fn save_gap_marker_conn(conn: &Connection, marker: &GapMarkerInsert<'_>) -> 
             marker.created_unix_ms,
         ],
     )?;
+    Ok(())
+}
+
+/// Chunked insert helper for participants to eliminate N+1 statement execution overhead.
+fn insert_participants_tx(
+    tx: &rusqlite::Transaction<'_>,
+    participants: &[crate::participants::Participant],
+) -> DbResult<()> {
+    if participants.is_empty() {
+        return Ok(());
+    }
+
+    const CHUNK_SIZE: usize = 50;
+    const COLS_PER_ROW: usize = 6;
+
+    let mut batch_sql = String::from(
+        "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender, division) VALUES ",
+    );
+    for i in 0..CHUNK_SIZE {
+        if i > 0 {
+            batch_sql.push_str(", ");
+        }
+        let p1 = i * COLS_PER_ROW + 1;
+        let p2 = p1 + 1;
+        let p3 = p1 + 2;
+        let p4 = p1 + 3;
+        let p5 = p1 + 4;
+        let p6 = p1 + 5;
+        use std::fmt::Write;
+        write!(batch_sql, "(?{p1}, ?{p2}, ?{p3}, ?{p4}, ?{p5}, ?{p6})").unwrap();
+    }
+
+    let mut batch_stmt = tx.prepare_cached(&batch_sql)?;
+    let mut single_stmt = tx.prepare_cached(
+        "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender, division)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?;
+
+    for chunk in participants.chunks(CHUNK_SIZE) {
+        if chunk.len() == CHUNK_SIZE {
+            let mut params: Vec<&dyn rusqlite::types::ToSql> =
+                Vec::with_capacity(CHUNK_SIZE * COLS_PER_ROW);
+            for p in chunk {
+                params.push(&p.bib);
+                params.push(&p.last);
+                params.push(&p.first);
+                params.push(&p.affiliation);
+                params.push(&p.gender);
+                params.push(&p.division);
+            }
+            batch_stmt.execute(params.as_slice())?;
+        } else {
+            for p in chunk {
+                single_stmt.execute(rusqlite::params![
+                    p.bib,
+                    &p.last,
+                    &p.first,
+                    &p.affiliation,
+                    &p.gender,
+                    p.division
+                ])?;
+            }
+        }
+    }
     Ok(())
 }
 
