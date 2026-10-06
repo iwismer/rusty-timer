@@ -524,21 +524,20 @@ impl Db {
         };
         tx.execute_batch("DELETE FROM subscriptions")?;
         let indices = assign_dbf_reader_indices(subs, &existing);
-        let mut stmt = tx.prepare(
+        let mut stmt = tx.prepare_cached(
             "INSERT INTO subscriptions
              (forwarder_endpoint_id, stream_id, local_port_override, event_type, forwarder_id, reader_ip, dbf_reader_index)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
         for (s, idx) in subs.iter().zip(indices) {
-            stmt.execute(rusqlite::params![
-                &s.forwarder_endpoint_id,
-                &s.stream_id,
-                s.local_port_override.map(|p| p as i64),
-                s.event_type.as_str(),
-                s.forwarder_id.as_deref(),
-                s.reader_ip.as_deref(),
-                idx.map(i64::from),
-            ])?;
+            stmt.raw_bind_parameter(1, &s.forwarder_endpoint_id)?;
+            stmt.raw_bind_parameter(2, &s.stream_id)?;
+            stmt.raw_bind_parameter(3, s.local_port_override.map(|p| p as i64))?;
+            stmt.raw_bind_parameter(4, s.event_type.as_str())?;
+            stmt.raw_bind_parameter(5, s.forwarder_id.as_deref())?;
+            stmt.raw_bind_parameter(6, s.reader_ip.as_deref())?;
+            stmt.raw_bind_parameter(7, idx.map(i64::from))?;
+            stmt.raw_execute()?;
         }
         drop(stmt);
         tx.commit()?;
