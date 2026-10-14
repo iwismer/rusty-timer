@@ -615,13 +615,7 @@ impl Db {
                 ])?;
             }
         }
-        {
-            let mut stmt =
-                tx.prepare("INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES (?1, ?2)")?;
-            for (bib, chip_id) in chips {
-                stmt.execute(rusqlite::params![chip_id, bib])?;
-            }
-        }
+        insert_bib_chips_conn(&tx, chips)?;
         {
             let mut stmt =
                 tx.prepare("INSERT OR REPLACE INTO divisions (divno, name) VALUES (?1, ?2)")?;
@@ -637,12 +631,7 @@ impl Db {
     pub fn replace_bib_chips(&mut self, chips: &[(i64, String)]) -> DbResult<()> {
         let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM bib_chips")?;
-        let mut stmt =
-            tx.prepare("INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES (?1, ?2)")?;
-        for (bib, chip_id) in chips {
-            stmt.execute(rusqlite::params![chip_id, bib])?;
-        }
-        drop(stmt);
+        insert_bib_chips_conn(&tx, chips)?;
         tx.commit()?;
         Ok(())
     }
@@ -2043,6 +2032,39 @@ pub fn save_gap_marker_conn(conn: &Connection, marker: &GapMarkerInsert<'_>) -> 
             marker.created_unix_ms,
         ],
     )?;
+    Ok(())
+}
+
+fn insert_bib_chips_conn(conn: &Connection, chips: &[(i64, String)]) -> DbResult<()> {
+    if chips.is_empty() {
+        return Ok(());
+    }
+    const CHUNK_SIZE: usize = 50;
+    let full_query = format!(
+        "INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES {}",
+        (0..CHUNK_SIZE)
+            .map(|i| format!("(?{}, ?{})", i * 2 + 1, i * 2 + 2))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let mut chunk_stmt = conn.prepare_cached(&full_query)?;
+    let mut single_stmt =
+        conn.prepare_cached("INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES (?1, ?2)")?;
+
+    for chunk in chips.chunks(CHUNK_SIZE) {
+        if chunk.len() == CHUNK_SIZE {
+            let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(CHUNK_SIZE * 2);
+            for (bib, chip_id) in chunk {
+                params.push(chip_id);
+                params.push(bib);
+            }
+            chunk_stmt.execute(params.as_slice())?;
+        } else {
+            for (bib, chip_id) in chunk {
+                single_stmt.execute(rusqlite::params![chip_id, bib])?;
+            }
+        }
+    }
     Ok(())
 }
 
