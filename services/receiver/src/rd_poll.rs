@@ -35,11 +35,11 @@ pub enum PollOutcome {
 /// Compute the `(mtime, size)` signature of all active RD files in `dir`, or `None` if
 /// any file's metadata cannot be read (missing file, RD closed, share
 /// unmounted).
-fn signature(dir: &Path) -> Option<FileSignature> {
+async fn signature(dir: &Path) -> Option<FileSignature> {
     let files = rd_dbf::resolve_rd_files(dir).ok()?;
     let mut sig = Vec::with_capacity(files.len());
     for file in files {
-        let meta = std::fs::metadata(dir.join(file)).ok()?;
+        let meta = tokio::fs::metadata(dir.join(file)).await.ok()?;
         sig.push((meta.modified().ok()?, meta.len()));
     }
     Some(sig)
@@ -74,7 +74,7 @@ pub async fn poll_once(
     dir: &Path,
     last: &mut Option<FileSignature>,
 ) -> PollOutcome {
-    let sig = signature(dir);
+    let sig = signature(dir).await;
     if let (Some(new), Some(old)) = (sig.as_ref(), last.as_ref())
         && new == old
     {
