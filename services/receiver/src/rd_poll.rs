@@ -48,19 +48,42 @@ fn signature(dir: &Path) -> Option<FileSignature> {
 /// Copy each active RD file into a fresh temp directory and parse the copies. Copying
 /// first mitigates sharing violations / torn reads while RD writes the
 /// originals. Any copy or parse error is returned so the caller keeps last good.
-fn snapshot_and_load(dir: &Path) -> Result<RdImport, RdError> {
-    let files = rd_dbf::resolve_rd_files(dir)?;
-    let tmp = tempfile::tempdir().map_err(|e| RdError::Io {
-        file: "<tempdir>".to_owned(),
-        source: e,
-    })?;
-    for file in files {
-        std::fs::copy(dir.join(file), tmp.path().join(file)).map_err(|e| RdError::Io {
-            file: file.to_owned(),
+async fn snapshot_and_load(dir: &Path) -> Result<RdImport, RdError> {
+    let dir_owned = dir.to_path_buf();
+    let (files, tmp) = tokio::task::spawn_blocking(move || {
+        let files = rd_dbf::resolve_rd_files(&dir_owned)?;
+        let tmp = tempfile::tempdir().map_err(|e| RdError::Io {
+            file: "<tempdir>".to_owned(),
             source: e,
         })?;
+        Ok::<_, RdError>((files, tmp))
+    })
+    .await
+    .map_err(|e| RdError::Io {
+        file: "<spawn_blocking>".to_owned(),
+        source: std::io::Error::other(e),
+    })??;
+
+    for file in files {
+        tokio::fs::copy(dir.join(file), tmp.path().join(file))
+            .await
+            .map_err(|e| RdError::Io {
+                file: file.to_owned(),
+                source: e,
+            })?;
     }
-    rd_dbf::load_from_dir(tmp.path())
+
+    let tmp_path = tmp.path().to_path_buf();
+    let import = tokio::task::spawn_blocking(move || rd_dbf::load_from_dir(&tmp_path))
+        .await
+        .map_err(|e| RdError::Io {
+            file: "<spawn_blocking>".to_owned(),
+            source: std::io::Error::other(e),
+        })??;
+
+    tokio::task::spawn_blocking(move || drop(tmp)).await.ok();
+
+    Ok(import)
 }
 
 /// Run one poll pass against `dir`.
@@ -81,18 +104,15 @@ pub async fn poll_once(
         return PollOutcome::Skipped;
     }
 
-    let dir_owned = dir.to_path_buf();
-    let loaded = tokio::task::spawn_blocking(move || snapshot_and_load(&dir_owned)).await;
-    match loaded {
-        Ok(Ok(import)) => match crate::control_api::apply_rd_import(state, import).await {
+    match snapshot_and_load(dir).await {
+        Ok(import) => match crate::control_api::apply_rd_import(state, import).await {
             Ok(summary) => {
                 *last = sig;
                 PollOutcome::Imported(summary.resolvable_chips)
             }
             Err(e) => PollOutcome::Failed(e.to_string()),
         },
-        Ok(Err(e)) => PollOutcome::Failed(e.to_string()),
-        Err(e) => PollOutcome::Failed(format!("import task failed: {e}")),
+        Err(e) => PollOutcome::Failed(e.to_string()),
     }
 }
 
