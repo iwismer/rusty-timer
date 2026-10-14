@@ -1,6 +1,10 @@
-use rusqlite::{Connection, TransactionBehavior, params};
+use std::fmt::Write;
+
+use rusqlite::{Connection, TransactionBehavior};
 
 use super::sql_i64_to_u64;
+
+const CHUNK_SIZE: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnouncerRowRecord {
@@ -76,14 +80,36 @@ pub fn upsert_announcer_rows(
     {
         return Err(AnnouncerStorageError::StaleGeneration { current_generation });
     }
-    {
-        let mut stmt = tx.prepare(
+    for chunk in rows.chunks(CHUNK_SIZE) {
+        let mut sql = String::from(
             "INSERT INTO announcer_rows (
                  forwarder_endpoint_id, stream_id, seq, source_generation, chip_id, bib,
                  display_name, reader_timestamp, received_unix_ms, division
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-             ON CONFLICT(forwarder_endpoint_id, stream_id, seq) DO UPDATE SET
+             VALUES ",
+        );
+        for i in 0..chunk.len() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            let base = i * 10;
+            let _ = write!(
+                sql,
+                "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4,
+                base + 5,
+                base + 6,
+                base + 7,
+                base + 8,
+                base + 9,
+                base + 10
+            );
+        }
+        sql.push_str(
+            " ON CONFLICT(forwarder_endpoint_id, stream_id, seq) DO UPDATE SET
                  source_generation = excluded.source_generation,
                  chip_id = excluded.chip_id,
                  bib = excluded.bib,
@@ -91,24 +117,33 @@ pub fn upsert_announcer_rows(
                  reader_timestamp = excluded.reader_timestamp,
                  received_unix_ms = excluded.received_unix_ms,
                  division = excluded.division",
-        )?;
-        for row in rows {
-            stmt.execute(params![
-                &row.forwarder_endpoint_id,
-                &row.stream_id,
-                u64_to_i64(row.seq, "seq")?,
-                u64_to_i64(
-                    row.announcer_source_generation,
-                    "announcer_source_generation"
-                )?,
-                &row.chip_id,
-                row.bib,
-                &row.display_name,
-                &row.reader_timestamp,
-                row.received_unix_ms,
-                &row.division,
-            ])?;
+        );
+
+        let mut stmt = tx.prepare_cached(&sql)?;
+        let mut converted = Vec::with_capacity(chunk.len());
+        for row in chunk {
+            let seq = u64_to_i64(row.seq, "seq")?;
+            let generation = u64_to_i64(
+                row.announcer_source_generation,
+                "announcer_source_generation",
+            )?;
+            converted.push((seq, generation));
         }
+
+        let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(chunk.len() * 10);
+        for (row, (seq, generation)) in chunk.iter().zip(&converted) {
+            params.push(&row.forwarder_endpoint_id);
+            params.push(&row.stream_id);
+            params.push(seq);
+            params.push(generation);
+            params.push(&row.chip_id);
+            params.push(&row.bib);
+            params.push(&row.display_name);
+            params.push(&row.reader_timestamp);
+            params.push(&row.received_unix_ms);
+            params.push(&row.division);
+        }
+        stmt.execute(rusqlite::params_from_iter(params))?;
     }
     tx.commit()?;
     Ok(())
