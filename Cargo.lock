@@ -6223,7 +6223,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.19.1"
+version = "0.20.0"
 dependencies = [
  "axum",
  "chrono",
