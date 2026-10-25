@@ -1855,17 +1855,20 @@ async fn run_shared_dbf_pass(
                             &sub.stream_id,
                         ) {
                             Ok(Some((Some(reader_index), event_type))) => {
-                                specs.push(crate::dbf_writer::DbfStreamSpec {
-                                    stream_id: LocalStreamKey::new(
-                                        &sub.forwarder_endpoint_id,
-                                        &sub.stream_id,
-                                    )
-                                    .as_str()
-                                    .to_owned(),
-                                    event_type,
-                                    reader_index,
-                                });
+                                if event_type != crate::db::EventType::Exclude {
+                                    specs.push(crate::dbf_writer::DbfStreamSpec {
+                                        stream_id: LocalStreamKey::new(
+                                            &sub.forwarder_endpoint_id,
+                                            &sub.stream_id,
+                                        )
+                                        .as_str()
+                                        .to_owned(),
+                                        event_type,
+                                        reader_index,
+                                    });
+                                }
                             }
+                            Ok(Some((None, crate::db::EventType::Exclude))) => {}
                             Ok(Some((None, _))) => {
                                 warn!(
                                     stream_id = %sub.stream_id,

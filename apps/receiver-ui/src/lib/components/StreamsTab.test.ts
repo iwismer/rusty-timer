@@ -5,6 +5,7 @@ const apiMocks = vi.hoisted(() => ({
   getStreams: vi.fn(),
   putSubscriptions: vi.fn(),
   getStreamEpochs: vi.fn().mockResolvedValue({ epochs: [] }),
+  updateSubscriptionEventType: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("$lib/api", () => apiMocks);
@@ -485,5 +486,15 @@ describe("StreamsTab", () => {
     expect(selector).toHaveValue("finish");
     expect(screen.getByRole("option", { name: "Finish" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Start" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Exclude" })).toBeInTheDocument();
+
+    await fireEvent.change(selector, { target: { value: "exclude" } });
+    expect(apiMocks.updateSubscriptionEventType).toHaveBeenCalledWith(
+      {
+        forwarder_endpoint_id: "fwd-1",
+        stream_id: "stream-10.0.0.1:10000",
+      },
+      "exclude",
+    );
   });
 });

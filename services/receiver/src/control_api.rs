@@ -5098,6 +5098,27 @@ mod tests {
         let db = state.storage.db.lock().await;
         let subs = db.load_stream_subscriptions().unwrap();
         assert_eq!(subs[0].event_type, crate::db::EventType::Start);
+
+        drop(db);
+        update_subscription_event_type(
+            &state,
+            "endpoint-1",
+            "44444444-4444-4444-4444-444444444444",
+            EventTypeRequest {
+                event_type: crate::db::EventType::Exclude,
+            },
+        )
+        .await
+        .unwrap();
+
+        let db = state.storage.db.lock().await;
+        let subs = db.load_stream_subscriptions().unwrap();
+        assert_eq!(subs[0].event_type, crate::db::EventType::Exclude);
+        let details = db
+            .load_subscription_dbf_details("endpoint-1", "44444444-4444-4444-4444-444444444444")
+            .unwrap()
+            .unwrap();
+        assert_eq!(details, (None, crate::db::EventType::Exclude));
     }
 
     #[tokio::test]

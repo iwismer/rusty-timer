@@ -264,6 +264,7 @@ pub async fn update_subscription_event_type(
             // the DBF worker's pass state and force a cross-stream regenerate.
             if changed {
                 state.notify_subscriptions_changed();
+                state.emit_streams_snapshot().await;
             }
             Ok(())
         }

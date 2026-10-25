@@ -67,7 +67,7 @@ export interface StreamEntry {
   // Whether this stream is opted in to announcer publishing. Always sent by the
   // backend; optional here so older fixtures/payloads remain valid.
   announcer_publish?: boolean;
-  event_type?: "start" | "finish";
+  event_type?: "start" | "finish" | "exclude";
   online?: boolean | null;
   reader_connected?: boolean | null;
   display_alias?: string | null;
@@ -138,7 +138,7 @@ export interface SubscriptionItem {
   forwarder_endpoint_id: string;
   stream_id: string;
   local_port_override: number | null;
-  event_type?: "start" | "finish";
+  event_type?: "start" | "finish" | "exclude";
   // Optional legacy display metadata; the backend may echo it back.
   forwarder_id?: string;
   reader_ip?: string;
@@ -782,7 +782,7 @@ export async function clearDbf(): Promise<void> {
 
 export async function updateSubscriptionEventType(
   stream: StreamIdentity,
-  eventType: "start" | "finish",
+  eventType: "start" | "finish" | "exclude",
 ): Promise<void> {
   await invoke("update_subscription_event_type", {
     forwarderEndpointId: stream.forwarder_endpoint_id,

@@ -30,6 +30,7 @@ pub struct DataStats {
 pub enum EventType {
     Start,
     Finish,
+    Exclude,
 }
 
 impl EventType {
@@ -37,6 +38,7 @@ impl EventType {
         match self {
             EventType::Start => "start",
             EventType::Finish => "finish",
+            EventType::Exclude => "exclude",
         }
     }
 }
@@ -47,8 +49,9 @@ impl std::str::FromStr for EventType {
         match s {
             "start" => Ok(EventType::Start),
             "finish" => Ok(EventType::Finish),
+            "exclude" | "none" | "excluded" => Ok(EventType::Exclude),
             other => Err(format!(
-                "invalid event type: '{other}', must be 'start' or 'finish'"
+                "invalid event type: '{other}', must be 'start', 'finish', or 'exclude'"
             )),
         }
     }
@@ -158,15 +161,20 @@ const DBF_READER_INDEX_MAX: u8 = 9;
 /// Assign one DBF reader index per subscription for a set replace. Surviving
 /// subscriptions keep their existing persisted index; the rest take the
 /// smallest unused digit in 0..=9, or `None` when all ten are taken.
+/// Subscriptions with `event_type == EventType::Exclude` do not take or keep
+/// a reader digit and are assigned `None`.
 fn assign_dbf_reader_indices(
     subs: &[StreamSubscription],
     existing: &std::collections::HashMap<(String, String), i64>,
 ) -> Vec<Option<u8>> {
     let mut used = [false; DBF_READER_INDEX_MAX as usize + 1];
     let mut assigned: Vec<Option<u8>> = vec![None; subs.len()];
-    // First pass: survivors keep their digit so DBF rows already written
-    // with it stay consistent.
+    // First pass: non-excluded survivors keep their digit so DBF rows already
+    // written with it stay consistent.
     for (slot, s) in assigned.iter_mut().zip(subs) {
+        if s.event_type == EventType::Exclude {
+            continue;
+        }
         let key = (s.forwarder_endpoint_id.clone(), s.stream_id.clone());
         if let Some(&idx) = existing.get(&key)
             && let Ok(idx) = u8::try_from(idx)
@@ -177,9 +185,12 @@ fn assign_dbf_reader_indices(
             *slot = Some(idx);
         }
     }
-    // Second pass: everyone else takes the smallest free digit; NULL when
-    // the ten digits are exhausted (DBF delivery skips those streams).
-    for slot in &mut assigned {
+    // Second pass: non-excluded subscriptions take the smallest free digit;
+    // NULL when the ten digits are exhausted (DBF delivery skips those streams).
+    for (slot, s) in assigned.iter_mut().zip(subs) {
+        if s.event_type == EventType::Exclude {
+            continue;
+        }
         if slot.is_none()
             && let Some(free) = used.iter().position(|&taken| !taken)
         {
@@ -1769,18 +1780,64 @@ impl Db {
         Ok(set)
     }
 
+    fn allocate_free_dbf_reader_index(&self) -> DbResult<Option<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT dbf_reader_index FROM subscriptions
+             WHERE dbf_reader_index IS NOT NULL",
+        )?;
+        let used_rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        let mut used = [false; (DBF_READER_INDEX_MAX + 1) as usize];
+        for r in used_rows {
+            let val = r?;
+            if let Ok(idx) = usize::try_from(val)
+                && idx < used.len()
+            {
+                used[idx] = true;
+            }
+        }
+        Ok(used.iter().position(|&taken| !taken).map(|pos| pos as i64))
+    }
+
     pub fn update_subscription_event_type(
         &self,
         fwd: &str,
         ip: &str,
         event_type: EventType,
     ) -> DbResult<bool> {
+        let current: Option<(String, Option<i64>)> = self
+            .conn
+            .query_row(
+                "SELECT event_type, dbf_reader_index
+                 FROM subscriptions
+                 WHERE (forwarder_endpoint_id = ?1 AND stream_id = ?2)
+                    OR (forwarder_id = ?1 AND reader_ip = ?2)",
+                rusqlite::params![fwd, ip],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        let Some((cur_event_type_str, cur_idx)) = current else {
+            return Ok(false);
+        };
+
+        if cur_event_type_str == event_type.as_str() {
+            return Ok(false);
+        }
+
+        let new_idx = if event_type == EventType::Exclude {
+            None
+        } else if cur_idx.is_some() {
+            cur_idx
+        } else {
+            self.allocate_free_dbf_reader_index()?
+        };
+
         let count = self.conn.execute(
             "UPDATE subscriptions
-             SET event_type = ?1
-             WHERE (forwarder_endpoint_id = ?2 AND stream_id = ?3)
-                OR (forwarder_id = ?2 AND reader_ip = ?3)",
-            rusqlite::params![event_type.as_str(), fwd, ip],
+             SET event_type = ?1, dbf_reader_index = ?2
+             WHERE (forwarder_endpoint_id = ?3 AND stream_id = ?4)
+                OR (forwarder_id = ?3 AND reader_ip = ?4)",
+            rusqlite::params![event_type.as_str(), new_idx, fwd, ip],
         )?;
         Ok(count > 0)
     }
@@ -1796,31 +1853,51 @@ impl Db {
         stream_id: &str,
         event_type: EventType,
     ) -> DbResult<Option<bool>> {
-        let count = self.conn.execute(
-            "UPDATE subscriptions
-             SET event_type = ?1
-             WHERE forwarder_endpoint_id = ?2 AND stream_id = ?3
-               AND event_type != ?1",
-            rusqlite::params![event_type.as_str(), forwarder_endpoint_id, stream_id],
-        )?;
-        if count > 0 {
-            return Ok(Some(true));
-        }
-        let exists = self
+        let current: Option<(String, Option<i64>)> = self
             .conn
             .query_row(
-                "SELECT 1 FROM subscriptions
+                "SELECT event_type, dbf_reader_index
+                 FROM subscriptions
                  WHERE forwarder_endpoint_id = ?1 AND stream_id = ?2",
                 rusqlite::params![forwarder_endpoint_id, stream_id],
-                |_| Ok(()),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        Ok(exists.map(|()| false))
+
+        let Some((cur_event_type_str, cur_idx)) = current else {
+            return Ok(None);
+        };
+
+        if cur_event_type_str == event_type.as_str() {
+            return Ok(Some(false));
+        }
+
+        let new_idx = if event_type == EventType::Exclude {
+            None
+        } else if cur_idx.is_some() {
+            cur_idx
+        } else {
+            self.allocate_free_dbf_reader_index()?
+        };
+
+        self.conn.execute(
+            "UPDATE subscriptions
+             SET event_type = ?1, dbf_reader_index = ?2
+             WHERE forwarder_endpoint_id = ?3 AND stream_id = ?4",
+            rusqlite::params![
+                event_type.as_str(),
+                new_idx,
+                forwarder_endpoint_id,
+                stream_id
+            ],
+        )?;
+        Ok(Some(true))
     }
 
     /// Resolve a subscription's DBF delivery parameters: the persisted
     /// single-digit READER index (None when all ten digits were taken at
-    /// assignment time; DBF delivery skips such streams) and event type.
+    /// assignment time or when excluded; DBF delivery skips such streams) and
+    /// event type.
     pub fn load_subscription_dbf_details(
         &self,
         fwd: &str,
@@ -1843,6 +1920,9 @@ impl Db {
                 let event_type = raw_event_type.parse::<EventType>().map_err(|e| {
                     DbError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
                 })?;
+                if event_type == EventType::Exclude {
+                    return Ok((None, EventType::Exclude));
+                }
                 let idx = idx
                     .map(|raw| {
                         u8::try_from(raw)
@@ -3195,6 +3275,72 @@ mod tests {
         db.replace_stream_subscriptions(&survivors).unwrap();
         assert_eq!(reader_index(&db, "ep-10", "s-10"), Some(0));
         assert_eq!(reader_index(&db, "ep-1", "s-1"), Some(1));
+    }
+
+    #[test]
+    fn dbf_reader_index_null_when_excluded() {
+        let mut db = Db::open_in_memory().unwrap();
+        let mut sub_excluded = bare_sub("ep-a", "s-a");
+        sub_excluded.event_type = EventType::Exclude;
+        let sub_timing = bare_sub("ep-b", "s-b");
+
+        db.replace_stream_subscriptions(&[sub_excluded, sub_timing])
+            .unwrap();
+
+        // Excluded stream does not get an index.
+        assert_eq!(reader_index(&db, "ep-a", "s-a"), None);
+        let details_a = db
+            .load_subscription_dbf_details("ep-a", "s-a")
+            .unwrap()
+            .unwrap();
+        assert_eq!(details_a, (None, EventType::Exclude));
+
+        // Non-excluded stream gets the first free index (0).
+        assert_eq!(reader_index(&db, "ep-b", "s-b"), Some(0));
+    }
+
+    #[test]
+    fn update_stream_subscription_event_type_exclude_frees_and_reallocates_index() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[bare_sub("ep-a", "s-a"), bare_sub("ep-b", "s-b")])
+            .unwrap();
+        assert_eq!(reader_index(&db, "ep-a", "s-a"), Some(0));
+        assert_eq!(reader_index(&db, "ep-b", "s-b"), Some(1));
+
+        // Exclude ep-a: index becomes None and change is reported.
+        let changed = db
+            .update_stream_subscription_event_type("ep-a", "s-a", EventType::Exclude)
+            .unwrap();
+        assert_eq!(changed, Some(true));
+        assert_eq!(reader_index(&db, "ep-a", "s-a"), None);
+
+        // Same-value update returns Some(false).
+        let changed_same = db
+            .update_stream_subscription_event_type("ep-a", "s-a", EventType::Exclude)
+            .unwrap();
+        assert_eq!(changed_same, Some(false));
+
+        // Re-enabling ep-a as Finish re-allocates the smallest free index (0, since 0 was freed).
+        let changed_back = db
+            .update_stream_subscription_event_type("ep-a", "s-a", EventType::Finish)
+            .unwrap();
+        assert_eq!(changed_back, Some(true));
+        assert_eq!(reader_index(&db, "ep-a", "s-a"), Some(0));
+        assert_eq!(reader_index(&db, "ep-b", "s-b"), Some(1));
+    }
+
+    #[test]
+    fn event_type_from_str_and_serde() {
+        assert_eq!("start".parse::<EventType>().unwrap(), EventType::Start);
+        assert_eq!("finish".parse::<EventType>().unwrap(), EventType::Finish);
+        assert_eq!("exclude".parse::<EventType>().unwrap(), EventType::Exclude);
+        assert_eq!("none".parse::<EventType>().unwrap(), EventType::Exclude);
+        assert_eq!("excluded".parse::<EventType>().unwrap(), EventType::Exclude);
+
+        let json = serde_json::to_string(&EventType::Exclude).unwrap();
+        assert_eq!(json, "\"exclude\"");
+        let deserialized: EventType = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, EventType::Exclude);
     }
 
     #[test]

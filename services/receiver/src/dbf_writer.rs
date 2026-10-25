@@ -29,6 +29,8 @@ pub enum DbfMappingError {
     InvalidChipRead(String),
     /// The parsed chip ID exceeds the 12-character CHIP field width.
     ChipIdTooLong(usize),
+    /// The stream is excluded from DBF output.
+    Excluded,
 }
 
 impl std::fmt::Display for DbfMappingError {
@@ -45,6 +47,7 @@ impl std::fmt::Display for DbfMappingError {
             Self::ChipIdTooLong(len) => {
                 write!(f, "chip ID length {len} exceeds CHIP field width (12)")
             }
+            Self::Excluded => write!(f, "stream is excluded from DBF output"),
         }
     }
 }
@@ -127,6 +130,10 @@ pub fn map_to_dbf_fields(
     event_type: EventType,
     reader_index: u8,
 ) -> Result<DbfRecord, DbfMappingError> {
+    if event_type == EventType::Exclude {
+        return Err(DbfMappingError::Excluded);
+    }
+
     if reader_index > 9 {
         return Err(DbfMappingError::ReaderIndexTooLarge(reader_index));
     }
@@ -138,6 +145,7 @@ pub fn map_to_dbf_fields(
     let event = match event_type {
         EventType::Start => "S",
         EventType::Finish => "F",
+        EventType::Exclude => unreachable!("handled above"),
     };
 
     let ts = &chip_read.timestamp;
@@ -1251,6 +1259,15 @@ mod tests {
         assert_eq!(record.event, "S");
         assert_eq!(record.tpoint, "S ");
         assert_eq!(record.reader, "0");
+    }
+
+    #[test]
+    fn map_to_dbf_fields_excluded_returns_err() {
+        let raw = sample_raw_frame();
+        assert!(matches!(
+            map_to_dbf_fields(&raw, EventType::Exclude, 0),
+            Err(DbfMappingError::Excluded)
+        ));
     }
 
     #[test]

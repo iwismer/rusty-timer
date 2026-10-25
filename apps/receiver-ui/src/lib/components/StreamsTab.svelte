@@ -659,7 +659,8 @@
                             e.stopPropagation();
                             void updateStreamEventType(
                               stream,
-                              e.currentTarget.value as "start" | "finish",
+                              e.currentTarget.value as
+                                "start" | "finish" | "exclude",
                             );
                           }}
                           onclick={(e) => e.stopPropagation()}
@@ -667,6 +668,7 @@
                         >
                           <option value="finish">Finish</option>
                           <option value="start">Start</option>
+                          <option value="exclude">Exclude</option>
                         </select>
                         <HelpTip
                           fieldKey="event_type"

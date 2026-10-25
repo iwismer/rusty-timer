@@ -103,11 +103,11 @@ export const RECEIVER_HELP = {
       },
       event_type: {
         label: 'Event Type',
-        summary: "Whether this stream's reads are written as Start or Finish rows.",
+        summary: "Whether this stream's reads are written as Start or Finish rows, or excluded from DBF.",
         detailHtml:
-          "When DBF output is enabled, each stream's reads are written as either <strong>Start</strong> or <strong>Finish</strong> rows for your timing software. Set this to match the reader's physical location.",
+          "When DBF output is enabled, each stream's reads are written as either <strong>Start</strong> or <strong>Finish</strong> rows for your timing software, or set to <strong>Exclude</strong> to keep reads (such as from an announcer mat) from being written to the DBF results file.",
         default: 'Finish',
-        range: 'Start, Finish',
+        range: 'Start, Finish, Exclude',
       },
       earliest_epoch: {
         label: 'From Epoch',

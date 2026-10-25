@@ -950,7 +950,7 @@ export async function subscribeAllAvailable(): Promise<void> {
 
 export async function updateStreamEventType(
   stream: api.StreamEntry,
-  eventType: "start" | "finish",
+  eventType: "start" | "finish" | "exclude",
 ): Promise<void> {
   if (!store.streams || !stream.subscribed) return;
 

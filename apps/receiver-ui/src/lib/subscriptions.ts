@@ -11,7 +11,7 @@ export interface SubscriptionBuildStream {
   subscribed: boolean;
   local_port: number | null;
   local_port_override: number | null;
-  event_type?: "start" | "finish";
+  event_type?: "start" | "finish" | "exclude";
 }
 
 export interface BuildUpdatedSubscriptionsParams {
@@ -31,7 +31,7 @@ export interface BuildUpdatedSubscriptionsResult {
     forwarder_id?: string;
     reader_ip?: string;
     local_port_override: number | null;
-    event_type: "start" | "finish";
+    event_type: "start" | "finish" | "exclude";
   }> | null;
   error: string | null;
 }
