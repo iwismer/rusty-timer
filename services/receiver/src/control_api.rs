@@ -2512,6 +2512,7 @@ macro_rules! receiver_command_list {
                 stream_id: "String",
                 publish: "bool"
             ) -> "()",
+            reset_announcer() -> "()",
             get_export_epochs(stream_id: "Option<String>") -> "ExportEpochsResponse",
             export_tagdata(request: "ExportTagdataRequest") -> "ExportTagdataResponse",
         }

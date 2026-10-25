@@ -342,6 +342,13 @@ async fn set_stream_announcer_publish(
 }
 
 #[tauri::command]
+async fn reset_announcer(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
+    control_api::reset_announcer(&state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_mode(state: State<'_, Arc<AppState>>) -> CmdResult<rt_domain::ReceiverMode> {
     control_api::get_mode(&state)
         .await

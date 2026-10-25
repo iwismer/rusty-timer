@@ -131,3 +131,18 @@ export async function revokeEnrollmentToken(
     },
   );
 }
+
+export interface ResetAnnouncerResponse {
+  announcer_source_generation: number;
+  finisher_count: number;
+}
+
+export async function resetAnnouncer(
+  adminUser = "dev-admin",
+): Promise<ResetAnnouncerResponse> {
+  return apiFetch<ResetAnnouncerResponse>("/announcer/reset", {
+    method: "POST",
+    headers: adminHeaders(adminUser),
+    body: JSON.stringify({}),
+  });
+}

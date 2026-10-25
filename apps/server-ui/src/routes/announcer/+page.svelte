@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
+  import { AlertBanner, buttonClass } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
   import type { AnnouncerRow, StatusResponse } from "$lib/api";
 
@@ -7,6 +8,12 @@
   let loadError = $state<string | null>(null);
   let loading = $state(true);
   let poll: ReturnType<typeof setInterval> | undefined;
+
+  let resetting = $state(false);
+  let confirmingReset = $state(false);
+  let resetError = $state<string | null>(null);
+  let resetSuccess = $state<string | null>(null);
+  let lastGeneration: number | undefined;
 
   // Keys that arrived since the last poll, used to flash new rows. Seeded on
   // the first successful load so an initial backlog does not all flash at once.
@@ -66,6 +73,16 @@
   async function loadStatus() {
     try {
       const next = await api.getStatus();
+      if (
+        lastGeneration !== undefined &&
+        next.announcer_source_generation !== lastGeneration
+      ) {
+        // Generation advanced remotely (e.g. from receiver or another tab).
+        seenKeys.clear();
+        seeded = false;
+        flashKeys = new Set();
+      }
+      lastGeneration = next.announcer_source_generation;
       status = next;
       loadError = null;
       reconcileNewRows(next.announcer_rows ?? []);
@@ -73,6 +90,36 @@
       loadError = String(err);
     } finally {
       loading = false;
+    }
+  }
+
+  async function handleReset() {
+    confirmingReset = false;
+    resetting = true;
+    resetError = null;
+    resetSuccess = null;
+    try {
+      const res = await api.resetAnnouncer();
+      lastGeneration = res.announcer_source_generation;
+      seenKeys.clear();
+      seeded = false;
+      flashKeys = new Set();
+      if (status) {
+        status = {
+          ...status,
+          announcer_source_generation: res.announcer_source_generation,
+          finisher_count: 0,
+          announcer_rows: [],
+        };
+      }
+      resetSuccess = "Announcer feed reset for the next race.";
+      setTimeout(() => {
+        resetSuccess = null;
+      }, 4000);
+    } catch (err) {
+      resetError = String(err);
+    } finally {
+      resetting = false;
     }
   }
 
@@ -103,10 +150,70 @@
         </p>
       </div>
 
-      <h1 class="text-3xl font-bold m-0 mb-1">Announcer Feed</h1>
-      <p class="text-sm text-text-muted mt-0 mb-4">
-        Newest finishers at the top.
-      </p>
+      <div class="flex flex-wrap items-center justify-between gap-4 mb-4">
+        <div>
+          <h1 class="text-3xl font-bold m-0 mb-1">Announcer Feed</h1>
+          <p class="text-sm text-text-muted mt-0 mb-0">
+            Newest finishers at the top.
+          </p>
+        </div>
+
+        <div>
+          {#if confirmingReset}
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="text-xs text-status-warn font-medium">
+                Reset feed for next race?
+              </span>
+              <button
+                data-testid="confirm-announcer-reset-btn"
+                type="button"
+                class={buttonClass("danger-soft", "sm")}
+                disabled={resetting}
+                onclick={() => void handleReset()}
+              >
+                {resetting ? "Resetting…" : "Yes, Reset Feed"}
+              </button>
+              <button
+                type="button"
+                class={buttonClass("secondary", "sm")}
+                disabled={resetting}
+                onclick={() => (confirmingReset = false)}
+              >
+                Cancel
+              </button>
+            </div>
+          {:else}
+            <button
+              data-testid="announcer-reset-btn"
+              type="button"
+              class={buttonClass("secondary", "sm")}
+              disabled={resetting}
+              onclick={() => (confirmingReset = true)}
+            >
+              Reset for Next Race…
+            </button>
+          {/if}
+        </div>
+      </div>
+
+      {#if resetSuccess}
+        <div class="mb-4">
+          <AlertBanner
+            variant="ok"
+            message={resetSuccess}
+            onDismiss={() => (resetSuccess = null)}
+          />
+        </div>
+      {/if}
+      {#if resetError}
+        <div class="mb-4">
+          <AlertBanner
+            variant="err"
+            message={resetError}
+            onDismiss={() => (resetError = null)}
+          />
+        </div>
+      {/if}
 
       {#if loadError}
         <p

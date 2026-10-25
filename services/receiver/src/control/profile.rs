@@ -84,6 +84,43 @@ pub async fn set_announcer_max_list_size(
     Ok(())
 }
 
+/// Reset the server announcer feed between races.
+///
+/// Calls `POST /announcer/reset` on the configured server with the receiver's
+/// device token, then marks all existing received events as announcer-pushed
+/// so older reads never push into the fresh race.
+pub async fn reset_announcer(state: &AppState) -> Result<(), ReceiverError> {
+    let (server_url, token) = {
+        let db = state.storage.db.lock().await;
+        let profile = db
+            .load_profile()
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+        let override_ = state.server_override().await;
+        let resolved = crate::runtime::resolve_server_config(profile.as_ref(), override_);
+        match resolved {
+            Some(s) if !s.url.trim().is_empty() && !s.token.trim().is_empty() => (s.url, s.token),
+            _ => {
+                return Err(ReceiverError::BadRequest(
+                    "server URL and token must be configured to reset the announcer feed".into(),
+                ));
+            }
+        }
+    };
+
+    crate::announcer_push::reset_announcer_feed(&server_url, &token)
+        .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+
+    {
+        let db = state.storage.db.lock().await;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let _ = db.mark_all_announcer_events_pushed(now_ms);
+        let _ = db.reset_announcer_fences();
+    }
+
+    state.emit_resync();
+    Ok(())
+}
+
 /// Choose the server URL+token to persist on a profile save.
 ///
 /// When a server env override is active the UI locks the URL/token inputs and

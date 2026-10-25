@@ -411,6 +411,10 @@ export async function setStreamAnnouncerPublish(
   });
 }
 
+export async function resetAnnouncer(): Promise<void> {
+  await invoke("reset_announcer", {});
+}
+
 export async function getStreams(): Promise<StreamsResponse> {
   return invoke<StreamsResponse>("get_streams");
 }

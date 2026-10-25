@@ -55,6 +55,20 @@ pub fn takeover_announcer_source(conn: &Connection) -> Result<u64, AnnouncerStor
     current_announcer_source_generation(conn)
 }
 
+/// Clear all announcer rows and advance the announcer source generation in one
+/// immediate transaction.
+pub fn clear_announcer_rows(conn: &mut Connection) -> Result<u64, AnnouncerStorageError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute("DELETE FROM announcer_rows", [])?;
+    tx.execute(
+        "UPDATE announcer_source_state SET generation = generation + 1 WHERE id = 1",
+        [],
+    )?;
+    let generation = current_announcer_source_generation(&tx)?;
+    tx.commit()?;
+    Ok(generation)
+}
+
 /// Persist a batch of announcer rows transactionally, fenced on the source
 /// generation.
 ///
@@ -315,5 +329,33 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM announcer_rows", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0, "stale rows must not slip in after a takeover");
+    }
+
+    #[test]
+    fn clear_announcer_rows_deletes_rows_and_advances_generation() {
+        let mut conn = test_conn();
+        upsert_announcer_rows(
+            &mut conn,
+            &[
+                row("fwd-a", "finish-line", 1, 0),
+                row("fwd-b", "finish-line", 2, 0),
+            ],
+        )
+        .unwrap();
+
+        let initial_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM announcer_rows", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(initial_count, 2);
+        assert_eq!(current_announcer_source_generation(&conn).unwrap(), 0);
+
+        let next_gen = clear_announcer_rows(&mut conn).unwrap();
+        assert_eq!(next_gen, 1);
+        assert_eq!(current_announcer_source_generation(&conn).unwrap(), 1);
+
+        let post_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM announcer_rows", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(post_count, 0, "all announcer rows must be deleted on clear");
     }
 }

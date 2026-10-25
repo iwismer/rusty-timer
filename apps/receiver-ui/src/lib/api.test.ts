@@ -634,4 +634,11 @@ describe("sse client", () => {
     expect(res.read_count).toBe(42);
     expect(res.filename).toBe("TAGDATA.TXT");
   });
+
+  it("resetAnnouncer invokes reset_announcer command", async () => {
+    const { resetAnnouncer } = await import("./api");
+    mockInvoke.mockResolvedValue(undefined);
+    await resetAnnouncer();
+    expect(mockInvoke).toHaveBeenCalledWith("reset_announcer", {});
+  });
 });

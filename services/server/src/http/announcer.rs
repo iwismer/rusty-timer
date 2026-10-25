@@ -10,7 +10,7 @@ use chrono::{TimeZone, Utc};
 use rt_server_api::announcer::{
     MAX_ANNOUNCER_DISPLAY_NAME_LEN, MAX_ANNOUNCER_DIVISION_LEN, MAX_ANNOUNCER_ID_LEN,
     MAX_ANNOUNCER_READER_TIMESTAMP_LEN, MAX_PUSH_ROWS, PushRowResponse, PushRowsRequest,
-    TakeoverResponse,
+    ResetAnnouncerResponse, TakeoverResponse,
 };
 
 use crate::announcer::{AnnouncerInputEvent, AnnouncerRuntime};
@@ -188,6 +188,52 @@ pub async fn takeover(State(state): State<AppState>, headers: HeaderMap) -> Resp
             .into_response(),
         Err(AnnouncerStorageError::Sqlite(err)) => {
             tracing::error!(error = %err, "announcer takeover failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Err(
+            AnnouncerStorageError::StaleGeneration { .. }
+            | AnnouncerStorageError::ValueOutOfRange(_),
+        ) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// `POST /announcer/reset` — reset announcer feed between races.
+///
+/// Clears all announcer rows from SQLite and resets the in-memory announcer
+/// runtime (clearing rows, seen chips, and finisher count). Advances the source
+/// generation so any in-flight rows from the previous race are rejected.
+///
+/// Authorized for active receivers (via minted bearer token) or admins (via
+/// upstream `Remote-User` header when `proxy_trusted` is enabled).
+pub async fn reset(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let is_admin = super::status::admin_authorized(&headers, state.admin_proxy_trusted);
+    let is_receiver = authorize_active_device_kind(&state, &headers, DeviceKind::Receiver).is_ok();
+    if !is_admin && !is_receiver {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let result = {
+        let mut conn = state.conn.lock().expect("registry mutex poisoned");
+        registry::clear_announcer_rows(&mut conn).inspect(|_| {
+            let mut runtime = state
+                .announcer_runtime
+                .lock()
+                .expect("announcer runtime mutex poisoned");
+            runtime.reset();
+        })
+    };
+
+    match result {
+        Ok(announcer_source_generation) => (
+            StatusCode::OK,
+            Json(ResetAnnouncerResponse {
+                announcer_source_generation,
+                finisher_count: 0,
+            }),
+        )
+            .into_response(),
+        Err(AnnouncerStorageError::Sqlite(err)) => {
+            tracing::error!(error = %err, "announcer reset failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
         Err(
@@ -881,5 +927,142 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn reset_clears_rows_and_runtime_and_bumps_generation() {
+        let state = test_state();
+        let app = router(state.clone());
+
+        // Push two rows.
+        let body = batch_body(0, &[row_json(1, 1_000), row_json(2, 2_000)]);
+        let push = app
+            .clone()
+            .oneshot(json_request("/announcer/rows", &body))
+            .await
+            .unwrap();
+        assert_eq!(push.status(), StatusCode::OK);
+        assert_eq!(announcer_rows_count(&state), 2);
+        {
+            let runtime = state.announcer_runtime.lock().unwrap();
+            assert_eq!(runtime.finisher_count(), 2);
+            assert_eq!(runtime.rows().len(), 2);
+        }
+
+        // Reset via receiver bearer token.
+        let reset_resp = app
+            .clone()
+            .oneshot(json_request("/announcer/reset", &serde_json::json!({})))
+            .await
+            .unwrap();
+        assert_eq!(reset_resp.status(), StatusCode::OK);
+        let reset_body = response_json(reset_resp).await;
+        assert_eq!(reset_body["announcer_source_generation"], 1);
+        assert_eq!(reset_body["finisher_count"], 0);
+
+        // SQLite table and in-memory runtime must both be empty.
+        assert_eq!(announcer_rows_count(&state), 0);
+        {
+            let runtime = state.announcer_runtime.lock().unwrap();
+            assert_eq!(runtime.finisher_count(), 0);
+            assert!(runtime.rows().is_empty());
+        }
+
+        // An in-flight push claiming old generation 0 must be rejected with CONFLICT.
+        let stale_push = app
+            .clone()
+            .oneshot(json_request("/announcer/rows", &row_body(3, 0, 3_000)))
+            .await
+            .unwrap();
+        assert_eq!(stale_push.status(), StatusCode::CONFLICT);
+        assert_eq!(announcer_rows_count(&state), 0);
+
+        // A push with the bumped generation 1 succeeds and starts from finisher 1.
+        let new_push = app
+            .oneshot(json_request("/announcer/rows", &row_body(1, 1, 4_000)))
+            .await
+            .unwrap();
+        assert_eq!(new_push.status(), StatusCode::OK);
+        let new_body = response_json(new_push).await;
+        assert_eq!(new_body["finisher_count"], 1);
+        assert_eq!(announcer_rows_count(&state), 1);
+        {
+            let runtime = state.announcer_runtime.lock().unwrap();
+            assert_eq!(runtime.finisher_count(), 1);
+            assert_eq!(runtime.rows().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_authorized_for_admin_and_receiver_denies_unauthorized() {
+        let state = test_state();
+        let (active, pending) = {
+            let conn = state.conn.lock().unwrap();
+            let a = crate::registry::register_device_minted(
+                &conn,
+                "rx-active-reset",
+                crate::registry::DeviceKind::Receiver,
+            )
+            .unwrap();
+            crate::registry::approve_device(&conn, "rx-active-reset")
+                .unwrap()
+                .unwrap();
+            let p = crate::registry::register_device_minted(
+                &conn,
+                "rx-pending-reset",
+                crate::registry::DeviceKind::Receiver,
+            )
+            .unwrap();
+            (a.device_token, p.device_token)
+        };
+
+        // Unauthorized request without token or admin header fails.
+        let unauth = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/announcer/reset")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // Pending receiver token is denied.
+        let pending_denied = router(state.clone())
+            .oneshot(json_request_with_token(
+                "/announcer/reset",
+                &pending,
+                &serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(pending_denied.status(), StatusCode::UNAUTHORIZED);
+
+        // Active receiver token is accepted.
+        let receiver_ok = router(state.clone())
+            .oneshot(json_request_with_token(
+                "/announcer/reset",
+                &active,
+                &serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(receiver_ok.status(), StatusCode::OK);
+
+        // Admin request with Remote-User header is accepted.
+        let admin_ok = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/announcer/reset")
+                    .header(crate::http::status::ADMIN_HEADER, "admin-user")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(admin_ok.status(), StatusCode::OK);
     }
 }

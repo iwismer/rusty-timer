@@ -235,4 +235,29 @@ describe("server api client", () => {
       }),
     );
   });
+
+  it("resetAnnouncer posts to /announcer/reset with admin header", async () => {
+    const { resetAnnouncer } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, {
+        announcer_source_generation: 4,
+        finisher_count: 0,
+      }),
+    );
+
+    const response = await resetAnnouncer("alice");
+
+    expect(response.announcer_source_generation).toBe(4);
+    expect(response.finisher_count).toBe(0);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/announcer/reset",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          "Content-Type": "application/json",
+          "Remote-User": "alice",
+        }),
+      }),
+    );
+  });
 });

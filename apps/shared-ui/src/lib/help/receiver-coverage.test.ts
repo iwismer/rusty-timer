@@ -36,6 +36,7 @@ describe('receiver help coverage', () => {
       'announcer_enabled',
       'max_list_size',
       'open_announcer_page',
+      'reset_announcer',
       'participants_file',
       'chips_file',
       'data_stats',

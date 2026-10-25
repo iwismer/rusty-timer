@@ -44,6 +44,7 @@ client-supplied `Remote-*` headers before injecting `Remote-User`.
 | `GET /forwarders` | Active receiver token | Discover approved forwarders and streams. |
 | `POST /announcer/takeover` | Active receiver token | Take over the fenced announcer generation. |
 | `POST /announcer/rows` | Active receiver token | Push sanitized announcer rows. |
+| `POST /announcer/reset` | Active receiver token or trusted `Remote-User` | Reset announcer rows, counts, and advance generation between races. |
 | `POST /admin/devices/approve` | Trusted `Remote-User` | Approve a pending device. |
 | `/admin/enrollment-tokens` | Trusted `Remote-User` | Create/list/revoke enrollment vouchers. |
 

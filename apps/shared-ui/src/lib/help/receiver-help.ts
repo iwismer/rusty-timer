@@ -329,6 +329,12 @@ export const RECEIVER_HELP = {
         detailHtml:
           'Opens the announcer page hosted by the server, where published reads appear with bib and name.',
       },
+      reset_announcer: {
+        label: 'Reset Announcer Feed',
+        summary: 'Clears the server announcer board and resets finisher counts between races.',
+        detailHtml:
+          'Resets the server announcer feed for the next race, clearing all announced finishers and resetting the finisher count to zero. Also marks existing received reads on this receiver so they are not re-published into the new race.',
+      },
       participants_file: {
         label: 'Participants (.ppl)',
         summary: 'Import a participant file so announcer rows show names.',

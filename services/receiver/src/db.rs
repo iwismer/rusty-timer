@@ -1270,6 +1270,22 @@ impl Db {
         Ok(changed > 0)
     }
 
+    /// Mark all currently unpushed events across all streams as pushed to the
+    /// announcer.
+    ///
+    /// Called when the announcer feed is reset between races so existing reads
+    /// prior to the reset are never pushed into the fresh race's announcer feed.
+    /// Returns the number of events newly marked.
+    pub fn mark_all_announcer_events_pushed(&self, pushed_unix_ms: i64) -> DbResult<usize> {
+        let changed = self.conn.execute(
+            "UPDATE received_events
+             SET announcer_pushed_unix_ms = ?1
+             WHERE announcer_pushed_unix_ms IS NULL",
+            rusqlite::params![pushed_unix_ms],
+        )?;
+        Ok(changed)
+    }
+
     /// Return the highest announcer source generation accepted for `stream_id`,
     /// or `None` if no generation has been fenced yet.
     pub fn load_announcer_fence(&self, stream_id: &str) -> DbResult<Option<i64>> {
@@ -3453,6 +3469,40 @@ mod tests {
             Some(4),
             "seq 4 was not in batch and should stay unpushed"
         );
+    }
+
+    #[test]
+    fn mark_all_announcer_events_pushed_marks_every_stream() {
+        let db = Db::open_in_memory().unwrap();
+        for stream_id in ["s1", "s2"] {
+            for seq in 1..=3i64 {
+                db.insert_received_event(&ReceivedEventInsert {
+                    stream_id,
+                    seq,
+                    epoch: 1,
+                    raw_frame: b"frame",
+                    read_kind: "chip",
+                    reader_timestamp: None,
+                    received_unix_ms: 1_700_000_000_000 + seq,
+                    dbf_delivered_unix_ms: None,
+                    chip_id: None,
+                })
+                .unwrap();
+            }
+        }
+
+        // Initially 3 unpushed on each stream.
+        assert_eq!(db.load_unpushed_announcer_events("s1").unwrap().len(), 3);
+        assert_eq!(db.load_unpushed_announcer_events("s2").unwrap().len(), 3);
+
+        let marked = db
+            .mark_all_announcer_events_pushed(1_700_000_050_000)
+            .unwrap();
+        assert_eq!(marked, 6);
+
+        // After reset marking, zero unpushed events remain on any stream.
+        assert_eq!(db.load_unpushed_announcer_events("s1").unwrap().len(), 0);
+        assert_eq!(db.load_unpushed_announcer_events("s2").unwrap().len(), 0);
     }
 
     #[test]

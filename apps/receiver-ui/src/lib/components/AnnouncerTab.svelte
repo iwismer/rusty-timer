@@ -7,6 +7,7 @@
     store,
     setAnnouncerEnabled,
     setAnnouncerMaxListSize,
+    resetAnnouncer,
     importParticipantsFile,
     importChipsFile,
     loadDataStats,
@@ -36,6 +37,13 @@
       ? `${store.savedServerUrl.replace(/\/+$/, "")}/announcer`
       : null,
   );
+
+  let confirmingReset = $state(false);
+
+  async function handleResetAnnouncer() {
+    confirmingReset = false;
+    await resetAnnouncer();
+  }
 
   async function openAnnouncerPage() {
     if (announcerUrl) await openUrl(announcerUrl);
@@ -133,24 +141,83 @@
         </span>
       </label>
 
-      <span class="inline-flex items-center gap-1">
-        <button
-          data-testid="open-announcer-page-btn"
-          type="button"
-          class={btnSecondary}
-          disabled={!announcerUrl}
-          onclick={openAnnouncerPage}
-        >
-          Open announcer page
-        </button>
-        <HelpTip
-          fieldKey="open_announcer_page"
-          sectionKey="announcer"
-          context="receiver"
-          onOpenModal={openHelp}
-        />
-      </span>
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="inline-flex items-center gap-1">
+          <button
+            data-testid="open-announcer-page-btn"
+            type="button"
+            class={btnSecondary}
+            disabled={!announcerUrl}
+            onclick={openAnnouncerPage}
+          >
+            Open announcer page
+          </button>
+          <HelpTip
+            fieldKey="open_announcer_page"
+            sectionKey="announcer"
+            context="receiver"
+            onOpenModal={openHelp}
+          />
+        </span>
+
+        {#if confirmingReset}
+          <span class="inline-flex items-center gap-2">
+            <button
+              data-testid="confirm-reset-announcer-btn"
+              type="button"
+              class="rounded-md border border-status-err/40 bg-status-err/10 px-3 py-1.5 text-xs font-semibold text-status-err hover:bg-status-err/20 disabled:opacity-50"
+              disabled={store.announcerResetBusy || !store.savedServerUrl}
+              onclick={handleResetAnnouncer}
+            >
+              {store.announcerResetBusy ? "Resetting…" : "Confirm Reset Feed"}
+            </button>
+            <button
+              type="button"
+              class={btnSecondary}
+              disabled={store.announcerResetBusy}
+              onclick={() => (confirmingReset = false)}
+            >
+              Cancel
+            </button>
+          </span>
+        {:else}
+          <span class="inline-flex items-center gap-1">
+            <button
+              data-testid="reset-announcer-btn"
+              type="button"
+              class={btnSecondary}
+              disabled={store.announcerResetBusy || !store.savedServerUrl}
+              onclick={() => (confirmingReset = true)}
+            >
+              Reset announcer feed…
+            </button>
+            <HelpTip
+              fieldKey="reset_announcer"
+              sectionKey="announcer"
+              context="receiver"
+              onOpenModal={openHelp}
+            />
+          </span>
+        {/if}
+      </div>
     </div>
+
+    {#if store.announcerResetMessage}
+      <p
+        data-testid="announcer-reset-message"
+        class="mt-3 text-xs text-status-ok"
+      >
+        {store.announcerResetMessage}
+      </p>
+    {/if}
+    {#if store.announcerResetError}
+      <p
+        data-testid="announcer-reset-error"
+        class="mt-3 text-xs text-status-err"
+      >
+        {store.announcerResetError}
+      </p>
+    {/if}
   </section>
 
   <section class="mt-6 rounded-lg border border-border bg-surface-1 p-4">

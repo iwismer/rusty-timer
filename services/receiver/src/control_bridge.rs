@@ -421,6 +421,7 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
             )
             .await?)
         }
+        "reset_announcer" => ok(control_api::reset_announcer(state).await?),
         "get_export_epochs" => {
             ok(control_api::get_export_epochs(state, arg(args, "stream_id")?).await?)
         }

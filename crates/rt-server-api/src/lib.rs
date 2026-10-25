@@ -192,6 +192,18 @@ mod tests {
             .unwrap(),
             serde_json::json!({"announcer_source_generation": 9})
         );
+
+        assert_eq!(
+            serde_json::to_value(crate::announcer::ResetAnnouncerResponse {
+                announcer_source_generation: 12,
+                finisher_count: 0,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "announcer_source_generation": 12,
+                "finisher_count": 0
+            })
+        );
     }
 
     #[test]

@@ -20,6 +20,7 @@ protect. The in-code source of truth is the module doc on
 | `/allowlist/receivers` | GET | M2M / device bearer | active forwarder minted token |
 | `/announcer/rows` | POST | M2M / device bearer | active receiver minted token |
 | `/announcer/takeover` | POST | M2M / device bearer | active receiver minted token |
+| `/announcer/reset` | POST | Admin or M2M / device bearer | upstream `Remote-User` header (`SERVER_TRUSTED_PROXY=1`) or active receiver minted token |
 
 ## Caddy / Authelia requirements
 

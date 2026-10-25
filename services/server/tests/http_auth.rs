@@ -272,6 +272,18 @@ async fn device_route_auth_matrix() {
             ],
         },
         Case {
+            name: "POST /announcer/reset",
+            method: Method::POST,
+            uri: "/announcer/reset",
+            body: Some(json!({})),
+            expected: vec![
+                (Bearer::ActiveReceiver, StatusCode::OK),
+                (Bearer::ActiveForwarder, StatusCode::UNAUTHORIZED),
+                (Bearer::PendingReceiver, StatusCode::UNAUTHORIZED),
+                (Bearer::None, StatusCode::UNAUTHORIZED),
+            ],
+        },
+        Case {
             name: "POST /forwarder/catalog",
             method: Method::POST,
             uri: "/forwarder/catalog",
@@ -443,6 +455,38 @@ async fn admin_route_auth_matrix() {
         "POST /admin/enrollment-tokens/{token_id}/revoke untrusted proxy",
         false,
         Some("admin"),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+
+    // POST /announcer/reset via admin identity
+    assert_admin_status(
+        "POST /announcer/reset trusted header",
+        true,
+        Method::POST,
+        "/announcer/reset",
+        Some("admin"),
+        &json!({}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_admin_status(
+        "POST /announcer/reset no header",
+        true,
+        Method::POST,
+        "/announcer/reset",
+        None,
+        &json!({}),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    assert_admin_status(
+        "POST /announcer/reset untrusted proxy",
+        false,
+        Method::POST,
+        "/announcer/reset",
+        Some("admin"),
+        &json!({}),
         StatusCode::UNAUTHORIZED,
     )
     .await;

@@ -60,3 +60,9 @@ pub struct PushRowResponse {
 pub struct TakeoverResponse {
     pub announcer_source_generation: u64,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResetAnnouncerResponse {
+    pub announcer_source_generation: u64,
+    pub finisher_count: u64,
+}

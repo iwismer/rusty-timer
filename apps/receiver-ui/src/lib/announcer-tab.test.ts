@@ -9,6 +9,9 @@ const mockState = vi.hoisted(() => ({
     announcerBusy: false,
     announcerMaxListSize: 25,
     announcerMaxListBusy: false,
+    announcerResetBusy: false,
+    announcerResetMessage: null as string | null,
+    announcerResetError: null as string | null,
     savedServerUrl: "http://127.0.0.1:8080",
     importBusy: false,
     importMessage: null as string | null,
@@ -27,6 +30,7 @@ const mockState = vi.hoisted(() => ({
   },
   setAnnouncerEnabled: vi.fn(),
   setAnnouncerMaxListSize: vi.fn(),
+  resetAnnouncer: vi.fn(),
   importParticipantsFile: vi.fn(),
   importChipsFile: vi.fn(),
   loadDataStats: vi.fn(),
@@ -39,6 +43,7 @@ vi.mock("$lib/store.svelte", () => ({
   store: mockState.store,
   setAnnouncerEnabled: mockState.setAnnouncerEnabled,
   setAnnouncerMaxListSize: mockState.setAnnouncerMaxListSize,
+  resetAnnouncer: mockState.resetAnnouncer,
   importParticipantsFile: mockState.importParticipantsFile,
   importChipsFile: mockState.importChipsFile,
   loadDataStats: mockState.loadDataStats,
@@ -185,6 +190,48 @@ describe("AnnouncerTab", () => {
     await fireEvent.click(screen.getByTestId("open-announcer-page-btn"));
     expect(mockState.openUrl).toHaveBeenCalledWith(
       "http://127.0.0.1:8080/announcer",
+    );
+  });
+
+  it("handles announcer reset confirmation and execution", async () => {
+    render(AnnouncerTab);
+    const resetBtn = screen.getByTestId("reset-announcer-btn");
+    await fireEvent.click(resetBtn);
+
+    const confirmBtn = screen.getByTestId("confirm-reset-announcer-btn");
+    expect(confirmBtn).toBeInTheDocument();
+
+    await fireEvent.click(confirmBtn);
+    expect(mockState.resetAnnouncer).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels announcer reset confirmation", async () => {
+    render(AnnouncerTab);
+    await fireEvent.click(screen.getByTestId("reset-announcer-btn"));
+    expect(
+      screen.getByTestId("confirm-reset-announcer-btn"),
+    ).toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByTestId("reset-announcer-btn")).toBeInTheDocument();
+    expect(mockState.resetAnnouncer).not.toHaveBeenCalled();
+  });
+
+  it("displays announcer reset success and error messages", () => {
+    mockState.store.announcerResetMessage =
+      "Announcer feed reset for the next race.";
+    const { unmount } = render(AnnouncerTab);
+    expect(screen.getByTestId("announcer-reset-message")).toHaveTextContent(
+      "Announcer feed reset for the next race.",
+    );
+    unmount();
+
+    mockState.store.announcerResetMessage = null;
+    mockState.store.announcerResetError =
+      "Failed to reset announcer feed: timeout";
+    render(AnnouncerTab);
+    expect(screen.getByTestId("announcer-reset-error")).toHaveTextContent(
+      "Failed to reset announcer feed: timeout",
     );
   });
 });

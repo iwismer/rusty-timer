@@ -202,6 +202,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/announcer/rows", post(announcer::push_rows))
         .route("/announcer/takeover", post(announcer::takeover))
+        .route("/announcer/reset", post(announcer::reset))
         .route("/allowlist/receivers", get(allowlist::receiver_allowlist))
         .route("/forwarders", get(forwarders::list_forwarders))
         .fallback(crate::ui_server::serve_ui)

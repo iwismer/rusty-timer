@@ -94,6 +94,9 @@ export const store = $state({
   announcerBusy: false,
   announcerMaxListSize: 25,
   announcerMaxListBusy: false,
+  announcerResetBusy: false,
+  announcerResetMessage: null as string | null,
+  announcerResetError: null as string | null,
   importBusy: false,
   importMessage: null as string | null,
   importError: null as string | null,
@@ -1040,6 +1043,24 @@ export async function setAnnouncerMaxListSize(
     store.error = `Failed to update announcer list size: ${e}`;
   } finally {
     store.announcerMaxListBusy = false;
+  }
+}
+
+export async function resetAnnouncer(): Promise<void> {
+  store.announcerResetBusy = true;
+  store.announcerResetMessage = null;
+  store.announcerResetError = null;
+  try {
+    store.error = null;
+    await api.resetAnnouncer();
+    store.announcerResetMessage = "Announcer feed reset for the next race.";
+    setTimeout(() => {
+      store.announcerResetMessage = null;
+    }, 4000);
+  } catch (e) {
+    store.announcerResetError = `Failed to reset announcer feed: ${e}`;
+  } finally {
+    store.announcerResetBusy = false;
   }
 }
 

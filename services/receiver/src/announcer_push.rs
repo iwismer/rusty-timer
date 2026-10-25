@@ -25,7 +25,7 @@
 
 use rt_server_api::announcer::{
     MAX_ANNOUNCER_DISPLAY_NAME_LEN, MAX_ANNOUNCER_DIVISION_LEN, MAX_ANNOUNCER_ID_LEN,
-    MAX_PUSH_ROWS, PushRow, PushRowsRequest, TakeoverResponse,
+    MAX_PUSH_ROWS, PushRow, PushRowsRequest, ResetAnnouncerResponse, TakeoverResponse,
 };
 use rt_server_api::register::{RegisterRequest, RegisterResponse};
 use serde::Deserialize;
@@ -337,6 +337,39 @@ pub fn takeover_announcer_generation(
     i64::try_from(value.announcer_source_generation).map_err(|_| {
         AnnouncerPushError::Transport(
             "server /announcer/takeover response generation out of range".to_owned(),
+        )
+    })
+}
+
+/// Reset the server announcer feed via `POST /announcer/reset` and return the
+/// newly-advanced source generation.
+pub fn reset_announcer_feed(base_url: &str, token: &str) -> Result<i64, AnnouncerPushError> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .connect_timeout(HTTP_TIMEOUT)
+        .build()
+        .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
+    let response = client
+        .post(format!(
+            "{}/announcer/reset",
+            base_url.trim_end_matches('/')
+        ))
+        .bearer_auth(token)
+        .json(&serde_json::json!({}))
+        .send()
+        .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
+    if !response.status().is_success() {
+        return Err(AnnouncerPushError::Transport(format!(
+            "server /announcer/reset returned {}",
+            response.status()
+        )));
+    }
+    let value: ResetAnnouncerResponse = response
+        .json()
+        .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
+    i64::try_from(value.announcer_source_generation).map_err(|_| {
+        AnnouncerPushError::Transport(
+            "server /announcer/reset response generation out of range".to_owned(),
         )
     })
 }
