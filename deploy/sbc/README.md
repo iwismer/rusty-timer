@@ -300,8 +300,9 @@ For non-interactive installs:
   falls back to the default (`true`) rather than disabling the feature;
   disabling requires an explicit recognized falsey value.
 - Set `RT_SETUP_UPS_ENABLED=1` when installing non-interactively on a build
-  with a PiSugar UPS. The script installs `pisugar-server`, enables I2C, and
-  writes an `[ups]` section with `enabled = true` to the forwarder config.
+  with a PiSugar UPS. The script installs `pisugar-server`, enables I2C,
+  installs `rt-pisugar-rtc.service` for offline UTC RTC clock synchronization,
+  and writes an `[ups]` section with `enabled = true` to the forwarder config.
   Optional UPS knobs are `RT_SETUP_UPS_MODEL` (default: `PiSugar 3`),
   `RT_SETUP_UPS_SHUTDOWN_LEVEL` (default: `5`), and
   `RT_SETUP_UPS_SHUTDOWN_DELAY` (default: `30`).

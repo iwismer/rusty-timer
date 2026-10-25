@@ -1687,12 +1687,17 @@ async fn emit_stream_projection(
                 })
             })
         };
+        let last_ts_ms = if proj.last_received_unix_ms > 0 {
+            proj.last_received_unix_ms
+        } else {
+            proj.max_received_unix_ms
+        };
         Some(crate::ui_events::LastRead {
             forwarder_id: display.forwarder_id.clone(),
             reader_ip: display.reader_ip.clone(),
             chip_id,
-            timestamp: crate::ui_events::unix_ms_to_rfc3339(proj.max_received_unix_ms)
-                .unwrap_or_else(|| proj.max_received_unix_ms.to_string()),
+            timestamp: crate::ui_events::unix_ms_to_rfc3339(last_ts_ms)
+                .unwrap_or_else(|| last_ts_ms.to_string()),
             bib: resolved.as_ref().map(|participant| participant.bib.clone()),
             name: resolved
                 .as_ref()

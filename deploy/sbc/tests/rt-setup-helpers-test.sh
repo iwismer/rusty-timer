@@ -399,4 +399,15 @@ page_v2='[{"tag_name":"forwarder-v2.0.0","published_at":"2026-03-01T00:00:00Z","
 url_multi_aarch64="$(select_latest_forwarder_asset_from_pages "aarch64-unknown-linux-gnu" "${page_v1}" "${page_v2}")"
 assert_eq "https://example.com/fwd-v2-aarch64.tar.gz" "${url_multi_aarch64}" "should select latest version aarch64 asset across multiple release pages"
 
+# --- PiSugar RTC sync rendering tests ---
+rtc_script="$(render_pisugar_rtc_sync_script)"
+assert_contains "${rtc_script}" "date -u -s" "render_pisugar_rtc_sync_script should use -u flag for UTC sync"
+assert_contains "${rtc_script}" "get rtc_time" "render_pisugar_rtc_sync_script should query rtc_time"
+assert_contains "${rtc_script}" "rtc_pi2rtc" "render_pisugar_rtc_sync_script should support rtc_pi2rtc"
+assert_contains "${rtc_script}" "NTPSynchronized" "render_pisugar_rtc_sync_script should check NTPSynchronized"
+
+rtc_unit="$(render_pisugar_rtc_systemd_unit)"
+assert_contains "${rtc_unit}" "After=pisugar-server.service" "render_pisugar_rtc_systemd_unit should order After pisugar-server"
+assert_contains "${rtc_unit}" "Before=rt-forwarder.service time-sync.target" "render_pisugar_rtc_systemd_unit should order Before forwarder"
+
 echo "PASS: rt-setup helper tests"

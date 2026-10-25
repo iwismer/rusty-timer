@@ -47,10 +47,12 @@ pub struct StreamProjection {
     pub unique_chips: HashSet<String>,
     /// Max `received_unix_ms` over all observed facts.
     pub max_received_unix_ms: i64,
-    /// Highest observed seq; `last_chip_id` tracks this row.
+    /// Highest observed seq; `last_chip_id` and `last_received_unix_ms` track this row.
     pub last_seq: i64,
     /// Chip id of the max-seq fact, for the LastRead UI event.
     pub last_chip_id: Option<String>,
+    /// Received unix ms of the max-seq fact, for the LastRead UI event.
+    pub last_received_unix_ms: i64,
 }
 
 impl StreamProjection {
@@ -73,6 +75,7 @@ impl StreamProjection {
         if fact.seq >= self.last_seq {
             self.last_seq = fact.seq;
             self.last_chip_id = Some(fact.chip_id.clone());
+            self.last_received_unix_ms = fact.received_unix_ms;
         }
     }
 
@@ -96,6 +99,7 @@ impl StreamProjection {
             proj.max_received_unix_ms = proj.max_received_unix_ms.max(row.max_received_unix_ms);
             if row.max_seq >= proj.last_seq {
                 proj.last_seq = row.max_seq;
+                proj.last_received_unix_ms = row.max_received_unix_ms;
             }
         }
         proj.unique_chips = live_epoch_chips;
@@ -285,5 +289,25 @@ mod tests {
         assert_eq!(seeded.max_received_unix_ms, folded.max_received_unix_ms);
         assert_eq!(seeded.last_seq, folded.last_seq);
         assert_eq!(seeded.last_chip_id, folded.last_chip_id);
+        assert_eq!(seeded.last_received_unix_ms, folded.last_received_unix_ms);
+    }
+
+    #[test]
+    fn last_read_timestamp_tracks_last_seq_not_max_received_unix_ms() {
+        // If an earlier event carried a future received_unix_ms (e.g. clock jump),
+        // the last_received_unix_ms should still track the actual latest read (highest seq).
+        let facts = [
+            fact(1, 1, 10_000_000, "chip-err"), // clock jumped into the future
+            fact(2, 1, 1_000, "chip-ok"),       // normal subsequent read
+        ];
+        let mut proj = StreamProjection::default();
+        for f in &facts {
+            proj.apply(f);
+        }
+
+        assert_eq!(proj.max_received_unix_ms, 10_000_000);
+        assert_eq!(proj.last_seq, 2);
+        assert_eq!(proj.last_chip_id.as_deref(), Some("chip-ok"));
+        assert_eq!(proj.last_received_unix_ms, 1_000);
     }
 }

@@ -30,6 +30,8 @@ POWER_ACTIONS_POLKIT_RULES_PATH="/etc/polkit-1/rules.d/90-rt-forwarder-power-act
 WIFI_POLKIT_RULES_PATH="/etc/polkit-1/rules.d/90-rt-forwarder-wifi.rules"
 USB_TETHER_NETPLAN_PATH="/etc/netplan/99-usb-tether.yaml"
 PISUGAR_INSTALL_SCRIPT_URL="https://cdn.pisugar.com/release/pisugar-power-manager.sh"
+PISUGAR_RTC_SYNC_HELPER="${HELPER_DIR}/rt-pisugar-rtc-sync.sh"
+PISUGAR_RTC_SERVICE_PATH="/etc/systemd/system/rt-pisugar-rtc.service"
 SPI_REBOOT_NEEDED="0"
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -320,6 +322,98 @@ tmp_target="\${TARGET_PATH}.tmp.\$\$"
 install -m 0755 "\${STAGED_PATH}" "\${tmp_target}"
 mv "\${tmp_target}" "\${TARGET_PATH}"
 rm -f "\${STAGED_PATH}"
+EOF
+}
+
+render_pisugar_rtc_sync_script() {
+  cat <<'EOF'
+#!/usr/bin/env bash
+# Synchronizes Linux system clock with PiSugar hardware RTC.
+# - On boot / offline: reads UTC time from PiSugar RTC and sets CLOCK_REALTIME in UTC (-u).
+# - On shutdown or when NTP synchronized: writes system clock to PiSugar RTC (rtc_pi2rtc).
+set -euo pipefail
+
+PISUGAR_PORT=8423
+PISUGAR_HOST="127.0.0.1"
+
+send_cmd() {
+  local cmd="$1"
+  python3 -c "
+import socket, sys
+try:
+    s = socket.create_connection(('${PISUGAR_HOST}', ${PISUGAR_PORT}), timeout=3)
+    s.sendall((sys.argv[1] + '\n').encode('utf-8'))
+    resp = s.recv(1024).decode('utf-8')
+    s.close()
+    print(resp.strip())
+except Exception:
+    sys.exit(1)
+" "$cmd" 2>/dev/null || true
+}
+
+sync_rtc_to_system() {
+  local rtc_resp
+  rtc_resp=$(send_cmd "get rtc_time")
+  # Expected format: "rtc_time: 2026-10-25T14:25:27.000+00:00"
+  local rtc_time
+  rtc_time=$(echo "${rtc_resp}" | awk '/rtc_time:/ {print $2}')
+  if [[ -n "${rtc_time}" ]]; then
+    # Must specify -u (UTC) so /bin/date sets UTC rather than misinterpreting as local time
+    date -u -s "${rtc_time}" >/dev/null 2>&1 || date -s "${rtc_time}" >/dev/null 2>&1
+    logger -t rt-pisugar-rtc "Synchronized system clock from PiSugar RTC: ${rtc_time} (UTC)"
+  else
+    logger -t rt-pisugar-rtc "Warning: Could not read rtc_time from PiSugar"
+  fi
+}
+
+sync_system_to_rtc() {
+  local resp
+  resp=$(send_cmd "rtc_pi2rtc")
+  logger -t rt-pisugar-rtc "Synchronized PiSugar RTC from system clock (rtc_pi2rtc)"
+}
+
+# Wait up to 10 seconds for pisugar-server to be ready
+for _ in {1..20}; do
+  if python3 -c "import socket; s = socket.create_connection(('${PISUGAR_HOST}', ${PISUGAR_PORT}), timeout=0.5); s.close()" 2>/dev/null; then
+    break
+  fi
+  sleep 0.5
+done
+
+action="${1:-start}"
+
+if [[ "${action}" == "--save" || "${action}" == "stop" ]]; then
+  sync_system_to_rtc
+  exit 0
+fi
+
+# On start/boot:
+is_ntp=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo "no")
+if [[ "${is_ntp}" == "yes" ]]; then
+  sync_system_to_rtc
+else
+  sync_rtc_to_system
+fi
+EOF
+}
+
+render_pisugar_rtc_systemd_unit() {
+  cat <<EOF
+[Unit]
+Description=PiSugar RTC Clock Synchronization
+Documentation=https://github.com/iwismer/rusty-timer
+After=pisugar-server.service
+Before=rt-forwarder.service time-sync.target
+Wants=pisugar-server.service
+
+[Service]
+Type=oneshot
+ExecStart=${PISUGAR_RTC_SYNC_HELPER} start
+ExecStop=${PISUGAR_RTC_SYNC_HELPER} stop
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
 EOF
 }
 
@@ -1267,6 +1361,9 @@ DEBCONF_EOF
   rm -f "${installer}"
 
   # 5. Configure pisugar-server
+  # Disable auto_rtc_sync in pisugar-server because its internal date sync
+  # omits the -u (UTC) flag, corrupting system time in non-UTC timezones.
+  # RTC synchronization is handled by rt-pisugar-rtc.service instead.
   local shutdown_level="${RT_SETUP_UPS_SHUTDOWN_LEVEL:-5}"
   local shutdown_delay="${RT_SETUP_UPS_SHUTDOWN_DELAY:-30}"
   mkdir -p /etc/pisugar-server
@@ -1276,31 +1373,47 @@ DEBCONF_EOF
   "auto_shutdown_level": ${shutdown_level},
   "auto_shutdown_delay": ${shutdown_delay},
   "auto_power_on": true,
-  "auto_rtc_sync": true,
+  "auto_rtc_sync": false,
   "soft_poweroff": true,
   "soft_poweroff_shell": "shutdown --poweroff 0",
   "long_tap_enable": true,
   "long_tap_shell": "sudo shutdown now"
 }
 PISUGAR_EOF
-  log "Wrote pisugar-server config (shutdown at ${shutdown_level}%, delay ${shutdown_delay}s)"
+  log "Wrote pisugar-server config (shutdown at ${shutdown_level}%, delay ${shutdown_delay}s, auto_rtc_sync disabled)"
 
   # 6. Enable and start pisugar-server
   systemctl enable pisugar-server.service
   systemctl start pisugar-server.service || true
   log "pisugar-server service enabled and started"
 
-  # 7. Add systemd ordering
+  # 7. Install PiSugar RTC synchronization helper and service
+  local rtc_helper="${PISUGAR_RTC_SYNC_HELPER}"
+  render_pisugar_rtc_sync_script > "${rtc_helper}"
+  chmod 0755 "${rtc_helper}"
+  chown root:root "${rtc_helper}"
+
+  local rtc_service="${PISUGAR_RTC_SERVICE_PATH}"
+  render_pisugar_rtc_systemd_unit > "${rtc_service}"
+  systemctl enable rt-pisugar-rtc.service
+  systemctl start rt-pisugar-rtc.service || true
+  log "rt-pisugar-rtc service enabled and started"
+
+  # 8. Add systemd ordering
   local service_file="/etc/systemd/system/rt-forwarder.service"
   if [[ -f "${service_file}" ]]; then
-    if ! grep -q "After=pisugar-server.service" "${service_file}"; then
-      sed -i '/^\[Unit\]/a After=pisugar-server.service' "${service_file}"
+    if ! grep -q "After=.*rt-pisugar-rtc.service" "${service_file}"; then
+      if grep -q "After=pisugar-server.service" "${service_file}"; then
+        sed -i 's/^After=pisugar-server.service.*/After=pisugar-server.service rt-pisugar-rtc.service/' "${service_file}"
+      else
+        sed -i '/^\[Unit\]/a After=pisugar-server.service rt-pisugar-rtc.service' "${service_file}"
+      fi
       systemctl daemon-reload
-      log "Added After=pisugar-server.service to rt-forwarder.service"
+      log "Added After=pisugar-server.service rt-pisugar-rtc.service to rt-forwarder.service"
     fi
   fi
 
-  # 8. Update forwarder.toml — add [ups] section if missing, or ensure enabled = true
+  # 9. Update forwarder.toml — add [ups] section if missing, or ensure enabled = true
   local config_file="${CONFIG_DIR}/forwarder.toml"
   if [[ -f "${config_file}" ]]; then
     if ! grep -q '^\[ups\]' "${config_file}"; then
