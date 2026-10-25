@@ -9,7 +9,10 @@ const config = {
       precompress: false,
       strict: true,
     }),
-    prerender: { entries: ["/", "/config"], handleHttpError: "warn" },
+    prerender: {
+      entries: ["/", "/config", "/wifi"],
+      handleHttpError: "warn",
+    },
   },
 };
 
