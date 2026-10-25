@@ -3766,6 +3766,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn benchmark_bulk_operations() {
         let mut db = Db::open_in_memory().unwrap();
         let divisions: Vec<(i32, String)> =

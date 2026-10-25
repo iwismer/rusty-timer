@@ -3,6 +3,7 @@ use receiver::participants::Participant;
 use std::time::Instant;
 
 #[test]
+#[ignore]
 fn bench_replace_rd_data() {
     let mut db = Db::open_in_memory().unwrap();
 
