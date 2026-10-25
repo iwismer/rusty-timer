@@ -46,11 +46,6 @@ export interface DataStats {
   resolvable_chips: number;
 }
 
-export interface StreamEpochOption {
-  stream_epoch: number;
-  created_unix_ms?: number | null;
-}
-
 export interface StreamEntry {
   // Canonical P2P stream identity (always present).
   forwarder_endpoint_id: string;
@@ -795,8 +790,21 @@ export async function updateSubscriptionEventType(
   });
 }
 
+export interface ExportEpochInfo {
+  epoch: number;
+  name?: string | null;
+  read_count: number;
+}
+
+export interface StreamExportEpochs {
+  stream_id: string;
+  epochs: ExportEpochInfo[];
+}
+
 export interface ExportEpochsResponse {
   epochs: number[];
+  details?: ExportEpochInfo[];
+  streams?: StreamExportEpochs[];
 }
 
 export interface ExportTagdataRequest {
@@ -804,6 +812,7 @@ export interface ExportTagdataRequest {
   epoch?: number | null;
   mode?: "merged" | "separate";
   destination_dir?: string | null;
+  stream_epochs?: Record<string, number | null> | null;
 }
 
 export interface ExportTagdataResponse {

@@ -599,13 +599,59 @@ describe("sse client", () => {
 
   it("getExportEpochs sends stream_id argument and returns epochs", async () => {
     const { getExportEpochs } = await import("./api");
-    mockInvoke.mockResolvedValue({ epochs: [3, 2, 1] });
+    mockInvoke.mockResolvedValue({
+      epochs: [3, 2, 1],
+      details: [
+        { epoch: 3, name: "Race 3", read_count: 50 },
+        { epoch: 2, name: "Race 2", read_count: 100 },
+        { epoch: 1, name: null, read_count: 20 },
+      ],
+      streams: [
+        {
+          stream_id: "ep1/s1",
+          epochs: [{ epoch: 1, name: "Start", read_count: 20 }],
+        },
+      ],
+    });
     const res = await getExportEpochs("stream-1");
     expect(mockInvoke).toHaveBeenCalledWith("get_export_epochs", {
       stream_id: "stream-1",
       streamId: "stream-1",
     });
     expect(res.epochs).toEqual([3, 2, 1]);
+    expect(res.details?.[0].name).toBe("Race 3");
+    expect(res.details?.[0].read_count).toBe(50);
+    expect(res.streams?.[0].stream_id).toBe("ep1/s1");
+  });
+
+  it("exportTagdata sends request argument with stream_epochs and returns result", async () => {
+    const { exportTagdata } = await import("./api");
+    mockInvoke.mockResolvedValue({
+      read_count: 120,
+      filename: "TAGDATA.TXT",
+      written_paths: ["C:\\Winrace\\Files\\TAGDATA.TXT"],
+      content: "aa...",
+      zip_base64: null,
+    });
+    const res = await exportTagdata({
+      mode: "merged",
+      stream_epochs: {
+        "ep1/s1": 2,
+        "ep1/s2": null,
+      },
+      destination_dir: "C:\\Winrace\\Files",
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("export_tagdata", {
+      request: {
+        mode: "merged",
+        stream_epochs: {
+          "ep1/s1": 2,
+          "ep1/s2": null,
+        },
+        destination_dir: "C:\\Winrace\\Files",
+      },
+    });
+    expect(res.read_count).toBe(120);
   });
 
   it("exportTagdata sends request argument and returns result", async () => {

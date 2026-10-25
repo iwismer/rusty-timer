@@ -1028,6 +1028,102 @@ impl Db {
         Ok(epochs)
     }
 
+    /// Load distinct epochs present in `received_events` with their valid tag read count.
+    pub fn load_received_epoch_counts(
+        &self,
+        stream_id: Option<&str>,
+    ) -> DbResult<Vec<(i64, usize)>> {
+        if let Some(stream) = stream_id {
+            let alt = stream
+                .split_once('/')
+                .map(|(ep, wire)| format!("{ep}\u{1f}{wire}"))
+                .unwrap_or_else(|| stream.to_string());
+            let mut stmt = self.conn.prepare(
+                "SELECT epoch,
+                        COUNT(CASE WHEN (substr(raw_frame, 1, 2) = X'6161' OR substr(raw_frame, 1, 2) = 'aa') THEN 1 END)
+                 FROM received_events
+                 WHERE stream_id = ?1 OR stream_id = ?2
+                 GROUP BY epoch
+                 ORDER BY epoch DESC",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![stream, alt], |row| {
+                let count: i64 = row.get(1)?;
+                Ok((row.get::<_, i64>(0)?, usize::try_from(count).unwrap_or(0)))
+            })?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT epoch,
+                        COUNT(CASE WHEN (substr(raw_frame, 1, 2) = X'6161' OR substr(raw_frame, 1, 2) = 'aa') THEN 1 END)
+                 FROM received_events
+                 GROUP BY epoch
+                 ORDER BY epoch DESC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let count: i64 = row.get(1)?;
+                Ok((row.get::<_, i64>(0)?, usize::try_from(count).unwrap_or(0)))
+            })?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        }
+    }
+
+    /// Load all distinct stream_ids and their epochs with tag read counts.
+    /// `stream_id` is normalized to use `/` instead of unit separator `\u{1f}`.
+    pub fn load_all_received_stream_epoch_counts(&self) -> DbResult<Vec<(String, i64, usize)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT stream_id,
+                    epoch,
+                    COUNT(CASE WHEN (substr(raw_frame, 1, 2) = X'6161' OR substr(raw_frame, 1, 2) = 'aa') THEN 1 END)
+             FROM received_events
+             GROUP BY stream_id, epoch
+             ORDER BY stream_id ASC, epoch DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let sid: String = row.get(0)?;
+            let count: i64 = row.get(2)?;
+            let normalized = sid.replace('\u{1f}', "/");
+            Ok((
+                normalized,
+                row.get::<_, i64>(1)?,
+                usize::try_from(count).unwrap_or(0),
+            ))
+        })?;
+
+        let mut by_stream_and_epoch: std::collections::BTreeMap<(String, i64), usize> =
+            std::collections::BTreeMap::new();
+        for r in rows {
+            let (sid, epoch, count) = r?;
+            *by_stream_and_epoch.entry((sid, epoch)).or_insert(0) += count;
+        }
+
+        let mut result: Vec<(String, i64, usize)> = by_stream_and_epoch
+            .into_iter()
+            .map(|((sid, epoch), count)| (sid, epoch, count))
+            .collect();
+        result.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+        Ok(result)
+    }
+
+    /// Load raw events for export with per-stream epoch selection.
+    /// If an entry in `stream_epochs` has `None`, all epochs for that stream are included.
+    /// Results are ordered chronologically by `(received_unix_ms, seq)`.
+    pub fn load_raw_export_events_for_stream_epochs(
+        &self,
+        stream_epochs: &std::collections::HashMap<String, Option<i64>>,
+    ) -> DbResult<Vec<ReceivedEvent>> {
+        let mut all_events = Vec::new();
+        for (stream_id, epoch) in stream_epochs {
+            let events = self.load_raw_export_events(Some(stream_id), *epoch)?;
+            all_events.extend(events);
+        }
+        all_events.sort_by(|a, b| {
+            a.received_unix_ms
+                .cmp(&b.received_unix_ms)
+                .then_with(|| a.seq.cmp(&b.seq))
+        });
+        Ok(all_events)
+    }
+
     /// Mark a single durable event as written to the DBF file. Only updates rows
     /// whose marker is still NULL, so this is safe to call repeatedly without
     /// overwriting an earlier delivery timestamp. Returns whether a row changed.
@@ -4073,6 +4169,42 @@ mod tests {
             db.load_raw_export_events(Some(s2), Some(1)).unwrap().len(),
             0
         );
+
+        // Epoch counts with aa tag frames vs non-tag frames
+        db.insert_received_event(&ReceivedEventInsert {
+            stream_id: s1,
+            seq: 3,
+            epoch: 1,
+            raw_frame: b"aa00058000123b3200012606251750411376\r\n",
+            read_kind: "tag",
+            reader_timestamp: Some("2026-07-05T09:03:00Z"),
+            received_unix_ms: 400,
+            dbf_delivered_unix_ms: None,
+            chip_id: None,
+        })
+        .unwrap();
+
+        let s1_counts = db.load_received_epoch_counts(Some(s1)).unwrap();
+        assert_eq!(s1_counts, vec![(2, 0), (1, 1)]);
+
+        let all_stream_counts = db.load_all_received_stream_epoch_counts().unwrap();
+        assert_eq!(
+            all_stream_counts,
+            vec![
+                ("s1".to_string(), 2, 0),
+                ("s1".to_string(), 1, 1),
+                ("s2".to_string(), 2, 0)
+            ]
+        );
+
+        // Per-stream epoch filtering
+        let mut filter = std::collections::HashMap::new();
+        filter.insert(s1.to_string(), Some(1));
+        filter.insert(s2.to_string(), None);
+        let multi_events = db
+            .load_raw_export_events_for_stream_epochs(&filter)
+            .unwrap();
+        assert_eq!(multi_events.len(), 3); // 2 rows from s1 with epoch 1, 1 row from s2 (all epochs)
     }
 
     #[test]

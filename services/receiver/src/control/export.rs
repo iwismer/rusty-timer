@@ -11,9 +11,27 @@ use crate::export::{
     write_separate_tagdata_files,
 };
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExportEpochInfo {
+    pub epoch: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub read_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StreamExportEpochs {
+    pub stream_id: String,
+    pub epochs: Vec<ExportEpochInfo>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportEpochsResponse {
     pub epochs: Vec<i64>,
+    #[serde(default)]
+    pub details: Vec<ExportEpochInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub streams: Vec<StreamExportEpochs>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +50,12 @@ pub struct ExportTagdataRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub destination_path: Option<String>,
+    #[serde(
+        default,
+        alias = "streamEpochs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub stream_epochs: Option<std::collections::HashMap<String, Option<i64>>>,
 }
 
 fn default_merged_mode() -> String {
@@ -49,7 +73,7 @@ pub struct ExportTagdataResponse {
     pub zip_base64: Option<String>,
 }
 
-/// Query distinct epochs for export.
+/// Query distinct epochs for export, with epoch names and read counts.
 pub async fn get_export_epochs(
     state: &AppState,
     stream_id: Option<String>,
@@ -58,7 +82,52 @@ pub async fn get_export_epochs(
     let epochs = db
         .load_distinct_received_epochs(stream_id.as_deref())
         .map_err(|e| ReceiverError::Internal(e.to_string()))?;
-    Ok(ExportEpochsResponse { epochs })
+    let counts = db
+        .load_received_epoch_counts(stream_id.as_deref())
+        .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    let all_stream_counts = db
+        .load_all_received_stream_epoch_counts()
+        .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    drop(db);
+
+    let mut details = Vec::new();
+    for (ep, count) in counts {
+        let name = if let Some(ref sid) = stream_id {
+            state.lookup_epoch_name(sid, ep).await
+        } else {
+            None
+        };
+        details.push(ExportEpochInfo {
+            epoch: ep,
+            name,
+            read_count: count,
+        });
+    }
+
+    let mut streams_map: std::collections::BTreeMap<String, Vec<ExportEpochInfo>> =
+        std::collections::BTreeMap::new();
+    for (sid, ep, count) in all_stream_counts {
+        let name = state.lookup_epoch_name(&sid, ep).await;
+        streams_map.entry(sid).or_default().push(ExportEpochInfo {
+            epoch: ep,
+            name,
+            read_count: count,
+        });
+    }
+
+    let streams = streams_map
+        .into_iter()
+        .map(|(sid, epochs)| StreamExportEpochs {
+            stream_id: sid,
+            epochs,
+        })
+        .collect();
+
+    Ok(ExportEpochsResponse {
+        epochs,
+        details,
+        streams,
+    })
 }
 
 /// Export raw reads to TAGDATA format (merged text or separate zip / files).
@@ -67,9 +136,13 @@ pub async fn export_tagdata(
     request: ExportTagdataRequest,
 ) -> Result<ExportTagdataResponse, ReceiverError> {
     let db = state.storage.db.lock().await;
-    let events = db
-        .load_raw_export_events(request.stream_id.as_deref(), request.epoch)
-        .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    let events = if let Some(ref map) = request.stream_epochs {
+        db.load_raw_export_events_for_stream_epochs(map)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?
+    } else {
+        db.load_raw_export_events(request.stream_id.as_deref(), request.epoch)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?
+    };
     drop(db);
 
     let read_count = events
@@ -198,11 +271,26 @@ mod tests {
         // Epochs
         let eps = get_export_epochs(&state, None).await.unwrap();
         assert_eq!(eps.epochs, vec![2, 1]);
+        assert_eq!(eps.details.len(), 2);
+        assert_eq!(eps.details[0].epoch, 2);
+        assert_eq!(eps.details[0].read_count, 1);
+        assert_eq!(eps.details[1].epoch, 1);
+        assert_eq!(eps.details[1].read_count, 1);
+        assert_eq!(eps.streams.len(), 2);
+        assert_eq!(eps.streams[0].stream_id, "s1");
+        assert_eq!(eps.streams[0].epochs[0].epoch, 1);
+        assert_eq!(eps.streams[0].epochs[0].read_count, 1);
+        assert_eq!(eps.streams[1].stream_id, "s2");
+        assert_eq!(eps.streams[1].epochs[0].epoch, 2);
+        assert_eq!(eps.streams[1].epochs[0].read_count, 1);
 
         let eps_s1 = get_export_epochs(&state, Some("s1".to_string()))
             .await
             .unwrap();
         assert_eq!(eps_s1.epochs, vec![1]);
+        assert_eq!(eps_s1.details.len(), 1);
+        assert_eq!(eps_s1.details[0].epoch, 1);
+        assert_eq!(eps_s1.details[0].read_count, 1);
 
         // Export all merged
         let res = export_tagdata(
@@ -212,6 +300,7 @@ mod tests {
                 epoch: None,
                 mode: "merged".to_string(),
                 destination_path: None,
+                stream_epochs: None,
             },
         )
         .await
@@ -230,6 +319,7 @@ mod tests {
                 epoch: Some(1),
                 mode: "merged".to_string(),
                 destination_path: None,
+                stream_epochs: None,
             },
         )
         .await
@@ -260,6 +350,7 @@ mod tests {
                 epoch: None,
                 mode: "separate".to_string(),
                 destination_path: Some(dest),
+                stream_epochs: None,
             },
         )
         .await
@@ -280,6 +371,7 @@ mod tests {
                 epoch: None,
                 mode: "merged".to_string(),
                 destination_path: Some(custom_file.to_string_lossy().to_string()),
+                stream_epochs: None,
             },
         )
         .await
@@ -289,5 +381,36 @@ mod tests {
             vec![custom_file.to_string_lossy().to_string()]
         );
         assert!(custom_file.exists());
+
+        // Export with per-stream epoch selection
+        let mut stream_epochs = std::collections::HashMap::new();
+        stream_epochs.insert("s1".to_string(), Some(1));
+        let res_stream_epochs = export_tagdata(
+            &state,
+            ExportTagdataRequest {
+                stream_id: None,
+                epoch: None,
+                mode: "merged".to_string(),
+                destination_path: None,
+                stream_epochs: Some(stream_epochs),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(res_stream_epochs.read_count, 1);
+        assert!(
+            res_stream_epochs
+                .content
+                .as_ref()
+                .unwrap()
+                .contains("aa00058000123b32")
+        );
+        assert!(
+            !res_stream_epochs
+                .content
+                .as_ref()
+                .unwrap()
+                .contains("aa00058000999b99")
+        );
     }
 }

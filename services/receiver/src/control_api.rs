@@ -1618,6 +1618,41 @@ impl AppState {
         Some((reader.current_epoch?, reader.current_epoch_start_seq))
     }
 
+    /// Look up the name of an epoch for a stream, if advertised in catalog or live status.
+    pub(crate) async fn lookup_epoch_name(&self, stream_id: &str, epoch: i64) -> Option<String> {
+        let (endpoint_id, wire_id) = if let Some(pair) = stream_id.split_once('/') {
+            (pair.0, pair.1)
+        } else if let Some(pair) = stream_id.split_once('\u{1f}') {
+            (pair.0, pair.1)
+        } else {
+            ("", stream_id)
+        };
+
+        if !endpoint_id.is_empty() {
+            let options = self.merged_epoch_options(endpoint_id, wire_id).await;
+            if let Some(opt) = options.iter().find(|o| o.stream_epoch == epoch)
+                && let Some(ref name) = opt.name
+            {
+                return Some(name.clone());
+            }
+        } else {
+            let discovered = self.forwarders.discovered_forwarders.read().await;
+            for (ep, forwarder) in discovered.iter() {
+                for st in &forwarder.streams {
+                    if st.stream_id == wire_id {
+                        let options = self.merged_epoch_options(ep, wire_id).await;
+                        if let Some(opt) = options.iter().find(|o| o.stream_epoch == epoch)
+                            && let Some(ref name) = opt.name
+                        {
+                            return Some(name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     pub(crate) async fn clear_forwarder_live_status(&self, endpoint_id: &str) {
         self.record_forwarder_last_seen(endpoint_id);
         {

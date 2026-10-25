@@ -14,12 +14,85 @@
 
   let selectedTarget = $state<string>("merged");
   let selectedEpoch = $state<string>("all");
-  let availableEpochs = $state<number[]>([]);
+  let selectedStreamEpochs = $state<Record<string, string>>({});
+  let availableEpochDetails = $state<api.ExportEpochInfo[]>([]);
+  let backendStreamsMap = $state<Map<string, api.ExportEpochInfo[]>>(new Map());
   let loadingEpochs = $state(false);
   let exporting = $state(false);
   let feedback = $state<{ kind: "ok" | "err"; message: string } | null>(null);
 
   let streams = $derived(store.streams?.streams ?? []);
+
+  interface ExportStreamItem {
+    key: string;
+    label: string;
+    forwarder_id?: string | null;
+    epochs: api.ExportEpochInfo[];
+    totalReads: number;
+  }
+
+  let exportStreamsList = $derived.by<ExportStreamItem[]>(() => {
+    const list: ExportStreamItem[] = [];
+    const seen = new Set<string>();
+
+    for (const s of streams) {
+      const key = streamIdentity(s);
+      seen.add(key);
+      const rawEpochs = backendStreamsMap.get(key) ?? [];
+      const enrichedEpochs = rawEpochs.map((ep) => {
+        const name =
+          ep.name ||
+          s.epoch_options?.find((o) => o.stream_epoch === ep.epoch)?.name ||
+          (s.stream_epoch === ep.epoch ? s.current_epoch_name : null) ||
+          null;
+        return { ...ep, name };
+      });
+      const totalReads = enrichedEpochs.reduce(
+        (acc, e) => acc + e.read_count,
+        0,
+      );
+      list.push({
+        key,
+        label: s.reader_ip ?? s.display_alias ?? s.stream_id,
+        forwarder_id: s.forwarder_id,
+        epochs: enrichedEpochs,
+        totalReads: totalReads > 0 ? totalReads : (s.reads_total ?? 0),
+      });
+    }
+
+    for (const [key, rawEpochs] of backendStreamsMap.entries()) {
+      if (seen.has(key)) continue;
+      const totalReads = rawEpochs.reduce((acc, e) => acc + e.read_count, 0);
+      list.push({
+        key,
+        label: key,
+        forwarder_id: null,
+        epochs: rawEpochs,
+        totalReads,
+      });
+    }
+
+    return list;
+  });
+
+  let singleStreamEpochs = $derived.by<api.ExportEpochInfo[]>(() => {
+    if (selectedTarget === "merged" || selectedTarget === "separate") {
+      return availableEpochDetails;
+    }
+    const fromMap = exportStreamsList.find((s) => s.key === selectedTarget);
+    if (fromMap && fromMap.epochs.length > 0) {
+      return fromMap.epochs;
+    }
+    return availableEpochDetails;
+  });
+
+  let singleStreamTotalReads = $derived.by<number>(() => {
+    if (selectedTarget === "merged" || selectedTarget === "separate") {
+      return exportStreamsList.reduce((acc, s) => acc + s.totalReads, 0);
+    }
+    const item = exportStreamsList.find((s) => s.key === selectedTarget);
+    return item?.totalReads ?? 0;
+  });
 
   $effect(() => {
     if (!open) {
@@ -40,38 +113,81 @@
 
   $effect(() => {
     if (!open) return;
-    const streamArg =
-      selectedTarget === "merged" || selectedTarget === "separate"
-        ? null
-        : selectedTarget;
+    const isAllStreams =
+      selectedTarget === "merged" || selectedTarget === "separate";
+    const streamArg = isAllStreams ? null : selectedTarget;
 
     loadingEpochs = true;
     api
       .getExportEpochs(streamArg)
       .then((res) => {
-        availableEpochs = res.epochs;
+        availableEpochDetails =
+          res.details ??
+          res.epochs.map((ep) => ({
+            epoch: ep,
+            name: null,
+            read_count: 0,
+          }));
+
+        if (res.streams && res.streams.length > 0) {
+          const map = new Map<string, api.ExportEpochInfo[]>();
+          for (const s of res.streams) {
+            map.set(s.stream_id, s.epochs);
+          }
+          backendStreamsMap = map;
+        } else if (!isAllStreams && streamArg) {
+          backendStreamsMap.set(streamArg, availableEpochDetails);
+          backendStreamsMap = new Map(backendStreamsMap);
+        }
+
+        // Initialize selected stream epochs if not present
+        const nextStreamEpochs = { ...selectedStreamEpochs };
+        for (const s of streams) {
+          const key = streamIdentity(s);
+          if (!nextStreamEpochs[key]) {
+            nextStreamEpochs[key] = "all";
+          }
+        }
+        selectedStreamEpochs = nextStreamEpochs;
       })
       .catch(() => {
-        availableEpochs = [];
+        availableEpochDetails = [];
       })
       .finally(() => {
         loadingEpochs = false;
       });
   });
 
+  function setAllStreamEpochs(target: "all" | "latest") {
+    const next: Record<string, string> = {};
+    for (const item of exportStreamsList) {
+      if (target === "all" || item.epochs.length === 0) {
+        next[item.key] = "all";
+      } else {
+        next[item.key] = String(item.epochs[0].epoch);
+      }
+    }
+    selectedStreamEpochs = next;
+  }
+
+  function formatEpochOption(ep: api.ExportEpochInfo): string {
+    const countStr = `${ep.read_count.toLocaleString()} ${ep.read_count === 1 ? "read" : "reads"}`;
+    if (ep.name && ep.name.trim().length > 0) {
+      return `Epoch ${ep.epoch} (${ep.name.trim()}) — ${countStr}`;
+    }
+    return `Epoch ${ep.epoch} — ${countStr}`;
+  }
+
   async function handleDownload() {
     exporting = true;
     feedback = null;
     try {
       const mode = selectedTarget === "separate" ? "separate" : "merged";
-      const stream_id =
-        selectedTarget === "merged" || selectedTarget === "separate"
-          ? undefined
-          : selectedTarget;
-      const epoch = selectedEpoch === "all" ? undefined : Number(selectedEpoch);
+      const isAllStreams =
+        selectedTarget === "merged" || selectedTarget === "separate";
+
       const defaultFilename =
         mode === "separate" ? "TAGDATA.ZIP" : "TAGDATA.TXT";
-
       const defaultDir = store.editRdImportDir?.trim() || "";
       const defaultPath = defaultDir
         ? `${defaultDir.replace(/[\\/]+$/, "")}/${defaultFilename}`
@@ -95,16 +211,31 @@
           return;
         }
       } catch {
-        // If saveFileDialog is unavailable (e.g. running in browser/test), fallback to direct browser download
         targetPath = null;
       }
 
-      const res = await api.exportTagdata({
-        stream_id,
-        epoch,
-        mode,
-        destination_dir: targetPath ?? undefined,
-      });
+      let res: api.ExportTagdataResponse;
+      if (isAllStreams) {
+        const stream_epochs: Record<string, number | null> = {};
+        for (const item of exportStreamsList) {
+          const choice = selectedStreamEpochs[item.key] ?? "all";
+          stream_epochs[item.key] = choice === "all" ? null : Number(choice);
+        }
+        res = await api.exportTagdata({
+          mode,
+          stream_epochs,
+          destination_dir: targetPath ?? undefined,
+        });
+      } else {
+        const epoch =
+          selectedEpoch === "all" ? undefined : Number(selectedEpoch);
+        res = await api.exportTagdata({
+          stream_id: selectedTarget,
+          epoch,
+          mode: "merged",
+          destination_dir: targetPath ?? undefined,
+        });
+      }
 
       if (targetPath) {
         feedback = {
@@ -200,7 +331,7 @@
           <span class="block text-xs font-medium text-text-muted mb-2">
             Target Stream
           </span>
-          <div class="flex flex-col gap-2 max-h-40 overflow-y-auto pr-1">
+          <div class="flex flex-col gap-2 max-h-36 overflow-y-auto pr-1">
             {#if streams.length > 1 || streams.length === 0}
               <label class="flex items-center gap-2 cursor-pointer text-xs">
                 <input
@@ -250,27 +381,116 @@
           </div>
         </div>
 
-        <div>
-          <label
-            for="receiver-export-epoch-select"
-            class="block text-xs font-medium text-text-muted mb-1"
-          >
-            Scope
-          </label>
-          <select
-            id="receiver-export-epoch-select"
-            bind:value={selectedEpoch}
-            class="w-full text-xs px-2.5 py-1.5 rounded-md border border-border bg-surface-0 text-text-primary"
-            disabled={loadingEpochs || exporting}
-          >
-            <option value="all">All Reads (all epochs)</option>
-            {#each availableEpochs as ep}
-              <option value={String(ep)}>
-                Epoch {ep}
+        {#if selectedTarget === "merged" || selectedTarget === "separate"}
+          <div>
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="block text-xs font-medium text-text-muted">
+                Scope (Epoch per Stream)
+              </span>
+              {#if exportStreamsList.length > 1}
+                <div class="flex items-center gap-1.5 text-[11px]">
+                  <span class="text-text-muted">Set all:</span>
+                  <button
+                    type="button"
+                    class="text-accent hover:underline cursor-pointer bg-transparent border-none p-0"
+                    onclick={() => setAllStreamEpochs("all")}
+                    disabled={loadingEpochs || exporting}
+                  >
+                    All Reads
+                  </button>
+                  <span class="text-text-muted">|</span>
+                  <button
+                    type="button"
+                    class="text-accent hover:underline cursor-pointer bg-transparent border-none p-0"
+                    onclick={() => setAllStreamEpochs("latest")}
+                    disabled={loadingEpochs || exporting}
+                  >
+                    Latest Epoch
+                  </button>
+                </div>
+              {/if}
+            </div>
+
+            <div class="flex flex-col gap-2 max-h-48 overflow-y-auto pr-1">
+              {#if exportStreamsList.length === 0}
+                <select
+                  id="receiver-export-epoch-select"
+                  bind:value={selectedEpoch}
+                  class="w-full text-xs px-2.5 py-1.5 rounded-md border border-border bg-surface-0 text-text-primary"
+                  disabled={loadingEpochs || exporting}
+                >
+                  <option value="all">All Reads (all epochs)</option>
+                  {#each availableEpochDetails as ep}
+                    <option value={String(ep.epoch)}>
+                      {formatEpochOption(ep)}
+                    </option>
+                  {/each}
+                </select>
+              {:else}
+                {#each exportStreamsList as item (item.key)}
+                  <div
+                    class="flex flex-col gap-1 p-2 rounded bg-surface-0 border border-border"
+                  >
+                    <div class="flex items-center justify-between text-xs">
+                      <span class="font-medium truncate font-mono"
+                        >{item.label}</span
+                      >
+                      {#if item.forwarder_id}
+                        <span class="text-[11px] text-text-muted"
+                          >({item.forwarder_id})</span
+                        >
+                      {/if}
+                    </div>
+                    <select
+                      id="receiver-export-epoch-stream-{item.key}"
+                      data-testid="receiver-export-epoch-stream-{item.key}"
+                      bind:value={selectedStreamEpochs[item.key]}
+                      class="w-full text-xs px-2 py-1.5 rounded border border-border bg-surface-1 text-text-primary"
+                      disabled={loadingEpochs || exporting}
+                    >
+                      <option value="all">
+                        All Reads (all epochs){item.totalReads > 0
+                          ? ` — ${item.totalReads.toLocaleString()} reads`
+                          : ""}
+                      </option>
+                      {#each item.epochs as ep}
+                        <option value={String(ep.epoch)}>
+                          {formatEpochOption(ep)}
+                        </option>
+                      {/each}
+                    </select>
+                  </div>
+                {/each}
+              {/if}
+            </div>
+          </div>
+        {:else}
+          <div>
+            <label
+              for="receiver-export-epoch-select"
+              class="block text-xs font-medium text-text-muted mb-1"
+            >
+              Scope
+            </label>
+            <select
+              id="receiver-export-epoch-select"
+              bind:value={selectedEpoch}
+              class="w-full text-xs px-2.5 py-1.5 rounded-md border border-border bg-surface-0 text-text-primary"
+              disabled={loadingEpochs || exporting}
+            >
+              <option value="all">
+                All Reads (all epochs){singleStreamTotalReads > 0
+                  ? ` — ${singleStreamTotalReads.toLocaleString()} reads`
+                  : ""}
               </option>
-            {/each}
-          </select>
-        </div>
+              {#each singleStreamEpochs as ep}
+                <option value={String(ep.epoch)}>
+                  {formatEpochOption(ep)}
+                </option>
+              {/each}
+            </select>
+          </div>
+        {/if}
 
         <p class="text-xs text-text-muted m-0">
           Exports raw reader passes with Windows CRLF endings, matching Race
