@@ -5217,7 +5217,7 @@ dependencies = [
 
 [[package]]
 name = "receiver"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "axum",
  "base64 0.23.1",
