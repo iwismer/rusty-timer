@@ -469,6 +469,10 @@ async fn main() {
         status_server.reader_control_service(),
         Arc::clone(&journal),
     ));
+    let wifi_control_handler = Arc::new(forwarder::p2p::ForwarderWifiControlHandler::new(
+        cfg.control.allow_wifi_control,
+        status_server.wifi_service(),
+    ));
     let p2p_runtime = match forwarder::p2p::start_forwarder_p2p(
         &cfg.p2p,
         journal_path,
@@ -481,6 +485,7 @@ async fn main() {
         status_server.status_feed(),
         remote_config_handler,
         reader_control_handler,
+        wifi_control_handler,
     )
     .await
     {

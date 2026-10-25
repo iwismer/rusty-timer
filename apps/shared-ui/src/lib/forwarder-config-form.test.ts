@@ -56,6 +56,7 @@ function makeForm(overrides: Partial<ForwarderConfigFormState> = {}): ForwarderC
     upsPollIntervalSecs: "",
     upsUpstreamHeartbeatSecs: "",
     controlAllowPowerActions: false,
+    controlAllowWifiControl: true,
     updateMode: "",
     readers: [makeReader()],
     ...overrides,
@@ -244,9 +245,11 @@ describe("fromConfig", () => {
     const form = fromConfig({
       control: {
         allow_power_actions: true,
+        allow_wifi_control: false,
       },
     });
     expect(form.controlAllowPowerActions).toBe(true);
+    expect(form.controlAllowWifiControl).toBe(false);
   });
 
   it("reads update.mode when present", () => {
@@ -462,13 +465,15 @@ describe("payload builders", () => {
     });
   });
 
-  it("serializes control allow_power_actions boolean", () => {
+  it("serializes control allow_power_actions and allow_wifi_control booleans", () => {
     const form = {
       controlAllowPowerActions: true,
+      controlAllowWifiControl: false,
     } as ForwarderConfigFormState;
 
     expect(toControlPayload(form)).toEqual({
       allow_power_actions: true,
+      allow_wifi_control: false,
     });
   });
 

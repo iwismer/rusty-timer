@@ -18,6 +18,10 @@ pub const CAP_REMOTE_CONFIG: &str = "remote-config";
 /// Peer supports reader-specific control verbs on the control stream.
 pub const CAP_READER_CONTROL: &str = "reader_control";
 
+/// Peer supports remote Wi-Fi scan/connect/disconnect/forget verbs on the
+/// control stream.
+pub const CAP_WIFI_CONTROL: &str = "wifi-control";
+
 /// Returns `true` when `cap` is present in a negotiated capability set.
 ///
 /// `caps` is typically [`HelloOk.capabilities`](crate::HelloOk), the

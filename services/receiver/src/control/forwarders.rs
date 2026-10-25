@@ -2,12 +2,13 @@
 //! handlers.
 
 use crate::control_api::{
-    AppState, ConfigCommand, DiscoveredForwarders, FORWARDER_CONFIG_TIMEOUT, ForwarderConnState,
-    ForwarderLiveStatus, ForwarderRuntimeStatus, ReaderCommand, ReaderLiveStatus, UpsStatusPayload,
-    derive_forwarder_state, optional_non_empty, sorted_reader_statuses, subscription_local_ports,
+    AppState, ConfigCommand, DiscoveredForwarders, FORWARDER_CONFIG_TIMEOUT,
+    FORWARDER_WIFI_TIMEOUT, ForwarderConnState, ForwarderLiveStatus, ForwarderRuntimeStatus,
+    ReaderCommand, ReaderLiveStatus, UpsStatusPayload, WifiCommand, derive_forwarder_state,
+    optional_non_empty, sorted_reader_statuses, subscription_local_ports,
 };
 use crate::error::ReceiverError;
-use rt_p2p_protocol::{ReaderControlResponse, ReaderInfo};
+use rt_p2p_protocol::{ReaderControlResponse, ReaderInfo, WifiControlRequest, WifiControlResponse};
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap};
 use tokio::sync::{mpsc, mpsc::error::TrySendError, oneshot};
@@ -38,6 +39,7 @@ pub struct ForwarderConnectionStatus {
     /// affordances.
     pub remote_config_available: bool,
     pub reader_control_available: bool,
+    pub wifi_control_available: bool,
     #[serde(default)]
     pub last_seen_secs: Option<u64>,
 }
@@ -125,10 +127,12 @@ pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
         .clone();
     let config_endpoints = state.forwarder_config_endpoints();
     let reader_control_endpoints = state.forwarder_reader_control_endpoints();
+    let wifi_control_endpoints = state.forwarder_wifi_control_endpoints();
     let mut endpoints: BTreeSet<String> = discovered.keys().cloned().collect();
     endpoints.extend(live_statuses.keys().cloned());
     endpoints.extend(config_endpoints.iter().cloned());
     endpoints.extend(reader_control_endpoints.iter().cloned());
+    endpoints.extend(wifi_control_endpoints.iter().cloned());
     let mut subscribed_counts: HashMap<String, usize> = HashMap::new();
     let local_ports = subscription_local_ports(&subscriptions);
     for subscription in &subscriptions {
@@ -149,6 +153,7 @@ pub async fn get_connections(state: &AppState) -> ConnectionsResponse {
         &local_ports,
         &config_endpoints,
         &reader_control_endpoints,
+        &wifi_control_endpoints,
         &last_seen_map,
     );
 
@@ -170,6 +175,7 @@ pub(crate) fn assemble_forwarder_connection_statuses(
     local_ports: &HashMap<(String, String), Option<u16>>,
     config_endpoints: &[String],
     reader_control_endpoints: &[String],
+    wifi_control_endpoints: &[String],
     last_seen_by_endpoint: &HashMap<String, std::time::Instant>,
 ) -> Vec<ForwarderConnectionStatus> {
     let mut forwarders = Vec::with_capacity(endpoints.len());
@@ -225,6 +231,7 @@ pub(crate) fn assemble_forwarder_connection_statuses(
             restart_needed: None,
             remote_config_available: config_endpoints.contains(&endpoint_id),
             reader_control_available: reader_control_endpoints.contains(&endpoint_id),
+            wifi_control_available: wifi_control_endpoints.contains(&endpoint_id),
             last_seen_secs,
         });
     }
@@ -374,6 +381,224 @@ pub async fn restart_forwarder(
     Ok(ForwarderRestartResult {
         accepted: response.accepted,
         error: optional_non_empty(response.error),
+    })
+}
+
+fn forwarder_wifi_control_unavailable() -> ReceiverError {
+    ReceiverError::NotConnected("forwarder not connected or Wi-Fi control unavailable".to_owned())
+}
+
+fn enqueue_wifi_command(
+    tx: &mpsc::Sender<WifiCommand>,
+    command: WifiCommand,
+) -> Result<(), ReceiverError> {
+    match tx.try_send(command) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(_)) => Err(ReceiverError::UpstreamError(
+            "forwarder Wi-Fi control channel busy".to_owned(),
+        )),
+        Err(TrySendError::Closed(_)) => Err(forwarder_wifi_control_unavailable()),
+    }
+}
+
+async fn await_wifi_response(
+    rx: oneshot::Receiver<WifiControlResponse>,
+) -> Result<WifiControlResponse, ReceiverError> {
+    match tokio::time::timeout(FORWARDER_WIFI_TIMEOUT, rx).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(_)) => Err(ReceiverError::NotConnected(
+            "forwarder control session ended before responding".to_owned(),
+        )),
+        Err(_) => Err(ReceiverError::UpstreamError(
+            "timed out waiting for forwarder Wi-Fi control response".to_owned(),
+        )),
+    }
+}
+
+async fn send_wifi_request(
+    state: &AppState,
+    endpoint_id: &str,
+    request: WifiControlRequest,
+) -> Result<WifiControlResponse, ReceiverError> {
+    let tx = state
+        .forwarder_wifi_control_tx(endpoint_id)
+        .ok_or_else(forwarder_wifi_control_unavailable)?;
+    let (resp_tx, resp_rx) = oneshot::channel();
+    enqueue_wifi_command(
+        &tx,
+        WifiCommand::Request {
+            request,
+            resp: resp_tx,
+        },
+    )?;
+    await_wifi_response(resp_rx).await
+}
+
+fn parse_wifi_payload<T: serde::de::DeserializeOwned>(
+    payload_json: Option<&str>,
+    context: &str,
+) -> Result<T, ReceiverError> {
+    let json = payload_json.filter(|s| !s.is_empty()).ok_or_else(|| {
+        ReceiverError::UpstreamError(format!("forwarder returned empty {context} payload"))
+    })?;
+    serde_json::from_str(json).map_err(|error| {
+        ReceiverError::UpstreamError(format!("forwarder returned invalid {context}: {error}"))
+    })
+}
+
+pub async fn forwarder_wifi_status(
+    state: &AppState,
+    endpoint_id: String,
+) -> Result<rt_domain::WifiStatus, ReceiverError> {
+    let response = send_wifi_request(
+        state,
+        &endpoint_id,
+        WifiControlRequest {
+            request_id: String::new(),
+            command: "status".to_owned(),
+            ssid: None,
+            password: None,
+            hidden: None,
+            rescan: None,
+        },
+    )
+    .await?;
+    if !response.ok {
+        return Err(ReceiverError::UpstreamError(response.message));
+    }
+    parse_wifi_payload(response.payload_json.as_deref(), "wifi status")
+}
+
+pub async fn forwarder_wifi_scan(
+    state: &AppState,
+    endpoint_id: String,
+    rescan: Option<bool>,
+) -> Result<rt_domain::WifiScanResult, ReceiverError> {
+    let response = send_wifi_request(
+        state,
+        &endpoint_id,
+        WifiControlRequest {
+            request_id: String::new(),
+            command: "scan".to_owned(),
+            ssid: None,
+            password: None,
+            hidden: None,
+            rescan,
+        },
+    )
+    .await?;
+    if !response.ok {
+        return Err(ReceiverError::UpstreamError(response.message));
+    }
+    parse_wifi_payload(response.payload_json.as_deref(), "wifi scan")
+}
+
+pub async fn forwarder_wifi_connect(
+    state: &AppState,
+    endpoint_id: String,
+    ssid: String,
+    password: Option<String>,
+    hidden: Option<bool>,
+) -> Result<rt_domain::WifiActionResult, ReceiverError> {
+    let response = send_wifi_request(
+        state,
+        &endpoint_id,
+        WifiControlRequest {
+            request_id: String::new(),
+            command: "connect".to_owned(),
+            ssid: Some(ssid),
+            password,
+            hidden,
+            rescan: None,
+        },
+    )
+    .await?;
+    if !response.ok {
+        return Err(ReceiverError::UpstreamError(response.message));
+    }
+    let status = match response.payload_json.as_deref().filter(|s| !s.is_empty()) {
+        Some(json) => Some(serde_json::from_str(json).map_err(|error| {
+            ReceiverError::UpstreamError(format!(
+                "forwarder returned invalid wifi status in connect response: {error}"
+            ))
+        })?),
+        None => None,
+    };
+    Ok(rt_domain::WifiActionResult {
+        ok: true,
+        message: response.message,
+        status,
+    })
+}
+
+pub async fn forwarder_wifi_disconnect(
+    state: &AppState,
+    endpoint_id: String,
+) -> Result<rt_domain::WifiActionResult, ReceiverError> {
+    let response = send_wifi_request(
+        state,
+        &endpoint_id,
+        WifiControlRequest {
+            request_id: String::new(),
+            command: "disconnect".to_owned(),
+            ssid: None,
+            password: None,
+            hidden: None,
+            rescan: None,
+        },
+    )
+    .await?;
+    if !response.ok {
+        return Err(ReceiverError::UpstreamError(response.message));
+    }
+    let status = match response.payload_json.as_deref().filter(|s| !s.is_empty()) {
+        Some(json) => Some(serde_json::from_str(json).map_err(|error| {
+            ReceiverError::UpstreamError(format!(
+                "forwarder returned invalid wifi status in disconnect response: {error}"
+            ))
+        })?),
+        None => None,
+    };
+    Ok(rt_domain::WifiActionResult {
+        ok: true,
+        message: response.message,
+        status,
+    })
+}
+
+pub async fn forwarder_wifi_forget(
+    state: &AppState,
+    endpoint_id: String,
+    ssid: String,
+) -> Result<rt_domain::WifiActionResult, ReceiverError> {
+    let response = send_wifi_request(
+        state,
+        &endpoint_id,
+        WifiControlRequest {
+            request_id: String::new(),
+            command: "forget".to_owned(),
+            ssid: Some(ssid),
+            password: None,
+            hidden: None,
+            rescan: None,
+        },
+    )
+    .await?;
+    if !response.ok {
+        return Err(ReceiverError::UpstreamError(response.message));
+    }
+    let status = match response.payload_json.as_deref().filter(|s| !s.is_empty()) {
+        Some(json) => Some(serde_json::from_str(json).map_err(|error| {
+            ReceiverError::UpstreamError(format!(
+                "forwarder returned invalid wifi status in forget response: {error}"
+            ))
+        })?),
+        None => None,
+    };
+    Ok(rt_domain::WifiActionResult {
+        ok: true,
+        message: response.message,
+        status,
     })
 }
 

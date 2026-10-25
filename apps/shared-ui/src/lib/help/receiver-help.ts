@@ -202,6 +202,12 @@ export const RECEIVER_HELP = {
         detailHtml:
           'Opens the remote configuration dialog for the forwarder. Only shown when the forwarder supports remote configuration.',
       },
+      forwarder_wifi: {
+        label: 'Wi-Fi',
+        summary: "Scan and manage the forwarder's Wi-Fi networks remotely over P2P.",
+        detailHtml:
+          'Opens the remote Wi-Fi manager for this forwarder, allowing you to scan for nearby networks, connect to a new SSID, disconnect, or forget saved Wi-Fi profiles. Only shown when the forwarder has Wi-Fi control enabled.',
+      },
       forwarder_battery: {
         label: 'Battery',
         summary: 'UPS battery level reported by the forwarder.',

@@ -54,7 +54,9 @@ pub mod proto {
     pub use crate::generated::*;
 }
 
-pub use capabilities::{CAP_CONTROL_EVENTS, CAP_READER_CONTROL, CAP_REMOTE_CONFIG, has_capability};
+pub use capabilities::{
+    CAP_CONTROL_EVENTS, CAP_READER_CONTROL, CAP_REMOTE_CONFIG, CAP_WIFI_CONTROL, has_capability,
+};
 pub use codec::{
     Frame, MAX_FRAME_BYTES, decode_frame, decode_frame_len, decode_frame_payload,
     decode_message_frame, encode_frame,
@@ -66,6 +68,7 @@ pub use generated::{
     GapNotice, Hello, HelloOk, Ping, Pong, ProtocolError as WireProtocolError, ReadRecord,
     ReaderControlRequest, ReaderControlResponse, ReaderInfo, ReaderStatus, RestartRequest,
     RestartResponse, StreamCatalog, StreamEntry, StreamEpochSummary, SubscribeMode, SubscribeOk,
-    SyncClock, UpsStatus, control_c2f, control_f2c, data_c2f, data_f2c,
+    SyncClock, UpsStatus, WifiControlRequest, WifiControlResponse, control_c2f, control_f2c,
+    data_c2f, data_f2c,
 };
 pub use negotiate::negotiate;

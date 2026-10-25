@@ -233,6 +233,24 @@ message RestartResponse {
   string error = 3;
 }
 
+message WifiControlRequest {
+  string request_id = 1;
+  // "status", "scan", "connect", "disconnect", or "forget"
+  string command = 2;
+  optional string ssid = 3;
+  optional string password = 4;
+  optional bool hidden = 5;
+  optional bool rescan = 6;
+}
+
+message WifiControlResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string message = 3;
+  // JSON-serialized rt_domain::WifiStatus or rt_domain::WifiScanResult
+  optional string payload_json = 4;
+}
+
 // ---------------------------------------------------------------------------
 // Data-plane messages
 // ---------------------------------------------------------------------------
@@ -325,6 +343,7 @@ message ControlC2F {
     ConfigGetRequest config_get_request = 5;
     ConfigSetRequest config_set_request = 6;
     RestartRequest restart_request = 7;
+    WifiControlRequest wifi_control_request = 8;
   }
 }
 
@@ -345,6 +364,7 @@ message ControlF2C {
     ConfigGetResponse config_get_response = 12;
     ConfigSetResponse config_set_response = 13;
     RestartResponse restart_response = 14;
+    WifiControlResponse wifi_control_response = 15;
   }
 }
 

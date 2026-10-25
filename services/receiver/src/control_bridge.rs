@@ -239,6 +239,32 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
         "restart_forwarder" => {
             ok(control_api::restart_forwarder(state, arg(args, "endpoint_id")?).await?)
         }
+        "forwarder_wifi_status" => {
+            ok(control_api::forwarder_wifi_status(state, arg(args, "endpoint_id")?).await?)
+        }
+        "forwarder_wifi_scan" => ok(control_api::forwarder_wifi_scan(
+            state,
+            arg(args, "endpoint_id")?,
+            arg(args, "rescan")?,
+        )
+        .await?),
+        "forwarder_wifi_connect" => ok(control_api::forwarder_wifi_connect(
+            state,
+            arg(args, "endpoint_id")?,
+            arg(args, "ssid")?,
+            arg(args, "password")?,
+            arg(args, "hidden")?,
+        )
+        .await?),
+        "forwarder_wifi_disconnect" => {
+            ok(control_api::forwarder_wifi_disconnect(state, arg(args, "endpoint_id")?).await?)
+        }
+        "forwarder_wifi_forget" => ok(control_api::forwarder_wifi_forget(
+            state,
+            arg(args, "endpoint_id")?,
+            arg(args, "ssid")?,
+        )
+        .await?),
         "reader_get_info" => ok(control_api::reader_get_info(
             state,
             arg(args, "endpoint_id")?,

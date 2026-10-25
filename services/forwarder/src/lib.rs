@@ -21,6 +21,7 @@ pub mod storage;
 pub mod ui_events;
 pub mod ui_server;
 pub mod ups_task;
+pub mod wifi;
 
 pub const DEFAULT_UPDATER_STAGE_DIR: &str = "/var/lib/rusty-timer";
 

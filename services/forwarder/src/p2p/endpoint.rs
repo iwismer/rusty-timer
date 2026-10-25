@@ -24,8 +24,8 @@ use crate::storage::journal::Journal;
 use super::allowlist::AllowList;
 use super::control::{
     CatalogProvider, ControlEvent, ControlEventSender, HeartbeatConfig, NoopReaderControlHandler,
-    NoopRemoteConfigHandler, RemoteConfigHandler, control_event_channel, negotiate_control_stream,
-    run_control_stream_loop,
+    NoopRemoteConfigHandler, NoopWifiControlHandler, RemoteConfigHandler, WifiControlHandler,
+    control_event_channel, negotiate_control_stream, run_control_stream_loop,
 };
 use super::data::{DataConfig, serve_data_streams};
 
@@ -52,6 +52,7 @@ struct ConnectionConfig {
     heartbeat: HeartbeatConfig,
     remote_config: Arc<dyn RemoteConfigHandler>,
     reader_control: Arc<dyn super::control::ReaderControlHandler>,
+    wifi_control: Arc<dyn WifiControlHandler>,
 }
 
 /// The forwarder's P2P endpoint and accept loop.
@@ -67,6 +68,7 @@ pub struct P2pEndpoint {
     heartbeat: HeartbeatConfig,
     remote_config: Arc<dyn RemoteConfigHandler>,
     reader_control: Arc<dyn super::control::ReaderControlHandler>,
+    wifi_control: Arc<dyn WifiControlHandler>,
     #[cfg(test)]
     _test_tempdir: Option<Arc<tempfile::TempDir>>,
 }
@@ -83,6 +85,7 @@ impl std::fmt::Debug for P2pEndpoint {
             .field("heartbeat", &self.heartbeat)
             .field("remote_config", &self.remote_config)
             .field("reader_control", &self.reader_control)
+            .field("wifi_control", &self.wifi_control)
             .finish_non_exhaustive()
     }
 }
@@ -115,6 +118,7 @@ impl P2pEndpoint {
             heartbeat: HeartbeatConfig::default(),
             remote_config: Arc::new(NoopRemoteConfigHandler),
             reader_control: Arc::new(NoopReaderControlHandler),
+            wifi_control: Arc::new(NoopWifiControlHandler),
             #[cfg(test)]
             _test_tempdir: None,
         })
@@ -143,6 +147,14 @@ impl P2pEndpoint {
         reader_control: Arc<dyn super::control::ReaderControlHandler>,
     ) -> Self {
         self.reader_control = reader_control;
+        self
+    }
+
+    /// Installs the Wi-Fi control handler that serves Wi-Fi verbs on the
+    /// control plane and drives `CAP_WIFI_CONTROL` advertisement.
+    #[must_use]
+    pub fn with_wifi_control(mut self, wifi_control: Arc<dyn WifiControlHandler>) -> Self {
+        self.wifi_control = wifi_control;
         self
     }
 
@@ -181,6 +193,7 @@ impl P2pEndpoint {
                         heartbeat: self.heartbeat,
                         remote_config: Arc::clone(&self.remote_config),
                         reader_control: Arc::clone(&self.reader_control),
+                        wifi_control: Arc::clone(&self.wifi_control),
                     };
                     tokio::spawn(async move {
                         handle_connection(connection, allow_list, catalog, journal, config).await;
@@ -249,6 +262,7 @@ async fn handle_connection(
         config.heartbeat,
         config.remote_config.as_ref(),
         config.reader_control.as_ref(),
+        config.wifi_control.as_ref(),
     )
     .await
     {
@@ -296,6 +310,7 @@ async fn handle_connection(
         outbound_events,
         config.reader_control,
         config.remote_config,
+        config.wifi_control,
     )
     .await;
     if let Some(task) = status_bridge_task {
@@ -534,6 +549,7 @@ mod tests {
                 heartbeat: HeartbeatConfig::default(),
                 remote_config: Arc::new(NoopRemoteConfigHandler),
                 reader_control: Arc::new(NoopReaderControlHandler),
+                wifi_control: Arc::new(NoopWifiControlHandler),
                 _test_tempdir: Some(tempdir),
             })
         }

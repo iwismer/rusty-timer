@@ -43,6 +43,7 @@
   } from "$lib/api";
   import { btnPrimary, btnSecondary } from "$lib/ui-classes";
   import ForwarderConfigModal from "./ForwarderConfigModal.svelte";
+  import ForwarderWifiModal from "./ForwarderWifiModal.svelte";
 
   type StateDisplay = {
     label: string;
@@ -53,6 +54,7 @@
   let busyByEndpoint = $state<Record<string, boolean>>({});
   let actionError = $state<string | null>(null);
   let configEndpointId = $state<string | null>(null);
+  let wifiEndpointId = $state<string | null>(null);
 
   // Reader/forwarder clock display. The reader clock arrives on status refresh;
   // we anchor it (baseTs) to the wall time it was captured (baseLocal) and tick
@@ -440,6 +442,15 @@
       ) ?? null
     );
   }
+
+  function selectedWifiForwarder(): ForwarderConnectionStatus | null {
+    if (!wifiEndpointId || !store.connections) return null;
+    return (
+      store.connections.forwarders.find(
+        (forwarder) => forwarder.endpoint_id === wifiEndpointId,
+      ) ?? null
+    );
+  }
 </script>
 
 <div class="mx-auto max-w-[760px] px-6 py-6">
@@ -608,7 +619,7 @@
                 {forwarder.endpoint_id}
               </p>
 
-              {#if forwarder.remote_config_available === true || showConnect(forwarder) || showDisconnect(forwarder) || showReconnect(forwarder)}
+              {#if forwarder.remote_config_available === true || forwarder.wifi_control_available === true || showConnect(forwarder) || showDisconnect(forwarder) || showReconnect(forwarder)}
                 <div class="mt-3 flex flex-wrap items-center gap-2">
                   {#if forwarder.remote_config_available === true}
                     <button
@@ -620,6 +631,21 @@
                     </button>
                     <HelpTip
                       fieldKey="forwarder_configure"
+                      sectionKey="connections"
+                      context="receiver"
+                      onOpenModal={openHelp}
+                    />
+                  {/if}
+                  {#if forwarder.wifi_control_available === true}
+                    <button
+                      data-testid={`forwarder-wifi-${forwarder.endpoint_id}`}
+                      class={btnSecondary}
+                      onclick={() => (wifiEndpointId = forwarder.endpoint_id)}
+                    >
+                      Wi-Fi
+                    </button>
+                    <HelpTip
+                      fieldKey="forwarder_wifi"
                       sectionKey="connections"
                       context="receiver"
                       onOpenModal={openHelp}
@@ -858,6 +884,13 @@
       endpointId={configEndpointId}
       displayName={configForwarder?.display_name ?? null}
       onClose={() => (configEndpointId = null)}
+    />
+    {@const wifiForwarder = selectedWifiForwarder()}
+    <ForwarderWifiModal
+      open={wifiEndpointId !== null}
+      endpointId={wifiEndpointId}
+      displayName={wifiForwarder?.display_name ?? null}
+      onClose={() => (wifiEndpointId = null)}
     />
   {:else}
     <section

@@ -68,6 +68,30 @@ async fn read_allow_power_actions(config_state: &ConfigState) -> Result<bool, (u
         .unwrap_or(false))
 }
 
+pub async fn read_allow_wifi_control(config_state: &ConfigState) -> Result<bool, (u16, String)> {
+    let _lock = config_state.write_lock.lock().await;
+    let toml_str = tokio::fs::read_to_string(&config_state.path)
+        .await
+        .map_err(|e| {
+            (
+                500u16,
+                serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
+                    .to_string(),
+            )
+        })?;
+    let raw: crate::config::RawConfig = toml::from_str(&toml_str).map_err(|e| {
+        (
+            500u16,
+            serde_json::json!({"ok": false, "error": format!("TOML parse error: {}", e)})
+                .to_string(),
+        )
+    })?;
+    Ok(raw
+        .control
+        .and_then(|c| c.allow_wifi_control)
+        .unwrap_or(true))
+}
+
 #[cfg(unix)]
 fn map_power_action_command_result(
     systemctl_action: &'static str,
@@ -741,20 +765,28 @@ pub async fn apply_section_update(
         }
         "control" => {
             let allow_power_actions = optional_bool_field(payload, "allow_power_actions")?;
+            let has_allow_wifi_control = payload.get("allow_wifi_control").is_some();
+            let allow_wifi_control_in = optional_bool_field(payload, "allow_wifi_control")?;
             let action = optional_string_field(payload, "action")?;
             if let Some(action) = action {
                 return apply_control_action_from_config(&action, config_state, logger).await;
             }
             update_config_file(config_state, subsystem, ui_tx, |raw| {
                 // Preserve existing P2P control settings; this handler only
-                // mutates allow_power_actions.
+                // mutates allow_power_actions and (when supplied) allow_wifi_control.
                 let allow_remote_config = raw.control.as_ref().and_then(|c| c.allow_remote_config);
                 let allow_reader_control =
                     raw.control.as_ref().and_then(|c| c.allow_reader_control);
+                let allow_wifi_control = if has_allow_wifi_control {
+                    allow_wifi_control_in
+                } else {
+                    raw.control.as_ref().and_then(|c| c.allow_wifi_control)
+                };
                 raw.control = Some(crate::config::RawControlConfig {
                     allow_power_actions,
                     allow_remote_config,
                     allow_reader_control,
+                    allow_wifi_control,
                 });
                 Ok(())
             })

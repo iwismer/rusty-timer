@@ -309,6 +309,34 @@ pub struct RestartResponse {
     #[prost(string, tag = "3")]
     pub error: ::prost::alloc::string::String,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WifiControlRequest {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// "status", "scan", "connect", "disconnect", or "forget"
+    #[prost(string, tag = "2")]
+    pub command: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "3")]
+    pub ssid: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "4")]
+    pub password: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, optional, tag = "5")]
+    pub hidden: ::core::option::Option<bool>,
+    #[prost(bool, optional, tag = "6")]
+    pub rescan: ::core::option::Option<bool>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WifiControlResponse {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag = "2")]
+    pub ok: bool,
+    #[prost(string, tag = "3")]
+    pub message: ::prost::alloc::string::String,
+    /// JSON-serialized rt_domain::WifiStatus or rt_domain::WifiScanResult
+    #[prost(string, optional, tag = "4")]
+    pub payload_json: ::core::option::Option<::prost::alloc::string::String>,
+}
 /// Request to subscribe to a stream's read events.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DataSubscribe {
@@ -401,7 +429,7 @@ pub struct GapNotice {
 /// Control plane, client (receiver) -> forwarder.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ControlC2F {
-    #[prost(oneof = "control_c2f::Msg", tags = "1, 2, 3, 4, 5, 6, 7")]
+    #[prost(oneof = "control_c2f::Msg", tags = "1, 2, 3, 4, 5, 6, 7, 8")]
     pub msg: ::core::option::Option<control_c2f::Msg>,
 }
 /// Nested message and enum types in `ControlC2F`.
@@ -422,6 +450,8 @@ pub mod control_c2f {
         ConfigSetRequest(super::ConfigSetRequest),
         #[prost(message, tag = "7")]
         RestartRequest(super::RestartRequest),
+        #[prost(message, tag = "8")]
+        WifiControlRequest(super::WifiControlRequest),
     }
 }
 /// Control plane, forwarder -> client (receiver).
@@ -429,7 +459,7 @@ pub mod control_c2f {
 pub struct ControlF2C {
     #[prost(
         oneof = "control_f2c::Msg",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15"
     )]
     pub msg: ::core::option::Option<control_f2c::Msg>,
 }
@@ -465,6 +495,8 @@ pub mod control_f2c {
         ConfigSetResponse(super::ConfigSetResponse),
         #[prost(message, tag = "14")]
         RestartResponse(super::RestartResponse),
+        #[prost(message, tag = "15")]
+        WifiControlResponse(super::WifiControlResponse),
     }
 }
 /// Data plane, client (receiver) -> forwarder.

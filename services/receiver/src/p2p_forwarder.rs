@@ -7,17 +7,19 @@ use std::time::Duration;
 
 use rt_iroh::{Endpoint, EndpointAddr, RecvStream, SendStream};
 use rt_p2p_protocol::{
-    CAP_READER_CONTROL, CAP_REMOTE_CONFIG, ConfigGetRequest, ConfigGetResponse, ConfigSetRequest,
-    ConfigSetResponse, ControlC2F, ControlF2C, Hello, Pong, ReaderControlRequest,
+    CAP_READER_CONTROL, CAP_REMOTE_CONFIG, CAP_WIFI_CONTROL, ConfigGetRequest, ConfigGetResponse,
+    ConfigSetRequest, ConfigSetResponse, ControlC2F, ControlF2C, Hello, Pong, ReaderControlRequest,
     ReaderControlResponse, RestartRequest, RestartResponse, StreamCatalog, SubscribeMode,
-    control_c2f, control_f2c, has_capability,
+    WifiControlResponse, control_c2f, control_f2c, has_capability,
 };
 use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{error, info, warn};
 
-use crate::control_api::{ConfigCommand, FORWARDER_CONFIG_TIMEOUT, ReaderCommand};
+use crate::control_api::{
+    ConfigCommand, FORWARDER_CONFIG_TIMEOUT, FORWARDER_WIFI_TIMEOUT, ReaderCommand, WifiCommand,
+};
 use crate::db::StreamSubscription;
 use crate::p2p_session::{
     BackoffConfig, DurableBatch, P2pSessionError, SessionOutcome, SessionStatusReporter,
@@ -330,10 +332,28 @@ async fn run_connected_forwarder(
     };
     let _reader_tx_keepalive = reader_tx;
 
+    let wifi_control = has_capability(&hello_ok.capabilities, CAP_WIFI_CONTROL);
+    let (wifi_tx, mut wifi_rx) = mpsc::channel::<WifiCommand>(32);
+    let _wifi_registration_guard = if wifi_control {
+        let guard = reporter
+            .app_state()
+            .register_forwarder_wifi_control_tx(endpoint_id, wifi_tx.clone());
+        reporter
+            .app_state()
+            .recompute_aggregate_connection_state()
+            .await;
+        Some(guard)
+    } else {
+        None
+    };
+    let _wifi_tx_keepalive = wifi_tx;
+
     let mut pending_config: HashMap<String, PendingConfigRequest> = HashMap::new();
     let mut pending_reader: HashMap<String, PendingReaderRequest> = HashMap::new();
+    let mut pending_wifi: HashMap<String, PendingWifiRequest> = HashMap::new();
     let mut next_config_request_id: u64 = 0;
     let mut next_reader_request_id: u64 = 0;
+    let mut next_wifi_request_id: u64 = 0;
     let prune_interval = FORWARDER_CONFIG_TIMEOUT.min(Duration::from_secs(1));
     let mut pending_config_prune_tick =
         tokio::time::interval_at(Instant::now() + prune_interval, prune_interval);
@@ -427,6 +447,7 @@ async fn run_connected_forwarder(
                             &recompute_notify,
                             &mut pending_config,
                             &mut pending_reader,
+                            &mut pending_wifi,
                         ).await {
                             warn!(%endpoint_id, %error, "failed to handle forwarder control frame");
                             break;
@@ -447,6 +468,19 @@ async fn run_connected_forwarder(
                     ).await
                 {
                     warn!(%endpoint_id, %error, "failed to send reader control request");
+                    break;
+                }
+            }
+            command = wifi_rx.recv() => {
+                if let Some(command) = command
+                    && let Err(error) = handle_wifi_command(
+                        command,
+                        &mut control_send,
+                        &mut pending_wifi,
+                        &mut next_wifi_request_id,
+                    ).await
+                {
+                    warn!(%endpoint_id, %error, "failed to send forwarder wifi control request");
                     break;
                 }
             }
@@ -472,6 +506,7 @@ async fn run_connected_forwarder(
                 let now = Instant::now();
                 prune_expired_pending_config(&mut pending_config, now);
                 prune_expired_pending_reader(&mut pending_reader, now);
+                prune_expired_pending_wifi(&mut pending_wifi, now);
                 // Re-attempt held override streams: a ReaderStatus frame may
                 // have made the override's epoch resolvable since the last
                 // sync (the catalog itself is fixed per connection). Also
@@ -512,6 +547,7 @@ async fn run_connected_forwarder(
     // `_config_registration_guard` on normal exit, panic, or task abort.
     drop(pending_config);
     drop(pending_reader);
+    drop(pending_wifi);
     reporter.app_state().ui.logger.log_warn(
         "RECV:P2P",
         format!("forwarder {endpoint_id} control connection closed; cleaning up sessions"),
@@ -576,11 +612,20 @@ struct PendingReaderRequest {
     responder: oneshot::Sender<ReaderControlResponse>,
 }
 
+struct PendingWifiRequest {
+    deadline: Instant,
+    responder: oneshot::Sender<WifiControlResponse>,
+}
+
 fn prune_expired_pending_config(pending: &mut HashMap<String, PendingConfigRequest>, now: Instant) {
     pending.retain(|_, request| request.deadline > now);
 }
 
 fn prune_expired_pending_reader(pending: &mut HashMap<String, PendingReaderRequest>, now: Instant) {
+    pending.retain(|_, request| request.deadline > now);
+}
+
+fn prune_expired_pending_wifi(pending: &mut HashMap<String, PendingWifiRequest>, now: Instant) {
     pending.retain(|_, request| request.deadline > now);
 }
 
@@ -670,6 +715,34 @@ async fn handle_reader_command(
     result
 }
 
+async fn handle_wifi_command(
+    command: WifiCommand,
+    send: &mut SendStream,
+    pending: &mut HashMap<String, PendingWifiRequest>,
+    next_request_id: &mut u64,
+) -> Result<(), P2pSessionError> {
+    prune_expired_pending_wifi(pending, Instant::now());
+    *next_request_id += 1;
+    let request_id = next_request_id.to_string();
+    let WifiCommand::Request { mut request, resp } = command;
+    request.request_id = request_id.clone();
+    let frame = ControlC2F {
+        msg: Some(control_c2f::Msg::WifiControlRequest(request)),
+    };
+    pending.insert(
+        request_id.clone(),
+        PendingWifiRequest {
+            deadline: Instant::now() + FORWARDER_WIFI_TIMEOUT,
+            responder: resp,
+        },
+    );
+    let result = write_frame(send, &frame).await;
+    if result.is_err() {
+        pending.remove(&request_id);
+    }
+    result
+}
+
 fn action_to_request(
     stream_id: String,
     action: rt_domain::ReaderControlAction,
@@ -730,6 +803,7 @@ fn action_to_request(
     request
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_control_frame(
     endpoint_id: &str,
     frame: ControlF2C,
@@ -738,6 +812,7 @@ async fn handle_control_frame(
     recompute_notify: &Notify,
     pending_config: &mut HashMap<String, PendingConfigRequest>,
     pending_reader: &mut HashMap<String, PendingReaderRequest>,
+    pending_wifi: &mut HashMap<String, PendingWifiRequest>,
 ) -> Result<(), P2pSessionError> {
     match frame.msg {
         Some(control_f2c::Msg::ReaderStatus(status)) => {
@@ -810,6 +885,11 @@ async fn handle_control_frame(
         }
         Some(control_f2c::Msg::ReaderControlResponse(response)) => {
             if let Some(request) = pending_reader.remove(&response.request_id) {
+                let _ = request.responder.send(response);
+            }
+        }
+        Some(control_f2c::Msg::WifiControlResponse(response)) => {
+            if let Some(request) = pending_wifi.remove(&response.request_id) {
                 let _ = request.responder.send(response);
             }
         }
@@ -2747,6 +2827,7 @@ mod tests {
         let recompute_notify = Notify::new();
         let mut pending_config = std::collections::HashMap::new();
         let mut pending_reader = std::collections::HashMap::new();
+        let mut pending_wifi = std::collections::HashMap::new();
 
         let status_frames = vec![
             ControlF2C {
@@ -2806,6 +2887,7 @@ mod tests {
                 &recompute_notify,
                 &mut pending_config,
                 &mut pending_reader,
+                &mut pending_wifi,
             )
             .await
             .expect("handle_control_frame failed");

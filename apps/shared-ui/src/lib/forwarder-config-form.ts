@@ -85,6 +85,7 @@ export interface ForwarderConfigFormState {
   upsUpstreamHeartbeatSecs: string;
   updateMode: string;
   controlAllowPowerActions: boolean;
+  controlAllowWifiControl: boolean;
   readers: ReaderEntry[];
 }
 
@@ -155,6 +156,7 @@ export function fromConfig(cfg: Record<string, unknown>): ForwarderConfigFormSta
         : "",
     updateMode: asString(update.mode),
     controlAllowPowerActions: control.allow_power_actions === true,
+    controlAllowWifiControl: control.allow_wifi_control !== false,
     readers,
   };
 }
@@ -207,7 +209,10 @@ export function toClockPayload(
 export function toControlPayload(
   form: ForwarderConfigFormState,
 ): Record<string, unknown> {
-  return { allow_power_actions: form.controlAllowPowerActions };
+  return {
+    allow_power_actions: form.controlAllowPowerActions,
+    allow_wifi_control: form.controlAllowWifiControl,
+  };
 }
 
 export function toUpsPayload(

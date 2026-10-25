@@ -366,6 +366,17 @@
                     Allow remote config
                   </span>
                 </label>
+                <label class="block text-sm font-medium text-text-secondary">
+                  <span class="inline-flex items-center gap-2">
+                    <input
+                      class="accent-accent"
+                      type="checkbox"
+                      disabled
+                      checked={config.control.allow_wifi_control !== false}
+                    />
+                    Allow Wi-Fi control
+                  </span>
+                </label>
               </div>
             </Card>
 

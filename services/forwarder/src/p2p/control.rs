@@ -25,12 +25,13 @@ use prost::Message;
 use rt_iroh::Connection;
 use rt_iroh::{EndpointId, RecvStream, SendStream};
 use rt_p2p_protocol::{
-    CAP_CONTROL_EVENTS, CAP_READER_CONTROL, CAP_REMOTE_CONFIG, ConfigGetRequest, ConfigGetResponse,
-    ConfigSetRequest, ConfigSetResponse, ControlC2F, ControlF2C, DownloadProgress, Hello,
-    MAX_FRAME_BYTES, Ping, Pong, ProtocolError, ProtocolErrorCode, ReaderControlRequest,
-    ReaderControlResponse, ReaderInfo, ReaderStatus, RestartRequest, RestartResponse,
-    StreamCatalog, SyncClock, UpsStatus, WireProtocolError, control_c2f, control_f2c,
-    decode_frame_len, decode_frame_payload, encode_frame, has_capability, negotiate,
+    CAP_CONTROL_EVENTS, CAP_READER_CONTROL, CAP_REMOTE_CONFIG, CAP_WIFI_CONTROL, ConfigGetRequest,
+    ConfigGetResponse, ConfigSetRequest, ConfigSetResponse, ControlC2F, ControlF2C,
+    DownloadProgress, Hello, MAX_FRAME_BYTES, Ping, Pong, ProtocolError, ProtocolErrorCode,
+    ReaderControlRequest, ReaderControlResponse, ReaderInfo, ReaderStatus, RestartRequest,
+    RestartResponse, StreamCatalog, SyncClock, UpsStatus, WifiControlRequest, WifiControlResponse,
+    WireProtocolError, control_c2f, control_f2c, decode_frame_len, decode_frame_payload,
+    encode_frame, has_capability, negotiate,
 };
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
@@ -309,6 +310,51 @@ impl RemoteConfigHandler for NoopRemoteConfigHandler {
     }
 }
 
+/// Future returned by a Wi-Fi control handler.
+pub type WifiControlFuture<'a> = Pin<Box<dyn Future<Output = WifiControlResponse> + Send + 'a>>;
+
+/// Error returned for any Wi-Fi control verb when the feature is disabled.
+pub(crate) const WIFI_CONTROL_DISABLED: &str = "wifi control disabled";
+
+/// Error returned for any Wi-Fi control verb when the peer did not negotiate
+/// [`CAP_WIFI_CONTROL`] on this connection.
+const WIFI_CONTROL_NOT_NEGOTIATED: &str = "wifi control was not negotiated on this connection";
+
+/// Serves remote Wi-Fi control requests (status/scan/connect/disconnect/forget)
+/// received on the P2P control stream.
+pub trait WifiControlHandler: std::fmt::Debug + Send + Sync + 'static {
+    /// Whether Wi-Fi control is currently allowed. Controls capability
+    /// advertisement and gating of all Wi-Fi control verbs.
+    fn allow_wifi_control(&self) -> bool {
+        false
+    }
+
+    /// Handles a Wi-Fi control request from `peer` and returns the response.
+    fn handle(&self, request: WifiControlRequest, peer: EndpointId) -> WifiControlFuture<'_>;
+}
+
+/// Default Wi-Fi control handler used until production wiring installs a real
+/// adapter. Reports the feature as disabled and rejects every verb.
+#[derive(Debug)]
+pub struct NoopWifiControlHandler;
+
+impl WifiControlHandler for NoopWifiControlHandler {
+    fn allow_wifi_control(&self) -> bool {
+        false
+    }
+
+    fn handle(&self, request: WifiControlRequest, _peer: EndpointId) -> WifiControlFuture<'_> {
+        Box::pin(async move {
+            WifiControlResponse {
+                request_id: request.request_id,
+                ok: false,
+                message: WIFI_CONTROL_DISABLED.to_owned(),
+                payload_json: None,
+            }
+        })
+    }
+}
+
 /// Typed status/control-plane events sent from the forwarder to a receiver.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ControlEvent {
@@ -412,6 +458,7 @@ fn wire_protocol_error(error: &ProtocolError) -> WireProtocolError {
 /// completes successfully: data delivery is gated on a finished control
 /// handshake so an allow-listed peer cannot receive journal data before
 /// `Hello`/catalog negotiation succeeds.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn negotiate_control_stream(
     send: SendStream,
     recv: RecvStream,
@@ -420,6 +467,7 @@ pub(crate) async fn negotiate_control_stream(
     heartbeat: HeartbeatConfig,
     remote_config: &dyn RemoteConfigHandler,
     reader_control: &dyn ReaderControlHandler,
+    wifi_control: &dyn WifiControlHandler,
 ) -> Result<(SendStream, RecvStream, Vec<String>), BoxError> {
     match tokio::time::timeout(
         handshake_timeout,
@@ -430,6 +478,7 @@ pub(crate) async fn negotiate_control_stream(
             heartbeat,
             remote_config,
             reader_control,
+            wifi_control,
         ),
     )
     .await
@@ -455,6 +504,7 @@ pub(crate) async fn run_control_stream_loop(
     outbound_events: Option<ControlEventReceiver>,
     reader_control: Arc<dyn ReaderControlHandler>,
     remote_config: Arc<dyn RemoteConfigHandler>,
+    wifi_control: Arc<dyn WifiControlHandler>,
 ) -> Result<(), BoxError> {
     run_control_loop(
         send,
@@ -465,6 +515,7 @@ pub(crate) async fn run_control_stream_loop(
         reader_control,
         outbound_events,
         remote_config,
+        wifi_control,
     )
     .await
 }
@@ -493,6 +544,7 @@ pub(crate) async fn serve_control_with_typed_control(
         reader_control,
         outbound_events,
         remote_config,
+        Arc::new(NoopWifiControlHandler),
     )
     .await
 }
@@ -509,6 +561,7 @@ pub(crate) async fn serve_control_stream_with_typed_control(
     reader_control: Arc<dyn ReaderControlHandler>,
     outbound_events: Option<ControlEventReceiver>,
     remote_config: Arc<dyn RemoteConfigHandler>,
+    wifi_control: Arc<dyn WifiControlHandler>,
 ) -> Result<(), BoxError> {
     let (send, recv, capabilities) = negotiate_control_stream(
         send,
@@ -518,6 +571,7 @@ pub(crate) async fn serve_control_stream_with_typed_control(
         heartbeat,
         remote_config.as_ref(),
         reader_control.as_ref(),
+        wifi_control.as_ref(),
     )
     .await?;
 
@@ -530,6 +584,7 @@ pub(crate) async fn serve_control_stream_with_typed_control(
         reader_control,
         outbound_events,
         remote_config,
+        wifi_control,
     )
     .await
 }
@@ -541,6 +596,7 @@ pub(crate) async fn serve_control_stream_with_typed_control(
 /// always agree at open time as the protocol requires. The advertised
 /// `HelloOk.heartbeat_interval_secs` is taken from the heartbeat config the
 /// handler actually pings with.
+#[allow(clippy::too_many_arguments)]
 async fn negotiate_and_serve_catalog_stream(
     mut send: SendStream,
     mut recv: RecvStream,
@@ -548,6 +604,7 @@ async fn negotiate_and_serve_catalog_stream(
     heartbeat: HeartbeatConfig,
     remote_config: &dyn RemoteConfigHandler,
     reader_control: &dyn ReaderControlHandler,
+    wifi_control: &dyn WifiControlHandler,
 ) -> Result<(SendStream, RecvStream, Vec<String>), BoxError> {
     let control = read_frame::<ControlC2F>(&mut recv).await?;
     let client_hello = match control.msg {
@@ -571,6 +628,9 @@ async fn negotiate_and_serve_catalog_stream(
         server_hello
             .capabilities
             .push(CAP_READER_CONTROL.to_owned());
+    }
+    if wifi_control.allow_wifi_control() {
+        server_hello.capabilities.push(CAP_WIFI_CONTROL.to_owned());
     }
 
     let hello_ok = match negotiate(&client_hello, &server_hello) {
@@ -623,7 +683,7 @@ async fn negotiate_and_serve_catalog_stream(
 /// Every reader-control and remote-config verb dispatch emits a `tracing`
 /// event attributed to `peer` (the authenticated remote endpoint id), including
 /// capability-gate denials, so control-plane operations are auditable.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_control_loop(
     mut send: SendStream,
     mut recv: RecvStream,
@@ -633,6 +693,7 @@ async fn run_control_loop(
     reader_control: Arc<dyn ReaderControlHandler>,
     mut outbound_events: Option<ControlEventReceiver>,
     remote_config: Arc<dyn RemoteConfigHandler>,
+    wifi_control: Arc<dyn WifiControlHandler>,
 ) -> Result<(), BoxError> {
     // Read frames on a dedicated task so heartbeat ticks never cancel a
     // partially-read frame (which would desync the length-prefixed framing).
@@ -678,6 +739,7 @@ async fn run_control_loop(
     let mut control_tasks = tokio::task::JoinSet::new();
     let reader_control_negotiated = has_capability(&capabilities, CAP_READER_CONTROL);
     let remote_config_negotiated = has_capability(&capabilities, CAP_REMOTE_CONFIG);
+    let wifi_control_negotiated = has_capability(&capabilities, CAP_WIFI_CONTROL);
 
     let result = loop {
         tokio::select! {
@@ -917,6 +979,52 @@ async fn run_control_loop(
                                 );
                                 let frame = ControlF2C {
                                     msg: Some(control_f2c::Msg::RestartResponse(response)),
+                                };
+                                let _ = config_response_tx.send(frame).await;
+                            });
+                        }
+                        Some(control_c2f::Msg::WifiControlRequest(request)) => {
+                            if !wifi_control_negotiated {
+                                tracing::warn!(
+                                    %peer,
+                                    verb = "wifi_control",
+                                    command = ?request.command,
+                                    request_id = %request.request_id,
+                                    outcome = "denied",
+                                    "p2p: control verb denied (capability not negotiated)"
+                                );
+                                let response = WifiControlResponse {
+                                    request_id: request.request_id,
+                                    ok: false,
+                                    message: WIFI_CONTROL_NOT_NEGOTIATED.to_owned(),
+                                    payload_json: None,
+                                };
+                                let frame = ControlF2C {
+                                    msg: Some(control_f2c::Msg::WifiControlResponse(response)),
+                                };
+                                if write_frame(&mut send, &frame).await.is_err() {
+                                    break Ok(());
+                                }
+                                continue;
+                            }
+
+                            let request_id = request.request_id.clone();
+                            let command = request.command.clone();
+                            let wifi_control = Arc::clone(&wifi_control);
+                            let config_response_tx = config_response_tx.clone();
+                            control_tasks.spawn(async move {
+                                let mut response = wifi_control.handle(request, peer).await;
+                                response.request_id = request_id;
+                                tracing::info!(
+                                    %peer,
+                                    verb = "wifi_control",
+                                    command = ?command,
+                                    request_id = %response.request_id,
+                                    outcome = if response.ok { "ok" } else { "error" },
+                                    "p2p: control verb handled"
+                                );
+                                let frame = ControlF2C {
+                                    msg: Some(control_f2c::Msg::WifiControlResponse(response)),
                                 };
                                 let _ = config_response_tx.send(frame).await;
                             });

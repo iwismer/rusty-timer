@@ -148,6 +148,7 @@ describe("ForwarderConfigModal", () => {
     expect(screen.getByLabelText("Server token file")).toBeDisabled();
     expect(screen.getByLabelText("Allow power actions")).toBeDisabled();
     expect(screen.getByLabelText("Allow remote config")).toBeDisabled();
+    expect(screen.getByLabelText("Allow Wi-Fi control")).toBeDisabled();
 
     // Each protected card explains why the fields are read-only.
     expect(

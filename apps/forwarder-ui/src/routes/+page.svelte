@@ -16,7 +16,7 @@
     serverApprovalTextClass,
     buttonClass,
   } from "@rusty-timer/shared-ui";
-  import type { ForwarderStatus } from "$lib/api";
+  import type { ForwarderStatus, WifiStatus } from "$lib/api";
   import ExportModal from "$lib/ExportModal.svelte";
   import {
     computeElapsedSecondsSince,
@@ -39,6 +39,7 @@
   } from "$lib/reader-status-cache";
 
   let status = $state<ForwarderStatus | null>(null);
+  let wifiStatus = $state<WifiStatus | null>(null);
   let error = $state<string | null>(null);
   let readModeHelpOpen = $state(false);
   let readModeHelpField = $state<string | undefined>(undefined);
@@ -113,9 +114,10 @@
         lastSeenBase = rebuilt.lastSeenBase;
         lastSeenReceivedAt = rebuilt.lastSeenReceivedAt;
       }
-      const [usResult, logsResp] = await Promise.allSettled([
+      const [usResult, logsResp, wifiResp] = await Promise.allSettled([
         api.getUpdateStatus(),
         api.getLogs(),
+        api.getWifiStatus(),
       ]);
       if (usResult.status === "fulfilled") {
         const us = usResult.value;
@@ -132,6 +134,9 @@
       }
       if (logsResp.status === "fulfilled") {
         logs = logsResp.value.entries;
+      }
+      if (wifiResp.status === "fulfilled") {
+        wifiStatus = wifiResp.value;
       }
     } catch (e) {
       error = String(e);
@@ -689,6 +694,20 @@
                 available={upsState.available}
                 configured
               />
+            </dd>
+          {/if}
+          {#if wifiStatus?.available}
+            <dt class="text-text-muted">Wi-Fi</dt>
+            <dd class="flex items-center gap-2">
+              <StatusBadge
+                label={wifiStatus.state === "connected" && wifiStatus.ssid
+                  ? wifiStatus.ssid
+                  : wifiStatus.state}
+                state={wifiStatus.state === "connected" ? "ok" : "warn"}
+              />
+              <a href="/wifi" class="text-xs text-accent hover:underline">
+                Manage
+              </a>
             </dd>
           {/if}
         </dl>

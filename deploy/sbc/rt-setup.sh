@@ -27,6 +27,7 @@ STAGED_FORWARDER_PATH="${DATA_DIR}/.forwarder-staged"
 APPLY_STAGED_HELPER="${HELPER_DIR}/rt-forwarder-apply-staged.sh"
 POWER_ACTIONS_SUDOERS_PATH="/etc/sudoers.d/90-rt-forwarder-power-actions"
 POWER_ACTIONS_POLKIT_RULES_PATH="/etc/polkit-1/rules.d/90-rt-forwarder-power-actions.rules"
+WIFI_POLKIT_RULES_PATH="/etc/polkit-1/rules.d/90-rt-forwarder-wifi.rules"
 USB_TETHER_NETPLAN_PATH="/etc/netplan/99-usb-tether.yaml"
 PISUGAR_INSTALL_SCRIPT_URL="https://cdn.pisugar.com/release/pisugar-power-manager.sh"
 SPI_REBOOT_NEEDED="0"
@@ -68,6 +69,24 @@ allow_power_actions_toml_value() {
 # Disabling it therefore requires an explicit, recognized falsey value.
 allow_remote_config_toml_value() {
   local raw="${RT_SETUP_ALLOW_REMOTE_CONFIG:-}"
+  if [[ -z "${raw}" ]]; then
+    printf 'true\n'
+    return 0
+  fi
+  local lower
+  lower="$(printf '%s' "${raw}" | tr '[:upper:]' '[:lower:]')"
+  case "${lower}" in
+    0|false|no|n|off)
+      printf 'false\n'
+      ;;
+    *)
+      printf 'true\n'
+      ;;
+  esac
+}
+
+allow_wifi_control_toml_value() {
+  local raw="${RT_SETUP_ALLOW_WIFI_CONTROL:-}"
   if [[ -z "${raw}" ]]; then
     printf 'true\n'
     return 0
@@ -383,6 +402,25 @@ polkit.addRule(function(action, subject) {
 EOF
 }
 
+render_wifi_polkit_rules() {
+  cat <<EOF
+polkit.addRule(function(action, subject) {
+  if (subject.user == "${SERVICE_USER}") {
+    if (
+      action.id == "org.freedesktop.NetworkManager.network-control" ||
+      action.id == "org.freedesktop.NetworkManager.wifi.scan" ||
+      action.id == "org.freedesktop.NetworkManager.enable-disable-wifi" ||
+      action.id == "org.freedesktop.NetworkManager.settings.modify.system" ||
+      action.id == "org.freedesktop.NetworkManager.settings.modify.own"
+    ) {
+      return polkit.Result.YES;
+    }
+  }
+  return polkit.Result.NOT_HANDLED;
+});
+EOF
+}
+
 config_allows_power_actions() {
   local state
   state="$(config_power_actions_state "${1:-${CONFIG_DIR}/forwarder.toml}")"
@@ -468,6 +506,87 @@ expected_allow_power_actions_for_install() {
 ensure_power_actions_prerequisites() {
   local polkit_rules_dir
   polkit_rules_dir="$(dirname "${POWER_ACTIONS_POLKIT_RULES_PATH}")"
+  if [[ ! -d "${polkit_rules_dir}" ]]; then
+    echo "Error: required polkit rules directory is missing: ${polkit_rules_dir}" >&2
+    exit 1
+  fi
+}
+
+config_wifi_control_state() {
+  local config_path="${1:-${CONFIG_DIR}/forwarder.toml}"
+  if [[ ! -f "${config_path}" ]]; then
+    printf 'missing_file\n'
+    return 0
+  fi
+
+  awk '
+    BEGIN {
+      in_control = 0
+      found = 0
+    }
+    {
+      line = $0
+      sub(/[[:space:]]*#.*/, "", line)
+
+      if (line ~ /^[[:space:]]*\[/) {
+        in_control = (line ~ /^[[:space:]]*\[control\][[:space:]]*$/)
+        next
+      }
+
+      if (!in_control) {
+        next
+      }
+
+      if (line ~ /^[[:space:]]*allow_wifi_control[[:space:]]*=/) {
+        sub(/^[[:space:]]*allow_wifi_control[[:space:]]*=[[:space:]]*/, "", line)
+        gsub(/[[:space:]]/, "", line)
+        line = tolower(line)
+        if (line == "true") {
+          print "true"
+        } else if (line == "false") {
+          print "false"
+        } else {
+          print "invalid"
+        }
+        found = 1
+        exit
+      }
+    }
+    END {
+      if (!found) {
+        print "missing_key"
+      }
+    }
+  ' "${config_path}"
+}
+
+expected_allow_wifi_control_for_install() {
+  local config_path="${1:-${CONFIG_DIR}/forwarder.toml}"
+  local state
+  state="$(config_wifi_control_state "${config_path}")"
+  case "${state}" in
+    true|missing_key)
+      printf '1\n'
+      ;;
+    false|invalid)
+      printf '0\n'
+      ;;
+    missing_file)
+      if [[ "$(allow_wifi_control_toml_value)" == "true" ]]; then
+        printf '1\n'
+      else
+        printf '0\n'
+      fi
+      ;;
+    *)
+      printf '0\n'
+      ;;
+  esac
+}
+
+ensure_wifi_control_prerequisites() {
+  local polkit_rules_dir
+  polkit_rules_dir="$(dirname "${WIFI_POLKIT_RULES_PATH}")"
   if [[ ! -d "${polkit_rules_dir}" ]]; then
     echo "Error: required polkit rules directory is missing: ${polkit_rules_dir}" >&2
     exit 1
@@ -864,6 +983,8 @@ configure() {
   control_allow_power_actions="$(allow_power_actions_toml_value)"
   local control_allow_remote_config
   control_allow_remote_config="$(allow_remote_config_toml_value)"
+  local control_allow_wifi_control
+  control_allow_wifi_control="$(allow_wifi_control_toml_value)"
 
   # Forwarder timezone
   local forwarder_timezone="${RT_SETUP_TIMEZONE:-}"
@@ -917,6 +1038,7 @@ bind = "${STATUS_BIND}"
 [control]
 allow_power_actions = ${control_allow_power_actions}
 allow_remote_config = ${control_allow_remote_config}
+allow_wifi_control = ${control_allow_wifi_control}
 
 [update]
 mode = "check-only"
@@ -992,6 +1114,17 @@ install_service() {
     chown root:root "${POWER_ACTIONS_POLKIT_RULES_PATH}"
   else
     rm -f "${POWER_ACTIONS_POLKIT_RULES_PATH}"
+  fi
+
+  local allow_wifi_control
+  allow_wifi_control="$(expected_allow_wifi_control_for_install "${CONFIG_DIR}/forwarder.toml")"
+  if [[ "${allow_wifi_control}" == "1" ]]; then
+    ensure_wifi_control_prerequisites
+    render_wifi_polkit_rules > "${WIFI_POLKIT_RULES_PATH}"
+    chmod 0644 "${WIFI_POLKIT_RULES_PATH}"
+    chown root:root "${WIFI_POLKIT_RULES_PATH}"
+  else
+    rm -f "${WIFI_POLKIT_RULES_PATH}"
   fi
 
   systemctl daemon-reload

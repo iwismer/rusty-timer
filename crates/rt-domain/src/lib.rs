@@ -216,6 +216,78 @@ pub struct ReaderStatusChanged {
     pub connected: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedWifiNetwork {
+    pub ssid: String,
+    pub uuid: String,
+    pub autoconnect: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WifiStatus {
+    pub available: bool,
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub band: Option<String>,
+    #[serde(default)]
+    pub saved_networks: Vec<SavedWifiNetwork>,
+}
+
+impl WifiStatus {
+    pub fn unavailable() -> Self {
+        Self {
+            available: false,
+            enabled: false,
+            interface: None,
+            state: "unavailable".to_owned(),
+            ssid: None,
+            ip_address: None,
+            gateway: None,
+            signal: None,
+            security: None,
+            band: None,
+            saved_networks: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WifiNetwork {
+    pub ssid: String,
+    pub in_use: bool,
+    pub signal: u8,
+    pub security: String,
+    pub bands: Vec<String>,
+    pub saved: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WifiScanResult {
+    pub status: WifiStatus,
+    pub networks: Vec<WifiNetwork>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WifiActionResult {
+    pub ok: bool,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<WifiStatus>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

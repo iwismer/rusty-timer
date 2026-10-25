@@ -73,6 +73,7 @@
   let checkMessage = $state<string | null>(null);
   let persistedAllowPowerActions = $state(false);
   let controlAllowPowerActions = $state(false);
+  let controlAllowWifiControl = $state(true);
   let readers: ReaderEntry[] = $state([]);
   let powerActionsEnabled = $derived(
     controlPowerActionsEnabled({
@@ -187,6 +188,7 @@
     updateMode = form.updateMode;
     persistedAllowPowerActions = form.controlAllowPowerActions;
     controlAllowPowerActions = form.controlAllowPowerActions;
+    controlAllowWifiControl = form.controlAllowWifiControl;
     readers = form.readers.map((reader) => ({ ...reader }));
   }
 
@@ -207,6 +209,7 @@
       upsUpstreamHeartbeatSecs,
       updateMode,
       controlAllowPowerActions,
+      controlAllowWifiControl,
       readers: readers.map((reader) => ({ ...reader })),
     };
   }
@@ -718,6 +721,20 @@
           </span>
           <p class={hintClass}>
             Required for "Restart Forwarder Device" and "Shutdown Forwarder Device".
+          </p>
+        </label>
+
+        <label class="mt-3 block text-sm font-medium text-text-secondary">
+          <span class="inline-flex items-center gap-2">
+            <input type="checkbox" bind:checked={controlAllowWifiControl} class="accent-accent" />
+            Allow Wi-Fi scanning and network changes from the UI <HelpTip
+              fieldKey="allow_wifi_control"
+              sectionKey="controls"
+              context="forwarder"
+            />
+          </span>
+          <p class={hintClass}>
+            Enables scanning, connecting, disconnecting, and forgetting Wi-Fi networks locally and over P2P.
           </p>
         </label>
         <button class={saveBtnClass} onclick={saveControl} disabled={savingSection['control']}>

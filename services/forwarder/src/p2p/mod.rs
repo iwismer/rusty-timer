@@ -23,6 +23,7 @@ mod endpoint;
 mod reader_control;
 mod remote_config;
 mod server_client;
+mod wifi_control;
 
 use std::net::SocketAddrV4;
 use std::num::TryFromIntError;
@@ -45,9 +46,9 @@ pub use allowlist::AllowList;
 pub use control::{
     CatalogProvider, ConfigGetFuture, ConfigSetFuture, ControlEvent, ControlEventReceiver,
     ControlEventSender, HeartbeatConfig, NoopReaderControlHandler, NoopRemoteConfigHandler,
-    ReaderControlFuture, ReaderControlHandler, RemoteConfigHandler, RestartFuture,
-    RewriteClockFuture, StaticCatalog, SyncClockDriftHandler, SyncClockFuture, SyncClockSource,
-    control_event_channel,
+    NoopWifiControlHandler, ReaderControlFuture, ReaderControlHandler, RemoteConfigHandler,
+    RestartFuture, RewriteClockFuture, StaticCatalog, SyncClockDriftHandler, SyncClockFuture,
+    SyncClockSource, WifiControlFuture, WifiControlHandler, control_event_channel,
 };
 pub use data::{DataConfig, serve_data_streams};
 pub use endpoint::P2pEndpoint;
@@ -59,6 +60,7 @@ pub use server_client::{
     ServerCatalogClient, apply_receiver_update, fetch_and_apply_once, run_allowlist_distribution,
     run_allowlist_push_subscription,
 };
+pub use wifi_control::ForwarderWifiControlHandler;
 
 const DEFAULT_P2P_SECRET_KEY_PATH: &str = "/var/lib/rusty-timer/p2p-secret.key";
 const DEFAULT_FORWARDER_CATALOG_PUSH_INTERVAL: Duration = Duration::from_secs(30);
@@ -142,6 +144,7 @@ pub async fn start_forwarder_p2p(
     status_feed: ForwarderStatusFeed,
     remote_config: Arc<dyn RemoteConfigHandler>,
     reader_control: Arc<dyn ReaderControlHandler>,
+    wifi_control: Arc<dyn WifiControlHandler>,
 ) -> Result<Option<P2pRuntime>, P2pStartError> {
     if !config.enabled {
         return Ok(None);
@@ -217,7 +220,8 @@ pub async fn start_forwarder_p2p(
     .await?
     .with_status_feed(status_feed)
     .with_remote_config(remote_config)
-    .with_reader_control(reader_control);
+    .with_reader_control(reader_control)
+    .with_wifi_control(wifi_control);
 
     let run_endpoint = endpoint.clone();
     let mut tasks = vec![
@@ -1098,6 +1102,7 @@ mod tests {
             status_feed().await?,
             Arc::new(NoopRemoteConfigHandler),
             Arc::new(NoopReaderControlHandler),
+            Arc::new(NoopWifiControlHandler),
         )
         .await?
         .expect("p2p enabled");
@@ -1145,6 +1150,7 @@ mod tests {
             status_feed().await?,
             Arc::new(NoopRemoteConfigHandler),
             Arc::new(NoopReaderControlHandler),
+            Arc::new(NoopWifiControlHandler),
         )
         .await?
         .expect("p2p enabled");
@@ -1300,6 +1306,7 @@ mod tests {
             store.status_feed(),
             Arc::new(NoopRemoteConfigHandler),
             Arc::new(NoopReaderControlHandler),
+            Arc::new(NoopWifiControlHandler),
         )
         .await?
         .expect("p2p enabled");
@@ -1370,6 +1377,7 @@ mod tests {
             status_feed().await?,
             Arc::new(NoopRemoteConfigHandler),
             Arc::new(NoopReaderControlHandler),
+            Arc::new(NoopWifiControlHandler),
         )
         .await?
         .expect("p2p enabled");

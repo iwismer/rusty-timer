@@ -609,6 +609,7 @@ mod tests {
             "allow_power_actions": null,
             "allow_remote_config": null,
             "allow_reader_control": null,
+            "allow_wifi_control": null,
         });
         let response = h
             .set_config(

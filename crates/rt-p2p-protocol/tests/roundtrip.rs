@@ -5,7 +5,7 @@ use rt_p2p_protocol::{
     ConfigGetRequest, ConfigGetResponse, ConfigSetRequest, ConfigSetResponse, ControlC2F,
     ControlF2C, DownloadProgress, Hello, ReadRecord, ReaderControlRequest, ReaderControlResponse,
     ReaderInfo, RestartRequest, RestartResponse, StreamCatalog, StreamEntry, StreamEpochSummary,
-    WireProtocolError, control_c2f, control_f2c,
+    WifiControlRequest, WifiControlResponse, WireProtocolError, control_c2f, control_f2c,
 };
 
 // A stream_id is opaque bytes on the wire; this test uses a 16-byte sample.
@@ -362,6 +362,46 @@ fn restart_response_control_f2c_round_trips() {
             request_id: "restart-1".to_string(),
             accepted: false,
             error: "restart already pending".to_string(),
+        })),
+    };
+
+    let mut buf = Vec::new();
+    original.encode(&mut buf).expect("encode ControlF2C");
+
+    let decoded = ControlF2C::decode(buf.as_slice()).expect("decode ControlF2C");
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn wifi_control_request_control_c2f_round_trips() {
+    let original = ControlC2F {
+        msg: Some(control_c2f::Msg::WifiControlRequest(WifiControlRequest {
+            request_id: "wifi-1".to_string(),
+            command: "connect".to_string(),
+            ssid: Some("TimingHotspot".to_string()),
+            password: Some("secret123".to_string()),
+            hidden: Some(false),
+            rescan: None,
+        })),
+    };
+
+    let mut buf = Vec::new();
+    original.encode(&mut buf).expect("encode ControlC2F");
+
+    let decoded = ControlC2F::decode(buf.as_slice()).expect("decode ControlC2F");
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn wifi_control_response_control_f2c_round_trips() {
+    let original = ControlF2C {
+        msg: Some(control_f2c::Msg::WifiControlResponse(WifiControlResponse {
+            request_id: "wifi-1".to_string(),
+            ok: true,
+            message: "connected".to_string(),
+            payload_json: Some(r#"{"available":true,"enabled":true,"state":"connected"}"#.into()),
         })),
     };
 

@@ -1,4 +1,16 @@
 import { apiFetch, ApiError } from "@rusty-timer/shared-ui/lib/api-helpers";
+import type {
+  WifiActionResult,
+  WifiApi,
+  WifiScanResult,
+  WifiStatus,
+} from "@rusty-timer/shared-ui";
+export type {
+  WifiActionResult,
+  WifiApi,
+  WifiScanResult,
+  WifiStatus,
+} from "@rusty-timer/shared-ui";
 
 export interface HardwareInfo {
   fw_version: string;
@@ -108,6 +120,7 @@ export interface ForwarderConfig {
   };
   control?: {
     allow_power_actions?: boolean;
+    allow_wifi_control?: boolean;
   };
   update?: {
     mode?: string;
@@ -385,3 +398,50 @@ export function getExportTagdataUrl(options: {
   const qs = params.toString();
   return `/api/v1/export/tagdata${qs ? `?${qs}` : ""}`;
 }
+
+export async function getWifiStatus(): Promise<WifiStatus> {
+  return apiFetch<WifiStatus>("/api/v1/wifi/status");
+}
+
+export async function scanWifi(rescan = true): Promise<WifiScanResult> {
+  return apiFetch<WifiScanResult>("/api/v1/wifi/scan", {
+    method: "POST",
+    body: JSON.stringify({ rescan }),
+  });
+}
+
+export async function connectWifi(params: {
+  ssid: string;
+  password?: string | null;
+  hidden?: boolean;
+}): Promise<WifiActionResult> {
+  return apiFetch<WifiActionResult>("/api/v1/wifi/connect", {
+    method: "POST",
+    body: JSON.stringify({
+      ssid: params.ssid,
+      password: params.password ?? null,
+      hidden: Boolean(params.hidden),
+    }),
+  });
+}
+
+export async function disconnectWifi(): Promise<WifiActionResult> {
+  return apiFetch<WifiActionResult>("/api/v1/wifi/disconnect", {
+    method: "POST",
+  });
+}
+
+export async function forgetWifi(ssid: string): Promise<WifiActionResult> {
+  return apiFetch<WifiActionResult>("/api/v1/wifi/forget", {
+    method: "POST",
+    body: JSON.stringify({ ssid }),
+  });
+}
+
+export const wifiApi: WifiApi = {
+  getStatus: getWifiStatus,
+  scan: (rescan = true) => scanWifi(rescan),
+  connect: connectWifi,
+  disconnect: disconnectWifi,
+  forget: forgetWifi,
+};

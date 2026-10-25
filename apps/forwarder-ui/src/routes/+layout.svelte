@@ -30,6 +30,11 @@
   <NavBar
     links={[
       { href: "/", label: "Status", active: currentPath === "/" },
+      {
+        href: "/wifi",
+        label: "Wi-Fi",
+        active: currentPath.startsWith("/wifi"),
+      },
       { href: "/config", label: "Config", active: currentPath === "/config" },
     ]}
     helpContext="forwarder"

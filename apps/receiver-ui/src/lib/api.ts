@@ -3,6 +3,18 @@
 // Uses Tauri IPC invoke() for direct in-process communication.
 
 import { invoke } from "@tauri-apps/api/core";
+import type {
+  WifiActionResult,
+  WifiApi,
+  WifiScanResult,
+  WifiStatus,
+} from "@rusty-timer/shared-ui";
+export type {
+  WifiActionResult,
+  WifiApi,
+  WifiScanResult,
+  WifiStatus,
+} from "@rusty-timer/shared-ui";
 
 export interface Profile {
   server_url: string;
@@ -236,6 +248,7 @@ export interface ForwarderConnectionStatus {
   restart_needed: boolean | null;
   remote_config_available: boolean;
   reader_control_available?: boolean;
+  wifi_control_available?: boolean;
   last_seen_secs?: number | null;
 }
 
@@ -810,4 +823,55 @@ export async function exportTagdata(
   request: ExportTagdataRequest,
 ): Promise<ExportTagdataResponse> {
   return invoke<ExportTagdataResponse>("export_tagdata", { request });
+}
+
+export async function forwarderWifiStatus(
+  endpointId: string,
+): Promise<WifiStatus> {
+  return invoke<WifiStatus>("forwarder_wifi_status", { endpointId });
+}
+
+export async function forwarderWifiScan(
+  endpointId: string,
+  rescan = true,
+): Promise<WifiScanResult> {
+  return invoke<WifiScanResult>("forwarder_wifi_scan", { endpointId, rescan });
+}
+
+export async function forwarderWifiConnect(
+  endpointId: string,
+  params: { ssid: string; password?: string | null; hidden?: boolean },
+): Promise<WifiActionResult> {
+  return invoke<WifiActionResult>("forwarder_wifi_connect", {
+    endpointId,
+    ssid: params.ssid,
+    password: params.password ?? null,
+    hidden: Boolean(params.hidden),
+  });
+}
+
+export async function forwarderWifiDisconnect(
+  endpointId: string,
+): Promise<WifiActionResult> {
+  return invoke<WifiActionResult>("forwarder_wifi_disconnect", { endpointId });
+}
+
+export async function forwarderWifiForget(
+  endpointId: string,
+  ssid: string,
+): Promise<WifiActionResult> {
+  return invoke<WifiActionResult>("forwarder_wifi_forget", {
+    endpointId,
+    ssid,
+  });
+}
+
+export function createForwarderWifiApi(endpointId: string): WifiApi {
+  return {
+    getStatus: () => forwarderWifiStatus(endpointId),
+    scan: (rescan = true) => forwarderWifiScan(endpointId, rescan),
+    connect: (params) => forwarderWifiConnect(endpointId, params),
+    disconnect: () => forwarderWifiDisconnect(endpointId),
+    forget: (ssid) => forwarderWifiForget(endpointId, ssid),
+  };
 }

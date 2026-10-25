@@ -8,6 +8,7 @@ export { default as DataTable } from '../components/DataTable.svelte';
 export { default as StatCard } from '../components/StatCard.svelte';
 export { default as ForwarderConfig } from '../components/ForwarderConfig.svelte';
 export { default as ForwarderConfigPage } from '../components/ForwarderConfigPage.svelte';
+export { default as ForwarderWifiManager } from '../components/ForwarderWifiManager.svelte';
 export { default as ConfirmDialog } from '../components/ConfirmDialog.svelte';
 export { default as HelpDialog } from '../components/HelpDialog.svelte';
 export { default as HelpTip } from '../components/HelpTip.svelte';
@@ -23,6 +24,7 @@ export type {
 } from '../lib/config-types';
 export * from '../lib/reader-view-model';
 export * from '../lib/read-mode-form';
+export * from '../lib/wifi-types';
 export * from '../lib/ui-classes';
 export * from '../lib/server-approval';
 export type {

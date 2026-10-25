@@ -97,6 +97,7 @@ pub struct StatusServer {
     local_addr: SocketAddr,
     store: StatusStore,
     config_state: Option<Arc<ConfigState>>,
+    wifi_service: crate::wifi::WifiService,
 }
 
 struct AppState<J: JournalAccess + Send + 'static> {
@@ -117,6 +118,7 @@ struct AppState<J: JournalAccess + Send + 'static> {
         >,
     >,
     reconnect_notifies: Arc<std::sync::RwLock<HashMap<String, Arc<Notify>>>>,
+    wifi_service: crate::wifi::WifiService,
 }
 
 impl<J: JournalAccess + Send + 'static> AppState<J> {
@@ -149,11 +151,16 @@ impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
             control_clients: self.control_clients.clone(),
             download_trackers: self.download_trackers.clone(),
             reconnect_notifies: self.reconnect_notifies.clone(),
+            wifi_service: self.wifi_service.clone(),
         }
     }
 }
 
 impl StatusServer {
+    /// Return the shared Wi-Fi service used by HTTP and P2P control paths.
+    pub fn wifi_service(&self) -> crate::wifi::WifiService {
+        self.wifi_service.clone()
+    }
     /// Return the bound listen address.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
@@ -407,6 +414,11 @@ impl StatusServer {
         let local_addr = listener.local_addr()?;
 
         let store = StatusStore::new(subsystem);
+        let wifi_service = crate::wifi::WifiService::new(
+            Arc::new(crate::wifi::NmcliWifiBackend::new()),
+            None,
+            store.logger(),
+        );
         let state = AppState {
             store: store.clone(),
             subsystem: store.subsystem_arc(),
@@ -420,6 +432,7 @@ impl StatusServer {
             control_clients: store.control_clients().clone(),
             download_trackers: store.download_trackers().clone(),
             reconnect_notifies: store.reconnect_notifies().clone(),
+            wifi_service: wifi_service.clone(),
         };
 
         let app = build_router(state);
@@ -433,6 +446,7 @@ impl StatusServer {
             local_addr,
             store,
             config_state: None,
+            wifi_service,
         })
     }
 
@@ -448,6 +462,11 @@ impl StatusServer {
         let local_addr = listener.local_addr()?;
 
         let store = StatusStore::new(subsystem);
+        let wifi_service = crate::wifi::WifiService::new(
+            Arc::new(crate::wifi::NmcliWifiBackend::new()),
+            Some(config_state.clone()),
+            store.logger(),
+        );
         let state = AppState {
             store: store.clone(),
             subsystem: store.subsystem_arc(),
@@ -461,6 +480,7 @@ impl StatusServer {
             control_clients: store.control_clients().clone(),
             download_trackers: store.download_trackers().clone(),
             reconnect_notifies: store.reconnect_notifies().clone(),
+            wifi_service: wifi_service.clone(),
         };
 
         let app = build_router(state);
@@ -474,6 +494,7 @@ impl StatusServer {
             local_addr,
             store,
             config_state: Some(config_state),
+            wifi_service,
         })
     }
 }
@@ -810,6 +831,159 @@ fn get_config_state<J: JournalAccess + Send + 'static>(
     state: &AppState<J>,
 ) -> Option<Arc<ConfigState>> {
     state.config_state.clone()
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct WifiScanBody {
+    rescan: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WifiConnectBody {
+    ssid: String,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    hidden: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WifiForgetBody {
+    ssid: String,
+}
+
+async fn wifi_status_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    match state.wifi_service.status().await {
+        Ok(status) => match serde_json::to_string(&status) {
+            Ok(json) => json_response(StatusCode::OK, json),
+            Err(e) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"ok": false, "error": e.to_string()}).to_string(),
+            ),
+        },
+        Err((code, body)) => json_response(
+            StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
+}
+
+async fn wifi_scan_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    let rescan = if body.is_empty() {
+        true
+    } else {
+        match parse_json_body::<WifiScanBody>(&body) {
+            Ok(parsed) => parsed.rescan.unwrap_or(true),
+            Err(e) => {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    serde_json::json!({"ok": false, "error": e}).to_string(),
+                );
+            }
+        }
+    };
+    match state.wifi_service.scan(rescan, "local UI").await {
+        Ok(scan) => match serde_json::to_string(&scan) {
+            Ok(json) => json_response(StatusCode::OK, json),
+            Err(e) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"ok": false, "error": e.to_string()}).to_string(),
+            ),
+        },
+        Err((code, body)) => json_response(
+            StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
+}
+
+async fn wifi_connect_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    let parsed: WifiConnectBody = match parse_json_body(&body) {
+        Ok(b) => b,
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": e}).to_string(),
+            );
+        }
+    };
+    match state
+        .wifi_service
+        .connect(
+            &parsed.ssid,
+            parsed.password.as_deref(),
+            parsed.hidden,
+            "local UI",
+        )
+        .await
+    {
+        Ok(res) => match serde_json::to_string(&res) {
+            Ok(json) => json_response(StatusCode::OK, json),
+            Err(e) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"ok": false, "error": e.to_string()}).to_string(),
+            ),
+        },
+        Err((code, body)) => json_response(
+            StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
+}
+
+async fn wifi_disconnect_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    match state.wifi_service.disconnect("local UI").await {
+        Ok(res) => match serde_json::to_string(&res) {
+            Ok(json) => json_response(StatusCode::OK, json),
+            Err(e) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"ok": false, "error": e.to_string()}).to_string(),
+            ),
+        },
+        Err((code, body)) => json_response(
+            StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
+}
+
+async fn wifi_forget_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    let parsed: WifiForgetBody = match parse_json_body(&body) {
+        Ok(b) => b,
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": e}).to_string(),
+            );
+        }
+    };
+    match state.wifi_service.forget(&parsed.ssid, "local UI").await {
+        Ok(res) => match serde_json::to_string(&res) {
+            Ok(json) => json_response(StatusCode::OK, json),
+            Err(e) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"ok": false, "error": e.to_string()}).to_string(),
+            ),
+        },
+        Err((code, body)) => json_response(
+            StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -1523,6 +1697,14 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             "/api/v1/control/shutdown-device",
             post(control_shutdown_device_handler::<J>),
         )
+        .route("/api/v1/wifi/status", get(wifi_status_handler::<J>))
+        .route("/api/v1/wifi/scan", post(wifi_scan_handler::<J>))
+        .route("/api/v1/wifi/connect", post(wifi_connect_handler::<J>))
+        .route(
+            "/api/v1/wifi/disconnect",
+            post(wifi_disconnect_handler::<J>),
+        )
+        .route("/api/v1/wifi/forget", post(wifi_forget_handler::<J>))
         .route("/api/v1/status", get(status_json_handler::<J>))
         .route("/api/v1/display-state", get(display_state_handler::<J>))
         .route("/api/v1/logs", get(logs_handler::<J>))
@@ -2777,6 +2959,7 @@ target = "192.168.1.100:10000"
             control_clients: server.control_clients().clone(),
             download_trackers: server.download_trackers().clone(),
             reconnect_notifies: server.reconnect_notifies().clone(),
+            wifi_service: server.wifi_service(),
         };
         update_cached_reader_info(
             &state,

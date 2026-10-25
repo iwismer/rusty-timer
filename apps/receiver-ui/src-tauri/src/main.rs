@@ -485,6 +485,61 @@ async fn restart_forwarder(
 }
 
 #[tauri::command]
+async fn forwarder_wifi_status(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+) -> CmdResult<rt_domain::WifiStatus> {
+    control_api::forwarder_wifi_status(&state, endpoint_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn forwarder_wifi_scan(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+    rescan: Option<bool>,
+) -> CmdResult<rt_domain::WifiScanResult> {
+    control_api::forwarder_wifi_scan(&state, endpoint_id, rescan)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn forwarder_wifi_connect(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+    ssid: String,
+    password: Option<String>,
+    hidden: Option<bool>,
+) -> CmdResult<rt_domain::WifiActionResult> {
+    control_api::forwarder_wifi_connect(&state, endpoint_id, ssid, password, hidden)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn forwarder_wifi_disconnect(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+) -> CmdResult<rt_domain::WifiActionResult> {
+    control_api::forwarder_wifi_disconnect(&state, endpoint_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn forwarder_wifi_forget(
+    state: State<'_, Arc<AppState>>,
+    endpoint_id: String,
+    ssid: String,
+) -> CmdResult<rt_domain::WifiActionResult> {
+    control_api::forwarder_wifi_forget(&state, endpoint_id, ssid)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn reader_get_info(
     state: State<'_, Arc<AppState>>,
     endpoint_id: String,

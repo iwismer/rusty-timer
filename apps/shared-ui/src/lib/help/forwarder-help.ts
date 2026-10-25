@@ -135,6 +135,13 @@ export const FORWARDER_HELP = {
         default: "Disabled",
         recommended: "Keep disabled during active timing to prevent accidental shutdowns.",
       },
+      allow_wifi_control: {
+        label: "Allow Wi-Fi Control",
+        summary: "Enables Wi-Fi scanning, connecting, disconnecting, and forgetting networks from the UI.",
+        detailHtml: "When enabled, operators can scan for nearby Wi-Fi networks, join or switch networks, disconnect Wi-Fi, and delete saved Wi-Fi profiles from the local forwarder Web UI or remotely over P2P from a connected receiver.<br><br>Disable this if you want to lock down network changes on a shared forwarder.",
+        default: "Enabled",
+        recommended: "Keep enabled for easy venue setup; disable if you want to prevent network changes.",
+      },
     },
     tips: [
       "Enable power actions only when you need to restart or shut down the physical device. Disable again after use.",
@@ -523,5 +530,31 @@ export const FORWARDER_HELP = {
       { sectionKey: "read_mode", label: "Read Mode" },
       { sectionKey: "journal", label: "Journal" },
     ],
+  },
+  wifi: {
+    title: "Wi-Fi Management",
+    overview: "Scan for nearby wireless networks, connect to WPA2/WPA3 or open networks, join hidden SSIDs, and manage saved NetworkManager Wi-Fi profiles on the forwarder.",
+    fields: {
+      current_connection: {
+        label: "Current Connection",
+        summary: "Shows the active Wi-Fi interface, SSID, IP address, gateway, band, security, and signal strength.",
+        detailHtml: "Displays live NetworkManager status for the forwarder's wireless interface. Use <strong>Refresh Status</strong> to poll the latest state or <strong>Disconnect</strong> to drop the active Wi-Fi association.",
+      },
+      available_networks: {
+        label: "Available Networks",
+        summary: "Nearby access points discovered by the wireless interface.",
+        detailHtml: "Click <strong>Scan for Networks</strong> to trigger an active wireless rescan. Networks with an existing saved profile can be joined with a single click; secured networks prompt for a WPA/WPA2/WPA3 password.",
+      },
+      saved_profiles: {
+        label: "Saved Wi-Fi Profiles",
+        summary: "Stored NetworkManager Wi-Fi connection profiles on this forwarder.",
+        detailHtml: "Click <strong>Forget</strong> to delete a saved Wi-Fi profile so the forwarder no longer auto-connects to that network.",
+      },
+    },
+    tips: [
+      "If you are connected to the forwarder Web UI over Wi-Fi, switching or disconnecting networks may briefly drop your browser connection while the interface re-associates.",
+      "Ethernet connections to IPICO readers are unaffected by Wi-Fi changes.",
+    ],
+    seeAlso: [{ sectionKey: "controls", label: "Forwarder Controls" }],
   },
 } as const satisfies HelpContext;

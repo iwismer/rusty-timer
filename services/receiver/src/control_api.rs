@@ -10,7 +10,8 @@ use crate::stream_key::{LocalStreamKey, is_valid_endpoint_id, is_valid_identity_
 use crate::ui_events::ReceiverUiEvent;
 use rt_p2p_protocol::{
     ConfigGetResponse, ConfigSetResponse, DownloadProgress, ReaderControlResponse, ReaderInfo,
-    ReaderStatus, RestartResponse, StreamCatalog, UpsStatus,
+    ReaderStatus, RestartResponse, StreamCatalog, UpsStatus, WifiControlRequest,
+    WifiControlResponse,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -74,6 +75,10 @@ use tracing::warn;
 /// routed back to the awaiting command by the per-forwarder control loop.
 pub(crate) const FORWARDER_CONFIG_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a Wi-Fi control command waits for the forwarder's response before
+/// failing (`nmcli` scan/connect uses `--wait 20` on the forwarder).
+pub(crate) const FORWARDER_WIFI_TIMEOUT: Duration = Duration::from_secs(35);
+
 /// A remote-config request bridged from a control-API command (`&AppState`) to
 /// the live [`ForwarderConnection`](crate::p2p_forwarder) control loop that
 /// owns the QUIC control session. Each variant carries a `oneshot` responder
@@ -100,6 +105,15 @@ pub(crate) enum ReaderCommand {
         stream_id: String,
         action: rt_domain::ReaderControlAction,
         resp: oneshot::Sender<ReaderControlResponse>,
+    },
+}
+
+/// A Wi-Fi control request bridged from control API commands to the live
+/// P2P control loop for a forwarder that negotiated `CAP_WIFI_CONTROL`.
+pub(crate) enum WifiCommand {
+    Request {
+        request: WifiControlRequest,
+        resp: oneshot::Sender<WifiControlResponse>,
     },
 }
 
@@ -172,6 +186,7 @@ struct ForwarderConnectionsFingerprint {
     display_name: Option<String>,
     remote_config_available: bool,
     reader_control_available: bool,
+    wifi_control_available: bool,
     subscribed_count: usize,
     available_count: usize,
     readers: Vec<ReaderLiveStatus>,
@@ -495,6 +510,7 @@ pub struct ForwarderControl {
     /// incapable forwarder fails fast.
     forwarder_config_tx: StdMutex<HashMap<String, mpsc::Sender<ConfigCommand>>>,
     forwarder_reader_control_tx: StdMutex<HashMap<String, mpsc::Sender<ReaderCommand>>>,
+    forwarder_wifi_control_tx: StdMutex<HashMap<String, mpsc::Sender<WifiCommand>>>,
     last_connections_fingerprint: StdMutex<Option<ConnectionsFingerprint>>,
 }
 
@@ -712,6 +728,7 @@ impl AppState {
                 forwarder_last_seen: Arc::new(StdMutex::new(HashMap::new())),
                 forwarder_config_tx: StdMutex::new(HashMap::new()),
                 forwarder_reader_control_tx: StdMutex::new(HashMap::new()),
+                forwarder_wifi_control_tx: StdMutex::new(HashMap::new()),
                 last_connections_fingerprint: StdMutex::new(None),
             },
             server_override: tokio::sync::RwLock::new((None, None)),
@@ -1435,6 +1452,61 @@ impl AppState {
             .collect()
     }
 
+    /// Register the Wi-Fi control request channel for a forwarder whose live
+    /// control session negotiated `CAP_WIFI_CONTROL`.
+    pub(crate) fn register_forwarder_wifi_control_tx(
+        self: &Arc<Self>,
+        endpoint_id: &str,
+        tx: mpsc::Sender<WifiCommand>,
+    ) -> ForwarderWifiControlRegistrationGuard {
+        self.forwarders
+            .forwarder_wifi_control_tx
+            .lock()
+            .unwrap()
+            .insert(endpoint_id.to_owned(), tx.clone());
+        ForwarderWifiControlRegistrationGuard {
+            state: Arc::clone(self),
+            endpoint_id: endpoint_id.to_owned(),
+            tx,
+        }
+    }
+
+    fn deregister_forwarder_wifi_control_tx(
+        &self,
+        endpoint_id: &str,
+        tx: &mpsc::Sender<WifiCommand>,
+    ) {
+        let mut registrations = self.forwarders.forwarder_wifi_control_tx.lock().unwrap();
+        if registrations
+            .get(endpoint_id)
+            .is_some_and(|registered| registered.same_channel(tx))
+        {
+            registrations.remove(endpoint_id);
+        }
+    }
+
+    pub(crate) fn forwarder_wifi_control_tx(
+        &self,
+        endpoint_id: &str,
+    ) -> Option<mpsc::Sender<WifiCommand>> {
+        self.forwarders
+            .forwarder_wifi_control_tx
+            .lock()
+            .unwrap()
+            .get(endpoint_id)
+            .cloned()
+    }
+
+    pub(crate) fn forwarder_wifi_control_endpoints(&self) -> Vec<String> {
+        self.forwarders
+            .forwarder_wifi_control_tx
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
     /// Mark a stream's data subscription as terminally failed on this
     /// forwarder's live connection (protocol/data-integrity error, see
     /// [`crate::p2p_session::P2pSessionError::is_retryable`]). Surfaced through
@@ -1648,6 +1720,7 @@ impl AppState {
             .clone();
         let config_endpoints = self.forwarder_config_endpoints();
         let reader_control_endpoints = self.forwarder_reader_control_endpoints();
+        let wifi_control_endpoints = self.forwarder_wifi_control_endpoints();
         let fingerprint = Self::connections_fingerprint(
             next.clone(),
             &statuses,
@@ -1657,6 +1730,7 @@ impl AppState {
             &live_statuses,
             &config_endpoints,
             &reader_control_endpoints,
+            &wifi_control_endpoints,
         );
         let connections_changed = {
             let mut last = self.forwarders.last_connections_fingerprint.lock().unwrap();
@@ -1683,6 +1757,7 @@ impl AppState {
         live_statuses: &HashMap<String, ForwarderLiveStatus>,
         config_endpoints: &[String],
         reader_control_endpoints: &[String],
+        wifi_control_endpoints: &[String],
     ) -> ConnectionsFingerprint {
         let mut endpoints: BTreeSet<String> = statuses.keys().cloned().collect();
         endpoints.extend(intents.keys().cloned());
@@ -1690,6 +1765,7 @@ impl AppState {
         endpoints.extend(live_statuses.keys().cloned());
         endpoints.extend(config_endpoints.iter().cloned());
         endpoints.extend(reader_control_endpoints.iter().cloned());
+        endpoints.extend(wifi_control_endpoints.iter().cloned());
 
         let mut subscribed_counts: HashMap<String, usize> = HashMap::new();
         let local_ports = subscription_local_ports(subscriptions);
@@ -1718,6 +1794,7 @@ impl AppState {
                         .and_then(|forwarder| forwarder.display_name.clone()),
                     remote_config_available: config_endpoints.contains(&endpoint_id),
                     reader_control_available: reader_control_endpoints.contains(&endpoint_id),
+                    wifi_control_available: wifi_control_endpoints.contains(&endpoint_id),
                     subscribed_count: subscribed_counts.get(&endpoint_id).copied().unwrap_or(0),
                     available_count: discovered_forwarder
                         .map_or(0, |forwarder| forwarder.streams.len()),
@@ -2112,6 +2189,28 @@ impl Drop for ForwarderReaderControlRegistrationGuard {
     }
 }
 
+/// RAII registration for a forwarder's live Wi-Fi control command channel.
+pub(crate) struct ForwarderWifiControlRegistrationGuard {
+    state: Arc<AppState>,
+    endpoint_id: String,
+    tx: mpsc::Sender<WifiCommand>,
+}
+
+impl Drop for ForwarderWifiControlRegistrationGuard {
+    fn drop(&mut self) {
+        self.state
+            .deregister_forwarder_wifi_control_tx(&self.endpoint_id, &self.tx);
+        self.state
+            .recompute_aggregate_connection_state_sync_default_trying();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let state = Arc::clone(&self.state);
+            handle.spawn(async move {
+                state.recompute_aggregate_connection_state().await;
+            });
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Request/Response types
 // ---------------------------------------------------------------------------
@@ -2327,6 +2426,22 @@ macro_rules! receiver_command_list {
                 config_json: "String"
             ) -> "ForwarderConfigSetResult",
             restart_forwarder(endpoint_id: "String") -> "ForwarderRestartResult",
+            forwarder_wifi_status(endpoint_id: "String") -> "WifiStatus",
+            forwarder_wifi_scan(
+                endpoint_id: "String",
+                rescan: "Option<bool>"
+            ) -> "WifiScanResult",
+            forwarder_wifi_connect(
+                endpoint_id: "String",
+                ssid: "String",
+                password: "Option<String>",
+                hidden: "Option<bool>"
+            ) -> "WifiActionResult",
+            forwarder_wifi_disconnect(endpoint_id: "String") -> "WifiActionResult",
+            forwarder_wifi_forget(
+                endpoint_id: "String",
+                ssid: "String"
+            ) -> "WifiActionResult",
             reader_get_info(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
             reader_sync_clock(endpoint_id: "String", stream_id: "String") -> "ReaderControlResult",
             reader_set_epoch_name(
@@ -3038,6 +3153,7 @@ mod tests {
             &subscribed_counts,
             &local_ports,
             &["endpoint-c".to_owned()],
+            &[],
             &[],
             &last_seen_by_endpoint,
         );
@@ -3857,6 +3973,86 @@ mod tests {
         let result = reader_refresh(&state, "endpoint-a".to_owned(), "stream-a".to_owned()).await;
 
         assert!(matches!(result, Err(ReceiverError::UpstreamError(_))));
+    }
+
+    #[tokio::test]
+    async fn wifi_control_commands_route_requests_and_parse_responses() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let _guard = state.register_forwarder_wifi_control_tx("endpoint-a", tx);
+
+        let conns = get_connections(&state).await;
+        let fwd = conns
+            .forwarders
+            .iter()
+            .find(|f| f.endpoint_id == "endpoint-a")
+            .expect("forwarder present");
+        assert!(fwd.wifi_control_available);
+
+        let expected_status = rt_domain::WifiStatus {
+            available: true,
+            enabled: true,
+            interface: Some("wlan0".to_owned()),
+            state: "connected".to_owned(),
+            ssid: Some("RaceTiming".to_owned()),
+            ip_address: Some("192.168.1.42/24".to_owned()),
+            gateway: Some("192.168.1.1".to_owned()),
+            signal: Some(85),
+            security: Some("WPA2".to_owned()),
+            band: Some("5 GHz".to_owned()),
+            saved_networks: vec![rt_domain::SavedWifiNetwork {
+                ssid: "RaceTiming".to_owned(),
+                uuid: "uuid-1".to_owned(),
+                autoconnect: true,
+            }],
+        };
+
+        let status_for_task = expected_status.clone();
+        tokio::spawn(async move {
+            // 1. status
+            let WifiCommand::Request { request, resp } = rx.recv().await.expect("wifi status cmd");
+            assert_eq!(request.command, "status");
+            resp.send(WifiControlResponse {
+                request_id: "1".to_owned(),
+                ok: true,
+                message: String::new(),
+                payload_json: Some(serde_json::to_string(&status_for_task).unwrap()),
+            })
+            .unwrap();
+
+            // 2. connect
+            let WifiCommand::Request { request, resp } = rx.recv().await.expect("wifi connect cmd");
+            assert_eq!(request.command, "connect");
+            assert_eq!(request.ssid.as_deref(), Some("NewNet"));
+            assert_eq!(request.password.as_deref(), Some("secret"));
+            assert_eq!(request.hidden, Some(false));
+            resp.send(WifiControlResponse {
+                request_id: "2".to_owned(),
+                ok: true,
+                message: "Connected to NewNet".to_owned(),
+                payload_json: Some(serde_json::to_string(&status_for_task).unwrap()),
+            })
+            .unwrap();
+        });
+
+        let status = forwarder_wifi_status(&state, "endpoint-a".to_owned())
+            .await
+            .expect("wifi status");
+        assert_eq!(status, expected_status);
+
+        let connect_res = forwarder_wifi_connect(
+            &state,
+            "endpoint-a".to_owned(),
+            "NewNet".to_owned(),
+            Some("secret".to_owned()),
+            Some(false),
+        )
+        .await
+        .expect("wifi connect");
+        assert!(connect_res.ok);
+        assert_eq!(connect_res.message, "Connected to NewNet");
+        assert_eq!(connect_res.status, Some(expected_status));
     }
 
     #[tokio::test]

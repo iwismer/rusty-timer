@@ -130,7 +130,23 @@ assert_eq "true" "$(allow_remote_config_toml_value)" "allow_remote_config_toml_v
 
 unset RT_SETUP_ALLOW_REMOTE_CONFIG || true
 
+# --- allow_wifi_control env helper ---
+unset RT_SETUP_ALLOW_WIFI_CONTROL || true
+assert_eq "true" "$(allow_wifi_control_toml_value)" "allow_wifi_control_toml_value should default to true when env unset"
+
+RT_SETUP_ALLOW_WIFI_CONTROL="false"
+assert_eq "false" "$(allow_wifi_control_toml_value)" "allow_wifi_control_toml_value should honor false override"
+
+RT_SETUP_ALLOW_WIFI_CONTROL="0"
+assert_eq "false" "$(allow_wifi_control_toml_value)" "allow_wifi_control_toml_value should treat 0 as false"
+
+RT_SETUP_ALLOW_WIFI_CONTROL="bogus"
+assert_eq "true" "$(allow_wifi_control_toml_value)" "allow_wifi_control_toml_value should fall back to default true on malformed override"
+
+unset RT_SETUP_ALLOW_WIFI_CONTROL || true
+
 assert_eq "/etc/polkit-1/rules.d/90-rt-forwarder-power-actions.rules" "${POWER_ACTIONS_POLKIT_RULES_PATH}" "polkit rules path constant should match expected location"
+assert_eq "/etc/polkit-1/rules.d/90-rt-forwarder-wifi.rules" "${WIFI_POLKIT_RULES_PATH}" "wifi polkit rules path constant should match expected location"
 assert_eq "/etc/sudoers.d/90-rt-forwarder-power-actions" "${POWER_ACTIONS_SUDOERS_PATH}" "legacy sudoers path constant should remain for cleanup"
 
 targets="$(reader_targets_from_env $'192.168.1.10:10000\n192.168.1.11:10000')"
@@ -172,6 +188,12 @@ assert_contains "${polkit_rules}" "action.id == \"org.freedesktop.systemd1.manag
 assert_contains "${polkit_rules}" "action.lookup(\"verb\") == \"start\"" "polkit rules should only allow start verb for manage-units"
 assert_contains "${polkit_rules}" "action.lookup(\"unit\") == \"reboot.target\"" "polkit rules should allow reboot target for manage-units"
 assert_contains "${polkit_rules}" "action.lookup(\"unit\") == \"poweroff.target\"" "polkit rules should allow poweroff target for manage-units"
+
+wifi_polkit_rules="$(render_wifi_polkit_rules)"
+assert_contains "${wifi_polkit_rules}" "subject.user == \"rt-forwarder\"" "wifi polkit rules should target the rt-forwarder user"
+assert_contains "${wifi_polkit_rules}" "\"org.freedesktop.NetworkManager.network-control\"" "wifi polkit rules should allow network-control"
+assert_contains "${wifi_polkit_rules}" "\"org.freedesktop.NetworkManager.wifi.scan\"" "wifi polkit rules should allow wifi scan"
+assert_contains "${wifi_polkit_rules}" "\"org.freedesktop.NetworkManager.settings.modify.system\"" "wifi polkit rules should allow modifying system connection settings"
 
 usb_netplan="$(render_usb_tether_netplan)"
 assert_eq "/etc/netplan/99-usb-tether.yaml" "${USB_TETHER_NETPLAN_PATH}" "USB tether netplan path constant should match expected location"
@@ -224,7 +246,7 @@ unset -f chown netplan
 
 setup_script="$(cat "${SCRIPT_PATH}")"
 assert_contains "${setup_script}" $'[p2p]\nenabled = true\nsecret_key_path' "generated forwarder config should enable P2P on SBC installs"
-assert_contains "${setup_script}" $'[control]\nallow_power_actions = ${control_allow_power_actions}\nallow_remote_config = ${control_allow_remote_config}' "generated [control] section should provision allow_remote_config alongside allow_power_actions"
+assert_contains "${setup_script}" $'[control]\nallow_power_actions = ${control_allow_power_actions}\nallow_remote_config = ${control_allow_remote_config}\nallow_wifi_control = ${control_allow_wifi_control}' "generated [control] section should provision allow_remote_config and allow_wifi_control alongside allow_power_actions"
 assert_contains "${setup_script}" $'[clock]\ntimezone = "${escaped_forwarder_timezone}"' "generated forwarder config should provision [clock] timezone"
 
 # --- timezone validation helpers ---
@@ -295,7 +317,32 @@ cat > "${tmp_cfg}" <<'EOF'
 server_url = "https://example.com"
 EOF
 assert_eq "0" "$(expected_allow_power_actions_for_install "${tmp_cfg}")" "install expectation should disable power actions when key is missing"
+
+# --- config_wifi_control_state & expected_allow_wifi_control_for_install ---
+cat > "${tmp_cfg}" <<'EOF'
+[control]
+allow_wifi_control = true
+EOF
+assert_eq "true" "$(config_wifi_control_state "${tmp_cfg}")" "config_wifi_control_state should return true when control.allow_wifi_control=true"
+assert_eq "1" "$(expected_allow_wifi_control_for_install "${tmp_cfg}")" "install expectation should enable wifi control when key is true"
+
+cat > "${tmp_cfg}" <<'EOF'
+[control]
+allow_wifi_control = false
+EOF
+assert_eq "false" "$(config_wifi_control_state "${tmp_cfg}")" "config_wifi_control_state should return false when control.allow_wifi_control=false"
+assert_eq "0" "$(expected_allow_wifi_control_for_install "${tmp_cfg}")" "install expectation should disable wifi control when key is false"
+
+cat > "${tmp_cfg}" <<'EOF'
+[p2p]
+server_url = "https://example.com"
+EOF
+assert_eq "missing_key" "$(config_wifi_control_state "${tmp_cfg}")" "config_wifi_control_state should return missing_key when key is missing"
+assert_eq "1" "$(expected_allow_wifi_control_for_install "${tmp_cfg}")" "install expectation should default wifi control to enabled when key is missing"
+
 rm -f "${tmp_cfg}"
+assert_eq "missing_file" "$(config_wifi_control_state "${tmp_cfg}")" "config_wifi_control_state should return missing_file for missing config"
+assert_eq "1" "$(expected_allow_wifi_control_for_install "${tmp_cfg}")" "missing config file should expect wifi control enabled by default"
 
 # --- parameterized asset selection ---
 page_aarch64='[{"tag_name":"forwarder-v2.0.0","published_at":"2026-03-01T00:00:00Z","draft":false,"prerelease":false,"assets":[{"name":"forwarder-v2.0.0-aarch64-unknown-linux-gnu.tar.gz","browser_download_url":"https://example.com/fwd-aarch64.tar.gz"}]}]'
