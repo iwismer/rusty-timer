@@ -551,7 +551,58 @@ impl Db {
             stmt.raw_execute()?;
         }
         drop(stmt);
+        let mut event_type_stmt = tx.prepare_cached(
+            "INSERT INTO stream_event_types (forwarder_endpoint_id, stream_id, event_type)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT (forwarder_endpoint_id, stream_id) DO UPDATE SET event_type = excluded.event_type",
+        )?;
+        for s in subs {
+            event_type_stmt.execute(rusqlite::params![
+                &s.forwarder_endpoint_id,
+                &s.stream_id,
+                s.event_type.as_str()
+            ])?;
+        }
+        drop(event_type_stmt);
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Load remembered per-stream DBF event types.
+    pub fn load_stream_event_types(
+        &self,
+    ) -> DbResult<std::collections::HashMap<(String, String), EventType>> {
+        let mut s = self.conn.prepare(
+            "SELECT forwarder_endpoint_id, stream_id, event_type
+             FROM stream_event_types",
+        )?;
+        let rows = s.query_map([], |r| {
+            Ok((
+                (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
+                parse_event_type_column(r.get::<_, String>(2)?, 2)?,
+            ))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (key, et) = row?;
+            map.insert(key, et);
+        }
+        Ok(map)
+    }
+
+    /// Save or update a stream's remembered DBF event type.
+    pub fn save_stream_event_type(
+        &self,
+        forwarder_endpoint_id: &str,
+        stream_id: &str,
+        event_type: EventType,
+    ) -> DbResult<()> {
+        self.conn.execute(
+            "INSERT INTO stream_event_types (forwarder_endpoint_id, stream_id, event_type)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT (forwarder_endpoint_id, stream_id) DO UPDATE SET event_type = excluded.event_type",
+            rusqlite::params![forwarder_endpoint_id, stream_id, event_type.as_str()],
+        )?;
         Ok(())
     }
 
@@ -1560,6 +1611,7 @@ impl Db {
         tx.execute_batch("DELETE FROM gap_markers")?;
         tx.execute_batch("DELETE FROM earliest_epochs")?;
         tx.execute_batch("DELETE FROM subscriptions")?;
+        tx.execute_batch("DELETE FROM stream_event_types")?;
         tx.execute_batch("DELETE FROM announcer_publish_streams")?;
         tx.execute(
             "UPDATE profile SET update_mode = ?1, receiver_mode_json = NULL, dbf_enabled = 0, announcer_enabled = 0",
@@ -1577,6 +1629,7 @@ impl Db {
         tx.execute_batch("DELETE FROM gap_markers")?;
         tx.execute_batch("DELETE FROM earliest_epochs")?;
         tx.execute_batch("DELETE FROM subscriptions")?;
+        tx.execute_batch("DELETE FROM stream_event_types")?;
         tx.execute_batch("DELETE FROM forwarder_intent")?;
         tx.execute_batch("DELETE FROM announcer_publish_streams")?;
         tx.execute_batch("DELETE FROM participants")?;
@@ -1885,6 +1938,7 @@ impl Db {
         };
 
         if cur_event_type_str == event_type.as_str() {
+            let _ = self.save_stream_event_type(forwarder_endpoint_id, stream_id, event_type);
             return Ok(Some(false));
         }
 
@@ -1905,6 +1959,16 @@ impl Db {
                 new_idx,
                 forwarder_endpoint_id,
                 stream_id
+            ],
+        )?;
+        self.conn.execute(
+            "INSERT INTO stream_event_types (forwarder_endpoint_id, stream_id, event_type)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT (forwarder_endpoint_id, stream_id) DO UPDATE SET event_type = excluded.event_type",
+            rusqlite::params![
+                forwarder_endpoint_id,
+                stream_id,
+                event_type.as_str(),
             ],
         )?;
         Ok(Some(true))
@@ -2825,6 +2889,7 @@ mod tests {
         // New tables and the global toggle must also be wiped.
         assert!(!db.load_announcer_enabled().unwrap());
         assert!(db.load_announcer_publish_streams().unwrap().is_empty());
+        assert!(db.load_stream_event_types().unwrap().is_empty());
         assert!(db.load_chip_to_participant().unwrap().is_empty());
     }
 
@@ -3343,6 +3408,55 @@ mod tests {
         assert_eq!(changed_back, Some(true));
         assert_eq!(reader_index(&db, "ep-a", "s-a"), Some(0));
         assert_eq!(reader_index(&db, "ep-b", "s-b"), Some(1));
+    }
+
+    #[test]
+    fn stream_event_types_persists_across_unsubscribing_and_resubscribing() {
+        let mut db = Db::open_in_memory().unwrap();
+        let mut sub_a = bare_sub("ep-a", "s-a");
+        sub_a.event_type = EventType::Start;
+        let mut sub_b = bare_sub("ep-b", "s-b");
+        sub_b.event_type = EventType::Exclude;
+
+        db.replace_stream_subscriptions(&[sub_a, sub_b]).unwrap();
+
+        let remembered = db.load_stream_event_types().unwrap();
+        assert_eq!(
+            remembered.get(&("ep-a".to_owned(), "s-a".to_owned())),
+            Some(&EventType::Start)
+        );
+        assert_eq!(
+            remembered.get(&("ep-b".to_owned(), "s-b".to_owned())),
+            Some(&EventType::Exclude)
+        );
+
+        // Unsubscribe ep-a: replace subscriptions with only ep-b.
+        let sub_b_only = bare_sub("ep-b", "s-b");
+        db.replace_stream_subscriptions(&[sub_b_only]).unwrap();
+
+        // ep-a is no longer in active subscriptions.
+        assert_eq!(db.load_stream_subscriptions().unwrap().len(), 1);
+
+        // But ep-a's event type is still remembered!
+        let remembered = db.load_stream_event_types().unwrap();
+        assert_eq!(
+            remembered.get(&("ep-a".to_owned(), "s-a".to_owned())),
+            Some(&EventType::Start)
+        );
+
+        // Update ep-a's event type directly via save_stream_event_type or
+        // update_stream_subscription_event_type on an active stream.
+        db.update_stream_subscription_event_type("ep-b", "s-b", EventType::Start)
+            .unwrap();
+        let remembered = db.load_stream_event_types().unwrap();
+        assert_eq!(
+            remembered.get(&("ep-b".to_owned(), "s-b".to_owned())),
+            Some(&EventType::Start)
+        );
+
+        // clear_data wipes stream_event_types
+        db.clear_data().unwrap();
+        assert!(db.load_stream_event_types().unwrap().is_empty());
     }
 
     #[test]

@@ -81,7 +81,7 @@ export function buildAllSubscriptions(
     local_port_override: stream.subscribed
       ? (stream.local_port_override ?? null)
       : null,
-    event_type: stream.subscribed ? (stream.event_type ?? "finish") : "finish",
+    event_type: stream.event_type ?? "finish",
   }));
 }
 
@@ -131,7 +131,7 @@ export function buildUpdatedSubscriptions(
         stream_id: target.stream_id,
         ...legacyMetadata(targetStream),
         local_port_override: parsed.value,
-        event_type: "finish",
+        event_type: targetStream?.event_type ?? "finish",
       },
     ],
     error: null,

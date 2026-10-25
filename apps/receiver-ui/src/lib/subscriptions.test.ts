@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  type SubscriptionBuildStream,
   buildAllSubscriptions,
   buildUpdatedSubscriptions,
   parsePortOverrideInput,
@@ -353,5 +354,114 @@ describe("buildUpdatedSubscriptions", () => {
 
     expect(result.subscriptions).toBeNull();
     expect(result.error).toBe("Port override must be in range 1-65535.");
+  });
+
+  it("remembers and restores stream event_type (start, exclude) when resubscribing", () => {
+    const allStreams: SubscriptionBuildStream[] = [
+      {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-start",
+        subscribed: false,
+        local_port: null,
+        local_port_override: null,
+        event_type: "start",
+      },
+      {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-exclude",
+        subscribed: false,
+        local_port: null,
+        local_port_override: null,
+        event_type: "exclude",
+      },
+    ];
+
+    // Resubscribing stream-start restores start
+    const resultStart = buildUpdatedSubscriptions({
+      allStreams,
+      target: {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-start",
+        currentlySubscribed: false,
+      },
+    });
+    expect(resultStart.error).toBeNull();
+    expect(resultStart.subscriptions).toEqual([
+      {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-start",
+        local_port_override: null,
+        event_type: "start",
+      },
+    ]);
+
+    // Resubscribing stream-exclude restores exclude
+    const resultExclude = buildUpdatedSubscriptions({
+      allStreams,
+      target: {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-exclude",
+        currentlySubscribed: false,
+      },
+    });
+    expect(resultExclude.error).toBeNull();
+    expect(resultExclude.subscriptions).toEqual([
+      {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-exclude",
+        local_port_override: null,
+        event_type: "exclude",
+      },
+    ]);
+  });
+
+  it("buildAllSubscriptions preserves remembered event_type on unsubscribed streams", () => {
+    const allStreams: SubscriptionBuildStream[] = [
+      {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-start",
+        subscribed: false,
+        local_port: null,
+        local_port_override: null,
+        event_type: "start",
+      },
+      {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-exclude",
+        subscribed: false,
+        local_port: null,
+        local_port_override: null,
+        event_type: "exclude",
+      },
+      {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-default",
+        subscribed: false,
+        local_port: null,
+        local_port_override: null,
+      },
+    ];
+
+    const subscriptions = buildAllSubscriptions(allStreams);
+    expect(subscriptions).toEqual([
+      {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-start",
+        local_port_override: null,
+        event_type: "start",
+      },
+      {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-exclude",
+        local_port_override: null,
+        event_type: "exclude",
+      },
+      {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-default",
+        local_port_override: null,
+        event_type: "finish",
+      },
+    ]);
   });
 });

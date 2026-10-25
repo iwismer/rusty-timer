@@ -183,19 +183,30 @@ pub async fn put_subscriptions(
         }
     }
 
+    let mut db = state.storage.db.lock().await;
+    let remembered = db.load_stream_event_types().unwrap_or_default();
     let subs: Vec<StreamSubscription> = body
         .subscriptions
         .into_iter()
-        .map(|s| StreamSubscription {
-            forwarder_endpoint_id: s.forwarder_endpoint_id,
-            stream_id: s.stream_id,
-            local_port_override: s.local_port_override,
-            event_type: s.event_type.unwrap_or(crate::db::EventType::Finish),
-            forwarder_id: s.forwarder_id,
-            reader_ip: s.reader_ip,
+        .map(|s| {
+            let event_type = s
+                .event_type
+                .or_else(|| {
+                    remembered
+                        .get(&(s.forwarder_endpoint_id.clone(), s.stream_id.clone()))
+                        .copied()
+                })
+                .unwrap_or(crate::db::EventType::Finish);
+            StreamSubscription {
+                forwarder_endpoint_id: s.forwarder_endpoint_id,
+                stream_id: s.stream_id,
+                local_port_override: s.local_port_override,
+                event_type,
+                forwarder_id: s.forwarder_id,
+                reader_ip: s.reader_ip,
+            }
         })
         .collect();
-    let mut db = state.storage.db.lock().await;
     match db.replace_stream_subscriptions(&subs) {
         Ok(()) => {
             drop(db);

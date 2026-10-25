@@ -1933,6 +1933,7 @@ impl AppState {
         };
         let announcer_publish_streams = db.load_announcer_publish_streams().unwrap_or_default();
         let intents = db.load_forwarder_intents().unwrap_or_default();
+        let remembered_event_types = db.load_stream_event_types().unwrap_or_default();
         // Earliest-epoch overrides keyed by local stream key: the UI's
         // read-back path for the "From epoch" control.
         let earliest_epochs: HashMap<String, i64> = db
@@ -2088,6 +2089,9 @@ impl AppState {
                     .get(endpoint_id)
                     .and_then(|status| status.failed_streams.get(&stream.stream_id).cloned());
                 let local_stream_key = LocalStreamKey::new(endpoint_id, &stream.stream_id);
+                let remembered_event_type = remembered_event_types
+                    .get(&(endpoint_id.clone(), stream.stream_id.clone()))
+                    .copied();
                 streams.push(StreamEntry {
                     override_held,
                     failure,
@@ -2100,7 +2104,7 @@ impl AppState {
                     local_port: None,
                     local_port_override: None,
                     announcer_publish: false,
-                    event_type: None,
+                    event_type: remembered_event_type,
                     online,
                     reader_connected,
                     display_alias: forwarder.display_name.clone(),
@@ -5228,5 +5232,143 @@ mod tests {
         // Streams response immediately reflects 0 / None reads without restart.
         let resp_after = state.build_streams_response().await;
         assert_eq!(resp_after.streams[0].reads_total, None);
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_and_resubscribe_remembers_event_type() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-1".to_owned());
+
+        state.forwarders.discovered_forwarders.write().await.insert(
+            "endpoint-1".to_owned(),
+            DiscoveredForwarder {
+                display_name: Some("Finish Line".to_owned()),
+                direct_addrs: Vec::new(),
+                streams: vec![DiscoveredStream {
+                    stream_id: "stream-a".to_owned(),
+                    epoch: 1,
+                    next_seq: 1,
+                    epoch_options: Vec::new(),
+                }],
+            },
+        );
+
+        // 1. Subscribe with Start
+        put_subscriptions(
+            &state,
+            SubscriptionsBody {
+                subscriptions: vec![SubscriptionRequest {
+                    forwarder_endpoint_id: "endpoint-1".to_owned(),
+                    stream_id: "stream-a".to_owned(),
+                    local_port_override: None,
+                    event_type: Some(crate::db::EventType::Start),
+                    forwarder_id: None,
+                    reader_ip: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let resp = state.build_streams_response().await;
+        assert_eq!(resp.streams.len(), 1);
+        assert!(resp.streams[0].subscribed);
+        assert_eq!(
+            resp.streams[0].event_type,
+            Some(crate::db::EventType::Start)
+        );
+
+        // 2. Unsubscribe (empty subscription list)
+        put_subscriptions(
+            &state,
+            SubscriptionsBody {
+                subscriptions: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        // 3. Verify unsubscribed stream has remembered event_type in build_streams_response
+        let resp_unsub = state.build_streams_response().await;
+        assert_eq!(resp_unsub.streams.len(), 1);
+        assert!(!resp_unsub.streams[0].subscribed);
+        assert_eq!(
+            resp_unsub.streams[0].event_type,
+            Some(crate::db::EventType::Start),
+            "unsubscribed stream should remember its previous event_type"
+        );
+
+        // 4. Resubscribe without specifying event_type (defaults to None, should restore remembered)
+        put_subscriptions(
+            &state,
+            SubscriptionsBody {
+                subscriptions: vec![SubscriptionRequest {
+                    forwarder_endpoint_id: "endpoint-1".to_owned(),
+                    stream_id: "stream-a".to_owned(),
+                    local_port_override: None,
+                    event_type: None,
+                    forwarder_id: None,
+                    reader_ip: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let db = state.storage.db.lock().await;
+        let subs = db.load_stream_subscriptions().unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].event_type, crate::db::EventType::Start);
+        drop(db);
+
+        // 5. Change to Exclude, unsubscribe, and resubscribe
+        update_subscription_event_type(
+            &state,
+            "endpoint-1",
+            "stream-a",
+            EventTypeRequest {
+                event_type: crate::db::EventType::Exclude,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Unsubscribe
+        put_subscriptions(
+            &state,
+            SubscriptionsBody {
+                subscriptions: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        let resp_unsub2 = state.build_streams_response().await;
+        assert_eq!(
+            resp_unsub2.streams[0].event_type,
+            Some(crate::db::EventType::Exclude),
+            "unsubscribed stream should remember Exclude event_type"
+        );
+
+        // Resubscribe with Exclude preserved
+        put_subscriptions(
+            &state,
+            SubscriptionsBody {
+                subscriptions: vec![SubscriptionRequest {
+                    forwarder_endpoint_id: "endpoint-1".to_owned(),
+                    stream_id: "stream-a".to_owned(),
+                    local_port_override: None,
+                    event_type: None,
+                    forwarder_id: None,
+                    reader_ip: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let db = state.storage.db.lock().await;
+        let subs = db.load_stream_subscriptions().unwrap();
+        assert_eq!(subs[0].event_type, crate::db::EventType::Exclude);
     }
 }

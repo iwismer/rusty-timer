@@ -62,6 +62,18 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     PRIMARY KEY (forwarder_endpoint_id, stream_id)
 );
 
+-- Per-stream DBF event type (start, finish, exclude). Kept in a separate table
+-- so unsubscribing and resubscribing remembers the read type choice.
+CREATE TABLE IF NOT EXISTS stream_event_types (
+    forwarder_endpoint_id TEXT NOT NULL,
+    stream_id             TEXT NOT NULL,
+    event_type            TEXT NOT NULL,
+    PRIMARY KEY (forwarder_endpoint_id, stream_id)
+);
+
+INSERT OR IGNORE INTO stream_event_types (forwarder_endpoint_id, stream_id, event_type)
+SELECT forwarder_endpoint_id, stream_id, event_type FROM subscriptions;
+
 CREATE TABLE IF NOT EXISTS received_events (
     stream_id                 TEXT NOT NULL,
     seq                       BIGINT NOT NULL,

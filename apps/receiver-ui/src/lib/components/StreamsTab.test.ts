@@ -303,6 +303,60 @@ describe("StreamsTab", () => {
     });
   });
 
+  it("resubscribing an unsubscribed stream restores its remembered event_type", async () => {
+    store.streams = {
+      streams: [
+        {
+          forwarder_endpoint_id: "endpoint-abc",
+          stream_id: "reader-start-1",
+          subscribed: false,
+          local_port: null,
+          local_port_override: null,
+          event_type: "start",
+          stream_epoch: 1,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    };
+    apiMocks.getStreams.mockResolvedValue({
+      streams: [
+        {
+          forwarder_endpoint_id: "endpoint-abc",
+          stream_id: "reader-start-1",
+          subscribed: true,
+          local_port: null,
+          local_port_override: null,
+          event_type: "start",
+          stream_epoch: 1,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    render(StreamsTab);
+
+    await fireEvent.click(screen.getByText("reader-start-1").closest("tr")!);
+    const subscribe = screen.getByTestId(
+      "subscribe-toggle-endpoint-abc/reader-start-1",
+    );
+    expect(subscribe).toHaveTextContent("Subscribe");
+
+    await fireEvent.click(subscribe);
+
+    await waitFor(() => {
+      expect(apiMocks.putSubscriptions).toHaveBeenCalledWith([
+        {
+          forwarder_endpoint_id: "endpoint-abc",
+          stream_id: "reader-start-1",
+          local_port_override: null,
+          event_type: "start",
+        },
+      ]);
+    });
+  });
+
   it("subscribes all available streams while preserving existing subscriptions", async () => {
     store.streams = {
       streams: [
