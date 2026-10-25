@@ -65,7 +65,8 @@ impl ReaderControlService {
     ) -> Result<crate::reader_control::ReaderInfo, String> {
         let client = self.client(reader_ip)?;
         let mut info = self.cached_reader_info(reader_ip).await.unwrap_or_default();
-        crate::reader_control::run_status_poll(&client, &mut info).await;
+        let clock_tz = self.clock_timezone().await.ok().flatten();
+        crate::reader_control::run_status_poll(&client, &mut info, clock_tz).await;
         self.update_cached_reader_info(reader_ip, info.clone())
             .await;
         Ok(info)
@@ -217,7 +218,8 @@ impl ReaderControlService {
         let mut info = self.cached_reader_info(reader_ip).await.unwrap_or_default();
         info.config = Some(crate::reader_control::Config3Info { mode, timeout });
         info.clock = None;
-        crate::reader_control::run_status_poll_merge_successes(&client, &mut info).await;
+        let clock_tz = self.clock_timezone().await.ok().flatten();
+        crate::reader_control::run_status_poll_merge_successes(&client, &mut info, clock_tz).await;
         self.update_cached_reader_info(reader_ip, info.clone())
             .await;
         Ok(info)
@@ -278,7 +280,8 @@ impl ReaderControlService {
         let mut info = self.cached_reader_info(reader_ip).await.unwrap_or_default();
         info.recording = Some(ext.recording_state.is_recording());
         info.estimated_stored_reads = Some(ext.estimated_stored_reads());
-        crate::reader_control::run_status_poll(&client, &mut info).await;
+        let clock_tz = self.clock_timezone().await.ok().flatten();
+        crate::reader_control::run_status_poll(&client, &mut info, clock_tz).await;
         self.update_cached_reader_info(reader_ip, info.clone())
             .await;
         Ok(info)
@@ -446,33 +449,7 @@ pub async fn estimate_one_way_latency(
     Ok((median_rtt / 2, rtts.len()))
 }
 
-/// Current wall time in the configured timezone, or the host's local time when
-/// no `[clock].timezone` is configured.
-///
-/// Returns the instant plus a human-readable zone label for logs. The same
-/// clock is used to align the SET_DATE_TIME send and to compute drift, so the
-/// reader is always compared against the wall clock it was set to.
-fn clock_wall_now(tz: Option<chrono_tz::Tz>) -> (chrono::DateTime<chrono::FixedOffset>, String) {
-    match tz {
-        Some(tz) => {
-            let now = chrono::Utc::now().with_timezone(&tz);
-            (
-                now.fixed_offset(),
-                format!("{} (UTC{})", tz.name(), now.offset()),
-            )
-        }
-        None => {
-            let now = chrono::Local::now();
-            (
-                now.fixed_offset(),
-                format!(
-                    "host local (UTC{}, no [clock] timezone configured)",
-                    now.offset()
-                ),
-            )
-        }
-    }
-}
+pub use crate::reader_control::clock_wall_now;
 
 /// Compute the target second boundary and pre-SET wait duration for clock sync.
 ///

@@ -764,8 +764,9 @@ async fn main() {
         let rx = shutdown_rx.clone();
         let ss = status_store.clone();
         let lg = logger.clone();
+        let cs = Some(config_state.clone());
         tokio::spawn(async move {
-            run_reader(reader_ip, reader_port, fanout_addr, j, rx, ss, lg).await;
+            run_reader(reader_ip, reader_port, fanout_addr, j, rx, ss, lg, cs).await;
         });
     }
 

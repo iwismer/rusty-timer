@@ -208,6 +208,14 @@ pub(crate) async fn fail_active_download(
 // Reader task: TCP connect → parse IPICO frames → journal + fanout
 // ---------------------------------------------------------------------------
 
+async fn current_clock_timezone(
+    config_state: Option<&crate::config_service::ConfigState>,
+) -> Option<chrono_tz::Tz> {
+    let cs = config_state?;
+    let name = crate::config_service::read_clock_timezone(cs).await?;
+    crate::config::parse_timezone_name(&name).ok()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_reader(
     reader_ip: String,
@@ -217,6 +225,7 @@ pub async fn run_reader(
     mut shutdown_rx: watch::Receiver<bool>,
     status: StatusStore,
     logger: Arc<rt_ui_log::UiLogger<ForwarderUiEvent>>,
+    config_state: Option<Arc<crate::config_service::ConfigState>>,
 ) {
     let target_addr = format!("{}:{}", reader_ip, reader_port);
     let mut backoff_secs: u64 = 1;
@@ -365,11 +374,14 @@ pub async fn run_reader(
         let poll_status = status.clone();
         let poll_target_addr = target_addr.clone();
         let poll_download_tracker = download_tracker.clone();
+        let poll_config_state = config_state.clone();
         let poll_abort_tx = abort_tx.clone();
         drop(abort_tx);
         let poll_handle = tokio::spawn(async move {
             // Run initial connection sequence
-            let reader_info = crate::reader_control::run_connect_sequence(&poll_client).await;
+            let clock_tz = current_clock_timezone(poll_config_state.as_deref()).await;
+            let reader_info =
+                crate::reader_control::run_connect_sequence(&poll_client, clock_tz).await;
             let control_supported = reader_info.connect_failures < 6;
             if !control_supported {
                 poll_logger.log_error(
@@ -412,7 +424,8 @@ pub async fn run_reader(
                 tokio::select! {
                     _ = interval.tick() => {
                         if control_supported {
-                            let successes = crate::reader_control::run_status_poll(&poll_client, &mut info).await;
+                            let clock_tz = current_clock_timezone(poll_config_state.as_deref()).await;
+                            let successes = crate::reader_control::run_status_poll(&poll_client, &mut info, clock_tz).await;
                             poll_status
                                 .update_reader_info_unless_disconnected(&poll_target_addr, info.clone())
                                 .await;

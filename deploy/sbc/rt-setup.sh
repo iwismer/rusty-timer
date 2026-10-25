@@ -143,11 +143,42 @@ default_forwarder_timezone() {
   if [[ -z "${tz}" && -L /etc/localtime ]]; then
     tz="$(readlink /etc/localtime 2>/dev/null | sed -n 's#.*/zoneinfo/##p' || true)"
   fi
-  if [[ -n "${tz}" ]] && is_valid_timezone "${tz}"; then
+  # If host timezone is an unconfigured default (Europe/London or Etc/UTC on fresh Pi OS),
+  # fall back to America/Toronto as the project default.
+  if [[ -n "${tz}" && "${tz}" != "Europe/London" && "${tz}" != "Etc/UTC" ]] && is_valid_timezone "${tz}"; then
     printf '%s\n' "${tz}"
     return 0
   fi
   printf 'America/Toronto\n'
+}
+
+apply_system_timezone() {
+  local tz="${1:-}"
+  if [[ -z "${tz}" ]] || ! is_valid_timezone "${tz}"; then
+    return 1
+  fi
+
+  local applied=0
+  if command -v timedatectl >/dev/null 2>&1; then
+    if timedatectl set-timezone "${tz}" 2>/dev/null; then
+      applied=1
+    fi
+  fi
+
+  if [[ "${applied}" -eq 0 && -f "/usr/share/zoneinfo/${tz}" ]]; then
+    ln -sf "/usr/share/zoneinfo/${tz}" /etc/localtime
+    if [[ -f /etc/timezone ]]; then
+      echo "${tz}" > /etc/timezone
+    fi
+    applied=1
+  fi
+
+  if [[ "${applied}" -eq 1 ]]; then
+    echo "Configured system timezone: ${tz}"
+  else
+    echo "Warning: failed to set system timezone to ${tz}" >&2
+  fi
+  return 0
 }
 
 toml_escape_string() {
@@ -708,6 +739,13 @@ configure() {
       if [[ -n "${existing_bind}" ]]; then
         STATUS_BIND="${existing_bind}"
       fi
+      local sync_tz="${RT_SETUP_TIMEZONE:-}"
+      if [[ -z "${sync_tz}" ]]; then
+        sync_tz=$(sed -n '/^\[clock\]/,/^\[/ s/^timezone\s*=\s*"\([^"]*\)".*/\1/p' "${CONFIG_DIR}/forwarder.toml" 2>/dev/null || true)
+      fi
+      if [[ -n "${sync_tz}" ]] && is_valid_timezone "${sync_tz}"; then
+        apply_system_timezone "${sync_tz}"
+      fi
       return
     fi
   fi
@@ -853,9 +891,7 @@ configure() {
   local escaped_forwarder_timezone
   escaped_forwarder_timezone="$(toml_escape_string "${forwarder_timezone}")"
 
-  if command -v timedatectl >/dev/null 2>&1; then
-    timedatectl set-timezone "${forwarder_timezone}" 2>/dev/null || true
-  fi
+  apply_system_timezone "${forwarder_timezone}"
 
   # Generate config file
   cat > "${CONFIG_DIR}/forwarder.toml" <<EOF

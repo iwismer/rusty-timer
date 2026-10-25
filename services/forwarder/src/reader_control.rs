@@ -455,6 +455,36 @@ pub struct ClockInfo {
     pub drift_ms: i64,
 }
 
+/// Current wall time in the configured timezone, or the host's local time when
+/// no `[clock].timezone` is configured.
+///
+/// Returns the instant plus a human-readable zone label for logs. The same
+/// clock is used to align the SET_DATE_TIME send and to compute drift, so the
+/// reader is always compared against the wall clock it was set to.
+pub fn clock_wall_now(
+    tz: Option<chrono_tz::Tz>,
+) -> (chrono::DateTime<chrono::FixedOffset>, String) {
+    match tz {
+        Some(tz) => {
+            let now = chrono::Utc::now().with_timezone(&tz);
+            (
+                now.fixed_offset(),
+                format!("{} (UTC{})", tz.name(), now.offset()),
+            )
+        }
+        None => {
+            let now = chrono::Local::now();
+            (
+                now.fixed_offset(),
+                format!(
+                    "host local (UTC{}, no [clock] timezone configured)",
+                    now.offset()
+                ),
+            )
+        }
+    }
+}
+
 /// Reader info gathered on connect and refreshed by polling.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ReaderInfo {
@@ -657,7 +687,10 @@ impl DownloadTracker {
 /// Each query is attempted independently; failures are counted in `ReaderInfo::connect_failures`.
 /// All 6 queries are always attempted even if some fail, so the returned `ReaderInfo` contains
 /// partial data from whichever queries succeeded.
-pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
+pub async fn run_connect_sequence(
+    client: &ControlClient,
+    clock_tz: Option<chrono_tz::Tz>,
+) -> ReaderInfo {
     let mut ri = ReaderInfo::default();
     let mut failures = 0u8;
 
@@ -719,7 +752,7 @@ pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
         failures += 1;
     }
 
-    if poll_clock(client, &mut ri).await.is_err() {
+    if poll_clock(client, &mut ri, clock_tz).await.is_err() {
         failures += 1;
     }
 
@@ -736,7 +769,11 @@ pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
 
 /// Poll extended status, CONFIG3 (read mode), tag format, and clock, updating info in place.
 /// Returns the number of successful queries in this poll cycle.
-pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) -> usize {
+pub async fn run_status_poll(
+    client: &ControlClient,
+    info: &mut ReaderInfo,
+    clock_tz: Option<chrono_tz::Tz>,
+) -> usize {
     let mut successes = 0;
     match client.get_extended_status().await {
         Ok(ext) => {
@@ -762,7 +799,7 @@ pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) -> u
     if poll_tag_message_format(client, info).await.is_ok() {
         successes += 1;
     }
-    if poll_clock(client, info).await.is_ok() {
+    if poll_clock(client, info, clock_tz).await.is_ok() {
         successes += 1;
     }
 
@@ -770,7 +807,11 @@ pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) -> u
 }
 
 /// Poll reader status, but preserve cached values when an individual poll fails.
-pub async fn run_status_poll_merge_successes(client: &ControlClient, info: &mut ReaderInfo) {
+pub async fn run_status_poll_merge_successes(
+    client: &ControlClient,
+    info: &mut ReaderInfo,
+    clock_tz: Option<chrono_tz::Tz>,
+) {
     let mut merged = info.clone();
 
     match client.get_extended_status().await {
@@ -801,7 +842,10 @@ pub async fn run_status_poll_merge_successes(client: &ControlClient, info: &mut 
     }
 
     let mut clock_polled = merged.clone();
-    if poll_clock(client, &mut clock_polled).await.is_ok() {
+    if poll_clock(client, &mut clock_polled, clock_tz)
+        .await
+        .is_ok()
+    {
         merged.clock = clock_polled.clock;
     }
 
@@ -821,11 +865,15 @@ async fn poll_tag_message_format(client: &ControlClient, info: &mut ReaderInfo) 
     }
 }
 
-async fn poll_clock(client: &ControlClient, info: &mut ReaderInfo) -> Result<(), ()> {
+async fn poll_clock(
+    client: &ControlClient,
+    info: &mut ReaderInfo,
+    clock_tz: Option<chrono_tz::Tz>,
+) -> Result<(), ()> {
     match client.get_date_time().await {
         Ok(dt) => {
             let reader_iso = dt.to_iso_string();
-            let now = chrono::Local::now();
+            let (now, _) = clock_wall_now(clock_tz);
             match chrono::NaiveDateTime::parse_from_str(&reader_iso, "%Y-%m-%dT%H:%M:%S%.3f") {
                 Ok(reader_naive) => {
                     let system_naive = now.naive_local();
@@ -1065,7 +1113,7 @@ mod tests {
                 recording: Some(true),
                 ..Default::default()
             };
-            let successes = run_status_poll(&client, &mut info).await;
+            let successes = run_status_poll(&client, &mut info, None).await;
             (successes, info)
         });
 
@@ -1133,7 +1181,7 @@ mod tests {
                 recording: Some(true),
                 ..Default::default()
             };
-            run_status_poll_merge_successes(&client, &mut info).await;
+            run_status_poll_merge_successes(&client, &mut info, None).await;
             info
         });
 
@@ -1662,5 +1710,38 @@ mod tests {
         let event = rx.try_recv().unwrap();
         assert!(matches!(event, DownloadEvent::Error { .. }));
         assert_eq!(*tracker.state(), DownloadState::Idle);
+    }
+
+    #[tokio::test]
+    async fn poll_clock_calculates_drift_in_configured_timezone() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (client, sink) = ControlClient::new(cmd_tx);
+
+        let tz: chrono_tz::Tz = "America/Toronto".parse().unwrap();
+
+        let task = tokio::spawn(async move {
+            let mut info = ReaderInfo::default();
+            poll_clock(&client, &mut info, Some(tz)).await.unwrap();
+            info
+        });
+
+        let _cmd = cmd_rx.recv().await.expect("cmd");
+        assert!(sink.feed(b"ab000902260306051855443727cf").await);
+
+        let info = task.await.expect("join");
+        let clock = info.clock.expect("clock populated");
+        assert_eq!(clock.reader_clock, "2026-03-06T18:55:44.550");
+        let (now, _) = clock_wall_now(Some(tz));
+        let expected_drift = now
+            .naive_local()
+            .signed_duration_since(
+                chrono::NaiveDateTime::parse_from_str(
+                    "2026-03-06T18:55:44.550",
+                    "%Y-%m-%dT%H:%M:%S%.3f",
+                )
+                .unwrap(),
+            )
+            .num_milliseconds();
+        assert!((clock.drift_ms - expected_drift).abs() < 1000);
     }
 }

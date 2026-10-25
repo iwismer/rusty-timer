@@ -241,6 +241,25 @@ assert_eq "0" "${tz_valid}" "Empty timezone should be rejected"
 
 assert_nonempty "$(default_forwarder_timezone)" "default_forwarder_timezone should return non-empty value"
 
+# apply_system_timezone returns error for invalid timezone
+if apply_system_timezone "Mars/Olympus" 2>/dev/null; then apply_tz_res=1; else apply_tz_res=0; fi
+assert_eq "0" "${apply_tz_res}" "apply_system_timezone should fail for invalid timezone"
+if apply_system_timezone "" 2>/dev/null; then apply_tz_res=1; else apply_tz_res=0; fi
+assert_eq "0" "${apply_tz_res}" "apply_system_timezone should fail for empty timezone"
+
+# Mock timedatectl to verify apply_system_timezone calls it
+mock_tdc_tz=""
+timedatectl() {
+  if [[ "${1:-}" == "set-timezone" ]]; then
+    mock_tdc_tz="${2:-}"
+    return 0
+  fi
+  return 1
+}
+apply_system_timezone "America/Toronto" >/dev/null 2>&1
+assert_eq "America/Toronto" "${mock_tdc_tz}" "apply_system_timezone should call timedatectl set-timezone"
+unset -f timedatectl
+
 tmp_cfg="$(mktemp)"
 cat > "${tmp_cfg}" <<'EOF'
 [control]
