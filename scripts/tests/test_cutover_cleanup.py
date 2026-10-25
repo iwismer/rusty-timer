@@ -137,7 +137,9 @@ class CutoverCleanupTests(unittest.TestCase):
             "getServerStreams",
             "getAnnouncerConfig",
             "putAnnouncerConfig",
-            "resetAnnouncer",
+            # NOTE: resetAnnouncer was previously forbidden as part of the legacy
+            # central-server announcer proxy, but is now reintroduced for
+            # cross-race announcer feed resets across server, receiver, and UI.
             # Reader-control wrappers are intentionally allowed again: they now
             # target direct receiver<->forwarder P2P control, not the old
             # central-server WebSocket proxy path.
@@ -159,13 +161,14 @@ class CutoverCleanupTests(unittest.TestCase):
             # commands were removed in the P2P cutover; these names are now
             # reused by the direct receiver<->forwarder P2P remote-config
             # feature (control_api.rs + control_bridge.rs + tauri main.rs).
+            # Similarly, reset_announcer is now reintroduced for cross-race
+            # announcer resets across server, receiver, and UI.
             "restart_forwarder_service",
             "restart_forwarder_device",
             "shutdown_forwarder_device",
             "get_server_streams",
             "get_announcer_config",
             "put_announcer_config",
-            "reset_announcer",
             # Reader-control commands are intentionally allowed again via the
             # direct P2P receiver<->forwarder bridge, not the old server proxy.
         ]

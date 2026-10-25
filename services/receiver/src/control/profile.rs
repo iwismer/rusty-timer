@@ -107,7 +107,8 @@ pub async fn reset_announcer(state: &AppState) -> Result<(), ReceiverError> {
         }
     };
 
-    crate::announcer_push::reset_announcer_feed(&server_url, &token)
+    crate::announcer_push::reset_announcer_feed(&state.http_client, &server_url, &token)
+        .await
         .map_err(|e| ReceiverError::Internal(e.to_string()))?;
 
     {

@@ -343,12 +343,11 @@ pub fn takeover_announcer_generation(
 
 /// Reset the server announcer feed via `POST /announcer/reset` and return the
 /// newly-advanced source generation.
-pub fn reset_announcer_feed(base_url: &str, token: &str) -> Result<i64, AnnouncerPushError> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .connect_timeout(HTTP_TIMEOUT)
-        .build()
-        .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
+pub async fn reset_announcer_feed(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+) -> Result<i64, AnnouncerPushError> {
     let response = client
         .post(format!(
             "{}/announcer/reset",
@@ -357,6 +356,7 @@ pub fn reset_announcer_feed(base_url: &str, token: &str) -> Result<i64, Announce
         .bearer_auth(token)
         .json(&serde_json::json!({}))
         .send()
+        .await
         .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
     if !response.status().is_success() {
         return Err(AnnouncerPushError::Transport(format!(
@@ -366,6 +366,7 @@ pub fn reset_announcer_feed(base_url: &str, token: &str) -> Result<i64, Announce
     }
     let value: ResetAnnouncerResponse = response
         .json()
+        .await
         .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
     i64::try_from(value.announcer_source_generation).map_err(|_| {
         AnnouncerPushError::Transport(
