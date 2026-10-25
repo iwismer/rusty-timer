@@ -125,6 +125,16 @@ impl StreamCounts {
     pub fn retain_keys(&self, keep: &HashSet<LocalStreamKey>) {
         self.inner.write().unwrap().retain(|k, _| keep.contains(k));
     }
+
+    /// Reset the counts for a stream (e.g. when local stream data is wiped).
+    pub fn reset(&self, key: &LocalStreamKey) {
+        self.inner.write().unwrap().remove(key);
+    }
+
+    /// Clear all stream counts (e.g. factory reset or reset all streams).
+    pub fn clear(&self) {
+        self.inner.write().unwrap().clear();
+    }
 }
 
 impl Default for StreamCounts {
@@ -247,5 +257,27 @@ mod tests {
 
         assert!(sc.get(&keep).is_some());
         assert!(sc.get(&drop).is_none());
+    }
+
+    #[test]
+    fn stream_counts_reset_removes_stream() {
+        let sc = StreamCounts::new();
+        let k = LocalStreamKey::new("f", "i");
+        sc.record(&k, 1, 1);
+        assert!(sc.get(&k).is_some());
+        sc.reset(&k);
+        assert!(sc.get(&k).is_none());
+    }
+
+    #[test]
+    fn stream_counts_clear_removes_all() {
+        let sc = StreamCounts::new();
+        let k1 = LocalStreamKey::new("f1", "i1");
+        let k2 = LocalStreamKey::new("f2", "i2");
+        sc.record(&k1, 1, 1);
+        sc.record(&k2, 1, 1);
+        sc.clear();
+        assert!(sc.get(&k1).is_none());
+        assert!(sc.get(&k2).is_none());
     }
 }

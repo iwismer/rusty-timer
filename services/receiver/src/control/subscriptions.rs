@@ -306,7 +306,16 @@ pub async fn admin_reset_stream_data(
         db.reset_stream_data(local_stream_key.as_str())
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     }
-    let _ = state.request_reconnect_if_connected().await;
+    state.ui.stream_counts.reset(&local_stream_key);
+    state
+        .clear_stream_metrics(&body.forwarder_endpoint_id, &body.stream_id)
+        .await;
+    state.clear_stream_delta_buffer(&body.forwarder_endpoint_id, &body.stream_id);
+    state.mark_stream_for_rebuild(local_stream_key.as_str());
+    let reconnected = state.request_reconnect_if_connected().await;
+    if !reconnected {
+        state.wake_reconcile();
+    }
     state.emit_streams_snapshot().await;
     Ok(())
 }
@@ -324,10 +333,17 @@ pub async fn admin_reset_all_streams_data(
             let local_stream_key = LocalStreamKey::new(&sub.forwarder_endpoint_id, &sub.stream_id);
             db.reset_stream_data(local_stream_key.as_str())
                 .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+            state.mark_stream_for_rebuild(local_stream_key.as_str());
             count += 1;
         }
     }
-    let _ = state.request_reconnect_if_connected().await;
+    state.ui.stream_counts.clear();
+    state.clear_stream_metrics_cache().await;
+    state.clear_all_stream_delta_buffer();
+    let reconnected = state.request_reconnect_if_connected().await;
+    if !reconnected {
+        state.wake_reconcile();
+    }
     state.emit_streams_snapshot().await;
     Ok(serde_json::json!({ "reset_count": count }))
 }

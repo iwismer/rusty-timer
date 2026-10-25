@@ -284,6 +284,9 @@ pub async fn admin_factory_reset(state: &AppState) -> Result<(), ReceiverError> 
     match db.factory_reset() {
         Ok(()) => {
             drop(db);
+            state.ui.stream_counts.clear();
+            state.clear_stream_metrics_cache().await;
+            state.clear_all_stream_delta_buffer();
             state.clear_forwarder_intent_cache();
             *state.receiver_id.write().await = String::new();
             // Drop the now-empty participant/chip lookup from memory so a

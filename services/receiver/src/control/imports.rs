@@ -325,6 +325,9 @@ pub async fn admin_clear_data(state: &AppState) -> Result<(), ReceiverError> {
     match db.clear_data() {
         Ok(()) => {
             drop(db);
+            state.ui.stream_counts.clear();
+            state.clear_stream_metrics_cache().await;
+            state.clear_all_stream_delta_buffer();
             state.notify_dbf_config_changed();
             state.emit_streams_snapshot().await;
             state.emit_resync();

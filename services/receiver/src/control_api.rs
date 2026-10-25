@@ -574,6 +574,9 @@ pub struct AppState {
     pub db_integrity_ok: bool,
     pub http_client: reqwest::Client,
     pub chip_lookup: Arc<tokio::sync::RwLock<ChipLookup>>,
+    /// Active stream workers marked to be rebuilt on the next reconcile pass
+    /// (e.g. following an admin stream data reset). Keyed by local stream key.
+    pub(crate) streams_needing_rebuild: Arc<StdMutex<HashSet<String>>>,
     /// The raw server URL+token override, set once at startup: env vars for the
     /// desktop app, CLI flags for headless. Source of truth for "is an override
     /// active" and for resolving the effective server in control handlers, so
@@ -697,6 +700,7 @@ impl AppState {
             db_integrity_ok,
             http_client,
             chip_lookup: Arc::new(tokio::sync::RwLock::new(ChipLookup::new())),
+            streams_needing_rebuild: Arc::new(StdMutex::new(HashSet::new())),
             forwarders: ForwarderControl {
                 discovered_forwarders: Arc::new(tokio::sync::RwLock::new(
                     DiscoveredForwarders::new(),
@@ -797,6 +801,34 @@ impl AppState {
 
     pub async fn clear_stream_metrics_cache(&self) {
         self.ui.stream_metrics_cache.write().await.clear();
+    }
+
+    pub async fn clear_stream_metrics(&self, endpoint_id: &str, stream_id: &str) {
+        let key = (endpoint_id.to_owned(), stream_id.to_owned());
+        self.ui.stream_metrics_cache.write().await.remove(&key);
+    }
+
+    pub(crate) fn clear_stream_delta_buffer(&self, endpoint_id: &str, stream_id: &str) {
+        let key = (endpoint_id.to_owned(), stream_id.to_owned());
+        self.ui.stream_delta_buffer.lock().unwrap().remove(&key);
+    }
+
+    pub(crate) fn clear_all_stream_delta_buffer(&self) {
+        self.ui.stream_delta_buffer.lock().unwrap().clear();
+    }
+
+    pub(crate) fn mark_stream_for_rebuild(&self, stream_id: &str) {
+        self.streams_needing_rebuild
+            .lock()
+            .unwrap()
+            .insert(stream_id.to_owned());
+    }
+
+    pub(crate) fn take_stream_needing_rebuild(&self, stream_id: &str) -> bool {
+        self.streams_needing_rebuild
+            .lock()
+            .unwrap()
+            .remove(stream_id)
     }
 
     pub async fn set_p2p_endpoint_id(&self, endpoint_id: String) {
@@ -4932,5 +4964,51 @@ mod tests {
             }
         }
         assert!(saw_resync, "clear data should request a UI resync");
+    }
+
+    #[tokio::test]
+    async fn admin_reset_stream_data_clears_in_memory_counts_and_marks_rebuild() {
+        let stream_id = "10.0.0.1:10000";
+        let local_key = LocalStreamKey::new("fwd-1", stream_id);
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[crate::db::StreamSubscription {
+            forwarder_endpoint_id: "fwd-1".to_owned(),
+            stream_id: stream_id.to_owned(),
+            forwarder_id: Some("fwd-1".to_owned()),
+            reader_ip: Some("10.0.0.1".to_owned()),
+            local_port_override: None,
+            event_type: crate::db::EventType::Start,
+        }])
+        .unwrap();
+
+        let (state, _shutdown_rx) = AppState::new(db, "recv-1".to_owned());
+        state.ui.stream_counts.record(&local_key, 1, 10);
+        state.ui.stream_counts.record(&local_key, 1, 11);
+        assert_eq!(state.ui.stream_counts.get(&local_key).unwrap().total, 2);
+
+        // Before reset, streams response shows reads_total = 2.
+        let resp_before = state.build_streams_response().await;
+        assert_eq!(resp_before.streams[0].reads_total, Some(2));
+
+        // Perform stream data reset.
+        admin_reset_stream_data(
+            &state,
+            StreamRef {
+                forwarder_endpoint_id: "fwd-1".to_owned(),
+                stream_id: stream_id.to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // In-memory counts must be reset.
+        assert!(state.ui.stream_counts.get(&local_key).is_none());
+
+        // Stream must be marked for worker rebuild.
+        assert!(state.take_stream_needing_rebuild(local_key.as_str()));
+
+        // Streams response immediately reflects 0 / None reads without restart.
+        let resp_after = state.build_streams_response().await;
+        assert_eq!(resp_after.streams[0].reads_total, None);
     }
 }

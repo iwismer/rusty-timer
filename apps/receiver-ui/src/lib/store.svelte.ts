@@ -607,6 +607,47 @@ export function markModeEdited(): void {
   modeEditVersion += 1;
 }
 
+export function clearStreamLocalMetrics(identity: string): void {
+  const nextMetrics = new Map(store.streamMetrics);
+  nextMetrics.delete(identity);
+  store.streamMetrics = nextMetrics;
+
+  const nextReads = new Map(store.lastReads);
+  nextReads.delete(identity);
+  store.lastReads = nextReads;
+
+  const nextActivity = new Map(store.streamActivityAt);
+  nextActivity.delete(identity);
+  store.streamActivityAt = nextActivity;
+
+  if (store.streams) {
+    store.streams = {
+      ...store.streams,
+      streams: store.streams.streams.map((s) => {
+        if (streamIdentity(s) !== identity) return s;
+        return { ...s, reads_total: 0, reads_epoch: 0 };
+      }),
+    };
+  }
+}
+
+export function clearAllStreamsLocalMetrics(): void {
+  store.streamMetrics = new Map();
+  store.lastReads = new Map();
+  store.streamActivityAt = new Map();
+
+  if (store.streams) {
+    store.streams = {
+      ...store.streams,
+      streams: store.streams.streams.map((s) => ({
+        ...s,
+        reads_total: 0,
+        reads_epoch: 0,
+      })),
+    };
+  }
+}
+
 function applyStreamCountUpdates(updates: StreamCountUpdate[]): boolean {
   if (updates.length === 0) return false;
   if (!store.streams) return true;

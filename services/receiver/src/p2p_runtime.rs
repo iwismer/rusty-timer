@@ -1306,11 +1306,15 @@ async fn reconcile_once(
             // otherwise keep pushing the stale one.
             let generation_mismatch =
                 existing.announcer_active && existing.announcer_generation != announcer_generation;
-            if !config_changed && !announcer_mismatch && !generation_mismatch {
+            let rebuild_requested = state.take_stream_needing_rebuild(&stream_id);
+            if !config_changed && !announcer_mismatch && !generation_mismatch && !rebuild_requested
+            {
                 continue;
             }
             if let Some(worker) = stream_workers.remove(&stream_id) {
-                if config_changed {
+                if rebuild_requested {
+                    info!(stream_id = %local_stream_key, "rebuilding p2p stream worker (stream data reset)");
+                } else if config_changed {
                     info!(stream_id = %local_stream_key, "rebuilding p2p stream worker (subscription config changed)");
                 } else if announcer_mismatch {
                     info!(stream_id = %local_stream_key, announce = want_announce, "rebuilding p2p stream worker (announcer state changed)");
@@ -1609,6 +1613,7 @@ async fn rebuild_stream_projection(
         }
     };
     if rows.is_empty() {
+        state.ui.stream_counts.reset(local_stream_key);
         return Some(StreamProjection::default());
     }
     info!(%stream_id, epochs = rows.len(), "rebuilding stream projection");

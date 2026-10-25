@@ -20,6 +20,8 @@
     selectedEarliestEpochValue,
     formatEarliestEpochOption,
     refreshStreamsAndEpochOptions,
+    clearStreamLocalMetrics,
+    clearAllStreamsLocalMetrics,
     openHelp,
   } from "$lib/store.svelte";
   import {
@@ -161,6 +163,7 @@
     actionError = null;
     try {
       await resetAllStreamsData();
+      clearAllStreamsLocalMetrics();
       await refreshStreamsAndEpochOptions();
     } catch (e) {
       actionError = `Failed to replay all streams: ${String(e)}`;
@@ -179,6 +182,7 @@
         forwarder_endpoint_id: stream.forwarder_endpoint_id,
         stream_id: stream.stream_id,
       });
+      clearStreamLocalMetrics(key);
       await refreshStreamsAndEpochOptions();
     } catch (e) {
       actionError = `Failed to replay stream ${streamPrimaryLabel(stream)}: ${String(e)}`;
@@ -194,6 +198,7 @@
     actionError = null;
     try {
       await clearStreamBoth(stream.forwarder_endpoint_id, stream.stream_id);
+      clearStreamLocalMetrics(key);
       await refreshStreamsAndEpochOptions();
     } catch (e) {
       actionError = `Failed to clear stream ${streamPrimaryLabel(stream)}: ${String(e)}`;
