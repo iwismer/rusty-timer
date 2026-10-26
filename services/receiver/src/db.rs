@@ -543,35 +543,8 @@ impl Db {
         };
         tx.execute_batch("DELETE FROM subscriptions")?;
         let indices = assign_dbf_reader_indices(subs, &existing);
-        let mut stmt = tx.prepare_cached(
-            "INSERT INTO subscriptions
-             (forwarder_endpoint_id, stream_id, local_port_override, event_type, forwarder_id, reader_ip, dbf_reader_index)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )?;
-        for (s, idx) in subs.iter().zip(indices) {
-            stmt.raw_bind_parameter(1, &s.forwarder_endpoint_id)?;
-            stmt.raw_bind_parameter(2, &s.stream_id)?;
-            stmt.raw_bind_parameter(3, s.local_port_override.map(|p| p as i64))?;
-            stmt.raw_bind_parameter(4, s.event_type.as_str())?;
-            stmt.raw_bind_parameter(5, s.forwarder_id.as_deref())?;
-            stmt.raw_bind_parameter(6, s.reader_ip.as_deref())?;
-            stmt.raw_bind_parameter(7, idx.map(i64::from))?;
-            stmt.raw_execute()?;
-        }
-        drop(stmt);
-        let mut event_type_stmt = tx.prepare_cached(
-            "INSERT INTO stream_event_types (forwarder_endpoint_id, stream_id, event_type)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT (forwarder_endpoint_id, stream_id) DO UPDATE SET event_type = excluded.event_type",
-        )?;
-        for s in subs {
-            event_type_stmt.execute(rusqlite::params![
-                &s.forwarder_endpoint_id,
-                &s.stream_id,
-                s.event_type.as_str()
-            ])?;
-        }
-        drop(event_type_stmt);
+        insert_subscriptions_batch(&tx, subs, &indices)?;
+        insert_stream_event_types_batch(&tx, subs)?;
         tx.commit()?;
         Ok(())
     }
@@ -2449,6 +2422,107 @@ pub fn save_gap_marker_conn(conn: &Connection, marker: &GapMarkerInsert<'_>) -> 
             marker.created_unix_ms,
         ],
     )?;
+    Ok(())
+}
+
+fn insert_subscriptions_batch(
+    conn: &Connection,
+    subs: &[StreamSubscription],
+    indices: &[Option<u8>],
+) -> DbResult<()> {
+    if subs.is_empty() {
+        return Ok(());
+    }
+    const CHUNK_SIZE: usize = 50;
+    const COLS_PER_ROW: usize = 7;
+
+    for (sub_chunk, idx_chunk) in subs.chunks(CHUNK_SIZE).zip(indices.chunks(CHUNK_SIZE)) {
+        let mut sql = String::from(
+            "INSERT INTO subscriptions (forwarder_endpoint_id, stream_id, local_port_override, event_type, forwarder_id, reader_ip, dbf_reader_index) VALUES ",
+        );
+        for i in 0..sub_chunk.len() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            let base = i * COLS_PER_ROW;
+            use std::fmt::Write;
+            let _ = write!(
+                sql,
+                "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4,
+                base + 5,
+                base + 6,
+                base + 7
+            );
+        }
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut params: Vec<&dyn rusqlite::types::ToSql> =
+            Vec::with_capacity(sub_chunk.len() * COLS_PER_ROW);
+
+        let converted: Vec<(Option<i64>, &'static str, Option<i64>)> = sub_chunk
+            .iter()
+            .zip(idx_chunk)
+            .map(|(s, idx)| {
+                (
+                    s.local_port_override.map(|p| p as i64),
+                    s.event_type.as_str(),
+                    idx.map(i64::from),
+                )
+            })
+            .collect();
+
+        for (s, (port, event_type_str, idx_i64)) in sub_chunk.iter().zip(&converted) {
+            params.push(&s.forwarder_endpoint_id);
+            params.push(&s.stream_id);
+            params.push(port);
+            params.push(event_type_str);
+            params.push(&s.forwarder_id);
+            params.push(&s.reader_ip);
+            params.push(idx_i64);
+        }
+        stmt.execute(rusqlite::params_from_iter(params))?;
+    }
+    Ok(())
+}
+
+fn insert_stream_event_types_batch(conn: &Connection, subs: &[StreamSubscription]) -> DbResult<()> {
+    if subs.is_empty() {
+        return Ok(());
+    }
+    const CHUNK_SIZE: usize = 50;
+    const COLS_PER_ROW: usize = 3;
+
+    for sub_chunk in subs.chunks(CHUNK_SIZE) {
+        let mut sql = String::from(
+            "INSERT INTO stream_event_types (forwarder_endpoint_id, stream_id, event_type) VALUES ",
+        );
+        for i in 0..sub_chunk.len() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            let base = i * COLS_PER_ROW;
+            use std::fmt::Write;
+            let _ = write!(sql, "(?{}, ?{}, ?{})", base + 1, base + 2, base + 3);
+        }
+        sql.push_str(" ON CONFLICT (forwarder_endpoint_id, stream_id) DO UPDATE SET event_type = excluded.event_type");
+
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut params: Vec<&dyn rusqlite::types::ToSql> =
+            Vec::with_capacity(sub_chunk.len() * COLS_PER_ROW);
+
+        let event_type_strs: Vec<&'static str> =
+            sub_chunk.iter().map(|s| s.event_type.as_str()).collect();
+
+        for (s, et_str) in sub_chunk.iter().zip(&event_type_strs) {
+            params.push(&s.forwarder_endpoint_id);
+            params.push(&s.stream_id);
+            params.push(et_str);
+        }
+        stmt.execute(rusqlite::params_from_iter(params))?;
+    }
     Ok(())
 }
 
