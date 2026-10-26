@@ -1,8 +1,12 @@
+use std::fmt::Write;
+
 use chrono::Utc;
 use rusqlite::{Connection, params};
 use serde::Serialize;
 
 use super::{ApprovalState, sql_i64_to_u64, sql_u64_to_i64};
+
+const CHUNK_SIZE: usize = 64;
 
 /// A registered forwarder's latest pushed identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -99,17 +103,42 @@ pub fn upsert_forwarder_catalog(
         "DELETE FROM forwarder_streams WHERE endpoint_id = ?1",
         [endpoint_id],
     )?;
-    for stream in streams {
-        tx.execute(
+    for chunk in streams.chunks(CHUNK_SIZE) {
+        let mut sql = String::from(
             "INSERT INTO forwarder_streams (endpoint_id, stream_id, epoch, next_seq)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                endpoint_id,
-                &stream.stream_id,
-                sql_u64_to_i64(stream.epoch)?,
-                sql_u64_to_i64(stream.next_seq)?,
-            ],
-        )?;
+             VALUES ",
+        );
+        for i in 0..chunk.len() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            let base = i * 4;
+            let _ = write!(
+                sql,
+                "(?{}, ?{}, ?{}, ?{})",
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4
+            );
+        }
+
+        let mut stmt = tx.prepare_cached(&sql)?;
+        let mut converted = Vec::with_capacity(chunk.len());
+        for stream in chunk {
+            let epoch = sql_u64_to_i64(stream.epoch)?;
+            let next_seq = sql_u64_to_i64(stream.next_seq)?;
+            converted.push((epoch, next_seq));
+        }
+
+        let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(chunk.len() * 4);
+        for (stream, (epoch, next_seq)) in chunk.iter().zip(&converted) {
+            params.push(&endpoint_id);
+            params.push(&stream.stream_id);
+            params.push(epoch);
+            params.push(next_seq);
+        }
+        stmt.execute(rusqlite::params_from_iter(params))?;
     }
 
     tx.commit()
@@ -410,5 +439,39 @@ mod tests {
         assert_eq!(fwd.streams[1].stream_id, "reader-b");
         assert_eq!(fwd.streams[1].epoch, 2);
         assert_eq!(fwd.streams[1].next_seq, 20);
+    }
+
+    #[test]
+    fn bench_upsert_forwarder_catalog() {
+        let conn = test_conn();
+        let num_streams = 500;
+        let streams: Vec<_> = (0..num_streams)
+            .map(|i| ForwarderCatalogStreamRecord {
+                stream_id: format!("stream-{i}"),
+                epoch: 1,
+                next_seq: u64::try_from(i).unwrap(),
+            })
+            .collect();
+
+        let start = std::time::Instant::now();
+        let iterations = 50;
+        for _ in 0..iterations {
+            upsert_forwarder_catalog(
+                &conn,
+                "bench-ep",
+                Some("Bench Forwarder"),
+                &["127.0.0.1:8080".to_owned()],
+                &streams,
+            )
+            .unwrap();
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "BENCHMARK: upsert_forwarder_catalog ({} streams, {} iterations): total {:?}, avg per iter {:?}",
+            num_streams,
+            iterations,
+            elapsed,
+            elapsed / iterations
+        );
     }
 }
