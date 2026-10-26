@@ -63,6 +63,7 @@ struct DesiredStreams {
 pub struct ForwarderConnection {
     /// The forwarder this connection dials; kept for stop-timeout logging.
     endpoint_id: String,
+    addr_tx: watch::Sender<EndpointAddr>,
     desired_tx: watch::Sender<DesiredStreams>,
     /// Generation of the last desired-streams update the connection task
     /// finished reconciling (see `DesiredStreams`). Read only by tests.
@@ -83,13 +84,15 @@ impl ForwarderConnection {
         reporter: Arc<SessionStatusReporter>,
         backoff: BackoffConfig,
     ) -> Self {
+        endpoint.set_peer_addr(forwarder_addr.clone());
+        let (addr_tx, addr_rx) = watch::channel(forwarder_addr);
         let (desired_tx, desired_rx) = watch::channel(DesiredStreams::default());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let synced_generation = Arc::new(AtomicU64::new(0));
         let task = tokio::spawn(run_forwarder_connection(
             endpoint_id.clone(),
             endpoint,
-            forwarder_addr,
+            addr_rx,
             writer,
             client_hello,
             reporter,
@@ -100,11 +103,24 @@ impl ForwarderConnection {
         ));
         Self {
             endpoint_id,
+            addr_tx,
             desired_tx,
             synced_generation,
             shutdown_tx,
             task,
         }
+    }
+
+    pub fn set_forwarder_addr(&self, endpoint: &Endpoint, forwarder_addr: EndpointAddr) {
+        endpoint.set_peer_addr(forwarder_addr.clone());
+        let _ = self.addr_tx.send_if_modified(|current| {
+            if *current == forwarder_addr {
+                false
+            } else {
+                *current = forwarder_addr;
+                true
+            }
+        });
     }
 
     pub fn set_desired_streams(&self, streams: Vec<ForwarderDataStream>) {
@@ -168,7 +184,7 @@ impl ForwarderConnection {
 async fn run_forwarder_connection(
     endpoint_id: String,
     endpoint: Arc<Endpoint>,
-    forwarder_addr: EndpointAddr,
+    mut addr_rx: watch::Receiver<EndpointAddr>,
     writer: WriterHandle,
     client_hello: Hello,
     reporter: Arc<SessionStatusReporter>,
@@ -182,6 +198,8 @@ async fn run_forwarder_connection(
         if *shutdown_rx.borrow() {
             return;
         }
+        let forwarder_addr = addr_rx.borrow_and_update().clone();
+        endpoint.set_peer_addr(forwarder_addr.clone());
         reporter
             .app_state()
             .mark_forwarder_dial_started(&endpoint_id)
@@ -194,7 +212,7 @@ async fn run_forwarder_connection(
                 }
                 continue;
             }
-            result = connect_and_hello(&endpoint, forwarder_addr.clone(), client_hello.clone()) => result,
+            result = connect_and_hello(&endpoint, forwarder_addr, client_hello.clone()) => result,
         };
 
         match session {
@@ -240,6 +258,14 @@ async fn run_forwarder_connection(
             changed = shutdown_rx.changed() => {
                 if changed.is_err() || *shutdown_rx.borrow() {
                     return;
+                }
+            }
+            changed = addr_rx.changed() => {
+                if changed.is_ok() {
+                    // Fresh address learned (e.g. via LAN discovery or manual IP
+                    // probe): reset backoff and dial immediately.
+                    next_delay = backoff.initial;
+                    continue;
                 }
             }
             () = tokio::time::sleep(next_delay) => {}
@@ -1000,6 +1026,7 @@ mod resolve_tests {
                     name: None,
                 }],
             }],
+            display_name: None,
         }
     }
 
@@ -1436,6 +1463,7 @@ mod tests {
             catalog: StreamCatalog {
                 generation: 1,
                 entries: Vec::new(),
+                display_name: None,
             },
             subscribe_ok: SubscribeOk {
                 stream_id: STREAM_ID.as_bytes().to_vec(),

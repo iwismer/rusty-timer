@@ -1,17 +1,19 @@
 use std::{
     fs,
     io::{self, ErrorKind},
-    net::{Ipv4Addr, SocketAddrV4},
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     path::Path,
 };
+
+pub mod lan_discovery;
 
 pub use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{
     Endpoint as IrohEndpoint, Watcher,
+    address_lookup::memory::MemoryLookup,
     endpoint::{QuicTransportConfig, presets},
 };
 pub use iroh::{EndpointAddr, EndpointId, RelayMode, SecretKey, TransportAddr};
-
 pub const ALPN: &[u8] = b"rusty-timer/fwd-rcv/1";
 
 #[derive(Debug, thiserror::Error)]
@@ -121,9 +123,67 @@ fn write_new_secret_key(path: &Path, bytes: &[u8; 32]) -> io::Result<()> {
     file.write_all(bytes)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectedPath {
+    LocalIp(SocketAddr),
+    PublicIp(SocketAddr),
+    Relay(String),
+}
+
+/// Returns whether `ip` is a local-network address (RFC 1918 private, link-local,
+/// IPv6 unique-local, or optionally loopback).
+#[must_use]
+pub fn is_lan_ip(ip: IpAddr, allow_loopback: bool) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private() || v4.is_link_local() || (allow_loopback && v4.is_loopback())
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_lan_ip(IpAddr::V4(v4), allow_loopback);
+            }
+            v6.is_unique_local()
+                || v6.is_unicast_link_local()
+                || (allow_loopback && v6.is_loopback())
+        }
+    }
+}
+
+/// Returns whether `conn` arrived over a direct local-network IP path and has
+/// no relay path.
+#[must_use]
+pub fn is_lan_connection(conn: &Connection, allow_loopback: bool) -> bool {
+    let paths = conn.paths();
+    let has_lan_ip = paths.iter().any(|path| {
+        matches!(
+            path.remote_addr(),
+            TransportAddr::Ip(addr) if is_lan_ip(addr.ip(), allow_loopback)
+        )
+    });
+    let has_relay = paths.iter().any(|path| path.remote_addr().is_relay());
+    has_lan_ip && !has_relay
+}
+
+/// Returns the currently selected transport path for `conn`, if any.
+#[must_use]
+pub fn selected_transport_path(conn: &Connection) -> Option<SelectedPath> {
+    let paths = conn.paths();
+    let chosen = paths
+        .iter()
+        .find(iroh::endpoint::Path::is_selected)
+        .or_else(|| paths.iter().next())?;
+    match chosen.remote_addr() {
+        TransportAddr::Ip(addr) if is_lan_ip(addr.ip(), true) => Some(SelectedPath::LocalIp(*addr)),
+        TransportAddr::Ip(addr) => Some(SelectedPath::PublicIp(*addr)),
+        TransportAddr::Relay(url) => Some(SelectedPath::Relay(url.to_string())),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Endpoint {
     inner: IrohEndpoint,
+    memory_lookup: MemoryLookup,
 }
 
 impl Endpoint {
@@ -140,6 +200,21 @@ impl Endpoint {
             Some(incoming) => Ok(Some(incoming.await?)),
             None => Ok(None),
         }
+    }
+
+    /// Replaces the in-memory address lookup entry for a peer endpoint.
+    pub fn set_peer_addr(&self, addr: EndpointAddr) {
+        self.memory_lookup.set_endpoint_info(addr);
+    }
+
+    /// Augments the in-memory address lookup entry for a peer endpoint.
+    pub fn add_peer_addr(&self, addr: EndpointAddr) {
+        self.memory_lookup.add_endpoint_info(addr);
+    }
+
+    /// Removes the in-memory address lookup entry for a peer endpoint.
+    pub fn remove_peer_addr(&self, endpoint_id: EndpointId) {
+        self.memory_lookup.remove_endpoint_info(endpoint_id);
     }
 
     /// Returns the endpoint's address, waiting until it contains at least one
@@ -170,12 +245,14 @@ impl Endpoint {
 #[derive(Debug)]
 pub struct EndpointBuilder {
     inner: iroh::endpoint::Builder,
+    memory_lookup: MemoryLookup,
 }
 
 impl Default for EndpointBuilder {
     fn default() -> Self {
         Self {
             inner: IrohEndpoint::builder(presets::N0).alpns(vec![ALPN.to_vec()]),
+            memory_lookup: MemoryLookup::new(),
         }
     }
 }
@@ -239,8 +316,14 @@ impl EndpointBuilder {
     }
 
     pub async fn bind(self) -> Result<Endpoint, Error> {
+        let inner = self
+            .inner
+            .address_lookup(self.memory_lookup.clone())
+            .bind()
+            .await?;
         Ok(Endpoint {
-            inner: self.inner.bind().await?,
+            inner,
+            memory_lookup: self.memory_lookup,
         })
     }
 }
@@ -276,9 +359,48 @@ mod tests {
 
         assert_eq!(connected.remote_id(), endpoint_b_addr.id);
         assert_eq!(accepted.remote_id(), endpoint_a.endpoint_id());
+        assert!(is_lan_connection(&accepted, true));
+        assert!(!is_lan_connection(&accepted, false));
+        assert!(matches!(
+            selected_transport_path(&connected),
+            Some(SelectedPath::LocalIp(_))
+        ));
 
         endpoint_a.close().await;
         endpoint_b.close().await;
+    }
+
+    #[tokio::test]
+    async fn memory_lookup_resolves_endpoint_id_without_explicit_addr() {
+        let endpoint_a = EndpointBuilder::test([11; 32]).bind().await.unwrap();
+        let endpoint_b = EndpointBuilder::test([12; 32]).bind().await.unwrap();
+        let endpoint_b_addr = endpoint_b.endpoint_addr().await;
+
+        endpoint_a.set_peer_addr(endpoint_b_addr.clone());
+
+        let (connected, accepted) = tokio::join!(
+            endpoint_a.connect(EndpointAddr::new(endpoint_b.endpoint_id())),
+            endpoint_b.accept(),
+        );
+
+        let connected = connected.unwrap();
+        let accepted = accepted.unwrap().unwrap();
+        assert_eq!(connected.remote_id(), endpoint_b.endpoint_id());
+        assert_eq!(accepted.remote_id(), endpoint_a.endpoint_id());
+
+        endpoint_a.close().await;
+        endpoint_b.close().await;
+    }
+
+    #[test]
+    fn is_lan_ip_classifies_private_link_local_and_loopback() {
+        assert!(is_lan_ip("192.168.1.50".parse().unwrap(), false));
+        assert!(is_lan_ip("10.0.0.5".parse().unwrap(), false));
+        assert!(is_lan_ip("172.16.5.4".parse().unwrap(), false));
+        assert!(is_lan_ip("169.254.10.20".parse().unwrap(), false));
+        assert!(!is_lan_ip("8.8.8.8".parse().unwrap(), true));
+        assert!(!is_lan_ip("127.0.0.1".parse().unwrap(), false));
+        assert!(is_lan_ip("127.0.0.1".parse().unwrap(), true));
     }
 
     #[tokio::test]

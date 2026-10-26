@@ -444,6 +444,10 @@ export async function getConnections(): Promise<ConnectionsResponse> {
   return invoke<ConnectionsResponse>("get_connections");
 }
 
+export async function addForwarderByHost(host: string): Promise<string> {
+  return invoke<string>("add_forwarder_by_host", { host });
+}
+
 export async function connectForwarder(endpointId: string): Promise<void> {
   await invoke("connect_forwarder", { endpointId });
 }

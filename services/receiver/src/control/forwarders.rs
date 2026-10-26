@@ -238,6 +238,272 @@ pub(crate) fn assemble_forwarder_connection_statuses(
     forwarders
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ProbedForwarder {
+    pub endpoint_id: String,
+    pub display_name: Option<String>,
+    pub direct_addrs: Vec<std::net::SocketAddr>,
+    pub canonical_host: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ForwarderStatusProbe {
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    p2p_endpoint_id: Option<String>,
+    #[serde(default)]
+    p2p_listen_port: Option<u16>,
+    #[serde(default)]
+    p2p_direct_addrs: Vec<String>,
+    #[serde(default)]
+    server: Option<ForwarderStatusServerProbe>,
+}
+
+#[derive(serde::Deserialize)]
+struct ForwarderStatusServerProbe {
+    #[serde(default)]
+    endpoint_id: Option<String>,
+}
+
+fn parse_forwarder_host_input(raw: &str) -> Result<(String, Option<u16>), ReceiverError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(ReceiverError::BadRequest(
+            "forwarder IP or hostname is required".to_owned(),
+        ));
+    }
+    let without_scheme = trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("https://"))
+        .unwrap_or(trimmed);
+    let authority = without_scheme
+        .split('/')
+        .next()
+        .unwrap_or(without_scheme)
+        .trim();
+    if authority.is_empty() {
+        return Err(ReceiverError::BadRequest(
+            "forwarder IP or hostname is required".to_owned(),
+        ));
+    }
+
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let Some((ipv6_host, after_bracket)) = rest.split_once(']') else {
+            return Err(ReceiverError::BadRequest(
+                "invalid IPv6 host syntax".to_owned(),
+            ));
+        };
+        let port = if let Some(port_str) = after_bracket.strip_prefix(':') {
+            let p = port_str
+                .parse::<u16>()
+                .ok()
+                .filter(|p| *p > 0)
+                .ok_or_else(|| ReceiverError::BadRequest("invalid port number".to_owned()))?;
+            Some(p)
+        } else if after_bracket.is_empty() {
+            None
+        } else {
+            return Err(ReceiverError::BadRequest(
+                "invalid host:port syntax".to_owned(),
+            ));
+        };
+        (format!("[{ipv6_host}]"), port)
+    } else if let Some((h, port_str)) = authority.rsplit_once(':')
+        && !h.contains(':')
+    {
+        let p = port_str
+            .parse::<u16>()
+            .ok()
+            .filter(|p| *p > 0)
+            .ok_or_else(|| ReceiverError::BadRequest("invalid port number".to_owned()))?;
+        (h.trim().to_owned(), Some(p))
+    } else {
+        (authority.to_owned(), None)
+    };
+
+    if host.is_empty()
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '[' | ']' | ':'))
+    {
+        return Err(ReceiverError::BadRequest(format!(
+            "invalid forwarder host '{host}'"
+        )));
+    }
+    Ok((host, port))
+}
+
+pub(crate) async fn probe_forwarder_host(
+    client: &reqwest::Client,
+    raw_host: &str,
+) -> Result<ProbedForwarder, ReceiverError> {
+    let (host, explicit_port) = parse_forwarder_host_input(raw_host)?;
+    let candidate_ports: Vec<u16> = match explicit_port {
+        Some(port) => vec![port],
+        None => vec![80, 8080],
+    };
+
+    let lookup_host = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host.as_str());
+    let resolved_ips: Vec<std::net::IpAddr> = match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::net::lookup_host((lookup_host, candidate_ports[0])),
+    )
+    .await
+    {
+        Ok(Ok(addrs)) => addrs.map(|a| a.ip()).collect(),
+        _ => lookup_host
+            .parse::<std::net::IpAddr>()
+            .into_iter()
+            .collect(),
+    };
+
+    let mut last_error = None;
+    for http_port in &candidate_ports {
+        let url = format!("http://{host}:{http_port}/api/v1/status");
+        let resp = match client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                last_error = Some(format!("{url}: {err}"));
+                continue;
+            }
+        };
+        let resp = match resp.error_for_status() {
+            Ok(resp) => resp,
+            Err(err) => {
+                last_error = Some(format!("{url}: {err}"));
+                continue;
+            }
+        };
+        let probe: ForwarderStatusProbe = match resp.json().await {
+            Ok(probe) => probe,
+            Err(err) => {
+                last_error = Some(format!("{url}: invalid status JSON: {err}"));
+                continue;
+            }
+        };
+
+        let endpoint_id = probe
+            .p2p_endpoint_id
+            .or_else(|| probe.server.and_then(|s| s.endpoint_id))
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                ReceiverError::UpstreamError(format!(
+                    "forwarder at {host}:{http_port} does not have a P2P endpoint enabled"
+                ))
+            })?;
+        if endpoint_id.parse::<rt_iroh::EndpointId>().is_err() {
+            return Err(ReceiverError::UpstreamError(format!(
+                "forwarder at {host}:{http_port} reported an invalid P2P endpoint ID"
+            )));
+        }
+
+        let advertised_addrs: Vec<std::net::SocketAddr> = probe
+            .p2p_direct_addrs
+            .iter()
+            .filter_map(|s| s.parse::<std::net::SocketAddr>().ok())
+            .collect();
+        let p2p_port = probe
+            .p2p_listen_port
+            .or_else(|| advertised_addrs.first().map(std::net::SocketAddr::port))
+            .filter(|p| *p > 0)
+            .ok_or_else(|| {
+                ReceiverError::UpstreamError(format!(
+                    "forwarder at {host}:{http_port} did not report a P2P UDP port"
+                ))
+            })?;
+
+        let host_is_loopback = resolved_ips.iter().any(|ip| ip.is_loopback());
+        let mut direct_addrs = Vec::new();
+        for &ip in &resolved_ips {
+            if !ip.is_unspecified() {
+                let candidate = std::net::SocketAddr::new(ip, p2p_port);
+                if !direct_addrs.contains(&candidate) {
+                    direct_addrs.push(candidate);
+                }
+            }
+        }
+        for addr in advertised_addrs {
+            if addr.ip().is_unspecified() || addr.port() == 0 {
+                continue;
+            }
+            if addr.ip().is_loopback() && !host_is_loopback {
+                continue;
+            }
+            if !direct_addrs.contains(&addr) {
+                direct_addrs.push(addr);
+            }
+        }
+        if direct_addrs.is_empty() {
+            return Err(ReceiverError::UpstreamError(format!(
+                "could not resolve a reachable IP address for forwarder '{host}'"
+            )));
+        }
+
+        let canonical_host = match explicit_port {
+            Some(p) => format!("{host}:{p}"),
+            None if *http_port != 80 => format!("{host}:{http_port}"),
+            None => host,
+        };
+        return Ok(ProbedForwarder {
+            endpoint_id,
+            display_name: probe.display_name.and_then(optional_non_empty),
+            direct_addrs,
+            canonical_host,
+        });
+    }
+
+    Err(ReceiverError::UpstreamError(format!(
+        "could not reach forwarder at '{host}' ({})",
+        last_error.unwrap_or_else(|| "connection failed".to_owned())
+    )))
+}
+
+pub async fn add_forwarder_by_host(
+    state: &AppState,
+    host: String,
+) -> Result<String, ReceiverError> {
+    let probed = probe_forwarder_host(&state.http_client, &host).await?;
+    let endpoint_id = probed.endpoint_id.clone();
+    {
+        let db = state.storage.db.lock().await;
+        db.upsert_known_forwarder(&crate::db::KnownForwarderRecord {
+            endpoint_id: endpoint_id.clone(),
+            display_name: probed.display_name.clone(),
+            direct_addrs: probed
+                .direct_addrs
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            manual_host: Some(probed.canonical_host),
+        })
+        .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+        db.set_forwarder_intent(&endpoint_id, true)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+        state.cache_forwarder_intent(&endpoint_id, true);
+    }
+    state
+        .merge_discovered_forwarder(
+            endpoint_id.clone(),
+            probed.display_name,
+            probed.direct_addrs,
+        )
+        .await;
+    state.wake_reconcile();
+    state.request_forwarder_reconnect(endpoint_id.clone()).await;
+    state.emit_resync();
+    Ok(endpoint_id)
+}
+
 pub async fn reconnect_server(state: &AppState) -> Result<(), ReceiverError> {
     state.request_connect().await;
     state.emit_resync();
@@ -892,4 +1158,100 @@ pub async fn reader_reconnect(
         rt_domain::ReaderControlAction::Reconnect,
     )
     .await
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Db;
+    use axum::{Json, Router, routing::get};
+
+    #[test]
+    fn parse_forwarder_host_input_accepts_ip_hostname_and_optional_port() {
+        assert_eq!(
+            parse_forwarder_host_input("192.168.1.50").unwrap(),
+            ("192.168.1.50".to_owned(), None)
+        );
+        assert_eq!(
+            parse_forwarder_host_input("rt-fwd-01.local").unwrap(),
+            ("rt-fwd-01.local".to_owned(), None)
+        );
+        assert_eq!(
+            parse_forwarder_host_input("http://192.168.1.50:8080/api").unwrap(),
+            ("192.168.1.50".to_owned(), Some(8080))
+        );
+        assert!(parse_forwarder_host_input("   ").is_err());
+        assert!(parse_forwarder_host_input("192.168.1.50:0").is_err());
+    }
+
+    #[tokio::test]
+    async fn add_forwarder_by_host_probes_status_persists_and_merges_without_duplicates() {
+        let endpoint_id = rt_iroh::SecretKey::from_bytes(&[99; 32])
+            .public()
+            .to_string();
+        let eid_for_route = endpoint_id.clone();
+
+        let app = Router::new().route(
+            "/api/v1/status",
+            get(move || {
+                let eid = eid_for_route.clone();
+                async move {
+                    Json(serde_json::json!({
+                        "forwarder_id": "fwd-test",
+                        "display_name": "Finish Box",
+                        "p2p_connected": true,
+                        "p2p_endpoint_id": eid,
+                        "p2p_listen_port": 7447,
+                        "p2p_direct_addrs": ["192.168.1.50:7447"]
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let (state, _rx) = AppState::new(Db::open_in_memory().unwrap(), "recv-test".to_owned());
+        let returned_id = add_forwarder_by_host(&state, format!("127.0.0.1:{}", addr.port()))
+            .await
+            .expect("probe should succeed");
+        assert_eq!(returned_id, endpoint_id);
+
+        // Merge a second time with a WAN address (simulating server discovery of the same peer)
+        state
+            .merge_discovered_forwarder(
+                endpoint_id.clone(),
+                None,
+                vec!["203.0.113.10:7447".parse().unwrap()],
+            )
+            .await;
+
+        let discovered = state.forwarders.discovered_forwarders.read().await;
+        assert_eq!(discovered.len(), 1, "must not duplicate the forwarder");
+        let entry = discovered.get(&endpoint_id).expect("forwarder entry");
+        assert_eq!(entry.display_name.as_deref(), Some("Finish Box"));
+        // LAN/loopback addresses must come before the public WAN address
+        assert_eq!(entry.direct_addrs[0], "127.0.0.1:7447".parse().unwrap());
+        assert!(
+            entry
+                .direct_addrs
+                .contains(&"203.0.113.10:7447".parse().unwrap())
+        );
+        drop(discovered);
+
+        let known = state
+            .storage
+            .db
+            .lock()
+            .await
+            .load_known_forwarders()
+            .unwrap();
+        assert_eq!(known.len(), 1);
+        assert_eq!(known[0].endpoint_id, endpoint_id);
+        assert_eq!(
+            known[0].manual_host.as_deref(),
+            Some(format!("127.0.0.1:{}", addr.port()).as_str())
+        );
+    }
 }

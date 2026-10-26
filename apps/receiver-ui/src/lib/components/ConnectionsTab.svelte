@@ -25,6 +25,7 @@
     ServerDeviceStatus,
   } from "$lib/api";
   import {
+    addForwarderByHost,
     connectForwarder,
     disconnectForwarder,
     readerAdvanceEpoch,
@@ -41,7 +42,7 @@
     readerSyncClock,
     reconnectForwarder,
   } from "$lib/api";
-  import { btnPrimary, btnSecondary } from "$lib/ui-classes";
+  import { btnPrimary, btnSecondary, inputClass } from "$lib/ui-classes";
   import ForwarderConfigModal from "./ForwarderConfigModal.svelte";
   import ForwarderWifiModal from "./ForwarderWifiModal.svelte";
 
@@ -55,7 +56,8 @@
   let actionError = $state<string | null>(null);
   let configEndpointId = $state<string | null>(null);
   let wifiEndpointId = $state<string | null>(null);
-
+  let addHostInput = $state("");
+  let addingHost = $state(false);
   // Reader/forwarder clock display. The reader clock arrives on status refresh;
   // we anchor it (baseTs) to the wall time it was captured (baseLocal) and tick
   // it forward locally so the display advances smoothly between refreshes, the
@@ -274,6 +276,21 @@
     await openUrl(url);
   }
 
+  async function handleAddForwarderByHost(): Promise<void> {
+    const trimmed = addHostInput.trim();
+    if (!trimmed || addingHost) return;
+    addingHost = true;
+    actionError = null;
+    try {
+      await addForwarderByHost(trimmed);
+      addHostInput = "";
+      await loadConnections();
+    } catch (e) {
+      actionError = String(e);
+    } finally {
+      addingHost = false;
+    }
+  }
   async function runForwarderAction(
     endpointId: string,
     action: (endpointId: string) => Promise<void>,
@@ -546,23 +563,48 @@
       </div>
     </section>
 
-    <div class="flex items-center justify-between mb-3">
-      <h2
-        class="text-sm font-semibold text-text-primary flex items-center gap-1.5"
+    <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
+      <div class="flex items-center gap-2">
+        <h2
+          class="text-sm font-semibold text-text-primary flex items-center gap-1.5"
+        >
+          Timing Forwarders
+          <HelpTip
+            fieldKey="forwarder_state"
+            sectionKey="connections"
+            context="receiver"
+            onOpenModal={openHelp}
+          />
+        </h2>
+        <span class="text-xs text-text-muted">
+          {store.connections.forwarders.length} discovered
+        </span>
+      </div>
+      <form
+        class="flex items-center gap-2"
+        onsubmit={(e) => {
+          e.preventDefault();
+          void handleAddForwarderByHost();
+        }}
       >
-        Timing Forwarders
-        <HelpTip
-          fieldKey="forwarder_state"
-          sectionKey="connections"
-          context="receiver"
-          onOpenModal={openHelp}
+        <input
+          data-testid="add-forwarder-host-input"
+          type="text"
+          class="{inputClass} text-xs py-1 w-60"
+          placeholder="IP or .local host (e.g. 192.168.1.50)"
+          bind:value={addHostInput}
+          disabled={addingHost}
         />
-      </h2>
-      <span class="text-xs text-text-muted">
-        {store.connections.forwarders.length} discovered
-      </span>
+        <button
+          data-testid="add-forwarder-host-btn"
+          type="submit"
+          class="{btnSecondary} text-xs py-1 whitespace-nowrap"
+          disabled={addingHost || !addHostInput.trim()}
+        >
+          {addingHost ? "Connecting…" : "Connect Local"}
+        </button>
+      </form>
     </div>
-
     {#if store.connections.forwarders.length === 0}
       <Card>
         <p class="m-0 text-sm text-text-muted">

@@ -794,6 +794,8 @@ pub async fn apply_section_update(
         }
         "p2p" => {
             let enabled = optional_bool_field(payload, "enabled")?;
+            let has_allow_lan = payload.get("allow_lan_receivers").is_some();
+            let allow_lan_in = optional_bool_field(payload, "allow_lan_receivers")?;
             let server_url = optional_string_field(payload, "server_url")?.and_then(|url| {
                 let trimmed = url.trim();
                 (!trimmed.is_empty()).then(|| trimmed.to_owned())
@@ -811,6 +813,11 @@ pub async fn apply_section_update(
             }
             update_config_file(config_state, subsystem, ui_tx, |raw| {
                 let previous = raw.p2p.take();
+                let allow_lan_receivers = if has_allow_lan {
+                    allow_lan_in
+                } else {
+                    previous.as_ref().and_then(|cfg| cfg.allow_lan_receivers)
+                };
                 raw.p2p = Some(crate::config::RawP2pConfig {
                     enabled,
                     secret_key_path: previous
@@ -825,6 +832,7 @@ pub async fn apply_section_update(
                     max_concurrent_bidi_streams: previous
                         .as_ref()
                         .and_then(|cfg| cfg.max_concurrent_bidi_streams),
+                    allow_lan_receivers,
                     static_allowed_receivers: previous
                         .as_ref()
                         .and_then(|cfg| cfg.static_allowed_receivers.clone()),

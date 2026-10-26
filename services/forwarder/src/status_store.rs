@@ -206,6 +206,9 @@ pub struct SubsystemStatus {
     /// P2P session state is tracked for the status page but does NOT affect readiness.
     pub(crate) p2p_connected: bool,
     pub(crate) p2p_endpoint_id: Option<String>,
+    pub(crate) p2p_listen_port: Option<u16>,
+    pub(crate) p2p_direct_addrs: Vec<String>,
+    pub(crate) display_name: Option<String>,
     pub(crate) forwarder_id: String,
     pub(crate) local_ip: Option<String>,
     pub(crate) readers: HashMap<String, ReaderStatus>,
@@ -233,6 +236,9 @@ impl SubsystemStatus {
             reason: None,
             p2p_connected: false,
             p2p_endpoint_id: None,
+            p2p_listen_port: None,
+            p2p_direct_addrs: Vec::new(),
+            display_name: None,
             forwarder_id: String::new(),
             local_ip: None,
             readers: HashMap::new(),
@@ -254,6 +260,9 @@ impl SubsystemStatus {
             reason: Some(reason),
             p2p_connected: false,
             p2p_endpoint_id: None,
+            p2p_listen_port: None,
+            p2p_direct_addrs: Vec::new(),
+            display_name: None,
             forwarder_id: String::new(),
             local_ip: None,
             readers: HashMap::new(),
@@ -706,6 +715,11 @@ impl StatusStore {
         ss.set_p2p_endpoint_id(endpoint_id);
     }
 
+    pub async fn set_p2p_direct_addrs(&self, addrs: Vec<String>, listen_port: Option<u16>) {
+        let mut ss = self.subsystem.lock().await;
+        ss.p2p_direct_addrs = addrs;
+        ss.p2p_listen_port = listen_port;
+    }
     /// Update the P2P session state (does not affect readiness).
     pub async fn set_p2p_connected(&self, connected: bool) {
         {
@@ -794,10 +808,13 @@ impl StatusStore {
         *self.display_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
     }
 
-    #[cfg(any(feature = "eink", feature = "lcd"))]
     pub async fn set_display_name(&self, name: Option<String>) {
-        *self.display_name.lock().await = name;
-        self.publish_display_state().await;
+        self.subsystem.lock().await.display_name = name.clone();
+        #[cfg(any(feature = "eink", feature = "lcd"))]
+        {
+            *self.display_name.lock().await = name;
+            self.publish_display_state().await;
+        }
     }
 
     #[cfg(any(feature = "eink", feature = "lcd"))]

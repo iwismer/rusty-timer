@@ -386,7 +386,9 @@ async fn main() {
 
     // Set forwarder identity on status page
     status_server.set_forwarder_id(&forwarder_id).await;
-
+    status_server
+        .set_display_name(cfg.display_name.clone())
+        .await;
     // Detect local IP from first reader
     let detect_target = all_readers.first().map(|(addr, _)| {
         addr.rsplit_once(':')
@@ -495,6 +497,12 @@ async fn main() {
                 .await;
             status_server.set_p2p_connected(true).await;
             let endpoint_addr = runtime.endpoint_addr().await;
+            let direct_addrs: Vec<String> =
+                endpoint_addr.ip_addrs().map(ToString::to_string).collect();
+            let listen_port = endpoint_addr.ip_addrs().next().map(|a| a.port());
+            status_server
+                .set_p2p_direct_addrs(direct_addrs, listen_port)
+                .await;
             info!(
                 p2p_endpoint_id = %runtime.endpoint_id(),
                 p2p_endpoint_addr = ?endpoint_addr,

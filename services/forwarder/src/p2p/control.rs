@@ -1158,6 +1158,7 @@ mod tests {
                 hardware_reader_id: "RDR-1".to_string(),
                 epoch_summaries: Vec::new(),
             }],
+            display_name: None,
         }
     }
 

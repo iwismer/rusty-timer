@@ -792,6 +792,7 @@ mod tests {
                 hardware_reader_id: "R1".to_owned(),
                 epoch_summaries: Vec::new(),
             }],
+            display_name: None,
         }
     }
 

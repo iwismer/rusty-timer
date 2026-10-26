@@ -204,6 +204,7 @@ pub async fn start_forwarder_p2p(
     };
     let (catalog, catalog_task) = LiveReaderCatalog::start(
         reader_streams,
+        display_name.clone(),
         status_feed.clone(),
         &status_snapshot,
         status_rx,
@@ -228,6 +229,12 @@ pub async fn start_forwarder_p2p(
         tokio::spawn(async move { run_endpoint.run().await }),
         catalog_task,
     ];
+    if !config.discovery_disabled {
+        tasks.push(rt_iroh::lan_discovery::spawn_forwarder_lan_beacon(
+            endpoint.endpoint().clone(),
+            display_name.clone(),
+        ));
+    }
 
     let mut catalog_shutdown = None;
     if let Some((base_url, voucher)) = server_credentials(config)? {
@@ -238,24 +245,13 @@ pub async fn start_forwarder_p2p(
         let (catalog_done_tx, catalog_done_rx) = tokio::sync::oneshot::channel();
         catalog_shutdown = Some((catalog_shutdown_tx, catalog_done_rx));
 
-        // Resolve the minted per-device token (load persisted, else bootstrap
-        // via the voucher) BEFORE starting any server-facing task, so every
-        // request carries the device token rather than the bootstrap voucher.
-        // The first attempt runs synchronously so file I/O errors still fail
-        // startup; if the server is merely unreachable (first boot before the
-        // network is up), the spawned task below keeps retrying with backoff.
+        // Read any already-persisted device token synchronously so local file
+        // I/O errors still fail startup, while network bootstrap happens inside
+        // the background task so an unreachable server never stalls P2P bind.
         let token_path = device_token_path(config);
+        let persisted_token = read_device_token(&token_path)?;
         let bootstrap_client =
             ServerCatalogClient::with_timeout(base_url.clone(), voucher, request_timeout);
-        let device_token =
-            resolve_device_token(&token_path, &endpoint_id, &bootstrap_client).await?;
-        if device_token.is_none() {
-            tracing::warn!(
-                %endpoint_id,
-                "forwarder has no minted device token yet (bootstrap unavailable); \
-                 retrying in the background"
-            );
-        }
 
         let server_endpoint = endpoint.clone();
         let server_journal = Arc::clone(&journal);
@@ -263,19 +259,24 @@ pub async fn start_forwarder_p2p(
         // One task owns the whole server integration so aborting it on shutdown
         // stops the bootstrap retry loop and all three server-facing loops.
         tasks.push(tokio::spawn(async move {
-            let device_token = match device_token {
+            let device_token = match persisted_token {
                 Some(token) => token,
                 None => {
                     let mut backoff = BOOTSTRAP_RETRY_INITIAL;
                     loop {
-                        tokio::time::sleep(backoff).await;
                         match resolve_device_token(&token_path, &endpoint_id, &bootstrap_client)
                             .await
                         {
                             Ok(Some(token)) => break token,
                             // Bootstrap failure (server unreachable/rejected):
                             // already logged inside resolve_device_token.
-                            Ok(None) => {}
+                            Ok(None) => {
+                                tracing::warn!(
+                                    %endpoint_id,
+                                    "forwarder has no minted device token yet (bootstrap unavailable); \
+                                     retrying in the background"
+                                );
+                            }
                             Err(error) => {
                                 tracing::warn!(
                                     %endpoint_id, %error,
@@ -283,6 +284,7 @@ pub async fn start_forwarder_p2p(
                                 );
                             }
                         }
+                        tokio::time::sleep(backoff).await;
                         backoff = (backoff * 2).min(BOOTSTRAP_RETRY_MAX);
                     }
                 }
@@ -375,6 +377,7 @@ impl LiveReaderCatalog {
     /// spawns the task that applies status-feed deltas.
     fn start(
         reader_streams: &[String],
+        display_name: Option<String>,
         feed: ForwarderStatusFeed,
         snapshot: &ForwarderStatusSnapshot,
         status_rx: broadcast::Receiver<ForwarderStatusEvent>,
@@ -393,6 +396,7 @@ impl LiveReaderCatalog {
                     epoch_summaries: epoch_summaries.get(stream).cloned().unwrap_or_default(),
                 })
                 .collect(),
+            display_name,
         };
         let (tx, rx) = watch::channel(initial);
         let task = tokio::spawn(run_catalog_updates(feed, status_rx, tx));
@@ -538,25 +542,43 @@ fn endpoint_builder(config: &P2pConfig) -> Result<EndpointBuilder, P2pStartError
     Ok(builder)
 }
 
+fn effective_allowlist_cache_path(config: &P2pConfig) -> Option<PathBuf> {
+    if let Some(path) = &config.allowlist_cache_path {
+        return Some(PathBuf::from(path));
+    }
+    if config.secret_key_seed_hex.is_none()
+        && let Some(key_path) = config.secret_key_path.as_deref()
+    {
+        let dir = Path::new(key_path)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        return Some(dir.join("p2p-allowlist.cache"));
+    }
+    None
+}
+
 fn build_allow_list(config: &P2pConfig) -> Result<AllowList, P2pStartError> {
-    if config.static_allowed_receivers.is_empty()
-        && config.allowlist_cache_path.is_none()
+    let cache_path = effective_allowlist_cache_path(config);
+    if !config.allow_lan_receivers
+        && config.static_allowed_receivers.is_empty()
+        && cache_path.is_none()
         && config.server_url.is_none()
     {
         return Err(P2pStartError::MissingAllowList);
     }
 
     let static_receivers = parse_endpoint_ids(&config.static_allowed_receivers)?;
-    let allow_list = match &config.allowlist_cache_path {
+    let allow_list = match &cache_path {
         Some(path) => AllowList::load(path)?,
         None => AllowList::new(vec![]),
     };
+    allow_list.set_allow_lan(config.allow_lan_receivers, config.allow_loopback_as_lan);
     // Static receivers are pinned: always allowed on top of the cached
     // last-known set, never revoked or persisted by later server snapshots.
     allow_list.set_pinned(static_receivers);
     Ok(allow_list)
 }
-
 fn server_credentials(config: &P2pConfig) -> Result<Option<(String, String)>, P2pStartError> {
     match (&config.server_url, &config.server_token_file) {
         (Some(url), Some(token_file)) => {
@@ -947,6 +969,8 @@ mod tests {
             relay_disabled: true,
             discovery_disabled: true,
             max_concurrent_bidi_streams: Some(64),
+            allow_lan_receivers: false,
+            allow_loopback_as_lan: false,
             static_allowed_receivers: vec![receiver_id],
             allowlist_cache_path: None,
             server_url: None,

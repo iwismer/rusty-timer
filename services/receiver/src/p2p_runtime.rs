@@ -342,25 +342,7 @@ pub async fn start_receiver_p2p(
         "receiver p2p endpoint bound"
     );
 
-    // Seed the discovered-forwarders map from the optional explicit forwarder
-    // so the loopback/dev path (and tests) dial it without a server. The
-    // discovery task (when a server is configured) refreshes the map but
-    // preserves this seed if the server hasn't advertised the same endpoint.
-    // An already-present entry (e.g. injected by a test) is left untouched.
-    if let Some(forwarder) = &config.forwarder {
-        forwarder
-            .endpoint_id
-            .parse::<EndpointId>()
-            .map_err(|e| format!("invalid forwarder endpoint id: {e}"))?;
-        let mut discovered = state.forwarders.discovered_forwarders.write().await;
-        discovered
-            .entry(forwarder.endpoint_id.clone())
-            .or_insert_with(|| DiscoveredForwarder {
-                display_name: None,
-                direct_addrs: vec![forwarder.direct_addr],
-                streams: Vec::new(),
-            });
-    }
+    seed_known_and_explicit_forwarders(&state, config.forwarder.as_ref()).await?;
 
     // P2P is configured and the runtime is attempting to reach the forwarder:
     // surface that as Connecting until a session actually connects. A shared
@@ -385,17 +367,58 @@ pub async fn start_receiver_p2p(
     Ok(P2pReceiverRuntime { shutdown_tx, task })
 }
 
-/// Replace the discovered-forwarders map with just the optional explicit
-/// (loopback/dev) forwarder seed. Called when the server config changes so
-/// forwarders learned from the previous server are not re-dialed; the new
-/// server's discovery loop (if any) then repopulates the map. An invalid seed
-/// endpoint id is dropped because it cannot be dialed.
+async fn seed_known_and_explicit_forwarders(
+    state: &Arc<AppState>,
+    forwarder: Option<&ForwarderPeerConfig>,
+) -> Result<(), String> {
+    if let Some(forwarder) = forwarder {
+        forwarder
+            .endpoint_id
+            .parse::<EndpointId>()
+            .map_err(|e| format!("invalid forwarder endpoint id: {e}"))?;
+    }
+    let known = state
+        .storage
+        .db
+        .lock()
+        .await
+        .load_known_forwarders()
+        .unwrap_or_default();
+    let mut discovered = state.forwarders.discovered_forwarders.write().await;
+    let previous = discovered.clone();
+    merge_known_forwarders(&mut discovered, &known, &previous);
+    if let Some(forwarder) = forwarder {
+        discovered
+            .entry(forwarder.endpoint_id.clone())
+            .or_insert_with(|| DiscoveredForwarder {
+                display_name: None,
+                direct_addrs: vec![forwarder.direct_addr],
+                streams: Vec::new(),
+            });
+    }
+    Ok(())
+}
+
+/// Replace the discovered-forwarders map with persisted LAN/manual forwarders
+/// and the optional explicit (loopback/dev) forwarder seed. Called when the
+/// server config changes so forwarders learned only from the previous server
+/// are not re-dialed; the new server's discovery loop (if any) then repopulates
+/// the map. An invalid seed endpoint id is dropped because it cannot be dialed.
 async fn reseed_discovered_forwarders(
     state: &Arc<AppState>,
     forwarder: Option<&ForwarderPeerConfig>,
 ) {
+    let known = state
+        .storage
+        .db
+        .lock()
+        .await
+        .load_known_forwarders()
+        .unwrap_or_default();
     let mut discovered = state.forwarders.discovered_forwarders.write().await;
+    let previous = discovered.clone();
     discovered.clear();
+    merge_known_forwarders(&mut discovered, &known, &previous);
     if let Some(forwarder) = forwarder
         && forwarder.endpoint_id.parse::<EndpointId>().is_ok()
     {
@@ -544,7 +567,8 @@ async fn run_reconcile_loop(
         .server
         .clone()
         .map(|thin| spawn_approval_watch(thin, shutdown_rx.clone()));
-
+    let lan_discovery_task = (!config.discovery_disabled)
+        .then(|| spawn_lan_discovery_task(Arc::clone(&state), shutdown_rx.clone()));
     // Single cross-stream DBF worker (one per DBF file; see
     // run_shared_dbf_worker). Lives for the whole runtime; it re-resolves
     // config/subscriptions every pass, so stream worker rebuilds don't touch
@@ -826,6 +850,10 @@ async fn run_reconcile_loop(
         task.abort();
         let _ = task.await;
     }
+    if let Some(task) = lan_discovery_task {
+        task.abort();
+        let _ = task.await;
+    }
     dbf_worker_task.abort();
     let _ = dbf_worker_task.await;
     delta_emitter_task.abort();
@@ -937,9 +965,17 @@ async fn run_discovery_loop(
     loop {
         match fetch_forwarders(&thin).await {
             Ok(entries) => {
+                let known = state
+                    .storage
+                    .db
+                    .lock()
+                    .await
+                    .load_known_forwarders()
+                    .unwrap_or_default();
                 let changed = {
                     let mut current = state.forwarders.discovered_forwarders.write().await;
-                    let map = build_discovered_forwarders(entries, seed.as_ref(), &current);
+                    let mut map = build_discovered_forwarders(entries, seed.as_ref(), &current);
+                    merge_known_forwarders(&mut map, &known, &current);
                     if *current == map {
                         false
                     } else {
@@ -1108,6 +1144,158 @@ fn build_discovered_forwarders(
     map
 }
 
+fn merge_known_forwarders(
+    map: &mut DiscoveredForwarders,
+    known: &[crate::db::KnownForwarderRecord],
+    previous: &DiscoveredForwarders,
+) {
+    for record in known {
+        if record.endpoint_id.parse::<EndpointId>().is_err() {
+            continue;
+        }
+        let known_addrs: Vec<SocketAddr> = record
+            .direct_addrs
+            .iter()
+            .filter_map(|addr| addr.parse::<SocketAddr>().ok())
+            .collect();
+        if known_addrs.is_empty() {
+            continue;
+        }
+        match map.get_mut(&record.endpoint_id) {
+            Some(existing) => {
+                existing.direct_addrs =
+                    crate::control_api::merge_priority_addrs(&known_addrs, &existing.direct_addrs);
+                if existing.display_name.is_none() {
+                    existing.display_name = record.display_name.clone();
+                }
+            }
+            None => {
+                let previous_streams = previous
+                    .get(&record.endpoint_id)
+                    .map(|f| f.streams.clone())
+                    .unwrap_or_default();
+                let previous_display = previous
+                    .get(&record.endpoint_id)
+                    .and_then(|f| f.display_name.clone());
+                map.insert(
+                    record.endpoint_id.clone(),
+                    DiscoveredForwarder {
+                        display_name: record.display_name.clone().or(previous_display),
+                        direct_addrs: crate::control_api::merge_priority_addrs(&known_addrs, &[]),
+                        streams: previous_streams,
+                    },
+                );
+            }
+        }
+    }
+}
+
+fn spawn_lan_discovery_task(
+    state: Arc<AppState>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let (beacon_tx, mut beacon_rx) = tokio::sync::mpsc::channel(32);
+        let listener_task =
+            rt_iroh::lan_discovery::spawn_receiver_lan_listener(beacon_tx, shutdown_rx.clone());
+        let mut host_probe_ticker = tokio::time::interval(Duration::from_secs(15));
+        host_probe_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        host_probe_ticker.tick().await;
+
+        loop {
+            tokio::select! {
+                biased;
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                maybe_beacon = beacon_rx.recv() => {
+                    let Some((beacon, sender_ip)) = maybe_beacon else {
+                        break;
+                    };
+                    let endpoint_id = beacon.endpoint_id.to_string();
+                    let direct_addrs = beacon.direct_addrs(sender_ip);
+                    if direct_addrs.is_empty() {
+                        continue;
+                    }
+                    {
+                        let db = state.storage.db.lock().await;
+                        let _ = db.upsert_known_forwarder(&crate::db::KnownForwarderRecord {
+                            endpoint_id: endpoint_id.clone(),
+                            display_name: beacon.display_name.clone(),
+                            direct_addrs: direct_addrs.iter().map(ToString::to_string).collect(),
+                            manual_host: None,
+                        });
+                    }
+                    if state
+                        .merge_discovered_forwarder(endpoint_id, beacon.display_name, direct_addrs)
+                        .await
+                    {
+                        state.wake_reconcile();
+                    }
+                }
+                _ = host_probe_ticker.tick() => {
+                    refresh_manual_host_forwarders(&state).await;
+                }
+            }
+        }
+
+        listener_task.abort();
+        let _ = listener_task.await;
+    })
+}
+
+async fn refresh_manual_host_forwarders(state: &Arc<AppState>) {
+    let manual_hosts: Vec<(String, String)> = {
+        let db = state.storage.db.lock().await;
+        db.load_known_forwarders()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|r| Some((r.endpoint_id, r.manual_host?)))
+            .collect()
+    };
+    for (endpoint_id, host) in manual_hosts {
+        let is_connected = state
+            .forwarders
+            .forwarder_runtime
+            .lock()
+            .unwrap()
+            .get(&endpoint_id)
+            .is_some_and(|rt| rt.control_up || rt.data_sessions > 0);
+        if is_connected {
+            continue;
+        }
+        if let Ok(probed) =
+            crate::control::forwarders::probe_forwarder_host(&state.http_client, &host).await
+        {
+            {
+                let db = state.storage.db.lock().await;
+                let _ = db.upsert_known_forwarder(&crate::db::KnownForwarderRecord {
+                    endpoint_id: probed.endpoint_id.clone(),
+                    display_name: probed.display_name.clone(),
+                    direct_addrs: probed
+                        .direct_addrs
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                    manual_host: Some(probed.canonical_host),
+                });
+            }
+            if state
+                .merge_discovered_forwarder(
+                    probed.endpoint_id,
+                    probed.display_name,
+                    probed.direct_addrs,
+                )
+                .await
+            {
+                state.wake_reconcile();
+            }
+        }
+    }
+}
+
 async fn fetch_forwarders(
     thin: &ServerClientConfig,
 ) -> Result<Vec<announcer_push::ForwarderDiscoveryEntry>, String> {
@@ -1233,17 +1421,18 @@ async fn reconcile_once(
     stop_forwarder_workers(removed_forwarders).await;
 
     for endpoint_id in desired_forwarders.keys() {
+        let Some(forwarder_addr) = resolve_forwarder_addr(endpoint_id, &discovered) else {
+            continue;
+        };
         // The pending grace clock is driven by the `ForwarderConnection` state
         // machine (set-once on the first dial attempt, cleared on connect,
         // re-armed on disconnect), not by the reconcile cadence. Marking it here
         // on every pass would reset it every reconcile interval so it could
         // never elapse to `Unavailable`.
-        if workers.contains_key(endpoint_id) {
+        if let Some(worker) = workers.get(endpoint_id) {
+            worker.set_forwarder_addr(endpoint, forwarder_addr);
             continue;
         }
-        let Some(forwarder_addr) = resolve_forwarder_addr(endpoint_id, &discovered) else {
-            continue;
-        };
         info!(%endpoint_id, "starting p2p forwarder worker");
         let worker = ForwarderConnection::start(
             endpoint_id.clone(),

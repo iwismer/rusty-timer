@@ -241,15 +241,16 @@ export type OverallHealth = "ok" | "warn" | "err";
 
 export function getOverallHealth(): OverallHealth {
   const connections = store.connections;
-
-  // With no connections payload, or no configured server yet, the roll-up is
-  // unknown rather than healthy. Show warn until the receiver has enough data.
-  if (!connections || !connections.server.configured) return "warn";
+  if (!connections) return "warn";
 
   const { server, forwarders } = connections;
   const intendedForwarders = forwarders.filter(
     (forwarder) => forwarder.pending || forwarder.state !== "disconnected",
   );
+  // With no configured server and no active local forwarders yet, the roll-up is
+  // unknown rather than healthy. Show warn until the receiver has enough data.
+  if (!server.configured && intendedForwarders.length === 0) return "warn";
+
   const pendingForwarders = intendedForwarders.filter(
     (forwarder) => forwarder.pending,
   );
@@ -262,9 +263,11 @@ export function getOverallHealth(): OverallHealth {
 
   // Reader-level offline status is not available to this roll-up yet; Phase 3
   // should fold reader connectivity into the same err > warn > ok precedence.
-  if (server.reachable === false) return "err";
-  if (server.approval_state !== "active" && !server.waiting_for_approval) {
-    return "err";
+  if (server.configured) {
+    if (server.reachable === false) return "err";
+    if (server.approval_state !== "active" && !server.waiting_for_approval) {
+      return "err";
+    }
   }
 
   // Pending forwarders are still connecting, so they contribute warn/amber but
@@ -276,8 +279,10 @@ export function getOverallHealth(): OverallHealth {
     return "err";
   }
 
-  if (server.waiting_for_approval) return "warn";
-  if (server.reachable !== true) return "warn";
+  if (server.configured) {
+    if (server.waiting_for_approval) return "warn";
+    if (server.reachable !== true) return "warn";
+  }
   if (pendingForwarders.length > 0) return "warn";
   if (unavailableForwarders.length > 0) return "warn";
 

@@ -218,6 +218,9 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
         "get_status" => ok(control_api::get_status(state).await),
         "get_connections" => ok(control_api::get_connections(state).await),
         "reconnect_server" => ok(control_api::reconnect_server(state).await?),
+        "add_forwarder_by_host" => {
+            ok(control_api::add_forwarder_by_host(state, arg(args, "host")?).await?)
+        }
         "connect_forwarder" => {
             ok(control_api::connect_forwarder(state, arg(args, "endpoint_id")?).await?)
         }

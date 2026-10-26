@@ -68,6 +68,31 @@ pub struct DiscoveredForwarder {
 /// Shared map of discovered forwarders keyed by their endpoint id (string
 /// form). Populated by the discovery task and/or seeded from explicit config.
 pub type DiscoveredForwarders = HashMap<String, DiscoveredForwarder>;
+
+/// Merge two lists of socket addresses without duplicates, ordering local-network
+/// addresses ahead of public WAN addresses so LAN paths are dialed first.
+#[must_use]
+pub(crate) fn merge_priority_addrs(
+    preferred: &[SocketAddr],
+    fallback: &[SocketAddr],
+) -> Vec<SocketAddr> {
+    let mut lan = Vec::new();
+    let mut wan = Vec::new();
+    for &addr in preferred.iter().chain(fallback.iter()) {
+        if addr.ip().is_unspecified() || addr.port() == 0 {
+            continue;
+        }
+        if rt_iroh::is_lan_ip(addr.ip(), true) {
+            if !lan.contains(&addr) {
+                lan.push(addr);
+            }
+        } else if !wan.contains(&addr) {
+            wan.push(addr);
+        }
+    }
+    lan.extend(wan);
+    lan
+}
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot, watch};
 use tracing::warn;
@@ -963,6 +988,50 @@ impl AppState {
         .await;
     }
 
+    pub async fn merge_discovered_forwarder(
+        &self,
+        endpoint_id: String,
+        display_name: Option<String>,
+        new_addrs: Vec<SocketAddr>,
+    ) -> bool {
+        let mut discovered = self.forwarders.discovered_forwarders.write().await;
+        let clean_name = display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned);
+        let changed = match discovered.get_mut(&endpoint_id) {
+            Some(existing) => {
+                let merged_addrs = merge_priority_addrs(&new_addrs, &existing.direct_addrs);
+                let next_name = clean_name.or_else(|| existing.display_name.clone());
+                if existing.direct_addrs == merged_addrs && existing.display_name == next_name {
+                    false
+                } else {
+                    existing.direct_addrs = merged_addrs;
+                    existing.display_name = next_name;
+                    true
+                }
+            }
+            None => {
+                discovered.insert(
+                    endpoint_id,
+                    DiscoveredForwarder {
+                        display_name: clean_name,
+                        direct_addrs: merge_priority_addrs(&new_addrs, &[]),
+                        streams: Vec::new(),
+                    },
+                );
+                true
+            }
+        };
+        drop(discovered);
+        if changed {
+            self.recompute_aggregate_connection_state().await;
+            self.emit_streams_snapshot().await;
+        }
+        changed
+    }
+
     pub(crate) async fn store_forwarder_catalog(&self, endpoint_id: &str, catalog: &StreamCatalog) {
         let mut discovered = self.forwarders.discovered_forwarders.write().await;
         let forwarder =
@@ -973,6 +1042,14 @@ impl AppState {
                     direct_addrs: Vec::new(),
                     streams: Vec::new(),
                 });
+        if let Some(name) = catalog
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            forwarder.display_name = Some(name.to_owned());
+        }
         let existing = forwarder
             .streams
             .iter()
@@ -2458,6 +2535,7 @@ macro_rules! receiver_command_list {
             get_status() -> "StatusResponse",
             get_connections() -> "ConnectionsResponse",
             reconnect_server() -> "()",
+            add_forwarder_by_host(host: "String") -> "String",
             connect_forwarder(endpoint_id: "String") -> "()",
             disconnect_forwarder(endpoint_id: "String") -> "()",
             reconnect_forwarder(endpoint_id: "String") -> "()",
@@ -4160,6 +4238,7 @@ mod tests {
                             },
                         ],
                     }],
+                    display_name: None,
                 },
             )
             .await;
@@ -4262,6 +4341,7 @@ mod tests {
                             name: Some("Stale Catalog Name".to_owned()),
                         }],
                     }],
+                    display_name: None,
                 },
             )
             .await;
@@ -4314,6 +4394,7 @@ mod tests {
                             },
                         ],
                     }],
+                    display_name: None,
                 },
             )
             .await;
