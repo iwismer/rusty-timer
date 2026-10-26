@@ -1767,6 +1767,26 @@ impl Db {
         )?;
         Ok(count > 0)
     }
+
+    pub fn clear_known_forwarder_manual_host(&self, endpoint_id: &str) -> DbResult<bool> {
+        let count = self.conn.execute(
+            "UPDATE known_forwarders SET manual_host = NULL WHERE endpoint_id = ?1",
+            [endpoint_id],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn reassign_known_forwarder_manual_host(
+        &self,
+        manual_host: &str,
+        new_endpoint_id: &str,
+    ) -> DbResult<usize> {
+        let count = self.conn.execute(
+            "UPDATE known_forwarders SET manual_host = NULL WHERE manual_host = ?1 AND endpoint_id != ?2",
+            [manual_host, new_endpoint_id],
+        )?;
+        Ok(count)
+    }
     pub fn delete_all_cursors(&self) -> DbResult<usize> {
         let count = self.conn.execute("DELETE FROM cursors", [])?;
         Ok(count)
@@ -4387,6 +4407,55 @@ mod tests {
             .load_raw_export_events_for_stream_epochs(&filter)
             .unwrap();
         assert_eq!(multi_events.len(), 3); // 2 rows from s1 with epoch 1, 1 row from s2 (all epochs)
+    }
+
+    #[test]
+    fn known_forwarders_crud_and_manual_host_reassignment() {
+        let db = Db::open_in_memory().unwrap();
+        let record1 = KnownForwarderRecord {
+            endpoint_id: "endpoint-1".to_owned(),
+            display_name: Some("Finish Box".to_owned()),
+            direct_addrs: vec!["192.168.1.50:7447".to_owned()],
+            manual_host: Some("192.168.1.50:8080".to_owned()),
+        };
+        db.upsert_known_forwarder(&record1).unwrap();
+
+        let list = db.load_known_forwarders().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].endpoint_id, "endpoint-1");
+        assert_eq!(list[0].manual_host.as_deref(), Some("192.168.1.50:8080"));
+
+        // Reassigning the same manual host to endpoint-2 clears it on endpoint-1
+        let reassigned = db
+            .reassign_known_forwarder_manual_host("192.168.1.50:8080", "endpoint-2")
+            .unwrap();
+        assert_eq!(reassigned, 1);
+
+        let record2 = KnownForwarderRecord {
+            endpoint_id: "endpoint-2".to_owned(),
+            display_name: Some("Replaced Box".to_owned()),
+            direct_addrs: vec!["192.168.1.50:7447".to_owned()],
+            manual_host: Some("192.168.1.50:8080".to_owned()),
+        };
+        db.upsert_known_forwarder(&record2).unwrap();
+
+        let list = db.load_known_forwarders().unwrap();
+        assert_eq!(list.len(), 2);
+        let ep1 = list.iter().find(|r| r.endpoint_id == "endpoint-1").unwrap();
+        let ep2 = list.iter().find(|r| r.endpoint_id == "endpoint-2").unwrap();
+        assert_eq!(ep1.manual_host, None);
+        assert_eq!(ep2.manual_host.as_deref(), Some("192.168.1.50:8080"));
+
+        // Explicitly clearing manual_host on endpoint-2
+        assert!(db.clear_known_forwarder_manual_host("endpoint-2").unwrap());
+        let list = db.load_known_forwarders().unwrap();
+        let ep2_cleared = list.iter().find(|r| r.endpoint_id == "endpoint-2").unwrap();
+        assert_eq!(ep2_cleared.manual_host, None);
+
+        // Removal
+        assert!(db.remove_known_forwarder("endpoint-1").unwrap());
+        assert!(!db.remove_known_forwarder("endpoint-1").unwrap());
+        assert_eq!(db.load_known_forwarders().unwrap().len(), 1);
     }
 
     #[test]

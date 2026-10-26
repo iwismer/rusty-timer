@@ -297,7 +297,7 @@ fn parse_forwarder_host_input(raw: &str) -> Result<(String, Option<u16>), Receiv
         ));
     }
 
-    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+    let (mut host, port) = if let Some(rest) = authority.strip_prefix('[') {
         let Some((ipv6_host, after_bracket)) = rest.split_once(']') else {
             return Err(ReceiverError::BadRequest(
                 "invalid IPv6 host syntax".to_owned(),
@@ -330,6 +330,10 @@ fn parse_forwarder_host_input(raw: &str) -> Result<(String, Option<u16>), Receiv
     } else {
         (authority.to_owned(), None)
     };
+
+    if host.parse::<std::net::Ipv6Addr>().is_ok() && !host.starts_with('[') {
+        host = format!("[{host}]");
+    }
 
     if host.is_empty()
         || !host
@@ -485,6 +489,8 @@ pub async fn add_forwarder_by_host(
     let endpoint_id = probed.endpoint_id.clone();
     {
         let db = state.storage.db.lock().await;
+        db.reassign_known_forwarder_manual_host(&probed.canonical_host, &endpoint_id)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
         db.upsert_known_forwarder(&crate::db::KnownForwarderRecord {
             endpoint_id: endpoint_id.clone(),
             display_name: probed.display_name.clone(),
@@ -1183,6 +1189,18 @@ mod tests {
         assert_eq!(
             parse_forwarder_host_input("rt-fwd-01.local").unwrap(),
             ("rt-fwd-01.local".to_owned(), None)
+        );
+        assert_eq!(
+            parse_forwarder_host_input("::1").unwrap(),
+            ("[::1]".to_owned(), None)
+        );
+        assert_eq!(
+            parse_forwarder_host_input("[::1]:8080").unwrap(),
+            ("[::1]".to_owned(), Some(8080))
+        );
+        assert_eq!(
+            parse_forwarder_host_input("fe80::1").unwrap(),
+            ("[fe80::1]".to_owned(), None)
         );
         assert_eq!(
             parse_forwarder_host_input("http://192.168.1.50:8080/api").unwrap(),

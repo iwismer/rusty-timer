@@ -1271,6 +1271,13 @@ async fn refresh_manual_host_forwarders(state: &Arc<AppState>) {
         {
             {
                 let db = state.storage.db.lock().await;
+                if probed.endpoint_id != endpoint_id {
+                    let _ = db.clear_known_forwarder_manual_host(&endpoint_id);
+                }
+                let _ = db.reassign_known_forwarder_manual_host(
+                    &probed.canonical_host,
+                    &probed.endpoint_id,
+                );
                 let _ = db.upsert_known_forwarder(&crate::db::KnownForwarderRecord {
                     endpoint_id: probed.endpoint_id.clone(),
                     display_name: probed.display_name.clone(),
