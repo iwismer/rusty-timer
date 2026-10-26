@@ -48,6 +48,46 @@ export type UpdateState = {
   error: string | null;
 };
 
+export type StreamRole = "start_finish" | "start" | "finish" | "announcer";
+
+function loadStoredRoles(): Record<string, StreamRole> {
+  if (typeof localStorage === "undefined") return {};
+  try {
+    const raw = localStorage.getItem("rt_stream_roles");
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function loadStoredOrder(): string[] {
+  if (typeof localStorage === "undefined") return [];
+  try {
+    const raw = localStorage.getItem("rt_stream_course_order");
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadStoredCutoverEpoch(): string {
+  if (typeof localStorage === "undefined") return "Finish Reads";
+  try {
+    return localStorage.getItem("rt_cutover_epoch_name") || "Finish Reads";
+  } catch {
+    return "Finish Reads";
+  }
+}
+
+export function persistCutoverEpoch(name: string): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem("rt_cutover_epoch_name", name);
+  } catch {
+    // ignore
+  }
+}
+
 // --------------- Reactive state ---------------
 // Wrapped in a single object so Svelte 5 allows export + mutation.
 
@@ -155,6 +195,15 @@ export const store = $state({
     string,
     { available: boolean; status: api.UpsStatus | null }
   >(),
+
+  // Stream roles and race day order
+  streamRoles: loadStoredRoles() as Record<string, StreamRole>,
+  streamCourseOrder: loadStoredOrder() as string[],
+  cutoverEpochName: loadStoredCutoverEpoch(),
+
+  // Race day startup workflow
+  raceDayModalOpen: false,
+  raceDayModalMode: "prompt" as "prompt" | "wizard",
 
   // Version info
   appVersion: "",
@@ -345,7 +394,12 @@ export function streamIsOptimisticallySubscribing(
   );
 }
 
-function markSubscriptionPending(streams: api.StreamEntry[]): void {
+function markSubscriptionPending(
+  streams: readonly Pick<
+    api.StreamEntry,
+    "forwarder_endpoint_id" | "stream_id"
+  >[],
+): void {
   const now = Date.now();
   store.streamSubscriptionPendingSince = {
     ...store.streamSubscriptionPendingSince,
@@ -355,7 +409,13 @@ function markSubscriptionPending(streams: api.StreamEntry[]): void {
   };
 }
 
-function clearSubscriptionPending(streams: api.StreamEntry[]): void {
+function clearSubscriptionPending(
+  streams: readonly (Pick<
+    api.StreamEntry,
+    "forwarder_endpoint_id" | "stream_id" | "subscribed"
+  > &
+    Partial<api.StreamEntry>)[],
+): void {
   const next = { ...store.streamSubscriptionPendingSince };
   let changed = false;
   const now = Date.now();
@@ -881,7 +941,12 @@ export async function changeEarliestEpoch(
 }
 
 export async function toggleSubscription(
-  stream: api.StreamEntry,
+  stream:
+    | api.StreamEntry
+    | Pick<
+        api.StreamEntry,
+        "forwarder_endpoint_id" | "stream_id" | "subscribed"
+      >,
 ): Promise<void> {
   if (store.streamActionBusy || !store.streams) return;
   store.streamActionBusy = true;
@@ -1484,6 +1549,410 @@ export function initStore(): void {
     console.error("initSSE failed:", e);
     store.error = `Event listener initialization failed: ${String(e)}`;
   });
+}
+
+export function getStreamRole(stream: api.StreamEntry): StreamRole {
+  const key = streamIdentity(stream);
+  const stored = store.streamRoles[key];
+  if (stored) return stored;
+  if (stream.event_type === "start") return "start";
+  if (stream.event_type === "exclude") return "announcer";
+  return "finish";
+}
+
+export function setStreamRole(stream: api.StreamEntry, role: StreamRole): void {
+  const key = streamIdentity(stream);
+  store.streamRoles = { ...store.streamRoles, [key]: role };
+  if (typeof localStorage !== "undefined") {
+    try {
+      localStorage.setItem(
+        "rt_stream_roles",
+        JSON.stringify(store.streamRoles),
+      );
+    } catch {}
+  }
+}
+
+export function getStreamDriftMs(stream: api.StreamEntry): number | null {
+  if (!store.connections) return null;
+  const forwarder = store.connections.forwarders.find(
+    (f) => f.endpoint_id === stream.forwarder_endpoint_id,
+  );
+  if (!forwarder) return null;
+  const reader = forwarder.readers.find(
+    (r) =>
+      r.stream_id === stream.stream_id ||
+      (stream.reader_ip != null && r.stream_id === stream.reader_ip),
+  );
+  return reader?.reader_info?.clock?.drift_ms ?? null;
+}
+
+export function streamPrimaryLabel(stream: api.StreamEntry): string {
+  if (!stream.subscribed) return stream.stream_id;
+  return stream.reader_ip ?? stream.stream_id;
+}
+
+export function streamForwarderLabel(
+  stream: api.StreamEntry,
+): string | null | undefined {
+  return stream.display_alias?.trim() || stream.forwarder_id;
+}
+
+export function getOrderedStreams(
+  streams: api.StreamEntry[] = store.streams?.streams ?? [],
+): api.StreamEntry[] {
+  if (store.streamCourseOrder.length === 0) return streams;
+  const orderMap = new Map<string, number>();
+  store.streamCourseOrder.forEach((key, index) => orderMap.set(key, index));
+  return [...streams].sort((a, b) => {
+    const keyA = streamIdentity(a);
+    const keyB = streamIdentity(b);
+    const idxA = orderMap.has(keyA) ? orderMap.get(keyA)! : 9999;
+    const idxB = orderMap.has(keyB) ? orderMap.get(keyB)! : 9999;
+    if (idxA !== idxB) return idxA - idxB;
+    return (a.reader_ip ?? a.stream_id).localeCompare(
+      b.reader_ip ?? b.stream_id,
+    );
+  });
+}
+
+export function moveStreamOrder(
+  streamOrKey: api.StreamEntry | string,
+  direction: -1 | 1,
+  orderedStreams: api.StreamEntry[] = getOrderedStreams(),
+): void {
+  const streamKey =
+    typeof streamOrKey === "string" ? streamOrKey : streamIdentity(streamOrKey);
+  const keys = orderedStreams.map((s) => streamIdentity(s));
+  const idx = keys.indexOf(streamKey);
+  if (idx === -1) return;
+  const targetIdx = idx + direction;
+  if (targetIdx < 0 || targetIdx >= keys.length) return;
+  const [removed] = keys.splice(idx, 1);
+  keys.splice(targetIdx, 0, removed);
+  store.streamCourseOrder = keys;
+  if (typeof localStorage !== "undefined") {
+    try {
+      localStorage.setItem("rt_stream_course_order", JSON.stringify(keys));
+    } catch {}
+  }
+}
+
+export async function cutoverStartFinishReaders(
+  newEpochName: string = "Finish Reads",
+): Promise<{ count: number }> {
+  if (!store.streams) return { count: 0 };
+  const targets = store.streams.streams.filter(
+    (s) =>
+      s.subscribed &&
+      getStreamRole(s) === "start_finish" &&
+      s.event_type === "start",
+  );
+  if (targets.length === 0) return { count: 0 };
+
+  store.streamActionBusy = true;
+  try {
+    store.error = null;
+    const trimmedEpoch = newEpochName.trim();
+    const results = await Promise.allSettled(
+      targets.map(async (stream) => {
+        await api.readerAdvanceEpoch(
+          stream.forwarder_endpoint_id,
+          stream.stream_id,
+          trimmedEpoch.length > 0 ? trimmedEpoch : null,
+        );
+        await api.updateSubscriptionEventType(
+          {
+            forwarder_endpoint_id: stream.forwarder_endpoint_id,
+            stream_id: stream.stream_id,
+          },
+          "finish",
+        );
+        clearStreamLocalMetrics(streamIdentity(stream));
+      }),
+    );
+    await refreshStreamsAndEpochOptions();
+    await loadConnections();
+    const rejected = results.filter((r) => r.status === "rejected");
+    if (rejected.length > 0) {
+      store.error = `Cutover partially failed: ${rejected.length} of ${targets.length} readers failed to transition.`;
+    }
+    return { count: targets.length - rejected.length };
+  } catch (e) {
+    store.error = `Cutover failed: ${String(e)}`;
+    throw e;
+  } finally {
+    store.streamActionBusy = false;
+  }
+}
+
+export async function bulkSyncClocks(
+  streams: api.StreamEntry[],
+): Promise<void> {
+  if (streams.length === 0) return;
+  store.streamActionBusy = true;
+  try {
+    store.error = null;
+    await Promise.allSettled(
+      streams.map((s) =>
+        api.readerSyncClock(s.forwarder_endpoint_id, s.stream_id),
+      ),
+    );
+    await loadConnections();
+  } catch (e) {
+    store.error = `Bulk sync clock failed: ${String(e)}`;
+  } finally {
+    store.streamActionBusy = false;
+  }
+}
+
+export async function bulkAdvanceEpoch(
+  streams: api.StreamEntry[],
+  epochName: string,
+): Promise<void> {
+  if (streams.length === 0) return;
+  store.streamActionBusy = true;
+  try {
+    store.error = null;
+    const trimmed = epochName.trim();
+    await Promise.allSettled(
+      streams.map((s) =>
+        api.readerAdvanceEpoch(
+          s.forwarder_endpoint_id,
+          s.stream_id,
+          trimmed.length > 0 ? trimmed : null,
+        ),
+      ),
+    );
+    for (const s of streams) {
+      clearStreamLocalMetrics(streamIdentity(s));
+    }
+    await refreshStreamsAndEpochOptions();
+    await loadConnections();
+  } catch (e) {
+    store.error = `Bulk advance epoch failed: ${String(e)}`;
+  } finally {
+    store.streamActionBusy = false;
+  }
+}
+
+export async function bulkSetRole(
+  streams: api.StreamEntry[],
+  role: StreamRole,
+): Promise<void> {
+  if (streams.length === 0) return;
+  store.streamActionBusy = true;
+  try {
+    store.error = null;
+    for (const s of streams) {
+      setStreamRole(s, role);
+      if (s.subscribed) {
+        if (
+          role === "start" ||
+          (role === "start_finish" && s.event_type !== "finish")
+        ) {
+          await api.updateSubscriptionEventType(
+            {
+              forwarder_endpoint_id: s.forwarder_endpoint_id,
+              stream_id: s.stream_id,
+            },
+            "start",
+          );
+        } else if (role === "finish") {
+          await api.updateSubscriptionEventType(
+            {
+              forwarder_endpoint_id: s.forwarder_endpoint_id,
+              stream_id: s.stream_id,
+            },
+            "finish",
+          );
+        } else if (role === "announcer") {
+          await api.updateSubscriptionEventType(
+            {
+              forwarder_endpoint_id: s.forwarder_endpoint_id,
+              stream_id: s.stream_id,
+            },
+            "exclude",
+          );
+          await api.setStreamAnnouncerPublish(
+            s.forwarder_endpoint_id,
+            s.stream_id,
+            true,
+          );
+        }
+      }
+    }
+    await refreshStreamsAndEpochOptions();
+  } catch (e) {
+    store.error = `Bulk set role failed: ${String(e)}`;
+  } finally {
+    store.streamActionBusy = false;
+  }
+}
+
+export function openRaceDayPrompt(): void {
+  store.raceDayModalMode = "prompt";
+  store.raceDayModalOpen = true;
+}
+
+export function openRaceDayWizard(): void {
+  store.raceDayModalMode = "wizard";
+  store.raceDayModalOpen = true;
+}
+
+export function closeRaceDayModal(): void {
+  store.raceDayModalOpen = false;
+  if (typeof sessionStorage !== "undefined") {
+    try {
+      sessionStorage.setItem("rusty_timer_race_day_prompted", "true");
+    } catch {
+      // ignore
+    }
+  }
+}
+
+export function checkInitialRaceDayPrompt(): void {
+  if (typeof sessionStorage !== "undefined") {
+    try {
+      const prompted = sessionStorage.getItem("rusty_timer_race_day_prompted");
+      if (!prompted) {
+        openRaceDayPrompt();
+      }
+    } catch {
+      // ignore
+    }
+  }
+}
+
+export interface RaceDaySetupConfig {
+  startFinishStartEpoch?: string;
+  startFinishFinishEpoch?: string;
+  startEpoch?: string;
+  finishEpoch?: string;
+  announcerEpoch?: string;
+  clearLocalReads: boolean;
+  resetDbfFile?: boolean;
+  resetAnnouncerFeed?: boolean;
+}
+
+export async function completeRaceDaySetup(
+  config: RaceDaySetupConfig,
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const streams = store.streams?.streams ?? [];
+    const promises: Promise<unknown>[] = [];
+    const readerWarnings: string[] = [];
+
+    if (config.startFinishFinishEpoch) {
+      store.cutoverEpochName = config.startFinishFinishEpoch;
+      persistCutoverEpoch(config.startFinishFinishEpoch);
+    }
+
+    for (const stream of streams) {
+      if (!stream.subscribed) continue;
+      const role = getStreamRole(stream);
+
+      let epochName: string | undefined;
+      if (role === "start_finish") {
+        epochName = config.startFinishStartEpoch?.trim() || "Mass Start";
+        promises.push(api.updateSubscriptionEventType(stream, "start"));
+        if (stream.announcer_publish) {
+          promises.push(
+            api.setStreamAnnouncerPublish(
+              stream.forwarder_endpoint_id,
+              stream.stream_id,
+              true,
+            ),
+          );
+        }
+      } else if (role === "start") {
+        epochName = config.startEpoch?.trim() || "Start Reads";
+        promises.push(api.updateSubscriptionEventType(stream, "start"));
+      } else if (role === "finish") {
+        epochName = config.finishEpoch?.trim() || "Finish Reads";
+        promises.push(api.updateSubscriptionEventType(stream, "finish"));
+        if (stream.announcer_publish) {
+          promises.push(
+            api.setStreamAnnouncerPublish(
+              stream.forwarder_endpoint_id,
+              stream.stream_id,
+              true,
+            ),
+          );
+        }
+      } else if (role === "announcer") {
+        epochName = config.announcerEpoch?.trim() || "Announcer Feed";
+        promises.push(
+          api.setStreamAnnouncerPublish(
+            stream.forwarder_endpoint_id,
+            stream.stream_id,
+            true,
+          ),
+        );
+        promises.push(api.updateSubscriptionEventType(stream, "exclude"));
+      }
+
+      if (epochName) {
+        promises.push(
+          api
+            .readerAdvanceEpoch(
+              stream.forwarder_endpoint_id,
+              stream.stream_id,
+              epochName,
+            )
+            .catch((e) => {
+              readerWarnings.push(`${stream.stream_id}: ${e}`);
+            }),
+        );
+      }
+    }
+
+    if (config.resetAnnouncerFeed) {
+      promises.push(
+        api.resetAnnouncer().catch((e) => {
+          readerWarnings.push(`announcer reset: ${e}`);
+        }),
+      );
+    }
+
+    if (config.clearLocalReads) {
+      promises.push(api.resetAllStreamsData());
+      clearAllStreamsLocalMetrics();
+      const shouldResetDbf =
+        config.resetDbfFile ?? (store.editDbfEnabled && store.dbfEnabled);
+      if (shouldResetDbf) {
+        promises.push(
+          api.clearDbf().catch((e) => {
+            readerWarnings.push(`clear DBF: ${e}`);
+          }),
+        );
+      }
+    }
+
+    const results = await Promise.allSettled(promises);
+    await refreshStreamsAndEpochOptions();
+    await loadConnections();
+
+    const rejections = results.filter(
+      (r): r is PromiseRejectedResult => r.status === "rejected",
+    );
+    if (rejections.length > 0) {
+      const msg = `${rejections.length} setup step(s) failed during race day initialization.`;
+      store.error = msg;
+      return { success: false, error: msg };
+    }
+
+    if (readerWarnings.length > 0) {
+      store.error = `Race day setup initialized, but warnings occurred on: ${readerWarnings.join(", ")}`;
+    }
+
+    closeRaceDayModal();
+    return { success: true };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    store.error = `Failed to complete race day setup: ${msg}`;
+    return { success: false, error: msg };
+  }
 }
 
 export function destroyStore(): void {

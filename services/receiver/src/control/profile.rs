@@ -90,15 +90,28 @@ pub async fn set_announcer_max_list_size(
 /// device token, then marks all existing received events as announcer-pushed
 /// so older reads never push into the fresh race.
 pub async fn reset_announcer(state: &AppState) -> Result<(), ReceiverError> {
-    let (server_url, token) = {
+    let (server_url, mut token) = {
         let db = state.storage.db.lock().await;
         let profile = db
             .load_profile()
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
         let override_ = state.server_override().await;
         let resolved = crate::runtime::resolve_server_config(profile.as_ref(), override_);
+        let device_token = db
+            .load_device_token()
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+
         match resolved {
-            Some(s) if !s.url.trim().is_empty() && !s.token.trim().is_empty() => (s.url, s.token),
+            Some(s) if !s.url.trim().is_empty() => {
+                let token = device_token.unwrap_or(s.token);
+                if token.trim().is_empty() {
+                    return Err(ReceiverError::BadRequest(
+                        "server URL and token must be configured to reset the announcer feed"
+                            .into(),
+                    ));
+                }
+                (s.url, token)
+            }
             _ => {
                 return Err(ReceiverError::BadRequest(
                     "server URL and token must be configured to reset the announcer feed".into(),
@@ -106,6 +119,44 @@ pub async fn reset_announcer(state: &AppState) -> Result<(), ReceiverError> {
             }
         }
     };
+
+    if state
+        .storage
+        .db
+        .lock()
+        .await
+        .load_device_token()
+        .ok()
+        .flatten()
+        .is_none()
+        && let Some(endpoint_id) = state.forwarders.p2p_endpoint_id.read().await.clone()
+    {
+        let url = server_url.clone();
+        let voucher = token.clone();
+        let receiver_id = state.receiver_id.read().await.clone();
+        let minted = tokio::task::spawn_blocking(move || {
+            crate::announcer_push::register_receiver_with_server(
+                &url,
+                &voucher,
+                &endpoint_id,
+                &receiver_id,
+            )
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .flatten();
+
+        if let Some(minted_token) = minted {
+            let _ = state
+                .storage
+                .db
+                .lock()
+                .await
+                .set_device_token(&minted_token);
+            token = minted_token;
+        }
+    }
 
     crate::announcer_push::reset_announcer_feed(&state.http_client, &server_url, &token)
         .await
@@ -338,5 +389,90 @@ pub async fn admin_factory_reset(state: &AppState) -> Result<(), ReceiverError> 
             Ok(())
         }
         Err(e) => Err(ReceiverError::Internal(e.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Db;
+    use axum::response::IntoResponse;
+
+    #[tokio::test]
+    async fn reset_announcer_uses_minted_device_token_over_voucher() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let app = axum::Router::new().route(
+            "/announcer/reset",
+            axum::routing::post(|headers: axum::http::HeaderMap| async move {
+                let auth = headers.get("authorization").and_then(|v| v.to_str().ok());
+                if auth == Some("Bearer minted-device-token-123") {
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "announcer_source_generation": 42,
+                            "finisher_count": 0,
+                        })),
+                    )
+                        .into_response()
+                } else {
+                    axum::http::StatusCode::UNAUTHORIZED.into_response()
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let mut db = Db::open_in_memory().unwrap();
+        // Persist profile with voucher token
+        db.save_profile(
+            &format!("http://127.0.0.1:{port}"),
+            "voucher-token-456",
+            DEFAULT_UPDATE_MODE,
+            Some("recv-test"),
+        )
+        .unwrap();
+        // Persist minted device token in DB
+        db.set_device_token("minted-device-token-123").unwrap();
+
+        let (state, _rx) = AppState::new(db, "recv-test".to_owned());
+        let result = reset_announcer(&state).await;
+        assert!(
+            result.is_ok(),
+            "reset_announcer should succeed with minted device token: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_announcer_reports_helpful_error_on_401() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let app = axum::Router::new().route(
+            "/announcer/reset",
+            axum::routing::post(|| async { axum::http::StatusCode::UNAUTHORIZED.into_response() }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let mut db = Db::open_in_memory().unwrap();
+        db.save_profile(
+            &format!("http://127.0.0.1:{port}"),
+            "voucher-token-456",
+            DEFAULT_UPDATE_MODE,
+            Some("recv-test"),
+        )
+        .unwrap();
+
+        let (state, _rx) = AppState::new(db, "recv-test".to_owned());
+        let result = reset_announcer(&state).await;
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("401 Unauthorized"),
+            "Error should mention 401 Unauthorized: {err}"
+        );
     }
 }

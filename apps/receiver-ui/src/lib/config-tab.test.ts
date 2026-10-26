@@ -257,4 +257,38 @@ describe("ConfigTab", () => {
     expect(mockState.saveRdImportConfig).toHaveBeenCalledOnce();
     expect(mockState.saveDbfConfig).not.toHaveBeenCalled();
   });
+
+  it("renders timing boxes & forwarders section with configure box button", () => {
+    (mockState.store as any).connections = {
+      server: {
+        configured: true,
+        endpoint_id: "srv",
+        reachable: true,
+        approval_state: "active",
+        waiting_for_approval: false,
+        message: null,
+      },
+      forwarders: [
+        {
+          endpoint_id: "fwd-01",
+          display_name: "box-01",
+          state: "subscribed",
+          pending: false,
+          subscribed_count: 1,
+          available_count: 1,
+          readers: [],
+          wifi_control_available: true,
+        },
+      ],
+    };
+
+    render(ConfigTab);
+
+    expect(screen.getByText("Timing Boxes & Forwarders")).toBeInTheDocument();
+    expect(screen.getByText("box-01")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("forwarder-config-btn-fwd-01"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("forwarder-wifi-btn-fwd-01")).toBeInTheDocument();
+  });
 });

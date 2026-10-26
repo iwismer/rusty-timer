@@ -2,13 +2,19 @@
   import type { Snippet } from "svelte";
   import { onMount, onDestroy } from "svelte";
   import { page } from "$app/state";
-  import { initStore, destroyStore, store } from "$lib/store.svelte";
+  import {
+    initStore,
+    destroyStore,
+    store,
+    checkInitialRaceDayPrompt,
+  } from "$lib/store.svelte";
   import { initDarkMode } from "@rusty-timer/shared-ui/lib/dark-mode";
   import { AlertBanner } from "@rusty-timer/shared-ui";
   import TabBar from "$lib/components/TabBar.svelte";
   import StatusBar from "$lib/components/StatusBar.svelte";
   import HelpModal from "$lib/components/HelpModal.svelte";
   import UpdateModal from "$lib/components/UpdateModal.svelte";
+  import RaceDayStartupModal from "$lib/components/RaceDayStartupModal.svelte";
   import ConnectionsTab from "$lib/components/ConnectionsTab.svelte";
   import StreamsTab from "$lib/components/StreamsTab.svelte";
   import ConfigTab from "$lib/components/ConfigTab.svelte";
@@ -30,6 +36,7 @@
     document.body.style.scrollbarGutter = "auto";
     initDarkMode();
     initStore();
+    checkInitialRaceDayPrompt();
   });
 
   onDestroy(() => {
@@ -49,7 +56,13 @@
 
   {#if store.error}
     <div class="px-3 py-1.5 shrink-0">
-      <AlertBanner variant="err" message={store.error} />
+      <AlertBanner
+        variant="err"
+        message={store.error}
+        onDismiss={() => {
+          store.error = null;
+        }}
+      />
     </div>
   {/if}
 
@@ -74,4 +87,5 @@
   <StatusBar />
   <UpdateModal />
   <HelpModal />
+  <RaceDayStartupModal />
 </div>

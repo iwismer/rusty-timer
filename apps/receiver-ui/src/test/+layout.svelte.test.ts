@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/svelte";
+import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import Layout from "../routes/+layout.svelte";
@@ -237,5 +237,23 @@ describe("receiver layout SSE updates", () => {
     expect(await screen.findByTestId("layout-child")).toHaveTextContent(
       "nested route content",
     );
+  });
+
+  it("renders dismissable global error banner when store.error is set", async () => {
+    store.error =
+      "Failed to clear DBF file: bad request: DBF directory does not exist";
+    render(Layout);
+
+    expect(
+      screen.getByText(
+        "Failed to clear DBF file: bad request: DBF directory does not exist",
+      ),
+    ).toBeInTheDocument();
+
+    const dismissBtn = screen.getByRole("button", { name: "Dismiss" });
+    expect(dismissBtn).toBeInTheDocument();
+
+    await fireEvent.click(dismissBtn);
+    expect(store.error).toBeNull();
   });
 });

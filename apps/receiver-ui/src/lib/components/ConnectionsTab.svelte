@@ -453,48 +453,75 @@
   }
 </script>
 
-<div class="mx-auto max-w-[760px] px-6 py-6">
+<div class="mx-auto max-w-4xl px-6 py-6">
   {#if store.connections}
     {@const serverDisplay = serverReachabilityDisplay(store.connections.server)}
+    <div class="mb-5 flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <h1 class="text-lg font-bold text-text-primary">
+          Forwarders & Reader Control
+        </h1>
+        <p class="text-xs text-text-muted mt-0.5">
+          Configure remote timing forwarders, manage IPICO readers, synchronize
+          clocks, and download reader memory.
+        </p>
+      </div>
+    </div>
+
     <section
       data-testid="connections-server-card"
-      class="rounded-lg border border-border bg-surface-1 p-4"
+      class="rounded-lg border border-border bg-surface-1 p-3.5 mb-6"
     >
-      <div class="flex items-start justify-between gap-4">
-        <div>
-          <p class="text-xs font-medium text-text-muted">
-            Server
-            <HelpTip
-              fieldKey="server_status"
-              sectionKey="connections"
-              context="receiver"
-              onOpenModal={openHelp}
-            />
-          </p>
-          <span
-            data-testid="server-reachability-state"
-            class="mt-1 flex items-center gap-2 text-sm font-medium {serverDisplay.textClass}"
-          >
-            <span class="h-2 w-2 rounded-full {serverDisplay.dotClass}"></span>
-            {serverDisplay.label}
-          </span>
-          {#if serverAddressDisplay(store.connections.server)}
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="flex flex-wrap items-center gap-4">
+          <div>
             <p
-              data-testid="server-address"
-              class="mt-1 font-mono text-xs text-text-muted"
+              class="text-[11px] font-medium text-text-muted flex items-center gap-1"
             >
-              {serverAddressDisplay(store.connections.server)}
+              Server Registry
+              <HelpTip
+                fieldKey="server_status"
+                sectionKey="connections"
+                context="receiver"
+                onOpenModal={openHelp}
+              />
             </p>
+            <span
+              data-testid="server-reachability-state"
+              class="mt-0.5 flex items-center gap-1.5 text-xs font-medium {serverDisplay.textClass}"
+            >
+              <span class="h-2 w-2 rounded-full {serverDisplay.dotClass}"
+              ></span>
+              {serverDisplay.label}
+            </span>
+          </div>
+          {#if serverAddressDisplay(store.connections.server)}
+            <div class="border-l border-border pl-4">
+              <p class="text-[11px] font-medium text-text-muted">
+                Server Address
+              </p>
+              <p
+                data-testid="server-address"
+                class="mt-0.5 font-mono text-xs text-text-secondary"
+              >
+                {serverAddressDisplay(store.connections.server)}
+              </p>
+            </div>
           {/if}
           {#if approvalLabel(store.connections.server)}
-            <p
-              data-testid="server-approval-state"
-              class="mt-2 text-xs {serverApprovalTextClass(
-                store.connections.server,
-              )}"
-            >
-              {approvalLabel(store.connections.server)}
-            </p>
+            <div class="border-l border-border pl-4">
+              <p class="text-[11px] font-medium text-text-muted">
+                Device Status
+              </p>
+              <p
+                data-testid="server-approval-state"
+                class="mt-0.5 text-xs font-medium {serverApprovalTextClass(
+                  store.connections.server,
+                )}"
+              >
+                {approvalLabel(store.connections.server)}
+              </p>
+            </div>
           {/if}
         </div>
 
@@ -502,7 +529,7 @@
           <span class="inline-flex items-center gap-1">
             <button
               data-testid="open-admin-panel-btn"
-              class={btnSecondary}
+              class="{btnSecondary} text-xs py-1"
               onclick={() => void openAdminPanel()}
               disabled={!adminUrl()}
             >
@@ -519,15 +546,22 @@
       </div>
     </section>
 
-    <h2 class="mt-6 mb-2 text-xs font-medium text-text-muted">
-      Forwarders
-      <HelpTip
-        fieldKey="forwarder_state"
-        sectionKey="connections"
-        context="receiver"
-        onOpenModal={openHelp}
-      />
-    </h2>
+    <div class="flex items-center justify-between mb-3">
+      <h2
+        class="text-sm font-semibold text-text-primary flex items-center gap-1.5"
+      >
+        Timing Forwarders
+        <HelpTip
+          fieldKey="forwarder_state"
+          sectionKey="connections"
+          context="receiver"
+          onOpenModal={openHelp}
+        />
+      </h2>
+      <span class="text-xs text-text-muted">
+        {store.connections.forwarders.length} discovered
+      </span>
+    </div>
 
     {#if store.connections.forwarders.length === 0}
       <Card>

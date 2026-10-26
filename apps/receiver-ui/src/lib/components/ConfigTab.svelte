@@ -13,6 +13,21 @@
     openHelp,
   } from "$lib/store.svelte";
   import { inputClass, btnPrimary, btnSecondary } from "$lib/ui-classes";
+  import ForwarderConfigModal from "./ForwarderConfigModal.svelte";
+  import ForwarderWifiModal from "./ForwarderWifiModal.svelte";
+
+  let selectedConfigEndpointId: string | null = null;
+  let selectedWifiEndpointId: string | null = null;
+
+  $: selectedConfigForwarder =
+    store.connections?.forwarders.find(
+      (f) => f.endpoint_id === selectedConfigEndpointId,
+    ) ?? null;
+
+  $: selectedWifiForwarder =
+    store.connections?.forwarders.find(
+      (f) => f.endpoint_id === selectedWifiEndpointId,
+    ) ?? null;
 
   function getDbfDirty(): boolean {
     return (
@@ -269,4 +284,92 @@
       </div>
     </div>
   </section>
+
+  <section class="mt-6 rounded-lg border border-border bg-surface-1 p-4">
+    <div class="flex items-center justify-between mb-3">
+      <p class="text-xs font-medium text-text-muted">
+        Timing Boxes &amp; Forwarders
+      </p>
+      <HelpTip
+        fieldKey="forwarder_state"
+        sectionKey="connections"
+        context="receiver"
+        onOpenModal={openHelp}
+      />
+    </div>
+
+    {#if store.connections?.forwarders && store.connections.forwarders.length > 0}
+      <div class="space-y-3">
+        {#each store.connections.forwarders as fwd}
+          <div
+            class="p-3 rounded-lg border border-border bg-surface-0 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+          >
+            <div>
+              <div class="flex items-center gap-2">
+                <span class="font-mono font-semibold text-xs text-text-primary">
+                  {fwd.display_name || fwd.endpoint_id}
+                </span>
+                <span
+                  class="text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded {fwd.state ===
+                  'subscribed'
+                    ? 'text-status-ok bg-status-ok-bg border border-status-ok-border'
+                    : 'text-text-muted bg-surface-2 border border-border'}"
+                >
+                  {fwd.state}
+                </span>
+              </div>
+              <div class="text-[11px] text-text-muted font-mono mt-0.5">
+                {fwd.endpoint_id} &middot; {fwd.readers?.length ?? 0} reader target(s)
+              </div>
+            </div>
+
+            <div class="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                data-testid={`forwarder-config-btn-${fwd.endpoint_id}`}
+                class={btnSecondary}
+                class:!px-2.5={true}
+                class:!py-1={true}
+                class:!text-xs={true}
+                onclick={() => (selectedConfigEndpointId = fwd.endpoint_id)}
+              >
+                Configure Box
+              </button>
+              {#if fwd.wifi_control_available}
+                <button
+                  type="button"
+                  data-testid={`forwarder-wifi-btn-${fwd.endpoint_id}`}
+                  class={btnSecondary}
+                  class:!px-2.5={true}
+                  class:!py-1={true}
+                  class:!text-xs={true}
+                  onclick={() => (selectedWifiEndpointId = fwd.endpoint_id)}
+                >
+                  Wi-Fi Settings
+                </button>
+              {/if}
+            </div>
+          </div>
+        {/each}
+      </div>
+    {:else}
+      <p class="text-xs text-text-muted italic py-1">
+        No timing boxes or forwarders currently detected.
+      </p>
+    {/if}
+  </section>
+
+  <ForwarderConfigModal
+    open={selectedConfigEndpointId !== null}
+    endpointId={selectedConfigEndpointId}
+    displayName={selectedConfigForwarder?.display_name ?? null}
+    onClose={() => (selectedConfigEndpointId = null)}
+  />
+
+  <ForwarderWifiModal
+    open={selectedWifiEndpointId !== null}
+    endpointId={selectedWifiEndpointId}
+    displayName={selectedWifiForwarder?.display_name ?? null}
+    onClose={() => (selectedWifiEndpointId = null)}
+  />
 </div>
