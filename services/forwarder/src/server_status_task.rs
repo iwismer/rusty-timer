@@ -195,7 +195,15 @@ mod tests {
     fn config_file_with_server_url(server_url: &str) -> (tempfile::TempDir, NamedTempFile) {
         let token_dir = tempfile::tempdir().expect("create temp token dir");
         let token_path = token_dir.path().join("fake-token");
-        std::fs::write(&token_path, "test-token\n").expect("write token file");
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&token_path).expect("open token file");
+        file.write_all(b"test-token\n").expect("write token file");
         let token_path = token_path.display().to_string().replace('\\', "/");
 
         let mut config_file = NamedTempFile::new().expect("create temp config");
