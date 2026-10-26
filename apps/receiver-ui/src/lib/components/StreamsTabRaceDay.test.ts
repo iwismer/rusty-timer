@@ -155,16 +155,31 @@ describe("StreamsTab Race Day Enhancements", () => {
     };
   });
 
-  it("renders reader drift chip and prominent epoch reads", () => {
+  it("renders reader drift chip and prominent epoch reads with correct color thresholds", () => {
+    // reader-100: 1ms (<250ms -> green ok)
+    // reader-101: 1420ms (>=1000ms -> red err)
     render(StreamsTab);
 
-    // Drift chip +1ms (for reader-100) and +1420ms (for reader-101)
-    expect(screen.getByText("+1ms")).toBeInTheDocument();
-    expect(screen.getByText("+1420ms")).toBeInTheDocument();
+    const chip1 = screen.getByText("+1ms");
+    expect(chip1).toBeInTheDocument();
+    expect(chip1.className).toContain("text-status-ok");
+
+    const chip2 = screen.getByText("+1420ms");
+    expect(chip2).toBeInTheDocument();
+    expect(chip2.className).toContain("text-status-err");
 
     // Prominent epoch reads: 540 and 530
     expect(screen.getByText("540")).toBeInTheDocument();
     expect(screen.getByText("530")).toBeInTheDocument();
+  });
+
+  it("styles drift chip with green ok for drift between 100ms and 249ms", () => {
+    store.connections!.forwarders[0].readers[0].reader_info!.clock!.drift_ms = 150;
+    render(StreamsTab);
+
+    const chip = screen.getByText("+150ms");
+    expect(chip).toBeInTheDocument();
+    expect(chip.className).toContain("text-status-ok");
   });
 
   it("shows Start / Finish active mode badge and cutover button when in start mode", async () => {

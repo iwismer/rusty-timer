@@ -1744,8 +1744,17 @@ export async function bulkSetRole(
   store.streamActionBusy = true;
   try {
     store.error = null;
+    const nextRoles = { ...store.streamRoles };
     for (const s of streams) {
-      setStreamRole(s, role);
+      nextRoles[streamIdentity(s)] = role;
+    }
+    store.streamRoles = nextRoles;
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.setItem("rt_stream_roles", JSON.stringify(nextRoles));
+      } catch {}
+    }
+    for (const s of streams) {
       if (s.subscribed) {
         if (
           role === "start" ||

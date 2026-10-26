@@ -969,7 +969,7 @@
                   {@const abs = Math.abs(driftMs)}
                   <span
                     class="font-mono text-xs px-1.5 py-0.5 rounded border font-medium inline-block text-center min-w-[56px] {abs <
-                    100
+                    250
                       ? 'border-status-ok-border bg-status-ok-bg text-status-ok'
                       : abs < 1000
                         ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400 font-bold'
