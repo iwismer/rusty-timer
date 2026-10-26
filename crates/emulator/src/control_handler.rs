@@ -11,6 +11,11 @@ use ipico_core::control::{
 };
 use ipico_core::read::ReadType;
 
+pub const INSTR_SET_SELECT_PATTERN: u8 = 0x30;
+pub const INSTR_SET_SELECT_MASK: u8 = 0x31;
+pub const INSTR_UNSUPPORTED_PROBE: u8 = 0xe2;
+pub const ERR_BAD_OR_UNKNOWN_INSTRUCTION: u8 = 0xf2;
+
 use chrono::{Datelike, Local, TimeZone, Timelike};
 use tracing::warn;
 
@@ -59,6 +64,13 @@ impl StorageState {
 // Emulated reader state
 // ---------------------------------------------------------------------------
 
+/// State for a pending clock update undergoing the ~500ms hardware rollover delay.
+#[derive(Debug, Clone, Copy)]
+pub struct PendingClockSet {
+    pub receipt_instant: std::time::Instant,
+    pub pre_set_local_time: chrono::DateTime<chrono::Local>,
+}
+
 /// Mutable state for a single emulated reader during a control session.
 ///
 /// Constructed from `ReaderScenarioConfig` with deterministic defaults.
@@ -79,6 +91,9 @@ pub struct EmulatedReaderState {
     tto_enabled: bool,
     recording: bool,
     clock_offset_ms: i64,
+    pending_clock_set: Option<PendingClockSet>,
+    select_pattern: [u8; 8],
+    select_mask: [u8; 8],
     stored_reads: u32,
     downloading: bool,
     storage_state: StorageState,
@@ -101,6 +116,9 @@ impl EmulatedReaderState {
             tto_enabled: false,
             recording: false,
             clock_offset_ms: 0,
+            pending_clock_set: None,
+            select_pattern: [0u8; 8],
+            select_mask: [0u8; 8],
             stored_reads: 0,
             downloading: false,
             storage_state: StorageState::Empty,
@@ -134,6 +152,9 @@ impl EmulatedReaderState {
             tto_enabled: cfg.initial_tto_enabled.unwrap_or(false),
             recording: cfg.initial_recording.unwrap_or(false),
             clock_offset_ms: cfg.clock_offset_ms.unwrap_or(0),
+            pending_clock_set: None,
+            select_pattern: [0u8; 8],
+            select_mask: [0u8; 8],
             stored_reads,
             downloading: false,
             storage_state: if stored_reads > 0 {
@@ -251,6 +272,22 @@ impl EmulatedReaderState {
 
     pub fn set_clock_offset_ms(&mut self, offset: i64) {
         self.clock_offset_ms = offset;
+    }
+
+    pub fn select_pattern(&self) -> &[u8; 8] {
+        &self.select_pattern
+    }
+
+    pub fn select_mask(&self) -> &[u8; 8] {
+        &self.select_mask
+    }
+
+    pub fn set_select_pattern(&mut self, pattern: [u8; 8]) {
+        self.select_pattern = pattern;
+    }
+
+    pub fn set_select_mask(&mut self, mask: [u8; 8]) {
+        self.select_mask = mask;
     }
 
     pub fn set_download_progress(&mut self, progress: u32) {
@@ -460,10 +497,29 @@ pub fn handle_control_frame(state: &mut EmulatedReaderState, frame: &str) -> Vec
         INSTR_CONFIG3 => handle_set_config3(state, reader_id, &data),
         INSTR_TAG_MESSAGE_FORMAT if is_query => handle_get_tag_message_format(state, reader_id),
         INSTR_TAG_MESSAGE_FORMAT => handle_set_tag_message_format(state, reader_id, &data),
+        INSTR_SET_SELECT_PATTERN => handle_pattern_query_or_write(
+            &mut state.select_pattern,
+            is_query,
+            reader_id,
+            INSTR_SET_SELECT_PATTERN,
+            &data,
+        ),
+        INSTR_SET_SELECT_MASK => handle_pattern_query_or_write(
+            &mut state.select_mask,
+            is_query,
+            reader_id,
+            INSTR_SET_SELECT_MASK,
+            &data,
+        ),
         INSTR_PRINT_BANNER => handle_print_banner(state, reader_id),
         INSTR_EXT_STATUS if is_query => handle_get_extended_status(state, reader_id),
         INSTR_EXT_STATUS => handle_ext_status_write(state, reader_id, &data),
         INSTR_UNKNOWN_E0 => vec![build_response_frame(reader_id, INSTR_UNKNOWN_E0, &[])],
+        INSTR_UNSUPPORTED_PROBE => vec![build_response_frame(
+            reader_id,
+            ERR_BAD_OR_UNKNOWN_INSTRUCTION,
+            &[],
+        )],
         _ => {
             eprintln!(
                 "[emulator] ignoring unknown instruction: 0x{:02x}",
@@ -479,7 +535,26 @@ pub fn handle_control_frame(state: &mut EmulatedReaderState, frame: &str) -> Vec
 // ---------------------------------------------------------------------------
 
 fn handle_get_date_time(state: &EmulatedReaderState, reader_id: u8) -> Vec<String> {
-    let now = Local::now() + chrono::Duration::milliseconds(state.clock_offset_ms);
+    let (now, centisecond) = match state.pending_clock_set {
+        Some(pending)
+            if pending.receipt_instant.elapsed() < std::time::Duration::from_millis(500) =>
+        {
+            let elapsed_ms = pending.receipt_instant.elapsed().as_millis() as i64;
+            // During the ~500ms window before rollover, the reader shows the pre-SET second
+            // with centiseconds counting up from ~52 (0x34).
+            let cs = (52 + elapsed_ms / 10).min(99) as u8;
+            (
+                pending.pre_set_local_time + chrono::Duration::milliseconds(elapsed_ms),
+                cs,
+            )
+        }
+        _ => {
+            let now = Local::now() + chrono::Duration::milliseconds(state.clock_offset_ms);
+            let cs = (now.nanosecond() / 10_000_000) as u8;
+            (now, cs)
+        }
+    };
+
     let year = (now.year() % 100) as u8;
     let month = now.month() as u8;
     let day = now.day() as u8;
@@ -492,7 +567,6 @@ fn handle_get_date_time(state: &EmulatedReaderState, reader_id: u8) -> Vec<Strin
     let hour = now.hour() as u8;
     let minute = now.minute() as u8;
     let second = now.second() as u8;
-    let centisecond = (now.nanosecond() / 10_000_000) as u8;
 
     let data = [
         to_bcd(year).expect("year % 100 is always in BCD range"),
@@ -512,7 +586,7 @@ fn handle_get_statistics(state: &EmulatedReaderState, reader_id: u8) -> Vec<Stri
     let data = [
         state.fw_version,
         0x00,
-        0x00,
+        0x27, // CONFIG1: 0x27 observed on all captures
         0x00,
         0x01,
         0x00,
@@ -524,6 +598,7 @@ fn handle_get_statistics(state: &EmulatedReaderState, reader_id: u8) -> Vec<Stri
         state.read_mode.config3_value(),
         state.hw_code,
         0x00,
+        0x01, // Extra 15th byte observed on 2013 ARM9 firmware in all captures
     ];
     vec![build_response_frame(reader_id, INSTR_GET_STATISTICS, &data)]
 }
@@ -539,6 +614,12 @@ fn build_extended_status_data(state: &EmulatedReaderState) -> [u8; 13] {
     let stored_extent = state.stored_reads.saturating_mul(32);
     let dl_progress = state.download_progress.saturating_mul(32);
     let hw_be = state.hw_identifier.to_be_bytes();
+    // In captures, byte 12 is 0x14 when stored reads are present pre-download, 0x00 when empty/post-download.
+    let flags_byte = if state.storage_state == StorageState::HasData && !state.downloading {
+        0x14
+    } else {
+        0x00
+    };
     [
         recording_state,
         ((stored_extent >> 16) & 0xff) as u8,
@@ -552,7 +633,7 @@ fn build_extended_status_data(state: &EmulatedReaderState) -> [u8; 13] {
         hw_be[1],
         0x8f,
         state.storage_state.wire_byte(),
-        0x00,
+        flags_byte,
     ]
 }
 
@@ -567,8 +648,9 @@ fn handle_get_config3(state: &EmulatedReaderState, reader_id: u8) -> Vec<String>
 }
 
 fn handle_get_tag_message_format(state: &EmulatedReaderState, reader_id: u8) -> Vec<String> {
-    let field_mask = if state.tto_enabled { 0x80 } else { 0x00 };
-    let data = [field_mask, 0x3f, 0x00, 0x00, 0xaa, 0x00, 0x0d, 0x0a];
+    // Real readers return standard ASCII format: 7f fc 61 61 aa 00 0d 0a (or ff fc... with TTO)
+    let field_mask = if state.tto_enabled { 0xff } else { 0x7f };
+    let data = [field_mask, 0xfc, 0x61, 0x61, 0xaa, 0x00, 0x0d, 0x0a];
     vec![build_response_frame(
         reader_id,
         INSTR_TAG_MESSAGE_FORMAT,
@@ -671,8 +753,18 @@ fn handle_set_date_time(
         .single()
     {
         Some(target) => {
-            let now = Local::now();
-            let diff = target - now;
+            let now_local = Local::now();
+            let pre_set_local_time =
+                now_local + chrono::Duration::milliseconds(state.clock_offset_ms);
+            // Real IPICO hardware resets centiseconds to ~52 (0x34) upon receiving SET_DATE_TIME,
+            // and the target second takes effect ~480-500ms later at cs rollover (99 -> 0).
+            // Thus at receipt + 500ms, the reader clock reaches target.000.
+            // The post-rollover clock offset is therefore (target - now_local) - 500ms.
+            let diff = target - now_local - chrono::Duration::milliseconds(500);
+            state.pending_clock_set = Some(PendingClockSet {
+                receipt_instant: std::time::Instant::now(),
+                pre_set_local_time,
+            });
             state.set_clock_offset_ms(diff.num_milliseconds());
         }
         None => {
@@ -692,16 +784,39 @@ fn handle_set_config3(state: &mut EmulatedReaderState, reader_id: u8, data: &[u8
         );
         return vec![];
     }
-    if let Some(mode) = ReadMode::from_config3(data[0]) {
+    let mode_byte = if data.len() >= 3 {
+        let mask = data[2];
+        (state.read_mode.config3_value() & !mask) | (data[0] & mask)
+    } else {
+        data[0]
+    };
+    if let Some(mode) = ReadMode::from_config3(mode_byte) {
         state.set_read_mode(mode);
     } else {
         eprintln!(
             "[emulator] SetConfig3: unrecognized read mode byte 0x{:02x}, keeping current mode",
-            data[0]
+            mode_byte
         );
     }
     state.set_config3_timeout(data[1]);
     vec![build_response_frame(reader_id, INSTR_CONFIG3, &[])]
+}
+
+fn handle_pattern_query_or_write(
+    pattern: &mut [u8; 8],
+    is_query: bool,
+    reader_id: u8,
+    instruction: u8,
+    data: &[u8],
+) -> Vec<String> {
+    if is_query {
+        vec![build_response_frame(reader_id, instruction, pattern)]
+    } else {
+        if data.len() >= 8 {
+            pattern.copy_from_slice(&data[..8]);
+        }
+        vec![build_response_frame(reader_id, instruction, &[])]
+    }
 }
 
 fn handle_set_tag_message_format(
@@ -770,8 +885,9 @@ fn handle_ext_status_write(
             vec![build_response_frame(reader_id, INSTR_EXT_STATUS, &[])]
         }
         0xd0 => {
-            // TriggerErase
+            // TriggerErase: reset stored reads and reset recording state to 0
             state.reset_storage();
+            state.set_recording(false);
             vec![build_response_frame(reader_id, INSTR_EXT_STATUS, &[])]
         }
         _ => {
@@ -1319,5 +1435,148 @@ mod tests {
             original_mode,
             "state should not be mutated"
         );
+    }
+
+    #[test]
+    fn handle_set_datetime_delays_rollover_and_resets_centiseconds() {
+        let mut state = make_test_state();
+        // Set clock ahead by 2 hours
+        let target = Local::now() + chrono::Duration::hours(2);
+        let year = (target.year() % 100) as u8;
+        let month = target.month() as u8;
+        let day = target.day() as u8;
+        let dow = 1u8;
+        let hour = target.hour() as u8;
+        let minute = target.minute() as u8;
+        let second = target.second() as u8;
+
+        let frame = cmd_to_frame(&Command::SetDateTime {
+            year,
+            month,
+            day,
+            day_of_week: dow,
+            hour,
+            minute,
+            second,
+        });
+        let responses = handle_control_frame(&mut state, &frame);
+        assert_eq!(responses.len(), 1);
+
+        // Immediately after SET_DATE_TIME (< 500ms):
+        // Centiseconds should be reset to ~52 (52..60), and the second should still be the pre-SET second.
+        let get_frame = cmd_to_frame(&Command::GetDateTime);
+        let get_responses = handle_control_frame(&mut state, &get_frame);
+        assert_eq!(get_responses.len(), 1);
+        let parsed = parse_response(get_responses[0].trim_end().as_bytes()).unwrap();
+        let dt = decode_date_time(&parsed).unwrap();
+        // Centiseconds counter should be near 52
+        assert!(
+            dt.centisecond >= 52 && dt.centisecond <= 65,
+            "expected centisecond ~52, got {}",
+            dt.centisecond
+        );
+        // Second should be pre-SET second (now.second(), not target.second() which is 2h ahead)
+        assert_ne!(dt.hour, target.hour() as u8);
+    }
+
+    #[test]
+    fn handle_unsupported_probe_e2_returns_f2() {
+        let mut state = make_test_state();
+        let frame = build_response_frame(0x00, INSTR_UNSUPPORTED_PROBE, &[0x06]);
+        let responses = handle_control_frame(&mut state, frame.trim_end());
+        assert_eq!(responses.len(), 1);
+        let err = parse_response(responses[0].trim_end().as_bytes()).unwrap_err();
+        match err {
+            ipico_core::control::ControlError::ReaderError(code) => {
+                assert_eq!(code, ERR_BAD_OR_UNKNOWN_INSTRUCTION);
+            }
+            other => panic!("expected ReaderError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_select_pattern_and_mask_write_and_query() {
+        let mut state = make_test_state();
+        let pattern_data = [0x05, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let mask_data = [0xbd, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+        // 1. Write select pattern
+        let frame_pat = build_response_frame(0x00, INSTR_SET_SELECT_PATTERN, &pattern_data);
+        let resp_pat = handle_control_frame(&mut state, frame_pat.trim_end());
+        assert_eq!(resp_pat.len(), 1);
+        let ack_pat = parse_response(resp_pat[0].trim_end().as_bytes()).unwrap();
+        assert_eq!(ack_pat.instruction(), INSTR_SET_SELECT_PATTERN);
+        assert!(ack_pat.data().is_empty());
+        assert_eq!(state.select_pattern(), &pattern_data);
+
+        // 2. Query select pattern
+        let query_pat_body = format!("00ff{:02x}", INSTR_SET_SELECT_PATTERN);
+        let query_pat_frame = format!("ab{}{:02x}", query_pat_body, lrc(query_pat_body.as_bytes()));
+        let query_pat_resp = handle_control_frame(&mut state, &query_pat_frame);
+        assert_eq!(query_pat_resp.len(), 1);
+        let parsed_pat = parse_response(query_pat_resp[0].trim_end().as_bytes()).unwrap();
+        assert_eq!(parsed_pat.instruction(), INSTR_SET_SELECT_PATTERN);
+        assert_eq!(parsed_pat.data(), &pattern_data);
+
+        // 3. Write select mask
+        let frame_mask = build_response_frame(0x00, INSTR_SET_SELECT_MASK, &mask_data);
+        let resp_mask = handle_control_frame(&mut state, frame_mask.trim_end());
+        assert_eq!(resp_mask.len(), 1);
+        let ack_mask = parse_response(resp_mask[0].trim_end().as_bytes()).unwrap();
+        assert_eq!(ack_mask.instruction(), INSTR_SET_SELECT_MASK);
+        assert!(ack_mask.data().is_empty());
+        assert_eq!(state.select_mask(), &mask_data);
+
+        // 4. Query select mask
+        let query_mask_body = format!("00ff{:02x}", INSTR_SET_SELECT_MASK);
+        let query_mask_frame = format!(
+            "ab{}{:02x}",
+            query_mask_body,
+            lrc(query_mask_body.as_bytes())
+        );
+        let query_mask_resp = handle_control_frame(&mut state, &query_mask_frame);
+        assert_eq!(query_mask_resp.len(), 1);
+        let parsed_mask = parse_response(query_mask_resp[0].trim_end().as_bytes()).unwrap();
+        assert_eq!(parsed_mask.instruction(), INSTR_SET_SELECT_MASK);
+        assert_eq!(parsed_mask.data(), &mask_data);
+    }
+
+    #[test]
+    fn handle_set_config3_with_mask() {
+        let mut state = make_test_state();
+        state.set_read_mode(ReadMode::Raw); // mode 0x00
+        // Set mode 0x03 with mask 0x07 (only lowest 3 bits affected)
+        let frame = build_response_frame(0x00, INSTR_CONFIG3, &[0x03, 0x05, 0x07]);
+        let resp = handle_control_frame(&mut state, frame.trim_end());
+        assert_eq!(resp.len(), 1);
+        assert_eq!(state.read_mode(), ReadMode::Event);
+        assert_eq!(state.config3_timeout(), 5);
+    }
+
+    #[test]
+    fn handle_get_statistics_returns_15_bytes_with_config1() {
+        let mut state = make_test_state();
+        let frame = cmd_to_frame(&Command::GetStatistics);
+        let responses = handle_control_frame(&mut state, &frame);
+        assert_eq!(responses.len(), 1);
+        let parsed = parse_response(responses[0].trim_end().as_bytes()).unwrap();
+        assert_eq!(parsed.data().len(), 15);
+        assert_eq!(parsed.data()[2], 0x27); // CONFIG1
+        assert_eq!(parsed.data()[14], 0x01); // 15th byte
+    }
+
+    #[test]
+    fn trigger_erase_resets_recording_state() {
+        let mut state = make_test_state();
+        state.set_recording(true);
+        state.set_stored_reads(50);
+        let frame = cmd_to_frame(&Command::TriggerErase);
+        let responses = handle_control_frame(&mut state, &frame);
+        assert_eq!(responses.len(), 1);
+        assert!(
+            !state.recording(),
+            "recording should be reset to false after erase"
+        );
+        assert_eq!(state.stored_reads(), 0);
     }
 }
