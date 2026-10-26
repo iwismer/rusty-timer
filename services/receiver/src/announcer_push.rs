@@ -359,9 +359,20 @@ pub async fn reset_announcer_feed(
         .await
         .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
     if !response.status().is_success() {
+        let status = response.status();
+        let body_text = response.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(AnnouncerPushError::Transport(
+                "server /announcer/reset returned 401 Unauthorized (receiver device token may need server approval)".to_owned(),
+            ));
+        }
+        let detail = if body_text.trim().is_empty() {
+            String::new()
+        } else {
+            format!(": {}", body_text.trim())
+        };
         return Err(AnnouncerPushError::Transport(format!(
-            "server /announcer/reset returned {}",
-            response.status()
+            "server /announcer/reset returned {status}{detail}"
         )));
     }
     let value: ResetAnnouncerResponse = response

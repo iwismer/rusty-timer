@@ -510,7 +510,7 @@ describe("StreamsTab", () => {
       ),
     ).not.toBeInTheDocument();
 
-    // Expanding Beta swaps the expanded slot rather than sharing one.
+    // Expanding Beta allows multiple streams to remain uncollapsed simultaneously.
     await fireEvent.click(betaRow);
     expect(
       screen.getByTestId(
@@ -518,10 +518,23 @@ describe("StreamsTab", () => {
       ),
     ).toBeInTheDocument();
     expect(
+      screen.getByTestId(
+        "subscribe-toggle-endpoint-1/11111111-1111-1111-1111-111111111111",
+      ),
+    ).toBeInTheDocument();
+
+    // Clicking Alpha again collapses Alpha while leaving Beta expanded.
+    await fireEvent.click(alphaRow);
+    expect(
       screen.queryByTestId(
         "subscribe-toggle-endpoint-1/11111111-1111-1111-1111-111111111111",
       ),
     ).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId(
+        "subscribe-toggle-endpoint-2/22222222-2222-2222-2222-222222222222",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("shows a DBF event type selector when DBF output is enabled", async () => {

@@ -1,11 +1,6 @@
 <script lang="ts">
-  import { untrack } from "svelte";
-  import {
-    AlertBanner,
-    BatteryIndicator,
-    ConfirmDialog,
-    HelpTip,
-  } from "@rusty-timer/shared-ui";
+  import { onMount, untrack } from "svelte";
+  import { AlertBanner, ConfirmDialog, HelpTip } from "@rusty-timer/shared-ui";
   import { resizeWidth } from "$lib/actions/resizeWidth";
   import {
     store,
@@ -23,7 +18,19 @@
     clearStreamLocalMetrics,
     clearAllStreamsLocalMetrics,
     openHelp,
+    getStreamRole,
+    setStreamRole,
+    getStreamDriftMs,
+    getOrderedStreams,
+    moveStreamOrder,
+    cutoverStartFinishReaders,
+    bulkSyncClocks,
+    bulkAdvanceEpoch,
+    bulkSetRole,
+    loadConnections,
+    type StreamRole,
   } from "$lib/store.svelte";
+  import * as api from "$lib/api";
   import {
     type StreamEntry,
     resetStreamData,
@@ -31,6 +38,8 @@
     clearStreamBoth,
   } from "$lib/api";
   import ExportTagdataModal from "$lib/components/ExportTagdataModal.svelte";
+  import ForwarderConfigModal from "./ForwarderConfigModal.svelte";
+  import ForwarderWifiModal from "./ForwarderWifiModal.svelte";
   import { btnPrimary, btnSecondary } from "$lib/ui-classes";
   import {
     deriveStreamDisplayStatus,
@@ -40,27 +49,46 @@
   } from "$lib/stream-status";
 
   let tableWidth = $state(0);
-  let expandedKey = $state<string | null>(null);
+  let expandedKeys = $state<Set<string>>(new Set());
+  let selectedKeys = $state<Set<string>>(new Set());
   let exportModalOpen = $state(false);
   let exportInitialStreamId = $state<string | null>(null);
+  let selectedConfigEndpointId = $state<string | null>(null);
+  let selectedWifiEndpointId = $state<string | null>(null);
+
+  let selectedConfigForwarder = $derived(
+    store.connections?.forwarders.find(
+      (f) => f.endpoint_id === selectedConfigEndpointId,
+    ) ?? null,
+  );
+
+  let selectedWifiForwarder = $derived(
+    store.connections?.forwarders.find(
+      (f) => f.endpoint_id === selectedWifiEndpointId,
+    ) ?? null,
+  );
 
   // Fixed column widths (approx)
-  const READS_COL = 70;
-  const PORT_COL = 60;
-  const STREAM_COL_MIN = 120;
+  const READS_COL = 95;
+  const DRIFT_COL = 85;
+  const CHEVRON_COL = 32;
+  const STREAM_COL_MIN = 180;
   const PADDING = 48;
 
   // Last Read field thresholds
   const TIME_W = 70;
   const BIB_W = 40;
   const NAME_W = 80;
-  const CHIP_TRUNC_W = 55;
-  const CHIP_FULL_W = 100;
 
   function availableLastReadWidth(): number {
     return Math.max(
       0,
-      tableWidth - STREAM_COL_MIN - READS_COL - PORT_COL - PADDING,
+      tableWidth -
+        STREAM_COL_MIN -
+        READS_COL -
+        DRIFT_COL -
+        CHEVRON_COL -
+        PADDING,
     );
   }
 
@@ -68,9 +96,75 @@
     return availableLastReadWidth() >= TIME_W;
   }
 
+  onMount(() => {
+    if (!store.connections) {
+      void loadConnections();
+    }
+  });
+
+  let orderedStreams = $derived(
+    store.streams ? getOrderedStreams(store.streams.streams) : [],
+  );
+
+  let cutoverCandidates = $derived(
+    store.streams
+      ? store.streams.streams.filter(
+          (s) =>
+            s.subscribed &&
+            getStreamRole(s) === "start_finish" &&
+            s.event_type === "start",
+        )
+      : [],
+  );
+
+  let selectedStreams = $derived(
+    orderedStreams.filter((s) => selectedKeys.has(streamIdentity(s))),
+  );
+
+  let allSelected = $derived(
+    orderedStreams.length > 0 && selectedKeys.size === orderedStreams.length,
+  );
+
   function toggleExpand(stream: StreamEntry) {
     const key = streamIdentity(stream);
-    expandedKey = expandedKey === key ? null : key;
+    const next = new Set(expandedKeys);
+    if (next.has(key)) {
+      next.delete(key);
+    } else {
+      next.add(key);
+    }
+    expandedKeys = next;
+  }
+
+  function expandAll(expanded: boolean) {
+    if (expanded && store.streams) {
+      expandedKeys = new Set(store.streams.streams.map(streamIdentity));
+    } else {
+      expandedKeys = new Set();
+    }
+  }
+
+  function toggleSelect(stream: StreamEntry, checked: boolean) {
+    const key = streamIdentity(stream);
+    const next = new Set(selectedKeys);
+    if (checked) {
+      next.add(key);
+    } else {
+      next.delete(key);
+    }
+    selectedKeys = next;
+  }
+
+  function toggleSelectAll(checked: boolean) {
+    if (checked) {
+      selectedKeys = new Set(orderedStreams.map(streamIdentity));
+    } else {
+      selectedKeys = new Set();
+    }
+  }
+
+  function handleMoveStream(stream: StreamEntry, direction: -1 | 1) {
+    moveStreamOrder(streamIdentity(stream), direction, orderedStreams);
   }
 
   function formatLastReadTimestamp(timestamp: string): string {
@@ -103,28 +197,23 @@
   let timeSinceLastRead = $state<Record<string, string>>({});
 
   $effect(() => {
-    if (!expandedKey) return;
-
-    const key = expandedKey;
-    // streamMetrics is keyed by the same canonical stream identity as
-    // expandedKey and timeSinceLastRead.
-    const metrics = store.streamMetrics.get(key);
-
-    if (!metrics?.epoch_last_received_at) {
-      timeSinceLastRead = {
-        ...untrack(() => timeSinceLastRead),
-        [key]: "N/A (no events in epoch)",
-      };
-      return;
-    }
+    if (expandedKeys.size === 0) return;
 
     const update = () => {
       const now = Date.now();
-      const lastAt = new Date(metrics.epoch_last_received_at!).getTime();
-      timeSinceLastRead = {
+      const next: Record<string, string> = {
         ...untrack(() => timeSinceLastRead),
-        [key]: formatDuration(now - lastAt),
       };
+      for (const key of expandedKeys) {
+        const metrics = store.streamMetrics.get(key);
+        if (!metrics?.epoch_last_received_at) {
+          next[key] = "N/A (no events in epoch)";
+        } else {
+          const lastAt = new Date(metrics.epoch_last_received_at).getTime();
+          next[key] = formatDuration(now - lastAt);
+        }
+      }
+      timeSinceLastRead = next;
     };
 
     update();
@@ -156,6 +245,23 @@
   let confirmingClearBothStream = $state<StreamEntry | null>(null);
   let clearingBothStreamKey = $state<string | null>(null);
   let actionError = $state<string | null>(null);
+
+  // Single reader inline action states
+  let epochInputs = $state<Record<string, string>>({});
+  let advancingEpochKey = $state<string | null>(null);
+  let syncingClockKey = $state<string | null>(null);
+
+  // Cutover action state
+  let confirmCutoverOpen = $state(false);
+  let cutoverEpochInput = $derived(store.cutoverEpochName || "Finish Reads");
+  let cutoverBusy = $state(false);
+
+  // Bulk action states
+  let confirmBulkEpochOpen = $state(false);
+  let bulkEpochInput = $state("");
+  let bulkEpochBusy = $state(false);
+  let bulkSyncBusy = $state(false);
+  let bulkRoleBusy = $state(false);
 
   async function handleReplayAll() {
     confirmReplayAllOpen = false;
@@ -205,6 +311,135 @@
     } finally {
       clearingBothStreamKey = null;
     }
+  }
+
+  async function handleSyncSingleClock(stream: StreamEntry) {
+    const key = streamIdentity(stream);
+    syncingClockKey = key;
+    actionError = null;
+    try {
+      await api.readerSyncClock(stream.forwarder_endpoint_id, stream.stream_id);
+      await loadConnections();
+    } catch (e) {
+      actionError = `Failed to sync clock for ${streamPrimaryLabel(stream)}: ${String(e)}`;
+    } finally {
+      syncingClockKey = null;
+    }
+  }
+
+  async function handleAdvanceSingleEpoch(stream: StreamEntry) {
+    const key = streamIdentity(stream);
+    advancingEpochKey = key;
+    actionError = null;
+    const epochName = epochInputs[key]?.trim() || null;
+    try {
+      await api.readerAdvanceEpoch(
+        stream.forwarder_endpoint_id,
+        stream.stream_id,
+        epochName,
+      );
+      clearStreamLocalMetrics(key);
+      await refreshStreamsAndEpochOptions();
+      await loadConnections();
+    } catch (e) {
+      actionError = `Failed to advance epoch for ${streamPrimaryLabel(stream)}: ${String(e)}`;
+    } finally {
+      advancingEpochKey = null;
+    }
+  }
+
+  async function handleRoleChange(stream: StreamEntry, role: StreamRole) {
+    actionError = null;
+    setStreamRole(stream, role);
+    if (!stream.subscribed) return;
+
+    try {
+      if (
+        role === "start" ||
+        (role === "start_finish" && stream.event_type !== "finish")
+      ) {
+        await updateStreamEventType(stream, "start");
+      } else if (role === "finish") {
+        await updateStreamEventType(stream, "finish");
+      } else if (role === "announcer") {
+        await updateStreamEventType(stream, "exclude");
+        await setStreamAnnouncerPublish(stream, true);
+      }
+    } catch (e) {
+      actionError = `Failed to update role for ${streamPrimaryLabel(stream)}: ${String(e)}`;
+    }
+  }
+
+  async function handleCutoverConfirm() {
+    confirmCutoverOpen = false;
+    cutoverBusy = true;
+    actionError = null;
+    try {
+      await cutoverStartFinishReaders(cutoverEpochInput);
+    } catch (e) {
+      actionError = `Cutover failed: ${String(e)}`;
+    } finally {
+      cutoverBusy = false;
+    }
+  }
+
+  async function handleBulkSyncClocks() {
+    if (selectedStreams.length === 0) return;
+    bulkSyncBusy = true;
+    actionError = null;
+    try {
+      await bulkSyncClocks(selectedStreams);
+    } catch (e) {
+      actionError = `Bulk sync clocks failed: ${String(e)}`;
+    } finally {
+      bulkSyncBusy = false;
+    }
+  }
+
+  async function handleBulkAdvanceEpoch() {
+    confirmBulkEpochOpen = false;
+    bulkEpochBusy = true;
+    actionError = null;
+    try {
+      await bulkAdvanceEpoch(selectedStreams, bulkEpochInput);
+    } catch (e) {
+      actionError = `Bulk advance epoch failed: ${String(e)}`;
+    } finally {
+      bulkEpochBusy = false;
+    }
+  }
+
+  async function handleBulkSetRole(role: StreamRole) {
+    if (selectedStreams.length === 0) return;
+    bulkRoleBusy = true;
+    actionError = null;
+    try {
+      await bulkSetRole(selectedStreams, role);
+    } catch (e) {
+      actionError = `Bulk set role failed: ${String(e)}`;
+    } finally {
+      bulkRoleBusy = false;
+    }
+  }
+
+  function batteryDisplay(stream: StreamEntry): string {
+    if (stream.forwarder_id && store.upsState.get(stream.forwarder_id)) {
+      const ups = store.upsState.get(stream.forwarder_id);
+      const pct = ups?.status?.battery_percent;
+      const charging = ups?.status?.charging;
+      if (pct != null) {
+        return `${pct}% ${charging ? "(charging ⚡)" : "(on battery)"}`;
+      }
+    }
+    if (store.connections) {
+      const forwarder = store.connections.forwarders.find(
+        (f) => f.endpoint_id === stream.forwarder_endpoint_id,
+      );
+      if (forwarder?.ups?.battery_percent != null) {
+        return `${forwarder.ups.battery_percent}% ${!forwarder.ups.on_battery ? "(charging ⚡)" : "(on battery)"}`;
+      }
+    }
+    return "\u2014";
   }
 
   function formatOptional(value: string | null | undefined): string {
@@ -277,53 +512,199 @@
   {/if}
 
   {#if store.streams?.streams && store.streams.streams.length > 0}
+    <!-- Action Toolbar (Multi-select, Bulk Actions, Cutover Button, Collapse/Expand) -->
     <div
-      class="flex justify-end gap-2 px-4 py-2 border-b border-border items-center"
+      class="flex flex-wrap items-center justify-between gap-3 px-4 py-2 border-b border-border bg-surface-0 shrink-0 text-sm"
     >
-      <button
-        data-testid="export-tagdata-btn"
-        class={btnSecondary}
-        onclick={() => {
-          exportInitialStreamId = null;
-          exportModalOpen = true;
-        }}
-      >
-        Export TAGDATA
-      </button>
-      {#if store.streams.streams.some((stream) => !stream.subscribed)}
-        <button
-          data-testid="subscribe-all-btn"
-          class={btnPrimary}
-          onclick={() => void subscribeAllAvailable()}
-          disabled={store.streamActionBusy}
+      <!-- Left: Multi-select & Bulk Controls -->
+      <div class="flex items-center gap-3">
+        <label
+          class="flex items-center gap-2 cursor-pointer font-medium text-xs text-text-secondary select-none"
         >
-          Subscribe All
-        </button>
-        <HelpTip
-          fieldKey="subscribe_all"
-          sectionKey="streams"
-          context="receiver"
-          onOpenModal={openHelp}
-        />
-      {/if}
-      {#if store.streams.streams.some((stream) => stream.subscribed)}
+          <input
+            type="checkbox"
+            checked={allSelected}
+            onchange={(e) => toggleSelectAll(e.currentTarget.checked)}
+            class="rounded accent-accent cursor-pointer"
+            aria-label="Select all streams"
+          />
+          <span>Select All ({selectedKeys.size}/{orderedStreams.length})</span>
+        </label>
+
+        <div class="h-4 w-px bg-border"></div>
+
+        <!-- Bulk Actions Group -->
+        <div
+          class="flex items-center gap-1.5 transition-opacity text-xs {selectedKeys.size >
+          0
+            ? ''
+            : 'opacity-50 pointer-events-none'}"
+        >
+          <button
+            type="button"
+            class={btnSecondary}
+            class:!px-2.5={true}
+            class:!py-1={true}
+            class:!text-xs={true}
+            disabled={selectedKeys.size === 0 || bulkSyncBusy}
+            onclick={handleBulkSyncClocks}
+          >
+            {bulkSyncBusy ? "Syncing…" : "Sync Clocks"}
+          </button>
+          <button
+            type="button"
+            class={btnSecondary}
+            class:!px-2.5={true}
+            class:!py-1={true}
+            class:!text-xs={true}
+            disabled={selectedKeys.size === 0}
+            onclick={() => {
+              bulkEpochInput = "";
+              confirmBulkEpochOpen = true;
+            }}
+          >
+            Advance Epoch…
+          </button>
+          <button
+            type="button"
+            class={btnSecondary}
+            class:!px-2.5={true}
+            class:!py-1={true}
+            class:!text-xs={true}
+            disabled={selectedKeys.size === 0}
+            onclick={() => {
+              exportInitialStreamId = null;
+              exportModalOpen = true;
+            }}
+          >
+            Export TAGDATA
+          </button>
+          <select
+            class="px-2 py-1 text-xs rounded font-medium bg-surface-2 border border-border text-text-primary cursor-pointer disabled:opacity-50"
+            disabled={selectedKeys.size === 0 || bulkRoleBusy}
+            onchange={(e) => {
+              const val = e.currentTarget.value as StreamRole;
+              if (val) void handleBulkSetRole(val);
+              e.currentTarget.value = "";
+            }}
+          >
+            <option value="" disabled selected>Set Role…</option>
+            <option value="start">Set: Start</option>
+            <option value="finish">Set: Finish</option>
+            <option value="start_finish">Set: Start / Finish</option>
+            <option value="announcer">Set: Announcer</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Right: Cutover Button, Export, Collapse/Expand -->
+      <div class="flex items-center gap-2">
+        {#if cutoverCandidates.length > 0}
+          <button
+            data-testid="advance-starts-to-finish-btn"
+            type="button"
+            class="flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-md bg-amber-600 hover:bg-amber-700 text-white cursor-pointer shadow-sm disabled:opacity-50"
+            disabled={store.streamActionBusy || cutoverBusy}
+            onclick={() => {
+              confirmCutoverOpen = true;
+            }}
+          >
+            <svg
+              class="w-3.5 h-3.5 text-amber-200"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <polygon points="13 19 22 12 13 5 13 19"></polygon>
+              <polygon points="2 19 11 12 2 5 2 19"></polygon>
+            </svg>
+            <span>Advance Starts to Finish</span>
+            <span
+              class="bg-amber-800/60 text-white px-1 py-0.2 rounded text-[10px] font-mono"
+            >
+              {cutoverCandidates.length}
+            </span>
+          </button>
+        {/if}
+
         <button
-          data-testid="replay-all-btn"
+          data-testid="export-tagdata-btn"
           class={btnSecondary}
+          class:!px-2.5={true}
+          class:!py-1={true}
+          class:!text-xs={true}
           onclick={() => {
-            confirmReplayAllOpen = true;
+            exportInitialStreamId = null;
+            exportModalOpen = true;
           }}
-          disabled={store.streamActionBusy || replayAllBusy}
         >
-          {replayAllBusy ? "Replaying..." : "Replay All Reads"}
+          Export TAGDATA
         </button>
-        <HelpTip
-          fieldKey="replay_all_reads"
-          sectionKey="streams"
-          context="receiver"
-          onOpenModal={openHelp}
-        />
-      {/if}
+
+        {#if store.streams.streams.some((stream) => !stream.subscribed)}
+          <button
+            data-testid="subscribe-all-btn"
+            class={btnPrimary}
+            class:!px-2.5={true}
+            class:!py-1={true}
+            class:!text-xs={true}
+            onclick={() => void subscribeAllAvailable()}
+            disabled={store.streamActionBusy}
+          >
+            Subscribe All
+          </button>
+          <HelpTip
+            fieldKey="subscribe_all"
+            sectionKey="streams"
+            context="receiver"
+            onOpenModal={openHelp}
+          />
+        {/if}
+
+        {#if store.streams.streams.some((stream) => stream.subscribed)}
+          <button
+            data-testid="replay-all-btn"
+            class={btnSecondary}
+            class:!px-2.5={true}
+            class:!py-1={true}
+            class:!text-xs={true}
+            onclick={() => {
+              confirmReplayAllOpen = true;
+            }}
+            disabled={store.streamActionBusy || replayAllBusy}
+          >
+            {replayAllBusy ? "Replaying..." : "Replay All Reads"}
+          </button>
+          <HelpTip
+            fieldKey="replay_all_reads"
+            sectionKey="streams"
+            context="receiver"
+            onOpenModal={openHelp}
+          />
+        {/if}
+
+        <div class="h-4 w-px bg-border mx-1"></div>
+
+        <button
+          type="button"
+          onclick={() => expandAll(true)}
+          class="text-xs text-text-muted hover:text-text-primary cursor-pointer"
+        >
+          Expand All
+        </button>
+        <span class="text-text-muted text-xs">&middot;</span>
+        <button
+          type="button"
+          onclick={() => expandAll(false)}
+          class="text-xs text-text-muted hover:text-text-primary cursor-pointer"
+        >
+          Collapse All
+        </button>
+      </div>
     </div>
   {/if}
 
@@ -333,10 +714,10 @@
     </p>
   {:else}
     <div class="flex-1 overflow-y-auto">
-      <table class="w-full text-sm">
+      <table class="w-full text-sm border-collapse">
         <thead>
           <tr
-            class="sticky top-0 z-10 bg-surface-0 border-b border-border text-left text-text-muted"
+            class="sticky top-0 z-10 bg-surface-0 border-b border-border text-left text-text-muted text-xs select-none"
           >
             <th class="w-px whitespace-nowrap py-2 px-4 font-medium">
               <span class="inline-flex items-center">
@@ -362,7 +743,8 @@
                 </span>
               </th>
             {/if}
-            <th class="py-2 px-2 font-medium text-right w-[70px]">
+            <th class="py-2 px-2 font-medium text-center w-[85px]"> Drift </th>
+            <th class="py-2 px-4 font-medium text-right w-[95px]">
               <span class="inline-flex items-center justify-end">
                 Reads
                 <HelpTip
@@ -373,34 +755,28 @@
                 />
               </span>
             </th>
-            <th class="py-2 px-4 font-medium text-right w-[60px]">
-              <span class="inline-flex items-center justify-end">
-                Port
-                <HelpTip
-                  fieldKey="local_port"
-                  sectionKey="streams"
-                  context="receiver"
-                  onOpenModal={openHelp}
-                />
-              </span>
-            </th>
+            <th class="w-[32px] py-2 pr-4"></th>
           </tr>
         </thead>
         <tbody>
-          {#each store.streams.streams as stream (streamIdentity(stream))}
+          {#each orderedStreams as stream, index (streamIdentity(stream))}
             {@const key = streamIdentity(stream)}
             {@const primaryLabel = streamPrimaryLabel(stream)}
             {@const secondaryLabel = streamSecondaryLabel(stream)}
+            {@const role = getStreamRole(stream)}
+            {@const driftMs = getStreamDriftMs(stream)}
             {@const displayStatus = deriveStreamDisplayStatus(stream, {
               recentActivity: streamHasRecentActivity(stream),
               optimisticSubscribing: streamIsOptimisticallySubscribing(stream),
             })}
             {@const displayBadge = streamDisplayBadge(displayStatus)}
+            <!-- Collapsed Double-Height Row -->
             <tr
               class="border-b border-border/50 hover:bg-surface-1/50 cursor-pointer {stream.subscribed
                 ? ''
                 : 'bg-surface-1/20'}"
               role="button"
+              aria-expanded={expandedKeys.has(key)}
               tabindex="0"
               onclick={() => toggleExpand(stream)}
               onkeydown={(e) => {
@@ -410,8 +786,65 @@
                 }
               }}
             >
-              <td class="w-px whitespace-nowrap py-2 px-4">
-                <div class="flex items-center gap-2 min-w-0">
+              <!-- Col 1: Stream Identity, Reorder, Checkbox, Role -->
+              <td class="w-px whitespace-nowrap py-2.5 px-4 align-middle">
+                <div
+                  class="flex items-center gap-2.5 min-w-0"
+                  role="presentation"
+                  onclick={(e) => e.stopPropagation()}
+                  onkeydown={(e) => e.stopPropagation()}
+                >
+                  <!-- Move Up/Down Controls -->
+                  <div class="flex flex-col gap-0.5 text-text-muted">
+                    <button
+                      type="button"
+                      class="p-0.5 leading-none hover:text-text-primary disabled:opacity-20 cursor-pointer disabled:cursor-not-allowed"
+                      disabled={index === 0}
+                      title="Move earlier in course order"
+                      aria-label="Move earlier in course order"
+                      onclick={() => handleMoveStream(stream, -1)}
+                    >
+                      <svg
+                        class="w-3 h-3"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2.5"
+                      >
+                        <polyline points="18 15 12 9 6 15"></polyline>
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      class="p-0.5 leading-none hover:text-text-primary disabled:opacity-20 cursor-pointer disabled:cursor-not-allowed"
+                      disabled={index === orderedStreams.length - 1}
+                      title="Move later in course order"
+                      aria-label="Move later in course order"
+                      onclick={() => handleMoveStream(stream, 1)}
+                    >
+                      <svg
+                        class="w-3 h-3"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2.5"
+                      >
+                        <polyline points="6 9 12 15 18 9"></polyline>
+                      </svg>
+                    </button>
+                  </div>
+
+                  <!-- Selection Checkbox -->
+                  <input
+                    type="checkbox"
+                    checked={selectedKeys.has(key)}
+                    onchange={(e) =>
+                      toggleSelect(stream, e.currentTarget.checked)}
+                    class="rounded accent-accent cursor-pointer"
+                    aria-label={`Select stream ${primaryLabel}`}
+                  />
+
+                  <!-- Connection Status Dot -->
                   <span
                     class="w-2.5 h-2.5 rounded-full shrink-0 {streamDisplayDotClass(
                       displayStatus,
@@ -419,15 +852,18 @@
                     title={streamDisplayLabel(displayStatus)}
                     aria-label={streamDisplayLabel(displayStatus)}
                   ></span>
+
+                  <!-- Double-height Info: Line 1 = IP & Role Badge, Line 2 = Forwarder & Epoch Name -->
                   <div class="min-w-0">
                     <div class="flex items-center gap-2">
                       <span
                         class={stream.subscribed
-                          ? "text-text-primary"
+                          ? "text-text-primary font-medium"
                           : "text-text-secondary font-mono"}
                       >
                         {primaryLabel}
                       </span>
+
                       {#if stream.failure}
                         <span
                           data-testid="stream-halted-{key}"
@@ -437,70 +873,380 @@
                           halted
                         </span>
                       {/if}
+
                       {#if !stream.subscribed}
                         <span
                           class="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-muted"
                         >
                           Available
                         </span>
-                      {:else if displayBadge}
-                        <span
-                          class="rounded border border-status-warn-border bg-status-warn-bg px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-status-warn"
-                        >
-                          {displayBadge}
-                        </span>
+                      {:else}
+                        {#if role === "start_finish"}
+                          {#if stream.event_type === "start"}
+                            <span
+                              class="rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] uppercase font-semibold tracking-wide text-amber-700 dark:text-amber-400"
+                            >
+                              Start / Finish &middot; START
+                            </span>
+                          {:else}
+                            <span
+                              class="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] uppercase font-semibold tracking-wide text-emerald-700 dark:text-emerald-400"
+                            >
+                              Start / Finish &middot; FINISH
+                            </span>
+                          {/if}
+                        {:else if role === "start"}
+                          <span
+                            class="rounded border border-blue-500/30 bg-blue-500/10 px-1.5 py-0.5 text-[10px] uppercase font-semibold tracking-wide text-blue-700 dark:text-blue-400"
+                          >
+                            Start
+                          </span>
+                        {:else if role === "finish"}
+                          <span
+                            class="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] uppercase font-semibold tracking-wide text-emerald-700 dark:text-emerald-400"
+                          >
+                            Finish
+                          </span>
+                        {:else if role === "announcer"}
+                          <span
+                            class="rounded border border-purple-500/30 bg-purple-500/10 px-1.5 py-0.5 text-[10px] uppercase font-semibold tracking-wide text-purple-700 dark:text-purple-400"
+                          >
+                            Announcer
+                          </span>
+                        {/if}
+
+                        {#if displayBadge}
+                          <span
+                            class="rounded border border-status-warn-border bg-status-warn-bg px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-status-warn"
+                          >
+                            {displayBadge}
+                          </span>
+                        {/if}
                       {/if}
                     </div>
-                    {#if secondaryLabel}
-                      <div class="text-xs text-text-muted truncate">
-                        {secondaryLabel}
-                      </div>
-                    {/if}
+
+                    <!-- Line 2: Forwarder ID & Epoch Name or secondary alias -->
+                    <div
+                      class="flex items-center gap-2 text-xs text-text-muted mt-0.5 truncate"
+                    >
+                      {#if stream.subscribed}
+                        {#if streamForwarderLabel(stream)}
+                          <span class="font-mono"
+                            >{streamForwarderLabel(stream)}</span
+                          >
+                        {/if}
+                        {#if stream.stream_epoch != null}
+                          {#if streamForwarderLabel(stream)}<span>&middot;</span
+                            >{/if}
+                          <span>
+                            Epoch #{stream.stream_epoch}{stream.current_epoch_name
+                              ? `: ${stream.current_epoch_name.trim()}`
+                              : ""}
+                          </span>
+                        {/if}
+                      {:else if secondaryLabel}
+                        <span class="truncate">{secondaryLabel}</span>
+                      {/if}
+                    </div>
                   </div>
-                  {#if stream.forwarder_id && store.upsState.get(stream.forwarder_id)}
-                    {@const upsEntry = store.upsState.get(stream.forwarder_id)}
-                    <BatteryIndicator
-                      percent={upsEntry?.status?.battery_percent ?? null}
-                      charging={upsEntry?.status?.charging ?? false}
-                      available={upsEntry?.available ?? true}
-                      configured
-                      compact
-                    />
-                  {/if}
                 </div>
               </td>
+
+              <!-- Col 2: Last Read -->
               {#if showLastReadCol()}
                 <td
-                  class="w-full max-w-0 py-2 px-2 text-left text-text-muted font-mono truncate"
+                  class="w-full max-w-0 py-2.5 px-2 text-left text-text-muted font-mono truncate align-middle"
                 >
                   {formatLastRead(key)}
                 </td>
               {/if}
+
+              <!-- Col 3: Drift Chip -->
               <td
-                class="py-2 px-2 text-right font-mono text-text-primary w-[70px]"
+                class="w-[85px] py-2.5 px-2 text-center align-middle whitespace-nowrap"
+              >
+                {#if driftMs != null}
+                  {@const abs = Math.abs(driftMs)}
+                  <span
+                    class="font-mono text-xs px-1.5 py-0.5 rounded border font-medium inline-block text-center min-w-[56px] {abs <
+                    250
+                      ? 'border-status-ok-border bg-status-ok-bg text-status-ok'
+                      : abs < 1000
+                        ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400 font-bold'
+                        : 'border-status-err-border bg-status-err-bg text-status-err font-bold'}"
+                    title="Reader clock offset from receiver host"
+                  >
+                    {driftMs >= 0 ? "+" : ""}{driftMs}ms
+                  </span>
+                {:else}
+                  <span class="text-xs text-text-muted">&mdash;</span>
+                {/if}
+              </td>
+
+              <!-- Col 4: Reads (Epoch) -->
+              <td
+                class="py-2.5 px-4 text-right font-mono text-text-primary font-bold text-sm w-[95px] align-middle whitespace-nowrap"
               >
                 {stream.subscribed
-                  ? (stream.reads_total ?? 0).toLocaleString()
+                  ? (stream.reads_epoch ?? 0).toLocaleString()
                   : "\u2014"}
               </td>
+
+              <!-- Col 5: Expand Chevron -->
               <td
-                class="py-2 px-4 text-right font-mono text-text-muted w-[60px]"
+                class="w-[32px] py-2.5 pr-4 text-right align-middle text-text-muted"
               >
-                {stream.local_port ?? "\u2014"}
+                <svg
+                  class="w-4 h-4 inline-block transition-transform duration-150 {expandedKeys.has(
+                    key,
+                  )
+                    ? 'rotate-180 text-accent'
+                    : ''}"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  aria-hidden="true"
+                >
+                  <polyline points="6 9 12 15 18 9"></polyline>
+                </svg>
               </td>
             </tr>
 
-            {#if expandedKey === key}
+            <!-- Expanded Details Row -->
+            {#if expandedKeys.has(key)}
               {@const metrics = store.streamMetrics.get(key)}
               <tr>
-                <td colspan={showLastReadCol() ? 4 : 3} class="p-0">
-                  <div class="bg-surface-1 px-4 py-3 border-b border-border">
-                    <div class="grid grid-cols-2 gap-x-6 gap-y-2 text-xs mb-3">
+                <td colspan={showLastReadCol() ? 5 : 4} class="p-0">
+                  <div
+                    class="bg-surface-1 px-4 py-3 border-b border-border space-y-3"
+                  >
+                    <!-- Quick Action Controls for this Reader -->
+                    <div
+                      class="flex flex-wrap items-center justify-between gap-3 bg-surface-0 p-2.5 rounded-lg border border-border text-xs"
+                    >
+                      <div class="flex flex-wrap items-center gap-2">
+                        <!-- Sync Clock button -->
+                        <button
+                          data-testid={`sync-clock-${key}`}
+                          class={btnSecondary}
+                          class:!px-2.5={true}
+                          class:!py-1={true}
+                          class:!text-xs={true}
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            void handleSyncSingleClock(stream);
+                          }}
+                          disabled={syncingClockKey === key ||
+                            store.streamActionBusy}
+                        >
+                          {syncingClockKey === key ? "Syncing…" : "Sync Clock"}
+                        </button>
+
+                        <!-- Inline Advance Epoch -->
+                        <div
+                          class="inline-flex items-center gap-1 bg-surface-1 p-0.5 rounded border border-border"
+                        >
+                          <input
+                            type="text"
+                            data-testid={`epoch-name-input-${key}`}
+                            placeholder="New epoch name"
+                            value={epochInputs[key] ?? ""}
+                            oninput={(e) => {
+                              epochInputs = {
+                                ...epochInputs,
+                                [key]: e.currentTarget.value,
+                              };
+                            }}
+                            onclick={(e) => e.stopPropagation()}
+                            class="px-2 py-0.5 text-xs rounded border border-border bg-surface-0 text-text-primary font-mono w-36 focus:outline-none focus:ring-1 focus:ring-accent"
+                          />
+                          <button
+                            data-testid={`advance-epoch-btn-${key}`}
+                            class="px-2 py-0.5 text-xs font-medium rounded bg-amber-600 hover:bg-amber-700 text-white cursor-pointer disabled:opacity-50"
+                            disabled={advancingEpochKey === key ||
+                              store.streamActionBusy}
+                            onclick={(e) => {
+                              e.stopPropagation();
+                              void handleAdvanceSingleEpoch(stream);
+                            }}
+                          >
+                            {advancingEpochKey === key
+                              ? "Advancing…"
+                              : "Advance Epoch"}
+                          </button>
+                        </div>
+
+                        <!-- Export TAGDATA -->
+                        <button
+                          data-testid={`export-stream-tagdata-${key}`}
+                          class={btnSecondary}
+                          class:!px-2.5={true}
+                          class:!py-1={true}
+                          class:!text-xs={true}
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            exportInitialStreamId = key;
+                            exportModalOpen = true;
+                          }}
+                        >
+                          Export TAGDATA
+                        </button>
+
+                        <!-- Clear Reads -->
+                        {#if stream.subscribed}
+                          <button
+                            data-testid={`clear-both-stream-${key}`}
+                            class="px-2.5 py-1 text-xs font-medium rounded-md bg-transparent text-status-err border border-status-err hover:bg-status-err-bg cursor-pointer disabled:opacity-50"
+                            onclick={(e) => {
+                              e.stopPropagation();
+                              confirmingClearBothStream = stream;
+                            }}
+                            disabled={replayingStreamKey === key ||
+                              clearingBothStreamKey === key}
+                            title="Purge stored reads from forwarder and reset receiver local data"
+                          >
+                            {clearingBothStreamKey === key
+                              ? "Clearing…"
+                              : "Clear Reads"}
+                          </button>
+                          <HelpTip
+                            fieldKey="clear_both"
+                            sectionKey="streams"
+                            context="receiver"
+                            onOpenModal={openHelp}
+                          />
+                        {/if}
+
+                        <!-- Subscribe / Unsubscribe -->
+                        <button
+                          data-testid={`subscribe-toggle-${key}`}
+                          class={stream.subscribed ? btnSecondary : btnPrimary}
+                          class:!px-2.5={true}
+                          class:!py-1={true}
+                          class:!text-xs={true}
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            void toggleSubscription(stream);
+                          }}
+                          disabled={store.streamActionBusy}
+                        >
+                          {stream.subscribed ? "Unsubscribe" : "Subscribe"}
+                        </button>
+                        <HelpTip
+                          fieldKey="subscribed"
+                          sectionKey="streams"
+                          context="receiver"
+                          onOpenModal={openHelp}
+                        />
+
+                        <!-- Replay Reads -->
+                        {#if stream.subscribed}
+                          <button
+                            data-testid={`replay-stream-${key}`}
+                            class={btnSecondary}
+                            class:!px-2.5={true}
+                            class:!py-1={true}
+                            class:!text-xs={true}
+                            onclick={(e) => {
+                              e.stopPropagation();
+                              confirmingReplayStream = stream;
+                            }}
+                            disabled={replayingStreamKey === key ||
+                              clearingBothStreamKey === key}
+                            title="Clear local stream data and replay all retained reads from the forwarder"
+                          >
+                            {replayingStreamKey === key
+                              ? "Replaying…"
+                              : "Replay Reads"}
+                          </button>
+                          <HelpTip
+                            fieldKey="replay_reads"
+                            sectionKey="streams"
+                            context="receiver"
+                            onOpenModal={openHelp}
+                          />
+                        {/if}
+                      </div>
+
+                      <!-- Role Select & Announce Toggle -->
+                      <div class="flex items-center gap-3">
+                        {#if stream.subscribed}
+                          <label
+                            class="flex items-center gap-1.5 font-medium text-text-secondary"
+                          >
+                            <span>Role:</span>
+                            <select
+                              data-testid={`dbf-event-type-${key}`}
+                              class="px-2 py-1 text-xs rounded font-mono bg-surface-1 border border-border text-text-primary focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
+                              value={role === "announcer" ? "exclude" : role}
+                              onchange={(e) => {
+                                e.stopPropagation();
+                                const val = e.currentTarget.value;
+                                void handleRoleChange(
+                                  stream,
+                                  val === "exclude"
+                                    ? "announcer"
+                                    : (val as StreamRole),
+                                );
+                              }}
+                              onclick={(e) => e.stopPropagation()}
+                              disabled={store.streamEventTypeBusy[key] ||
+                                store.streamActionBusy}
+                            >
+                              <option value="start_finish"
+                                >Start / Finish</option
+                              >
+                              <option value="start">Start</option>
+                              <option value="finish">Finish</option>
+                              <option value="exclude">Exclude</option>
+                            </select>
+                            <HelpTip
+                              fieldKey="event_type"
+                              sectionKey="streams"
+                              context="receiver"
+                              onOpenModal={openHelp}
+                            />
+                          </label>
+
+                          <label
+                            class="inline-flex items-center gap-1.5 text-xs text-text-muted cursor-pointer"
+                            title="Publish this stream's reads to the announcer board"
+                          >
+                            <input
+                              data-testid={`announcer-publish-toggle-${key}`}
+                              type="checkbox"
+                              checked={stream.announcer_publish ?? false}
+                              disabled={store.streamAnnouncerBusy[key]}
+                              onclick={(e) => e.stopPropagation()}
+                              onchange={(e) => {
+                                e.stopPropagation();
+                                void setStreamAnnouncerPublish(
+                                  stream,
+                                  e.currentTarget.checked,
+                                );
+                              }}
+                              class="accent-accent"
+                            />
+                            Announce
+                            <HelpTip
+                              fieldKey="announce"
+                              sectionKey="streams"
+                              context="receiver"
+                              onOpenModal={openHelp}
+                            />
+                          </label>
+                        {/if}
+                      </div>
+                    </div>
+
+                    <!-- Clean Details Grid -->
+                    <div class="grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
                       <div>
                         <span class="text-text-muted">Reader IP:</span>
-                        <span class="font-mono text-text-primary ml-1"
-                          >{formatOptional(stream.reader_ip)}</span
-                        >
+                        <span class="font-mono text-text-primary ml-1">
+                          {formatOptional(stream.reader_ip)}
+                        </span>
                       </div>
                       <div>
                         <span class="text-text-muted">
@@ -512,27 +1258,50 @@
                             onOpenModal={openHelp}
                           />
                         </span>
-                        <span class="font-mono text-text-primary ml-1"
-                          >{formatOptional(streamForwarderLabel(stream))}</span
+                        <span class="font-mono text-text-primary ml-1">
+                          {formatOptional(streamForwarderLabel(stream))}
+                        </span>
+                        <button
+                          type="button"
+                          data-testid={`stream-fwd-config-btn-${key}`}
+                          class="ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium border border-border bg-surface-1 hover:bg-surface-2 text-text-secondary cursor-pointer"
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            selectedConfigEndpointId =
+                              stream.forwarder_endpoint_id;
+                          }}
                         >
+                          Configure Box
+                        </button>
+                        {#if store.connections?.forwarders.find((f) => f.endpoint_id === stream.forwarder_endpoint_id)?.wifi_control_available}
+                          <button
+                            type="button"
+                            data-testid={`stream-fwd-wifi-btn-${key}`}
+                            class="ml-1 px-1.5 py-0.5 rounded text-[10px] font-medium border border-border bg-surface-1 hover:bg-surface-2 text-text-secondary cursor-pointer"
+                            onclick={(e) => {
+                              e.stopPropagation();
+                              selectedWifiEndpointId =
+                                stream.forwarder_endpoint_id;
+                            }}
+                          >
+                            Wi-Fi
+                          </button>
+                        {/if}
                       </div>
-                      {#if stream.stream_epoch != null}
-                        <div>
-                          <span class="text-text-muted">
-                            Epoch:
-                            <HelpTip
-                              fieldKey="stream_epoch"
-                              sectionKey="streams"
-                              context="receiver"
-                              onOpenModal={openHelp}
-                            />
-                          </span>
-                          <span class="font-mono text-text-primary ml-1">
-                            {stream.stream_epoch}{#if stream.current_epoch_name?.trim()}
-                              ({stream.current_epoch_name.trim()}){/if}
-                          </span>
-                        </div>
-                      {/if}
+                      <div>
+                        <span class="text-text-muted">Local Proxy:</span>
+                        <span class="font-mono text-text-primary ml-1">
+                          {stream.local_port
+                            ? `127.0.0.1:${stream.local_port}`
+                            : "not subscribed"}
+                        </span>
+                      </div>
+                      <div>
+                        <span class="text-text-muted">Forwarder Battery:</span>
+                        <span class="font-mono text-text-primary ml-1">
+                          {batteryDisplay(stream)}
+                        </span>
+                      </div>
                     </div>
 
                     {#if metrics}
@@ -548,41 +1317,41 @@
                               onOpenModal={openHelp}
                             />
                           </p>
-                          <div class="grid grid-cols-1 gap-y-2 text-xs">
+                          <div class="grid grid-cols-1 gap-y-1.5 text-xs">
                             <div
                               title="Total frames received including retransmits"
                             >
                               <span class="text-text-muted">Raw count:</span>
-                              <span class="font-mono text-text-primary ml-1"
-                                >{metrics.raw_count.toLocaleString()}</span
-                              >
+                              <span class="font-mono text-text-primary ml-1">
+                                {metrics.raw_count.toLocaleString()}
+                              </span>
                             </div>
                             <div title="Unique frames after deduplication">
                               <span class="text-text-muted">Dedup count:</span>
-                              <span class="font-mono text-text-primary ml-1"
-                                >{metrics.dedup_count.toLocaleString()}</span
-                              >
+                              <span class="font-mono text-text-primary ml-1">
+                                {metrics.dedup_count.toLocaleString()}
+                              </span>
                             </div>
                             <div
                               title="Duplicate frames that matched existing events"
                             >
                               <span class="text-text-muted">Retransmit:</span>
-                              <span class="font-mono text-text-primary ml-1"
-                                >{metrics.retransmit_count.toLocaleString()}</span
-                              >
+                              <span class="font-mono text-text-primary ml-1">
+                                {metrics.retransmit_count.toLocaleString()}
+                              </span>
                             </div>
                             <div
                               title="Forwarder-reported delay since the last unique frame was received (snapshot, not live)"
                             >
                               <span class="text-text-muted">Lag:</span>
-                              <span class="font-mono text-text-primary ml-1"
-                                >{formatLag(metrics.lag_ms)}</span
-                              >
+                              <span class="font-mono text-text-primary ml-1">
+                                {formatLag(metrics.lag_ms)}
+                              </span>
                             </div>
                           </div>
                         </div>
 
-                        <!-- Current Epoch Metrics -->
+                        <!-- Current Epoch Metrics (Cleaned: no raw frames, deduplicated, retransmitted) -->
                         <div>
                           <p class="text-muted text-xs font-medium mb-1">
                             Current Epoch
@@ -593,44 +1362,14 @@
                               onOpenModal={openHelp}
                             />
                           </p>
-                          <div class="grid grid-cols-1 gap-y-2 text-xs">
-                            <div title="Frames received in the current epoch">
-                              <span class="text-text-muted">Raw count:</span>
-                              <span class="font-mono text-text-primary ml-1"
-                                >{metrics.epoch_raw_count.toLocaleString()}</span
-                              >
-                            </div>
-                            <div title="Unique frames in the current epoch">
-                              <span class="text-text-muted">Dedup count:</span>
-                              <span class="font-mono text-text-primary ml-1"
-                                >{metrics.epoch_dedup_count.toLocaleString()}</span
-                              >
-                            </div>
-                            <div title="Duplicate frames in the current epoch">
-                              <span class="text-text-muted">Retransmit:</span>
-                              <span class="font-mono text-text-primary ml-1"
-                                >{metrics.epoch_retransmit_count.toLocaleString()}</span
-                              >
-                            </div>
+                          <div class="grid grid-cols-1 gap-y-1.5 text-xs">
                             <div
                               title="Distinct chip IDs detected in the current epoch"
                             >
                               <span class="text-text-muted">Unique chips:</span>
-                              <span class="font-mono text-text-primary ml-1"
-                                >{metrics.unique_chips.toLocaleString()}</span
-                              >
-                            </div>
-                            <div
-                              title="Timestamp of the last unique frame in the current epoch"
-                            >
-                              <span class="text-text-muted">Last read:</span>
-                              <span class="font-mono text-text-primary ml-1"
-                                >{metrics.epoch_last_received_at
-                                  ? new Date(
-                                      metrics.epoch_last_received_at,
-                                    ).toLocaleString()
-                                  : "N/A (no events in epoch)"}</span
-                              >
+                              <span class="font-mono text-text-primary ml-1">
+                                {metrics.unique_chips.toLocaleString()}
+                              </span>
                             </div>
                             <div
                               title="Live-updating elapsed time since last unique frame"
@@ -638,9 +1377,21 @@
                               <span class="text-text-muted"
                                 >Time since last read:</span
                               >
-                              <span class="font-mono text-text-primary ml-1"
-                                >{timeSinceLastRead[key] ?? "—"}</span
-                              >
+                              <span class="font-mono text-text-primary ml-1">
+                                {timeSinceLastRead[key] ?? "—"}
+                              </span>
+                            </div>
+                            <div
+                              title="Timestamp of the last unique frame in the current epoch"
+                            >
+                              <span class="text-text-muted">Last read:</span>
+                              <span class="font-mono text-text-primary ml-1">
+                                {metrics.epoch_last_received_at
+                                  ? new Date(
+                                      metrics.epoch_last_received_at,
+                                    ).toLocaleString()
+                                  : "N/A (no events in epoch)"}
+                              </span>
                             </div>
                           </div>
                         </div>
@@ -649,41 +1400,18 @@
                       <p class="text-muted text-xs mt-2">Metrics unavailable</p>
                     {/if}
 
-                    <div class="flex items-center gap-2 flex-wrap">
-                      {#if stream.subscribed && store.dbfEnabled}
-                        <select
-                          data-testid="dbf-event-type-{key}"
-                          class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-28 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
-                          value={stream.event_type ?? "finish"}
-                          onchange={(e) => {
-                            e.stopPropagation();
-                            void updateStreamEventType(
-                              stream,
-                              e.currentTarget.value as
-                                "start" | "finish" | "exclude",
-                            );
-                          }}
-                          onclick={(e) => e.stopPropagation()}
-                          disabled={store.streamEventTypeBusy[key]}
+                    <!-- From Epoch Override (if diagnostic override used) -->
+                    {#if store.modeDraft !== "race"}
+                      {@const options = store.streamEpochOptions[key] ?? []}
+                      {@const selectedEarliest =
+                        selectedEarliestEpochValue(stream)}
+                      <div
+                        class="pt-2 border-t border-border flex items-center gap-2"
+                      >
+                        <label
+                          class="text-xs text-text-secondary flex items-center gap-2"
                         >
-                          <option value="finish">Finish</option>
-                          <option value="start">Start</option>
-                          <option value="exclude">Exclude</option>
-                        </select>
-                        <HelpTip
-                          fieldKey="event_type"
-                          sectionKey="streams"
-                          context="receiver"
-                          onOpenModal={openHelp}
-                        />
-                      {/if}
-
-                      {#if store.modeDraft !== "race"}
-                        {@const options = store.streamEpochOptions[key] ?? []}
-                        {@const selectedEarliest =
-                          selectedEarliestEpochValue(stream)}
-                        <label class="text-xs text-text-secondary mr-1">
-                          From epoch:
+                          <span>From epoch:</span>
                           <HelpTip
                             fieldKey="earliest_epoch"
                             sectionKey="streams"
@@ -691,8 +1419,8 @@
                             onOpenModal={openHelp}
                           />
                           <select
-                            data-testid="earliest-epoch-{key}"
-                            class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-72 max-w-full focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
+                            data-testid={`earliest-epoch-${key}`}
+                            class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-64 max-w-full focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
                             value={selectedEarliest}
                             onchange={(e) => {
                               e.stopPropagation();
@@ -713,146 +1441,20 @@
                             {:else}
                               <option value="">All available data</option>
                               {#each options as option}
-                                <!-- Local-only epochs (no longer advertised by
-                                     the forwarder) cannot resolve an override
-                                     (fail-closed) and are not selectable. -->
                                 <option
                                   value={String(option.stream_epoch)}
                                   disabled={!option.selectable}
                                 >
                                   {formatEarliestEpochOption(
                                     option,
-                                  )}{option.selectable
-                                    ? ""
-                                    : " (no longer available on forwarder)"}
+                                  )}{option.selectable ? "" : " (unavailable)"}
                                 </option>
                               {/each}
                             {/if}
                           </select>
                         </label>
-                        {#if stream.override_held}
-                          <span
-                            data-testid="override-held-{key}"
-                            class="text-xs text-status-warn"
-                            title="The selected earliest epoch is not advertised by the forwarder. No data flows until it becomes available or the override is cleared."
-                          >
-                            paused: epoch unavailable
-                          </span>
-                        {/if}
-                      {/if}
-
-                      <button
-                        data-testid="subscribe-toggle-{key}"
-                        class={stream.subscribed ? btnSecondary : btnPrimary}
-                        class:!px-2.5={true}
-                        class:!py-1={true}
-                        class:!text-xs={true}
-                        onclick={(e) => {
-                          e.stopPropagation();
-                          void toggleSubscription(stream);
-                        }}
-                        disabled={store.streamActionBusy}
-                      >
-                        {stream.subscribed ? "Unsubscribe" : "Subscribe"}
-                      </button>
-                      <HelpTip
-                        fieldKey="subscribed"
-                        sectionKey="streams"
-                        context="receiver"
-                        onOpenModal={openHelp}
-                      />
-
-                      <button
-                        data-testid="export-stream-tagdata-{key}"
-                        class={btnSecondary}
-                        class:!px-2.5={true}
-                        class:!py-1={true}
-                        class:!text-xs={true}
-                        onclick={(e) => {
-                          e.stopPropagation();
-                          exportInitialStreamId = key;
-                          exportModalOpen = true;
-                        }}
-                      >
-                        Export TAGDATA
-                      </button>
-
-                      {#if stream.subscribed}
-                        <button
-                          data-testid="replay-stream-{key}"
-                          class={btnSecondary}
-                          class:!px-2.5={true}
-                          class:!py-1={true}
-                          class:!text-xs={true}
-                          onclick={(e) => {
-                            e.stopPropagation();
-                            confirmingReplayStream = stream;
-                          }}
-                          disabled={replayingStreamKey === key ||
-                            clearingBothStreamKey === key}
-                          title="Clear local stream data and replay all retained reads from the forwarder"
-                        >
-                          {replayingStreamKey === key
-                            ? "Replaying..."
-                            : "Replay Reads"}
-                        </button>
-                        <HelpTip
-                          fieldKey="replay_reads"
-                          sectionKey="streams"
-                          context="receiver"
-                          onOpenModal={openHelp}
-                        />
-
-                        <button
-                          data-testid="clear-both-stream-{key}"
-                          class="px-2.5 py-1 text-xs rounded-md bg-surface-0 text-red-600 border border-red-300 dark:border-red-900 cursor-pointer hover:bg-red-50 dark:hover:bg-red-950/30 disabled:opacity-50"
-                          onclick={(e) => {
-                            e.stopPropagation();
-                            confirmingClearBothStream = stream;
-                          }}
-                          disabled={replayingStreamKey === key ||
-                            clearingBothStreamKey === key}
-                          title="Purge stored reads from forwarder and reset receiver local data (start clean state)"
-                        >
-                          {clearingBothStreamKey === key
-                            ? "Clearing..."
-                            : "Clear Both"}
-                        </button>
-                        <HelpTip
-                          fieldKey="clear_both"
-                          sectionKey="streams"
-                          context="receiver"
-                          onOpenModal={openHelp}
-                        />
-
-                        <label
-                          class="inline-flex items-center gap-1.5 text-xs text-text-muted"
-                          title="Publish this stream's finish reads to the announcer board"
-                        >
-                          <input
-                            data-testid="announcer-publish-toggle-{key}"
-                            type="checkbox"
-                            checked={stream.announcer_publish ?? false}
-                            disabled={store.streamAnnouncerBusy[key]}
-                            onclick={(e) => e.stopPropagation()}
-                            onchange={(e) => {
-                              e.stopPropagation();
-                              void setStreamAnnouncerPublish(
-                                stream,
-                                e.currentTarget.checked,
-                              );
-                            }}
-                          />
-                          Announce
-                          <HelpTip
-                            fieldKey="announce"
-                            sectionKey="streams"
-                            context="receiver"
-                            onOpenModal={openHelp}
-                          />
-                        </label>
-                      {/if}
-                    </div>
+                      </div>
+                    {/if}
                   </div>
                 </td>
               </tr>
@@ -862,6 +1464,20 @@
       </table>
     </div>
   {/if}
+
+  <!-- Modals & Dialogs -->
+  <ConfirmDialog
+    open={confirmCutoverOpen}
+    title="Advance Starts to Finish"
+    message={`Advance ${cutoverCandidates.length} Start/Finish reader(s) to Finish mode and start a new epoch "${cutoverEpochInput}"?`}
+    confirmLabel="Advance to Finish"
+    variant="warn"
+    busy={cutoverBusy}
+    onConfirm={handleCutoverConfirm}
+    onCancel={() => {
+      confirmCutoverOpen = false;
+    }}
+  />
 
   <ConfirmDialog
     open={confirmReplayAllOpen}
@@ -894,9 +1510,9 @@
 
   <ConfirmDialog
     open={confirmingClearBothStream !== null}
-    title="Clear Both (Clean State)"
+    title="Clear Reads (Clean State)"
     message={`Purge all stored reads from the forwarder AND reset local receiver data for ${confirmingClearBothStream ? streamPrimaryLabel(confirmingClearBothStream) : "this stream"}? A new epoch will be started on the forwarder. This cannot be undone.`}
-    confirmLabel="Clear Both"
+    confirmLabel="Clear Reads"
     variant="err"
     busy={clearingBothStreamKey !== null}
     onConfirm={() => {
@@ -907,6 +1523,58 @@
       confirmingClearBothStream = null;
     }}
   />
+
+  {#if confirmBulkEpochOpen}
+    <div
+      class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+    >
+      <div
+        class="bg-surface-0 border border-border rounded-xl shadow-2xl max-w-sm w-full p-4 space-y-3"
+      >
+        <h3 class="text-sm font-bold text-text-primary">
+          Advance Epoch for Selected Readers
+        </h3>
+        <p class="text-xs text-text-muted">
+          Advancing the epoch creates a new clean timing window on the {selectedStreams.length}
+          selected readers.
+        </p>
+        <label class="block text-xs font-medium text-text-secondary">
+          New Epoch Name:
+          <input
+            type="text"
+            bind:value={bulkEpochInput}
+            placeholder="Finish Reads"
+            class="mt-1 w-full px-2.5 py-1.5 rounded border border-border bg-surface-1 text-xs font-mono text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+          />
+        </label>
+        <div class="flex justify-end gap-2 pt-2">
+          <button
+            type="button"
+            class={btnSecondary}
+            class:!px-3={true}
+            class:!py-1.5={true}
+            class:!text-xs={true}
+            onclick={() => {
+              confirmBulkEpochOpen = false;
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            class={btnPrimary}
+            class:!px-3={true}
+            class:!py-1.5={true}
+            class:!text-xs={true}
+            disabled={bulkEpochBusy}
+            onclick={handleBulkAdvanceEpoch}
+          >
+            {bulkEpochBusy ? "Advancing…" : "Advance Epoch"}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <ExportTagdataModal
@@ -915,4 +1583,18 @@
   onclose={() => {
     exportModalOpen = false;
   }}
+/>
+
+<ForwarderConfigModal
+  open={selectedConfigEndpointId !== null}
+  endpointId={selectedConfigEndpointId}
+  displayName={selectedConfigForwarder?.display_name ?? null}
+  onClose={() => (selectedConfigEndpointId = null)}
+/>
+
+<ForwarderWifiModal
+  open={selectedWifiEndpointId !== null}
+  endpointId={selectedWifiEndpointId}
+  displayName={selectedWifiForwarder?.display_name ?? null}
+  onClose={() => (selectedWifiEndpointId = null)}
 />
