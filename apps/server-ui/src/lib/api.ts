@@ -36,11 +36,14 @@ export interface AnnouncerRow {
   reader_timestamp: string | null;
   received_at: string;
   division: string | null;
+  gender?: string | null;
+  age?: number | null;
 }
 
 export interface StatusResponse {
   announcer_source_generation: number;
   finisher_count: number;
+  announcer_expiry_minutes?: number;
   announcer_rows: AnnouncerRow[];
   devices: DeviceRecord[];
   forwarders: ForwarderRecord[];

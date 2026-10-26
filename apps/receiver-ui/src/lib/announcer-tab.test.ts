@@ -9,6 +9,8 @@ const mockState = vi.hoisted(() => ({
     announcerBusy: false,
     announcerMaxListSize: 25,
     announcerMaxListBusy: false,
+    announcerExpiryMinutes: 15,
+    announcerExpiryBusy: false,
     announcerResetBusy: false,
     announcerResetMessage: null as string | null,
     announcerResetError: null as string | null,
@@ -30,6 +32,7 @@ const mockState = vi.hoisted(() => ({
   },
   setAnnouncerEnabled: vi.fn(),
   setAnnouncerMaxListSize: vi.fn(),
+  setAnnouncerExpiryMinutes: vi.fn(),
   resetAnnouncer: vi.fn(),
   importParticipantsFile: vi.fn(),
   importChipsFile: vi.fn(),
@@ -43,6 +46,7 @@ vi.mock("$lib/store.svelte", () => ({
   store: mockState.store,
   setAnnouncerEnabled: mockState.setAnnouncerEnabled,
   setAnnouncerMaxListSize: mockState.setAnnouncerMaxListSize,
+  setAnnouncerExpiryMinutes: mockState.setAnnouncerExpiryMinutes,
   resetAnnouncer: mockState.resetAnnouncer,
   importParticipantsFile: mockState.importParticipantsFile,
   importChipsFile: mockState.importChipsFile,
@@ -65,6 +69,8 @@ describe("AnnouncerTab", () => {
     mockState.store.announcerBusy = false;
     mockState.store.announcerMaxListSize = 25;
     mockState.store.announcerMaxListBusy = false;
+    mockState.store.announcerExpiryMinutes = 15;
+    mockState.store.announcerExpiryBusy = false;
     mockState.store.savedServerUrl = "http://127.0.0.1:8080";
     mockState.store.importBusy = false;
     mockState.store.importMessage = null;
@@ -183,6 +189,16 @@ describe("AnnouncerTab", () => {
     mockState.store.announcerMaxListSize = 40;
     render(AnnouncerTab);
     expect(screen.getByTestId("announcer-max-list-input")).toHaveValue(40);
+  });
+
+  it("reflects and updates the expiry minutes from the store", async () => {
+    mockState.store.announcerExpiryMinutes = 20;
+    render(AnnouncerTab);
+    const input = screen.getByTestId("announcer-expiry-minutes-input");
+    expect(input).toHaveValue(20);
+    await fireEvent.input(input, { target: { value: "30" } });
+    await fireEvent.blur(input);
+    expect(mockState.setAnnouncerExpiryMinutes).toHaveBeenCalledWith(30);
   });
 
   it("opens the server announcer page using the saved server URL", async () => {

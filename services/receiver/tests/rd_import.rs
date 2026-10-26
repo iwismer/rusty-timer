@@ -41,6 +41,8 @@ async fn rd_dir_import_resolves_known_chip_with_division() {
     assert_eq!(entry.bib, "1");
     assert_eq!(entry.name.as_deref(), Some("John Smith"));
     assert_eq!(entry.division.as_deref(), Some("5k"));
+    assert_eq!(entry.gender.as_deref(), Some("M"));
+    assert_eq!(entry.age, Some(30));
 
     // Latin1 + division 2 for the accented participant.
     let renee = lookup
@@ -50,6 +52,8 @@ async fn rd_dir_import_resolves_known_chip_with_division() {
     assert_eq!(renee.bib, "2");
     assert_eq!(renee.name.as_deref(), Some("Renée Dupont"));
     assert_eq!(renee.division.as_deref(), Some("10k"));
+    assert_eq!(renee.gender.as_deref(), Some("F"));
+    assert_eq!(renee.age, Some(27));
 
     // Unknown chip → no lookup entry, so the resolver returns None and the read
     // falls back to displaying the raw chip id.
@@ -69,6 +73,8 @@ async fn rd_dir_import_resolves_known_chip_with_division() {
     assert_eq!(spare.bib, "900");
     assert_eq!(spare.name, None);
     assert_eq!(spare.division, None);
+    assert_eq!(spare.gender, None);
+    assert_eq!(spare.age, None);
 }
 
 #[tokio::test]

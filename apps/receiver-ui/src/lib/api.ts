@@ -27,6 +27,8 @@ export interface Profile {
   announcer_enabled?: boolean;
   // Receiver-configured cap on visible rows in the server announcer feed.
   announcer_max_list_size?: number;
+  // Receiver-configured row-expiry window (in minutes) in the server announcer feed.
+  announcer_expiry_minutes?: number;
 }
 
 export interface ImportSummary {
@@ -392,6 +394,12 @@ export async function setAnnouncerMaxListSize(
   maxListSize: number,
 ): Promise<void> {
   await invoke("set_announcer_max_list_size", { maxListSize });
+}
+
+export async function setAnnouncerExpiryMinutes(
+  expiryMinutes: number,
+): Promise<void> {
+  await invoke("set_announcer_expiry_minutes", { expiryMinutes });
 }
 
 export async function setStreamAnnouncerPublish(

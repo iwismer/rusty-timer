@@ -27,6 +27,33 @@ class DevStackChipTests(unittest.TestCase):
         self.assertEqual(expected_chips, generated_chips)
 
 
+    def test_seed_receiver_participants_populates_age_gender_and_multiple_divisions(
+        self,
+    ) -> None:
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            data_dir = Path(temp_dir_name)
+            dev_stack.seed_receiver_participants(data_dir)
+            conn = sqlite3.connect(str(data_dir / "receiver.sqlite3"))
+            try:
+                rows = conn.execute(
+                    "SELECT p.bib, p.gender, p.age, d.name, c.chip_id "
+                    "FROM participants p "
+                    "JOIN divisions d ON d.divno = p.division "
+                    "JOIN bib_chips c ON c.bib = p.bib "
+                    "ORDER BY p.bib"
+                ).fetchall()
+            finally:
+                conn.close()
+
+            self.assertEqual(len(rows), dev_stack.NUM_FRAMES)
+            divisions = {row[3] for row in rows}
+            genders = {row[1] for row in rows}
+            self.assertEqual(divisions, {"5k", "10k", "Half Marathon"})
+            self.assertEqual(genders, {"M", "F", "X"})
+            self.assertTrue(all(row[2] is not None and row[2] > 0 for row in rows))
+
 class DevStackForwarderConfigTests(unittest.TestCase):
     def test_forwarder_config_accepts_multiple_reader_targets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:

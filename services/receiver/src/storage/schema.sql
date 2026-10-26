@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS profile (
     -- Global announcer publish on/off (opt-in; default off).
     announcer_enabled INTEGER NOT NULL DEFAULT 0,
     announcer_max_list_size INTEGER NOT NULL DEFAULT 25,
+    announcer_expiry_minutes INTEGER NOT NULL DEFAULT 15,
     device_token TEXT,
     -- Race Director DBF participant/chip import (background poll). Opt-in;
     -- default off. The manual import action ignores `rd_import_enabled`.
@@ -160,7 +161,9 @@ CREATE TABLE IF NOT EXISTS participants (
     gender      TEXT NOT NULL,
     -- Division code (Race Director RUNDIV). NULL for .ppl imports. Joined to
     -- `divisions` for a display name on resolve.
-    division    INTEGER
+    division    INTEGER,
+    -- Participant age (Race Director RUNAGE). NULL when unknown or for .ppl imports.
+    age         INTEGER
 );
 
 -- Division code -> display name, imported from Race Director DIVISION.DBF.

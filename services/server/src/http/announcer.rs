@@ -8,9 +8,9 @@ use axum::{
 };
 use chrono::{TimeZone, Utc};
 use rt_server_api::announcer::{
-    MAX_ANNOUNCER_DISPLAY_NAME_LEN, MAX_ANNOUNCER_DIVISION_LEN, MAX_ANNOUNCER_ID_LEN,
-    MAX_ANNOUNCER_READER_TIMESTAMP_LEN, MAX_PUSH_ROWS, PushRowResponse, PushRowsRequest,
-    ResetAnnouncerResponse, TakeoverResponse,
+    MAX_ANNOUNCER_DISPLAY_NAME_LEN, MAX_ANNOUNCER_DIVISION_LEN, MAX_ANNOUNCER_GENDER_LEN,
+    MAX_ANNOUNCER_ID_LEN, MAX_ANNOUNCER_READER_TIMESTAMP_LEN, MAX_PUSH_ROWS, PushRowResponse,
+    PushRowsRequest, ResetAnnouncerResponse, TakeoverResponse,
 };
 
 use crate::announcer::{AnnouncerInputEvent, AnnouncerRuntime};
@@ -23,6 +23,10 @@ use crate::registry::{self, AnnouncerRowRecord, AnnouncerStorageError, DeviceKin
 /// source (receiver) owns this setting; this only bounds what the server
 /// retains in the live runtime for the public feed.
 pub(crate) const DEFAULT_MAX_ANNOUNCER_ROWS: usize = 25;
+/// Fallback row-expiry window (in minutes) when a pushing receiver does not
+/// send its own `expiry_minutes`.
+pub(crate) const DEFAULT_ANNOUNCER_EXPIRY_MINUTES: u32 =
+    crate::announcer::DEFAULT_ANNOUNCER_EXPIRY_MINUTES;
 
 /// `POST /announcer/rows` — batch announcer row push.
 ///
@@ -66,6 +70,10 @@ pub async fn push_rows(
         .max_list_size
         .filter(|n| *n > 0)
         .map_or(DEFAULT_MAX_ANNOUNCER_ROWS, |n| n as usize);
+    let expiry_minutes = req
+        .expiry_minutes
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_ANNOUNCER_EXPIRY_MINUTES);
 
     let announcer_source_generation = req.announcer_source_generation;
     let records: Vec<AnnouncerRowRecord> = req
@@ -82,6 +90,8 @@ pub async fn push_rows(
             reader_timestamp: row.reader_timestamp,
             received_unix_ms: row.received_unix_ms,
             division: row.division,
+            gender: row.gender,
+            age: row.age,
         })
         .collect();
 
@@ -93,6 +103,7 @@ pub async fn push_rows(
                 &state.announcer_runtime,
                 rows,
                 max_list_size,
+                expiry_minutes,
             ))
         })
     };
@@ -154,6 +165,10 @@ fn validate_push_rows(req: &PushRowsRequest) -> Result<(), String> {
         }
         if let Some(division) = row.division.as_deref() {
             check_len("division", division, MAX_ANNOUNCER_DIVISION_LEN)
+                .map_err(|field| format!("{field} too long"))?;
+        }
+        if let Some(gender) = row.gender.as_deref() {
+            check_len("gender", gender, MAX_ANNOUNCER_GENDER_LEN)
                 .map_err(|field| format!("{field} too long"))?;
         }
     }
@@ -247,9 +262,11 @@ pub(crate) fn rebuild_runtime(
     runtime: &std::sync::Mutex<AnnouncerRuntime>,
     rows: Vec<AnnouncerRowRecord>,
     max_list_size: usize,
+    expiry_minutes: u32,
 ) -> u64 {
     let mut runtime = runtime.lock().expect("announcer runtime mutex poisoned");
     runtime.reset();
+    runtime.set_expiry_minutes(expiry_minutes);
     for row in rows {
         let Some(received_at) = Utc.timestamp_millis_opt(row.received_unix_ms).single() else {
             continue;
@@ -264,6 +281,8 @@ pub(crate) fn rebuild_runtime(
             reader_timestamp: row.reader_timestamp,
             received_at,
             division: row.division,
+            gender: row.gender,
+            age: row.age,
         };
         runtime.ingest(event, max_list_size);
     }
@@ -598,6 +617,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gender_and_age_round_trip_through_push_into_runtime_row() {
+        let state = test_state();
+        let app = router(state.clone());
+        let mut body = row_body(7, 0, 1_000);
+        body["rows"][0]["gender"] = serde_json::json!("F");
+        body["rows"][0]["age"] = serde_json::json!(29);
+
+        let resp = app
+            .oneshot(json_request("/announcer/rows", &body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        {
+            let conn = state.conn.lock().unwrap();
+            let (gender, age): (Option<String>, Option<i32>) = conn
+                .query_row(
+                    "SELECT gender, age FROM announcer_rows
+                     WHERE forwarder_endpoint_id = 'fwd-endpoint'
+                       AND stream_id = 'finish-line' AND seq = 7",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(gender.as_deref(), Some("F"));
+            assert_eq!(age, Some(29));
+        }
+
+        let runtime = state.announcer_runtime.lock().unwrap();
+        assert_eq!(runtime.rows()[0].gender.as_deref(), Some("F"));
+        assert_eq!(runtime.rows()[0].age, Some(29));
+    }
+
+    #[tokio::test]
     async fn push_without_division_defaults_to_none() {
         let state = test_state();
         let app = router(state.clone());
@@ -787,6 +840,8 @@ mod tests {
                     reader_timestamp: Some("10:00:00".to_string()),
                     received_unix_ms: 1_000,
                     division: None,
+                    gender: None,
+                    age: None,
                 }],
             )
             .unwrap();

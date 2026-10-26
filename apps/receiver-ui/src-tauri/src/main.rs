@@ -330,6 +330,16 @@ async fn set_announcer_max_list_size(
 }
 
 #[tauri::command]
+async fn set_announcer_expiry_minutes(
+    state: State<'_, Arc<AppState>>,
+    expiry_minutes: u32,
+) -> CmdResult<()> {
+    control_api::set_announcer_expiry_minutes(&state, expiry_minutes)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn set_stream_announcer_publish(
     state: State<'_, Arc<AppState>>,
     forwarder_endpoint_id: String,

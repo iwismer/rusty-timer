@@ -60,6 +60,7 @@ import contextlib
 import json
 import os
 import shutil
+import sqlite3
 import signal
 import socket
 import subprocess
@@ -171,6 +172,178 @@ def bin_path(name: str) -> Path:
         )
     return path
 
+DEV_DIVISIONS = [
+    (1, "5k"),
+    (2, "10k"),
+    (3, "Half Marathon"),
+]
+
+
+def derive_endpoint_id(seed_hex: str) -> str | None:
+    try:
+        headless_bin = bin_path("receiver-headless")
+    except FileNotFoundError:
+        return None
+    out = subprocess.run(
+        [str(headless_bin), "print-endpoint-id", "--p2p-secret-key-seed-hex", seed_hex],
+        cwd=str(REPO_ROOT),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    endpoint_id = out.stdout.strip()
+    return endpoint_id if out.returncode == 0 and len(endpoint_id) == 64 else None
+
+
+def seed_receiver_participants(
+    receiver_data_dir: Path,
+    *,
+    server_url: str = "",
+    server_token: str = "",
+    forwarder_endpoint_id: str | None = None,
+    stream_ids: list[str] | None = None,
+) -> None:
+    """Seed the receiver SQLite DB with sample participants, divisions, and chips.
+
+    Populates 25 participants (matching the emulated chip series) with varied
+    ages, genders (M/F/X), and multiple divisions (5k, 10k, Half Marathon) so
+    the announcer screen shows full participant metadata out of the box.
+    """
+    receiver_data_dir.mkdir(parents=True, exist_ok=True)
+    db_path = receiver_data_dir / "receiver.sqlite3"
+    ppl_path = REPO_ROOT / "test_assets" / "ppl" / "large.ppl"
+    ppl_rows: list[tuple[int, str, str, str, str]] = []
+    if ppl_path.exists():
+        for raw_line in ppl_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith(";"):
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 3 and parts[0].isdigit():
+                bib = int(parts[0])
+                last = parts[1]
+                first = parts[2]
+                affiliation = parts[3] if len(parts) > 3 else ""
+                gender = parts[5].upper() if len(parts) > 5 and parts[5] else "X"
+                if gender not in ("M", "F", "X"):
+                    gender = "X"
+                ppl_rows.append((bib, last, first, affiliation, gender))
+            if len(ppl_rows) >= NUM_FRAMES:
+                break
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(
+            """
+            PRAGMA journal_mode=WAL;
+            PRAGMA user_version = 1;
+            CREATE TABLE IF NOT EXISTS divisions (
+                divno INTEGER PRIMARY KEY,
+                name  TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS participants (
+                bib         INTEGER PRIMARY KEY,
+                last        TEXT NOT NULL,
+                first       TEXT NOT NULL,
+                affiliation TEXT NOT NULL,
+                gender      TEXT NOT NULL,
+                division    INTEGER,
+                age         INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS bib_chips (
+                chip_id TEXT PRIMARY KEY,
+                bib     INTEGER NOT NULL
+            );
+            """
+        )
+        for divno, name in DEV_DIVISIONS:
+            conn.execute(
+                "INSERT OR REPLACE INTO divisions (divno, name) VALUES (?, ?)",
+                (divno, name),
+            )
+        for idx in range(1, NUM_FRAMES + 1):
+            if idx <= len(ppl_rows):
+                bib, last, first, affiliation, gender = ppl_rows[idx - 1]
+            else:
+                bib, last, first, affiliation, gender = (
+                    idx,
+                    f"Runner{idx}",
+                    f"Test{idx}",
+                    "",
+                    "F" if idx % 2 == 0 else "M",
+                )
+            if idx % 10 == 0:
+                gender = "X"
+            divno = DEV_DIVISIONS[(idx - 1) % len(DEV_DIVISIONS)][0]
+            age = 19 + ((idx * 7) % 45)
+            chip_id = format(int(DEV_CHIP_BASE_HEX, 16) + idx, "012x")
+            conn.execute(
+                "INSERT OR REPLACE INTO participants "
+                "(bib, last, first, affiliation, gender, division, age) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (bib, last, first, affiliation, gender, divno, age),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO bib_chips (chip_id, bib) VALUES (?, ?)",
+                (chip_id, bib),
+            )
+        if server_url or forwarder_endpoint_id:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS profile (
+                    server_url  TEXT NOT NULL,
+                    token       TEXT NOT NULL,
+                    update_mode TEXT NOT NULL DEFAULT 'check-and-download',
+                    receiver_mode_json TEXT,
+                    receiver_id TEXT,
+                    dbf_enabled INTEGER NOT NULL DEFAULT 0,
+                    announcer_enabled INTEGER NOT NULL DEFAULT 0,
+                    announcer_max_list_size INTEGER NOT NULL DEFAULT 25,
+                    announcer_expiry_minutes INTEGER NOT NULL DEFAULT 15,
+                    device_token TEXT,
+                    rd_import_enabled INTEGER NOT NULL DEFAULT 0,
+                    rd_import_dir     TEXT NOT NULL DEFAULT 'C:\\Winrace\\Files',
+                    rd_import_interval_secs INTEGER NOT NULL DEFAULT 15,
+                    dbf_flush_interval_ms INTEGER NOT NULL DEFAULT 1000
+                );
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    forwarder_endpoint_id TEXT NOT NULL,
+                    stream_id             TEXT NOT NULL,
+                    local_port_override   INTEGER,
+                    event_type            TEXT NOT NULL DEFAULT 'finish',
+                    forwarder_id          TEXT,
+                    reader_ip             TEXT,
+                    dbf_reader_index      INTEGER,
+                    PRIMARY KEY (forwarder_endpoint_id, stream_id)
+                );
+                CREATE TABLE IF NOT EXISTS announcer_publish_streams (
+                    stream_id TEXT PRIMARY KEY
+                );
+                """
+            )
+            has_profile = conn.execute("SELECT COUNT(*) FROM profile").fetchone()[0] > 0
+            if not has_profile:
+                conn.execute(
+                    "INSERT INTO profile (server_url, token, announcer_enabled) VALUES (?, ?, 1)",
+                    (server_url, server_token),
+                )
+            else:
+                conn.execute("UPDATE profile SET announcer_enabled = 1")
+            if forwarder_endpoint_id and stream_ids:
+                for idx, stream_id in enumerate(stream_ids):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO subscriptions "
+                        "(forwarder_endpoint_id, stream_id, event_type, reader_ip, dbf_reader_index) "
+                        "VALUES (?, ?, 'finish', ?, ?)",
+                        (forwarder_endpoint_id, stream_id, stream_id, idx if idx < 10 else None),
+                    )
+                    conn.execute(
+                        "INSERT OR IGNORE INTO announcer_publish_streams (stream_id) VALUES (?)",
+                        (f"{forwarder_endpoint_id}\x1f{stream_id}",),
+                    )
+        conn.commit()
+    finally:
+        conn.close()
 
 # ---------------------------------------------------------------------------
 # Process management
@@ -466,6 +639,13 @@ def main() -> int:
         f"127.0.0.1:{reader.emulator_port}" for reader in reader_ports
     ]
 
+    seed_receiver_participants(
+        receiver_data_dir,
+        server_url=server_url,
+        server_token=RECEIVER_VOUCHER,
+        forwarder_endpoint_id=derive_endpoint_id(FORWARDER_SEED_HEX),
+        stream_ids=expected_stream_ids,
+    )
     # --- Files ---
     reads_file = work_dir / "reads.txt"
     reads_file.write_text(
@@ -647,18 +827,47 @@ def run_receiver(mode: str, stack: Stack, work_dir: Path, receiver_env: dict) ->
         proc.wait()
         return
 
-    # mode == "tauri": launch the real desktop app via `cargo tauri dev`.
-    print("\n[receiver] launching the desktop app via `cargo tauri dev` "
-          "(Ctrl-C to stop the whole stack) ...")
+    # mode == "tauri": launch the real desktop app.
     env = dict(os.environ)
     env.update(receiver_env)
+    if shutil.which("cargo-tauri") is not None:
+        print("\n[receiver] launching the desktop app via `cargo tauri dev` "
+              "(Ctrl-C to stop the whole stack) ...")
+        proc = subprocess.Popen(
+            ["cargo", "tauri", "dev"],
+            cwd=str(RECEIVER_UI_DIR),
+            env=env,
+        )
+        stack.procs.append(Managed(name="receiver-tauri",
+                                   argv=["cargo", "tauri", "dev"],
+                                   log_path=work_dir / "receiver-tauri.log", proc=proc))
+        proc.wait()
+        return
+
+    print("\n[receiver] launching receiver-ui dev server + desktop app "
+          "(Ctrl-C to stop the whole stack) ...")
+    ui_dev = stack.add(
+        Managed(
+            name="receiver-ui-dev",
+            argv=["npm", "run", "dev", "--", "--host", "127.0.0.1", "--port", "5173"],
+            log_path=work_dir / "receiver-ui-dev.log",
+            cwd=RECEIVER_UI_DIR,
+            env=env,
+        )
+    )
+    ui_dev.start()
+    wait_tcp(5173, timeout=30, what="receiver-ui vite dev server")
+    ui_dev.assert_alive()
+
+    tauri_bin = TARGET_DIR / "receiver"
+    tauri_argv = [str(tauri_bin)] if tauri_bin.exists() else ["cargo", "run", "-p", "receiver-tauri"]
     proc = subprocess.Popen(
-        ["cargo", "tauri", "dev"],
-        cwd=str(RECEIVER_UI_DIR),
+        tauri_argv,
+        cwd=str(REPO_ROOT),
         env=env,
     )
     stack.procs.append(Managed(name="receiver-tauri",
-                               argv=["cargo", "tauri", "dev"],
+                               argv=tauri_argv,
                                log_path=work_dir / "receiver-tauri.log", proc=proc))
     proc.wait()
 

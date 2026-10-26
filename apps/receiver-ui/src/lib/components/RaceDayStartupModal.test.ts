@@ -36,6 +36,7 @@ const apiMocks = vi.hoisted(() => ({
   setStreamAnnouncerPublish: vi.fn().mockResolvedValue({}),
   setAnnouncerEnabled: vi.fn().mockResolvedValue({}),
   setAnnouncerMaxListSize: vi.fn().mockResolvedValue({}),
+  setAnnouncerExpiryMinutes: vi.fn().mockResolvedValue({}),
   resetAnnouncer: vi.fn().mockResolvedValue({}),
   getDataStats: vi.fn().mockResolvedValue({
     participants: 524,
@@ -286,13 +287,17 @@ describe("RaceDayStartupModal", () => {
     const maxList = screen.getByTestId("wizard-announcer-max-list");
     expect(maxList).toBeInTheDocument();
 
+    const expiryInput = screen.getByTestId("wizard-announcer-expiry-minutes");
+    expect(expiryInput).toBeInTheDocument();
     await fireEvent.click(toggle);
     await fireEvent.input(maxList, { target: { value: "30" } });
+    await fireEvent.input(expiryInput, { target: { value: "25" } });
 
     await fireEvent.click(nextBtn); // to 6
     await waitFor(() => {
       expect(apiMocks.setAnnouncerEnabled).toHaveBeenCalledWith(true);
       expect(apiMocks.setAnnouncerMaxListSize).toHaveBeenCalledWith(30);
+      expect(apiMocks.setAnnouncerExpiryMinutes).toHaveBeenCalledWith(25);
       expect(screen.getByText("Step 6 of 7")).toBeInTheDocument();
     });
   });

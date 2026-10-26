@@ -317,6 +317,7 @@ CREATE TABLE IF NOT EXISTS profile (
     dbf_enabled INTEGER NOT NULL DEFAULT 0,
     announcer_enabled INTEGER NOT NULL DEFAULT 0,
     announcer_max_list_size INTEGER NOT NULL DEFAULT 25,
+    announcer_expiry_minutes INTEGER NOT NULL DEFAULT 15,
     device_token TEXT,
     rd_import_enabled INTEGER NOT NULL DEFAULT 0,
     rd_import_dir TEXT NOT NULL DEFAULT 'C:\\Winrace\\Files',
@@ -347,7 +348,8 @@ CREATE TABLE IF NOT EXISTS participants (
     first       TEXT NOT NULL,
     affiliation TEXT NOT NULL,
     gender      TEXT NOT NULL,
-    division    INTEGER
+    division    INTEGER,
+    age         INTEGER
 );
 CREATE TABLE IF NOT EXISTS bib_chips (
     chip_id TEXT PRIMARY KEY,

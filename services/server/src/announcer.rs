@@ -16,6 +16,8 @@ pub struct AnnouncerInputEvent {
     pub reader_timestamp: Option<String>,
     pub received_at: DateTime<Utc>,
     pub division: Option<String>,
+    pub gender: Option<String>,
+    pub age: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -29,6 +31,8 @@ pub struct AnnouncerRow {
     pub reader_timestamp: Option<String>,
     pub received_at: DateTime<Utc>,
     pub division: Option<String>,
+    pub gender: Option<String>,
+    pub age: Option<i32>,
 }
 
 impl From<AnnouncerInputEvent> for AnnouncerRow {
@@ -43,6 +47,8 @@ impl From<AnnouncerInputEvent> for AnnouncerRow {
             reader_timestamp: event.reader_timestamp,
             received_at: event.received_at,
             division: event.division,
+            gender: event.gender,
+            age: event.age,
         }
     }
 }
@@ -55,15 +61,29 @@ pub struct AnnouncerDelta {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnnouncerEvent {
-    Update(AnnouncerDelta),
+    Update(Box<AnnouncerDelta>),
     Resync,
 }
 
-#[derive(Debug, Default)]
+pub const DEFAULT_ANNOUNCER_EXPIRY_MINUTES: u32 = 15;
+
+#[derive(Debug)]
 pub struct AnnouncerRuntime {
     seen_chips: HashSet<String>,
     rows: VecDeque<AnnouncerRow>,
     finisher_count: u64,
+    expiry_minutes: u32,
+}
+
+impl Default for AnnouncerRuntime {
+    fn default() -> Self {
+        Self {
+            seen_chips: HashSet::new(),
+            rows: VecDeque::new(),
+            finisher_count: 0,
+            expiry_minutes: DEFAULT_ANNOUNCER_EXPIRY_MINUTES,
+        }
+    }
 }
 
 impl AnnouncerRuntime {
@@ -86,6 +106,19 @@ impl AnnouncerRuntime {
     #[must_use]
     pub fn finisher_count(&self) -> u64 {
         self.finisher_count
+    }
+
+    #[must_use]
+    pub fn expiry_minutes(&self) -> u32 {
+        self.expiry_minutes
+    }
+
+    pub fn set_expiry_minutes(&mut self, expiry_minutes: u32) {
+        self.expiry_minutes = if expiry_minutes > 0 {
+            expiry_minutes
+        } else {
+            DEFAULT_ANNOUNCER_EXPIRY_MINUTES
+        };
     }
 
     pub fn ingest(
@@ -139,6 +172,8 @@ mod tests {
             received_at: Utc.with_ymd_and_hms(2026, 1, 1, 10, 0, 0).unwrap()
                 + chrono::Duration::seconds(secs),
             division: None,
+            gender: None,
+            age: None,
         }
     }
 

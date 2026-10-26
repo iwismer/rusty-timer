@@ -7,6 +7,7 @@
     store,
     setAnnouncerEnabled,
     setAnnouncerMaxListSize,
+    setAnnouncerExpiryMinutes,
     resetAnnouncer,
     importParticipantsFile,
     importChipsFile,
@@ -29,6 +30,18 @@
   function commitMaxList() {
     if (maxListInput !== store.announcerMaxListSize) {
       void setAnnouncerMaxListSize(maxListInput);
+    }
+  }
+
+  let expiryMinutesInput = $state(store.announcerExpiryMinutes);
+
+  $effect(() => {
+    expiryMinutesInput = store.announcerExpiryMinutes;
+  });
+
+  function commitExpiryMinutes() {
+    if (expiryMinutesInput !== store.announcerExpiryMinutes) {
+      void setAnnouncerExpiryMinutes(expiryMinutesInput);
     }
   }
 
@@ -138,6 +151,30 @@
         />
         <span class="mt-1 block text-[11px] text-text-muted">
           Caps how many rows the server announcer feed keeps visible.
+        </span>
+      </label>
+
+      <label class="block text-xs font-medium text-text-muted">
+        Hide finishers after (min)
+        <HelpTip
+          fieldKey="expiry_minutes"
+          sectionKey="announcer"
+          context="receiver"
+          onOpenModal={openHelp}
+        />
+        <input
+          data-testid="announcer-expiry-minutes-input"
+          class="{inputClass} mt-1 w-24"
+          type="number"
+          min="1"
+          max="1440"
+          bind:value={expiryMinutesInput}
+          disabled={store.announcerExpiryBusy}
+          onblur={commitExpiryMinutes}
+        />
+        <span class="mt-1 block text-[11px] text-text-muted">
+          Automatically hides finishers from the announcer screen after this
+          many minutes.
         </span>
       </label>
 

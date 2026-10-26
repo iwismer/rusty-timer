@@ -23,6 +23,8 @@ mod tests {
             reader_timestamp: Some("10:00:00".to_owned()),
             received_at: Utc.timestamp_millis_opt(received_unix_ms).unwrap(),
             division: None,
+            gender: None,
+            age: None,
         }
     }
 
@@ -77,7 +79,7 @@ mod tests {
         let user_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 4);
+        assert_eq!(user_version, 5);
 
         let create_sql: String = conn
             .query_row(
@@ -91,6 +93,8 @@ mod tests {
         assert!(create_sql.contains("seq INTEGER NOT NULL"));
         assert!(create_sql.contains("source_generation INTEGER NOT NULL"));
         assert!(create_sql.contains("division TEXT"));
+        assert!(create_sql.contains("gender TEXT"));
+        assert!(create_sql.contains("age INTEGER"));
         assert!(create_sql.contains("PRIMARY KEY(forwarder_endpoint_id, stream_id, seq)"));
     }
 
@@ -145,6 +149,6 @@ mod tests {
         let user_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 4);
+        assert_eq!(user_version, 5);
     }
 }

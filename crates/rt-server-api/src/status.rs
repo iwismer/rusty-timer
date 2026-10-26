@@ -9,6 +9,9 @@ pub struct StatusResponse {
     pub announcer_source_generation: u64,
     /// Unique-chip finisher count from the live announcer runtime.
     pub finisher_count: u64,
+    /// Receiver-configured announcer row expiry window in minutes (default 15).
+    #[serde(default = "default_announcer_expiry_minutes")]
+    pub announcer_expiry_minutes: u32,
     /// Most recent announcer rows held in the live runtime, newest first.
     pub announcer_rows: Vec<AnnouncerRow>,
     /// All registered devices and their approval state.
@@ -17,6 +20,9 @@ pub struct StatusResponse {
     pub forwarders: Vec<ForwarderRecord>,
     /// Backup forwarder stream catalog rows, if any.
     pub forwarder_streams: Vec<ForwarderStreamRecord>,
+}
+fn default_announcer_expiry_minutes() -> u32 {
+    15
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +39,10 @@ pub struct AnnouncerRow {
     pub reader_timestamp: Option<String>,
     pub received_at: DateTime<Utc>,
     pub division: Option<String>,
+    #[serde(default)]
+    pub gender: Option<String>,
+    #[serde(default)]
+    pub age: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

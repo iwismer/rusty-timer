@@ -24,8 +24,9 @@
 //!   locally from race/participant data via the injected resolver.
 
 use rt_server_api::announcer::{
-    MAX_ANNOUNCER_DISPLAY_NAME_LEN, MAX_ANNOUNCER_DIVISION_LEN, MAX_ANNOUNCER_ID_LEN,
-    MAX_PUSH_ROWS, PushRow, PushRowsRequest, ResetAnnouncerResponse, TakeoverResponse,
+    MAX_ANNOUNCER_DISPLAY_NAME_LEN, MAX_ANNOUNCER_DIVISION_LEN, MAX_ANNOUNCER_GENDER_LEN,
+    MAX_ANNOUNCER_ID_LEN, MAX_PUSH_ROWS, PushRow, PushRowsRequest, ResetAnnouncerResponse,
+    TakeoverResponse,
 };
 use rt_server_api::register::{RegisterRequest, RegisterResponse};
 use serde::Deserialize;
@@ -49,6 +50,8 @@ pub struct ResolvedParticipant {
     pub name: Option<String>,
     /// Division display name, when the participant has a known division.
     pub division: Option<String>,
+    pub gender: Option<String>,
+    pub age: Option<i32>,
 }
 
 /// Narrow resolver from a chip ID to a participant identity.
@@ -82,6 +85,8 @@ pub struct AnnouncerRow {
     pub bib: Option<String>,
     pub name: Option<String>,
     pub division: Option<String>,
+    pub gender: Option<String>,
+    pub age: Option<i32>,
 }
 
 /// A batch of announcer rows sharing one composite stream identity and one
@@ -100,6 +105,7 @@ pub struct AnnouncerBatch<'a> {
     pub stream_id: &'a str,
     pub announcer_source_generation: i64,
     pub max_list_size: u32,
+    pub expiry_minutes: u32,
     pub rows: &'a [AnnouncerRow],
 }
 
@@ -217,6 +223,11 @@ fn push_rows_request_body(
                     .division
                     .as_deref()
                     .map(|division| clamp_wire_string(division, MAX_ANNOUNCER_DIVISION_LEN)),
+                gender: row
+                    .gender
+                    .as_deref()
+                    .map(|gender| clamp_wire_string(gender, MAX_ANNOUNCER_GENDER_LEN)),
+                age: row.age,
             })
         })
         .collect::<Result<Vec<_>, AnnouncerPushError>>()?;
@@ -230,6 +241,7 @@ fn push_rows_request_body(
         stream_id: checked_identity_field("stream_id", batch.stream_id, MAX_ANNOUNCER_ID_LEN)?,
         rows,
         max_list_size: Some(batch.max_list_size),
+        expiry_minutes: Some(batch.expiry_minutes),
     })
 }
 
@@ -549,6 +561,7 @@ pub fn push_announcer_rows(
     // enabling the announcer against a large backlog (rows carry raw frames)
     // and each chunk is exactly one transport request downstream.
     let max_list_size = db.load_announcer_max_list_size()?;
+    let expiry_minutes = db.load_announcer_expiry_minutes()?;
     let mut total_marked = 0usize;
     loop {
         let pending = db.load_unpushed_announcer_events_limited(stream_id, MAX_PUSH_ROWS)?;
@@ -561,14 +574,19 @@ pub fn push_announcer_rows(
             .iter()
             .map(|event| {
                 let chip_id = chip_id_from_raw_frame(&event.raw_frame);
-                let resolved = resolver.resolve(&chip_id);
+                let (bib, name, division, gender, age) = match resolver.resolve(&chip_id) {
+                    Some(p) => (Some(p.bib), p.name, p.division, p.gender, p.age),
+                    None => (None, None, None, None, None),
+                };
                 AnnouncerRow {
                     seq: event.seq,
                     received_unix_ms: event.received_unix_ms,
                     chip_id,
-                    bib: resolved.as_ref().map(|p| p.bib.clone()),
-                    name: resolved.as_ref().and_then(|p| p.name.clone()),
-                    division: resolved.and_then(|p| p.division),
+                    bib,
+                    name,
+                    division,
+                    gender,
+                    age,
                 }
             })
             .collect();
@@ -591,6 +609,7 @@ pub fn push_announcer_rows(
             stream_id: stream_key.wire_stream_id(),
             announcer_source_generation: generation,
             max_list_size,
+            expiry_minutes,
             rows: &rows,
         })?;
 
@@ -666,6 +685,7 @@ mod tests {
         stream_id: String,
         announcer_source_generation: i64,
         max_list_size: u32,
+        expiry_minutes: u32,
         rows: Vec<AnnouncerRow>,
     }
 
@@ -724,6 +744,7 @@ mod tests {
                 stream_id: batch.stream_id.to_owned(),
                 announcer_source_generation: batch.announcer_source_generation,
                 max_list_size: batch.max_list_size,
+                expiry_minutes: batch.expiry_minutes,
                 rows: batch.rows.to_vec(),
             });
             Ok(())
@@ -740,6 +761,8 @@ mod tests {
                         bib: (*bib).to_owned(),
                         name: Some((*name).to_owned()),
                         division: None,
+                        gender: None,
+                        age: None,
                     },
                 )
             })
@@ -906,6 +929,8 @@ mod tests {
             bib: Some("42".to_owned()),
             name: Some("Ada Lovelace".to_owned()),
             division: Some("5k".to_owned()),
+            gender: Some("F".to_owned()),
+            age: Some(29),
         }
     }
 
@@ -915,6 +940,7 @@ mod tests {
             stream_id: "finish-line",
             announcer_source_generation: 3,
             max_list_size: 25,
+            expiry_minutes: 15,
             rows,
         }
     }
@@ -928,18 +954,25 @@ mod tests {
         assert_eq!(body["stream_id"], "finish-line");
         assert_eq!(body["announcer_source_generation"], 3);
         assert_eq!(body["max_list_size"], 25);
+        assert_eq!(body["expiry_minutes"], 15);
         assert_eq!(body["rows"][0]["seq"], 7);
         assert_eq!(body["rows"][0]["division"], "5k");
+        assert_eq!(body["rows"][0]["gender"], "F");
+        assert_eq!(body["rows"][0]["age"], 29);
         assert_eq!(body["rows"][0]["bib"], 42);
         assert_eq!(body["rows"][0]["display_name"], "Ada Lovelace");
         // An absent division serializes as null rather than being dropped.
         let rows = vec![AnnouncerRow {
             division: None,
+            gender: None,
+            age: None,
             ..sample_row()
         }];
         let body =
             serde_json::to_value(push_rows_request_body(&sample_batch(&rows)).unwrap()).unwrap();
         assert!(body["rows"][0]["division"].is_null());
+        assert!(body["rows"][0]["gender"].is_null());
+        assert!(body["rows"][0]["age"].is_null());
     }
 
     #[test]
@@ -948,6 +981,8 @@ mod tests {
             bib: Some("1488".to_owned()),
             name: None,
             division: None,
+            gender: None,
+            age: None,
             ..sample_row()
         }];
         let body =
@@ -1007,6 +1042,8 @@ mod tests {
                 bib: "42".to_owned(),
                 name: Some("Ada Lovelace".to_owned()),
                 division: Some("5k".to_owned()),
+                gender: Some("F".to_owned()),
+                age: Some(29),
             })
         };
 
@@ -1023,6 +1060,8 @@ mod tests {
         assert_eq!(requests.len(), 1);
         let row = &requests[0].rows[0];
         assert_eq!(row.division.as_deref(), Some("5k"));
+        assert_eq!(row.gender.as_deref(), Some("F"));
+        assert_eq!(row.age, Some(29));
         assert_eq!(row.bib, Some(42));
         assert_eq!(row.display_name, "Ada Lovelace");
     }
@@ -1056,6 +1095,8 @@ mod tests {
                 bib: "42".to_owned(),
                 name: Some(over_limit_name.clone()),
                 division: Some(over_limit_division.clone()),
+                gender: None,
+                age: None,
             })
         };
 
@@ -1096,6 +1137,8 @@ mod tests {
                 bib: "1488".to_owned(),
                 name: None,
                 division: None,
+                gender: None,
+                age: None,
             })
         };
 

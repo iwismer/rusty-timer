@@ -35,6 +35,7 @@ describe('receiver help coverage', () => {
     expectFields(RECEIVER_HELP.announcer, [
       'announcer_enabled',
       'max_list_size',
+      'expiry_minutes',
       'open_announcer_page',
       'reset_announcer',
       'participants_file',

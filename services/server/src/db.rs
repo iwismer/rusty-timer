@@ -2,7 +2,7 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
-const CURRENT_USER_VERSION: i64 = 4;
+const CURRENT_USER_VERSION: i64 = 5;
 
 pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -39,6 +39,8 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
              reader_timestamp TEXT,
              received_unix_ms INTEGER NOT NULL,
              division TEXT,
+             gender TEXT,
+             age INTEGER,
              PRIMARY KEY(forwarder_endpoint_id, stream_id, seq)
          );
          CREATE TABLE IF NOT EXISTS announcer_source_state (
@@ -47,6 +49,12 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
          );
          INSERT OR IGNORE INTO announcer_source_state (id, generation) VALUES (1, 0);",
     )?;
+    if !has_column(conn, "announcer_rows", "gender")? {
+        conn.execute("ALTER TABLE announcer_rows ADD COLUMN gender TEXT", [])?;
+    }
+    if !has_column(conn, "announcer_rows", "age")? {
+        conn.execute("ALTER TABLE announcer_rows ADD COLUMN age INTEGER", [])?;
+    }
 
     if user_version < CURRENT_USER_VERSION {
         conn.pragma_update(None, "user_version", CURRENT_USER_VERSION)?;

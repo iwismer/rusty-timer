@@ -18,6 +18,7 @@
     setStreamAnnouncerPublish,
     setAnnouncerEnabled,
     setAnnouncerMaxListSize,
+    setAnnouncerExpiryMinutes,
     loadDbfConfig,
     loadRdImportConfig,
     saveDbfConfig,
@@ -104,18 +105,21 @@
   let userToggledAnnouncer = $state(false);
   let announcerScreenEnabled = $state(false);
   let announcerMaxList = $state(20);
+  let announcerExpiryMinutes = $state(15);
 
   $effect(() => {
     if (!store.raceDayModalOpen) {
       userToggledAnnouncer = false;
       announcerScreenEnabled = false;
       announcerMaxList = 20;
+      announcerExpiryMinutes = 15;
       finishError = null;
       return;
     }
     if (!userToggledAnnouncer) {
       announcerScreenEnabled = hasAnnouncerPublish || store.announcerEnabled;
       announcerMaxList = store.announcerMaxListSize || 20;
+      announcerExpiryMinutes = store.announcerExpiryMinutes || 15;
     }
   });
 
@@ -209,6 +213,7 @@
     } else if (step === 5) {
       await setAnnouncerEnabled(announcerScreenEnabled);
       await setAnnouncerMaxListSize(announcerMaxList);
+      await setAnnouncerExpiryMinutes(announcerExpiryMinutes);
       step = 6;
     } else if (step < 7) {
       step += 1;
@@ -1004,6 +1009,26 @@
                   <p class="text-[11px] text-text-muted">
                     Controls the maximum number of recent finishers displayed
                     simultaneously on the announcer screen.
+                  </p>
+                </div>
+
+                <div
+                  class="p-3.5 rounded-lg border border-border bg-surface-1 space-y-2"
+                >
+                  <label class="block text-xs font-medium text-text-secondary">
+                    Hide finishers after (minutes):
+                    <input
+                      type="number"
+                      min="1"
+                      max="1440"
+                      data-testid="wizard-announcer-expiry-minutes"
+                      bind:value={announcerExpiryMinutes}
+                      class="mt-1 w-24 px-2 py-1 rounded border border-border bg-surface-0 font-mono text-xs text-text-primary"
+                    />
+                  </label>
+                  <p class="text-[11px] text-text-muted">
+                    Athletes automatically disappear from the announcer screen
+                    after this many minutes (15 minutes by default).
                   </p>
                 </div>
 

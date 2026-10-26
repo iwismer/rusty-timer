@@ -323,6 +323,14 @@ export const RECEIVER_HELP = {
           'Limits the number of finisher rows visible on the server announcer page. Older rows scroll off as new finishers arrive.',
         range: '1-500',
       },
+      expiry_minutes: {
+        label: 'Hide Finishers After (min)',
+        summary: 'Hides finishers from the announcer screen after a set number of minutes.',
+        detailHtml:
+          'Athletes automatically disappear from the announcer screen once their finish read is older than this many minutes (15 minutes by default).',
+        range: '1-1440',
+        default: '15',
+      },
       open_announcer_page: {
         label: 'Open Announcer Page',
         summary: 'Opens the server announcer board in your browser.',

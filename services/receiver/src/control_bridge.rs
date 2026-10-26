@@ -410,6 +410,11 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
             arg(args, "max_list_size")?,
         )
         .await?),
+        "set_announcer_expiry_minutes" => ok(control_api::set_announcer_expiry_minutes(
+            state,
+            arg(args, "expiry_minutes")?,
+        )
+        .await?),
         "set_stream_announcer_publish" => {
             let forwarder_endpoint_id: String = arg(args, "forwarder_endpoint_id")?;
             let stream_id: String = arg(args, "stream_id")?;

@@ -1684,6 +1684,8 @@ async fn emit_stream_projection(
                     bib: entry.bib.clone(),
                     name: entry.name.clone(),
                     division: entry.division.clone(),
+                    gender: entry.gender.clone(),
+                    age: entry.age,
                 })
             })
         };
@@ -2080,6 +2082,8 @@ impl ParticipantResolver for SnapshotResolver {
                     bib: entry.bib.clone(),
                     name: entry.name.clone(),
                     division: entry.division.clone(),
+                    gender: entry.gender.clone(),
+                    age: entry.age,
                 });
             }
         }

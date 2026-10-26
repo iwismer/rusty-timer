@@ -60,6 +60,7 @@ impl AppState {
                     &announcer_runtime,
                     rows,
                     announcer::DEFAULT_MAX_ANNOUNCER_ROWS,
+                    announcer::DEFAULT_ANNOUNCER_EXPIRY_MINUTES,
                 );
             }
             Err(err) => {

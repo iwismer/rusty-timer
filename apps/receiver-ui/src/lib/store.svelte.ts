@@ -134,6 +134,8 @@ export const store = $state({
   announcerBusy: false,
   announcerMaxListSize: 25,
   announcerMaxListBusy: false,
+  announcerExpiryMinutes: 15,
+  announcerExpiryBusy: false,
   announcerResetBusy: false,
   announcerResetMessage: null as string | null,
   announcerResetError: null as string | null,
@@ -851,6 +853,7 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
       store.serverSource = p.server_source ?? "none";
       store.announcerEnabled = p.announcer_enabled ?? false;
       store.announcerMaxListSize = p.announcer_max_list_size ?? 25;
+      store.announcerExpiryMinutes = p.announcer_expiry_minutes ?? 15;
       // Only overwrite edit fields if the user hasn't made unsaved changes.
       if (!configWasDirty) {
         store.editServerUrl = p.server_url;
@@ -1108,6 +1111,22 @@ export async function setAnnouncerMaxListSize(
     store.error = `Failed to update announcer list size: ${e}`;
   } finally {
     store.announcerMaxListBusy = false;
+  }
+}
+
+export async function setAnnouncerExpiryMinutes(
+  expiryMinutes: number,
+): Promise<void> {
+  const clamped = Math.min(1440, Math.max(1, Math.round(expiryMinutes)));
+  store.announcerExpiryBusy = true;
+  try {
+    store.error = null;
+    await api.setAnnouncerExpiryMinutes(clamped);
+    store.announcerExpiryMinutes = clamped;
+  } catch (e) {
+    store.error = `Failed to update announcer expiry time: ${e}`;
+  } finally {
+    store.announcerExpiryBusy = false;
   }
 }
 

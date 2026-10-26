@@ -14,7 +14,7 @@
 //!   per chip, so a bib with several chips is simply several rows; row 1 is a
 //!   deleted `BIB`/`CHIP` header that is skipped.
 //! * `RACE.DBF` — participant table (`RUNERNO`=bib, `RUNFNAME`, `RUNLNAME`,
-//!   `RUNSEX`, `RUNDIV`). This is the default participant source; `ANNRACE.DBF`
+//!   `RUNSEX`, `RUNAGE`, `RUNDIV`). This is the default participant source; `ANNRACE.DBF`
 //!   is an unverified alternative (spec §3, open question #2) and is **not**
 //!   used here.
 //! * `DIVISION.DBF` — division names (`DIVNO`→`DIVNAME`).
@@ -276,6 +276,7 @@ fn parse_race(dbf: &Dbf) -> Result<Vec<Participant>, RdError> {
     let last_field = dbf.field("RUNLNAME");
     let sex_field = dbf.field("RUNSEX");
     let div_field = dbf.field("RUNDIV");
+    let age_field = dbf.field("RUNAGE");
 
     let mut participants = Vec::new();
     for rec in dbf.records() {
@@ -304,6 +305,10 @@ fn parse_race(dbf: &Dbf) -> Result<Vec<Participant>, RdError> {
         let division = div_field
             .and_then(|f| dbf.value(rec, f))
             .and_then(|s| s.trim().parse::<i32>().ok());
+        let age = age_field
+            .and_then(|f| dbf.value(rec, f))
+            .and_then(|s| s.trim().parse::<i32>().ok())
+            .filter(|&a| a > 0);
         participants.push(Participant {
             bib,
             last,
@@ -311,6 +316,7 @@ fn parse_race(dbf: &Dbf) -> Result<Vec<Participant>, RdError> {
             affiliation: String::new(),
             gender,
             division,
+            age,
         });
     }
     Ok(participants)
@@ -562,6 +568,7 @@ mod tests {
         assert_eq!(renee.last, "Dupont");
         assert_eq!(renee.gender, "F");
         assert_eq!(renee.division, Some(2));
+        assert_eq!(renee.age, Some(27));
     }
 
     #[test]
@@ -592,6 +599,8 @@ mod tests {
         let parts = parse_race(&load_fixture(RACE_FILE)).unwrap();
         assert_eq!(parts.iter().find(|p| p.bib == 1).unwrap().gender, "M");
         assert_eq!(parts.iter().find(|p| p.bib == 3).unwrap().gender, "X");
+        assert_eq!(parts.iter().find(|p| p.bib == 1).unwrap().age, Some(30));
+        assert_eq!(parts.iter().find(|p| p.bib == 3).unwrap().age, Some(40));
     }
 
     #[test]

@@ -106,13 +106,14 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> Respon
         }
     }
 
-    let (finisher_count, announcer_rows) = {
+    let (finisher_count, announcer_expiry_minutes, announcer_rows) = {
         let runtime = state
             .announcer_runtime
             .lock()
             .expect("announcer runtime mutex poisoned");
         (
             runtime.finisher_count(),
+            runtime.expiry_minutes(),
             runtime.rows().iter().cloned().collect::<Vec<_>>(),
         )
     };
@@ -122,6 +123,7 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> Respon
         Json(wire::StatusResponse {
             announcer_source_generation,
             finisher_count,
+            announcer_expiry_minutes,
             announcer_rows: announcer_rows
                 .into_iter()
                 .map(announcer_row_to_wire)
@@ -148,6 +150,8 @@ fn announcer_row_to_wire(row: crate::announcer::AnnouncerRow) -> wire::Announcer
         reader_timestamp: row.reader_timestamp,
         received_at: row.received_at,
         division: row.division,
+        gender: row.gender,
+        age: row.age,
     }
 }
 

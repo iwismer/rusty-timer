@@ -146,8 +146,11 @@ mod tests {
                 reader_timestamp: None,
                 received_unix_ms: 1_700_000_000_100,
                 division: None,
+                gender: None,
+                age: None,
             }],
             max_list_size: Some(25),
+            expiry_minutes: Some(15),
         };
         assert_eq!(
             serde_json::to_value(&request).unwrap(),
@@ -162,9 +165,12 @@ mod tests {
                     "display_name": "Ada Lovelace",
                     "reader_timestamp": null,
                     "received_unix_ms": 1_700_000_000_100_i64,
-                    "division": null
+                    "division": null,
+                    "gender": null,
+                    "age": null
                 }],
-                "max_list_size": 25
+                "max_list_size": 25,
+                "expiry_minutes": 15
             })
         );
         let missing_defaults =
@@ -183,7 +189,10 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(missing_defaults.rows[0].division, None);
+        assert_eq!(missing_defaults.rows[0].gender, None);
+        assert_eq!(missing_defaults.rows[0].age, None);
         assert_eq!(missing_defaults.max_list_size, None);
+        assert_eq!(missing_defaults.expiry_minutes, None);
 
         assert_eq!(
             serde_json::to_value(crate::announcer::TakeoverResponse {
@@ -235,6 +244,7 @@ mod tests {
         let status = crate::status::StatusResponse {
             announcer_source_generation: 1,
             finisher_count: 2,
+            announcer_expiry_minutes: 15,
             announcer_rows: vec![crate::status::AnnouncerRow {
                 forwarder_endpoint_id: "fwd-1".to_owned(),
                 stream_id: "finish-line".to_owned(),
@@ -247,6 +257,8 @@ mod tests {
                     .unwrap()
                     .with_timezone(&chrono::Utc),
                 division: None,
+                gender: None,
+                age: None,
             }],
             devices: vec![crate::status::DeviceRecord {
                 endpoint_id: "rx-1".to_owned(),

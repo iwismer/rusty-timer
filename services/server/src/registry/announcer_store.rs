@@ -21,6 +21,10 @@ pub struct AnnouncerRowRecord {
     pub received_unix_ms: i64,
     /// Division display name resolved by the receiver, when known.
     pub division: Option<String>,
+    /// Participant gender resolved by the receiver, when known.
+    pub gender: Option<String>,
+    /// Participant age resolved by the receiver, when known.
+    pub age: Option<i32>,
 }
 
 #[derive(Debug)]
@@ -98,7 +102,7 @@ pub fn upsert_announcer_rows(
         let mut sql = String::from(
             "INSERT INTO announcer_rows (
                  forwarder_endpoint_id, stream_id, seq, source_generation, chip_id, bib,
-                 display_name, reader_timestamp, received_unix_ms, division
+                 display_name, reader_timestamp, received_unix_ms, division, gender, age
              )
              VALUES ",
         );
@@ -106,10 +110,10 @@ pub fn upsert_announcer_rows(
             if i > 0 {
                 sql.push_str(", ");
             }
-            let base = i * 10;
+            let base = i * 12;
             let _ = write!(
                 sql,
-                "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
+                "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
                 base + 1,
                 base + 2,
                 base + 3,
@@ -119,7 +123,9 @@ pub fn upsert_announcer_rows(
                 base + 7,
                 base + 8,
                 base + 9,
-                base + 10
+                base + 10,
+                base + 11,
+                base + 12
             );
         }
         sql.push_str(
@@ -130,7 +136,9 @@ pub fn upsert_announcer_rows(
                  display_name = excluded.display_name,
                  reader_timestamp = excluded.reader_timestamp,
                  received_unix_ms = excluded.received_unix_ms,
-                 division = excluded.division",
+                 division = excluded.division,
+                 gender = excluded.gender,
+                 age = excluded.age",
         );
 
         let mut stmt = tx.prepare_cached(&sql)?;
@@ -144,7 +152,7 @@ pub fn upsert_announcer_rows(
             converted.push((seq, generation));
         }
 
-        let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(chunk.len() * 10);
+        let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(chunk.len() * 12);
         for (row, (seq, generation)) in chunk.iter().zip(&converted) {
             params.push(&row.forwarder_endpoint_id);
             params.push(&row.stream_id);
@@ -156,6 +164,8 @@ pub fn upsert_announcer_rows(
             params.push(&row.reader_timestamp);
             params.push(&row.received_unix_ms);
             params.push(&row.division);
+            params.push(&row.gender);
+            params.push(&row.age);
         }
         stmt.execute(rusqlite::params_from_iter(params))?;
     }
@@ -168,7 +178,7 @@ pub fn list_announcer_rows_ordered(
 ) -> Result<Vec<AnnouncerRowRecord>, AnnouncerStorageError> {
     let mut stmt = conn.prepare(
         "SELECT source_generation, forwarder_endpoint_id, stream_id, seq, chip_id, bib,
-                display_name, reader_timestamp, received_unix_ms, division
+                display_name, reader_timestamp, received_unix_ms, division, gender, age
          FROM announcer_rows
          ORDER BY received_unix_ms, forwarder_endpoint_id, stream_id, seq",
     )?;
@@ -184,6 +194,8 @@ pub fn list_announcer_rows_ordered(
             reader_timestamp: row.get(7)?,
             received_unix_ms: row.get(8)?,
             division: row.get(9)?,
+            gender: row.get(10)?,
+            age: row.get(11)?,
         })
     })?;
 
@@ -234,6 +246,8 @@ mod tests {
             reader_timestamp: None,
             received_unix_ms: i64::try_from(seq).unwrap() * 1_000,
             division: None,
+            gender: None,
+            age: None,
         }
     }
 

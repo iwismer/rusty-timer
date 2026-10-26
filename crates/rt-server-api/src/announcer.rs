@@ -13,6 +13,8 @@ pub const MAX_ANNOUNCER_DISPLAY_NAME_LEN: usize = 256;
 pub const MAX_ANNOUNCER_DIVISION_LEN: usize = 256;
 /// Maximum byte length for announcer reader timestamp strings.
 pub const MAX_ANNOUNCER_READER_TIMESTAMP_LEN: usize = 64;
+/// Maximum byte length for announcer participant gender strings.
+pub const MAX_ANNOUNCER_GENDER_LEN: usize = 16;
 
 /// A batch of announcer rows pushed by a receiver.
 ///
@@ -34,6 +36,10 @@ pub struct PushRowsRequest {
     /// back to the server default.
     #[serde(default)]
     pub max_list_size: Option<u32>,
+    /// Receiver-configured announcer row expiry window in minutes. Absent or
+    /// zero falls back to the server default (15 minutes).
+    #[serde(default)]
+    pub expiry_minutes: Option<u32>,
 }
 
 /// One announcer row within a [`PushRowsRequest`] batch.
@@ -48,6 +54,12 @@ pub struct PushRow {
     /// Division display name resolved by the receiver, when known.
     #[serde(default)]
     pub division: Option<String>,
+    /// Participant gender resolved by the receiver, when known.
+    #[serde(default)]
+    pub gender: Option<String>,
+    /// Participant age resolved by the receiver, when known.
+    #[serde(default)]
+    pub age: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

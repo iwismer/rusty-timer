@@ -27,6 +27,8 @@ pub struct ChipEntry {
     pub bib: String,
     pub name: Option<String>,
     pub division: Option<String>,
+    pub gender: Option<String>,
+    pub age: Option<i32>,
 }
 
 pub type ChipLookup = HashMap<String, HashMap<String, ChipEntry>>;
@@ -2546,6 +2548,7 @@ macro_rules! receiver_command_list {
             get_data_stats() -> "DataStats",
             set_announcer_enabled(enabled: "bool") -> "()",
             set_announcer_max_list_size(max_list_size: "u32") -> "()",
+            set_announcer_expiry_minutes(expiry_minutes: "u32") -> "()",
             set_stream_announcer_publish(
                 forwarder_endpoint_id: "String",
                 stream_id: "String",
@@ -2777,6 +2780,7 @@ mod tests {
                 affiliation: String::new(),
                 gender: "X".to_owned(),
                 division: None,
+                age: None,
             }],
             chips: vec![(7, "058003799177".to_owned())],
             divisions: std::collections::HashMap::new(),
@@ -2890,6 +2894,7 @@ mod tests {
                 affiliation: String::new(),
                 gender: "X".to_owned(),
                 division: None,
+                age: None,
             }])
             .unwrap();
             db.replace_bib_chips(&[(12, "chip-12".to_owned())]).unwrap();

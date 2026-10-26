@@ -362,12 +362,13 @@ impl Db {
         // delete+insert (mirrors dbf handling).
         let announcer_enabled = self.load_announcer_enabled()?;
         let announcer_max_list_size = self.load_announcer_max_list_size()?;
+        let announcer_expiry_minutes = self.load_announcer_expiry_minutes()?;
         let rd_import = self.load_rd_import_config()?;
         let tx = self.transaction()?;
         tx.execute_batch("DELETE FROM profile")?;
         tx.execute(
-            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, dbf_flush_interval_ms, announcer_enabled, announcer_max_list_size, rd_import_enabled, rd_import_dir, rd_import_interval_secs) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, dbf_config.flush_interval_ms, i64::from(announcer_enabled), i64::from(announcer_max_list_size), i64::from(rd_import.enabled), &rd_import.dir, i64::from(rd_import.interval_secs)],
+            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, dbf_flush_interval_ms, announcer_enabled, announcer_max_list_size, announcer_expiry_minutes, rd_import_enabled, rd_import_dir, rd_import_interval_secs) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, dbf_config.flush_interval_ms, i64::from(announcer_enabled), i64::from(announcer_max_list_size), i64::from(announcer_expiry_minutes), i64::from(rd_import.enabled), &rd_import.dir, i64::from(rd_import.interval_secs)],
         )?;
         tx.commit()?;
         Ok(())
@@ -689,7 +690,7 @@ impl Db {
         &self,
     ) -> DbResult<std::collections::HashMap<String, crate::control_api::ChipEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT c.chip_id, c.bib, p.first, p.last, d.name
+            "SELECT c.chip_id, c.bib, p.first, p.last, d.name, p.gender, p.age
              FROM bib_chips c
              LEFT JOIN participants p ON p.bib = c.bib
              LEFT JOIN divisions d ON d.divno = p.division",
@@ -700,6 +701,8 @@ impl Db {
             let first: Option<String> = r.get(2)?;
             let last: Option<String> = r.get(3)?;
             let division: Option<String> = r.get(4)?;
+            let gender: Option<String> = r.get(5)?;
+            let age: Option<i32> = r.get(6)?;
             let name = match (first, last) {
                 (Some(first), Some(last)) => Some(format!("{first} {last}").trim().to_owned()),
                 _ => None,
@@ -710,6 +713,8 @@ impl Db {
                     bib: bib.to_string(),
                     name,
                     division,
+                    gender,
+                    age,
                 },
             ))
         })?;
@@ -1585,6 +1590,42 @@ impl Db {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> DbResult<()> {
             self.conn.execute_batch(SCHEMA_SQL)?;
+            let has_age_col: bool = {
+                let mut stmt = self.conn.prepare("PRAGMA table_info(participants)")?;
+                let mut rows = stmt.query([])?;
+                let mut found = false;
+                while let Some(row) = rows.next()? {
+                    let name: String = row.get(1)?;
+                    if name == "age" {
+                        found = true;
+                        break;
+                    }
+                }
+                found
+            };
+            if !has_age_col {
+                self.conn
+                    .execute("ALTER TABLE participants ADD COLUMN age INTEGER", [])?;
+            }
+            let has_expiry_col: bool = {
+                let mut stmt = self.conn.prepare("PRAGMA table_info(profile)")?;
+                let mut rows = stmt.query([])?;
+                let mut found = false;
+                while let Some(row) = rows.next()? {
+                    let name: String = row.get(1)?;
+                    if name == "announcer_expiry_minutes" {
+                        found = true;
+                        break;
+                    }
+                }
+                found
+            };
+            if !has_expiry_col {
+                self.conn.execute(
+                    "ALTER TABLE profile ADD COLUMN announcer_expiry_minutes INTEGER NOT NULL DEFAULT 15",
+                    [],
+                )?;
+            }
             self.conn.execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_received_announcer_unpushed
                      ON received_events(stream_id, received_unix_ms, seq)
@@ -1909,6 +1950,35 @@ impl Db {
         let changed = self.conn.execute(
             "UPDATE profile SET announcer_max_list_size = ?1",
             rusqlite::params![i64::from(max_list_size)],
+        )?;
+        if changed == 0 {
+            return Err(DbError::ProfileMissing);
+        }
+        Ok(())
+    }
+
+    /// Receiver-configured row-expiry window (in minutes) for the server
+    /// announcer feed. Defaults to 15 when unset or out of range.
+    pub fn load_announcer_expiry_minutes(&self) -> DbResult<u32> {
+        let value: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT announcer_expiry_minutes FROM profile LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let resolved = value
+            .filter(|n| *n > 0)
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(15);
+        Ok(resolved)
+    }
+
+    pub fn set_announcer_expiry_minutes(&self, expiry_minutes: u32) -> DbResult<()> {
+        let changed = self.conn.execute(
+            "UPDATE profile SET announcer_expiry_minutes = ?1",
+            rusqlite::params![i64::from(expiry_minutes)],
         )?;
         if changed == 0 {
             return Err(DbError::ProfileMissing);
@@ -2282,10 +2352,10 @@ fn insert_participants_batch(
         return Ok(());
     }
     const CHUNK_SIZE: usize = 50;
-    const COLS_PER_ROW: usize = 6;
+    const COLS_PER_ROW: usize = 7;
 
     let mut full_query = String::from(
-        "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender, division) VALUES ",
+        "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender, division, age) VALUES ",
     );
     for i in 0..CHUNK_SIZE {
         if i > 0 {
@@ -2295,20 +2365,21 @@ fn insert_participants_batch(
         use std::fmt::Write;
         let _ = write!(
             full_query,
-            "(?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
+            "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
             base + 1,
             base + 2,
             base + 3,
             base + 4,
             base + 5,
-            base + 6
+            base + 6,
+            base + 7
         );
     }
 
     let mut chunk_stmt = conn.prepare_cached(&full_query)?;
     let mut single_stmt = conn.prepare_cached(
-        "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender, division)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT OR REPLACE INTO participants (bib, last, first, affiliation, gender, division, age)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?;
 
     for chunk in participants.chunks(CHUNK_SIZE) {
@@ -2322,6 +2393,7 @@ fn insert_participants_batch(
                 params.push(&p.affiliation);
                 params.push(&p.gender);
                 params.push(&p.division);
+                params.push(&p.age);
             }
             chunk_stmt.execute(rusqlite::params_from_iter(params))?;
         } else {
@@ -2332,7 +2404,8 @@ fn insert_participants_batch(
                     &p.first,
                     &p.affiliation,
                     &p.gender,
-                    p.division
+                    p.division,
+                    p.age
                 ])?;
             }
         }
@@ -2510,6 +2583,20 @@ mod tests {
             60,
             "announcer_max_list_size must survive a profile save"
         );
+        assert_eq!(
+            db.load_announcer_expiry_minutes().unwrap(),
+            15,
+            "announcer_expiry_minutes defaults to 15"
+        );
+        db.set_announcer_expiry_minutes(30).unwrap();
+        assert_eq!(db.load_announcer_expiry_minutes().unwrap(), 30);
+        db.save_profile("http://z", "t3", DEFAULT_UPDATE_MODE, None)
+            .unwrap();
+        assert_eq!(
+            db.load_announcer_expiry_minutes().unwrap(),
+            30,
+            "announcer_expiry_minutes must survive a profile save"
+        );
     }
 
     #[test]
@@ -2522,6 +2609,7 @@ mod tests {
             affiliation: String::new(),
             gender: "M".to_owned(),
             division: None,
+            age: Some(34),
         }])
         .unwrap();
         db.replace_bib_chips(&[(1i64, "0580".to_owned())]).unwrap();
@@ -2530,6 +2618,8 @@ mod tests {
         assert_eq!(entry.bib, "1");
         assert_eq!(entry.name.as_deref(), Some("B A"));
         assert_eq!(entry.division, None);
+        assert_eq!(entry.gender.as_deref(), Some("M"));
+        assert_eq!(entry.age, Some(34));
     }
 
     #[test]
@@ -2542,6 +2632,8 @@ mod tests {
         assert_eq!(entry.bib, "99");
         assert_eq!(entry.name, None);
         assert_eq!(entry.division, None);
+        assert_eq!(entry.gender, None);
+        assert_eq!(entry.age, None);
         // Re-import replaces wholesale.
         db.replace_participants(&[crate::participants::Participant {
             bib: 5,
@@ -2550,6 +2642,7 @@ mod tests {
             affiliation: "Team".to_owned(),
             gender: "X".to_owned(),
             division: None,
+            age: None,
         }])
         .unwrap();
         db.replace_bib_chips(&[(5, "abc".to_owned())]).unwrap();
@@ -2968,6 +3061,7 @@ mod tests {
             affiliation: String::new(),
             gender: "X".to_owned(),
             division: None,
+            age: None,
         }])
         .unwrap();
         db.replace_bib_chips(&[(1, "0a1b".to_owned())]).unwrap();
@@ -4225,6 +4319,7 @@ mod tests {
                 affiliation: "Team".to_owned(),
                 gender: "M".to_owned(),
                 division: Some(i as i32),
+                age: Some(25),
             })
             .collect();
         let start = std::time::Instant::now();

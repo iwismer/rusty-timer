@@ -22,6 +22,7 @@ fn bench_replace_rd_data() {
                 "F".to_string()
             },
             division: Some((i % 20) as i32),
+            age: Some(20 + (i % 50) as i32),
         });
         chips.push((i as i64, format!("CHIP{:08X}", i)));
     }

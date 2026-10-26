@@ -51,6 +51,8 @@ pub struct ProfileResponse {
     pub announcer_enabled: bool,
     /// Receiver-configured cap on visible rows in the server announcer feed.
     pub announcer_max_list_size: u32,
+    /// Receiver-configured row-expiry window (in minutes) in the server announcer feed.
+    pub announcer_expiry_minutes: u32,
 }
 
 /// Enable or disable the global announcer publish toggle. The P2P reconcile
@@ -80,6 +82,23 @@ pub async fn set_announcer_max_list_size(
             .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     }
     // Other UI/bridge clients hold this in profile state; nudge them to refetch.
+    state.emit_resync();
+    Ok(())
+}
+
+/// Set the receiver-configured row-expiry window (in minutes) on the server
+/// announcer feed. The value is clamped to `1..=1440` and rides the next
+/// announcer push to the server.
+pub async fn set_announcer_expiry_minutes(
+    state: &AppState,
+    expiry_minutes: u32,
+) -> Result<(), ReceiverError> {
+    let clamped = expiry_minutes.clamp(1, 1440);
+    {
+        let db = state.storage.db.lock().await;
+        db.set_announcer_expiry_minutes(clamped)
+            .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    }
     state.emit_resync();
     Ok(())
 }
@@ -226,11 +245,12 @@ pub async fn get_profile(state: &AppState) -> Result<ProfileResponse, ReceiverEr
     .to_owned();
     let (server_url, token) =
         resolved.map_or_else(|| (String::new(), String::new()), |s| (s.url, s.token));
-    let (announcer_enabled, announcer_max_list_size) = {
+    let (announcer_enabled, announcer_max_list_size, announcer_expiry_minutes) = {
         let db = state.storage.db.lock().await;
         (
             db.load_announcer_enabled().unwrap_or(false),
             db.load_announcer_max_list_size().unwrap_or(25),
+            db.load_announcer_expiry_minutes().unwrap_or(15),
         )
     };
     Ok(ProfileResponse {
@@ -240,6 +260,7 @@ pub async fn get_profile(state: &AppState) -> Result<ProfileResponse, ReceiverEr
         server_source,
         announcer_enabled,
         announcer_max_list_size,
+        announcer_expiry_minutes,
     })
 }
 

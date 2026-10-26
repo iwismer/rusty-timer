@@ -31,6 +31,9 @@ pub struct Participant {
     /// `.ppl` format, which has no division field. Joined to a display name via
     /// the `divisions` table on resolve.
     pub division: Option<i32>,
+    /// Participant age (from the Race Director `RUNAGE` column). `None` when
+    /// unknown or for the `.ppl` format.
+    pub age: Option<i32>,
 }
 
 fn split_ppl_fields(line: &str) -> Vec<String> {
@@ -113,6 +116,7 @@ pub fn parse_ppl_line(line: &str) -> Result<Option<Participant>, String> {
         affiliation,
         gender,
         division: None,
+        age: None,
     }))
 }
 
