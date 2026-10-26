@@ -215,6 +215,9 @@ impl StatusServer {
         self.store.set_p2p_endpoint_id(endpoint_id).await;
     }
 
+    pub async fn set_p2p_direct_addrs(&self, addrs: Vec<String>, listen_port: Option<u16>) {
+        self.store.set_p2p_direct_addrs(addrs, listen_port).await;
+    }
     /// Update the P2P session state (does not affect readiness).
     pub async fn set_p2p_connected(&self, connected: bool) {
         self.store.set_p2p_connected(connected).await;
@@ -299,7 +302,6 @@ impl StatusServer {
         self.store.set_display_sender(tx);
     }
 
-    #[cfg(any(feature = "eink", feature = "lcd"))]
     pub async fn set_display_name(&self, name: Option<String>) {
         self.store.set_display_name(name).await;
     }
@@ -989,10 +991,18 @@ async fn wifi_forget_handler<J: JournalAccess + Send + 'static>(
 #[derive(serde::Serialize)]
 struct StatusJsonResponse {
     forwarder_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
     version: String,
     ready: bool,
     ready_reason: Option<String>,
     p2p_connected: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    p2p_endpoint_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    p2p_listen_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    p2p_direct_addrs: Vec<String>,
     restart_needed: bool,
     ups_status: Option<UpsStatusState>,
     server: crate::status_store::ServerDeviceStatus,
@@ -1030,9 +1040,13 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
         .cloned()
         .unwrap_or_else(crate::status_store::ServerDeviceStatus::not_configured);
     let forwarder_id = ss.forwarder_id.clone();
+    let display_name = ss.display_name.clone();
     let ready = ss.is_ready();
     let ready_reason = ss.reason.clone();
     let p2p_connected = ss.p2p_connected();
+    let p2p_endpoint_id = ss.p2p_endpoint_id.clone();
+    let p2p_listen_port = ss.p2p_listen_port;
+    let p2p_direct_addrs = ss.p2p_direct_addrs.clone();
     let restart_needed = ss.restart_needed();
     let ups_status = ss.ups_status().cloned();
     let mut readers: Vec<_> = ss
@@ -1066,10 +1080,14 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
 
     let resp = StatusJsonResponse {
         forwarder_id,
+        display_name,
         version: (*state.version).clone(),
         ready,
         ready_reason,
         p2p_connected,
+        p2p_endpoint_id,
+        p2p_listen_port,
+        p2p_direct_addrs,
         restart_needed,
         ups_status,
         server,

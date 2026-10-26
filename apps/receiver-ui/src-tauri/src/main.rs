@@ -444,6 +444,13 @@ async fn reconnect_server(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
 }
 
 #[tauri::command]
+async fn add_forwarder_by_host(state: State<'_, Arc<AppState>>, host: String) -> CmdResult<String> {
+    control_api::add_forwarder_by_host(&state, host)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn connect_forwarder(state: State<'_, Arc<AppState>>, endpoint_id: String) -> CmdResult<()> {
     control_api::connect_forwarder(&state, endpoint_id)
         .await

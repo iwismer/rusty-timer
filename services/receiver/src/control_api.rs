@@ -68,6 +68,31 @@ pub struct DiscoveredForwarder {
 /// Shared map of discovered forwarders keyed by their endpoint id (string
 /// form). Populated by the discovery task and/or seeded from explicit config.
 pub type DiscoveredForwarders = HashMap<String, DiscoveredForwarder>;
+
+/// Merge two lists of socket addresses without duplicates, ordering local-network
+/// addresses ahead of public WAN addresses so LAN paths are dialed first.
+#[must_use]
+pub(crate) fn merge_priority_addrs(
+    preferred: &[SocketAddr],
+    fallback: &[SocketAddr],
+) -> Vec<SocketAddr> {
+    let mut lan = Vec::new();
+    let mut wan = Vec::new();
+    for &addr in preferred.iter().chain(fallback.iter()) {
+        if addr.ip().is_unspecified() || addr.port() == 0 {
+            continue;
+        }
+        if rt_iroh::is_lan_ip(addr.ip(), true) {
+            if !lan.contains(&addr) {
+                lan.push(addr);
+            }
+        } else if !wan.contains(&addr) {
+            wan.push(addr);
+        }
+    }
+    lan.extend(wan);
+    lan
+}
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot, watch};
 use tracing::warn;
@@ -141,6 +166,12 @@ pub enum ForwarderConnState {
     Disconnected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForwarderConnectionMode {
+    Lan,
+    Internet,
+}
 /// A point-in-time view of one forwarder's connection state.
 ///
 /// Contract for consumers (notably the UI): while `pending == true` the
@@ -186,6 +217,8 @@ struct ForwarderConnectionsFingerprint {
     intent: bool,
     discovered: bool,
     display_name: Option<String>,
+    connection_mode: Option<ForwarderConnectionMode>,
+    local_ip: Option<String>,
     remote_config_available: bool,
     reader_control_available: bool,
     wifi_control_available: bool,
@@ -200,6 +233,7 @@ struct ForwarderConnectionsFingerprint {
 pub(crate) struct ForwarderLiveStatus {
     readers: HashMap<String, ReaderLiveStatus>,
     pub(crate) ups: Option<UpsStatusPayload>,
+    pub(crate) selected_path: Option<rt_iroh::SelectedPath>,
     /// Wire stream ids whose data subscription failed terminally on the live
     /// connection (protocol/data-integrity error), with the failure detail.
     /// Set by [`AppState::mark_forwarder_stream_failed`]; cleared on control
@@ -213,6 +247,44 @@ pub(crate) struct ForwarderLiveStatus {
     pub(crate) override_held_streams: BTreeSet<String>,
 }
 
+pub(crate) fn derive_forwarder_network_info(
+    state: ForwarderConnState,
+    discovered: Option<&DiscoveredForwarder>,
+    live_status: &ForwarderLiveStatus,
+) -> (Option<ForwarderConnectionMode>, Option<String>) {
+    let is_live = state == ForwarderConnState::Connected || state == ForwarderConnState::Subscribed;
+    let connection_mode = if is_live {
+        match live_status.selected_path {
+            Some(rt_iroh::SelectedPath::LocalIp(_)) => Some(ForwarderConnectionMode::Lan),
+            Some(rt_iroh::SelectedPath::PublicIp(_) | rt_iroh::SelectedPath::Relay(_)) => {
+                Some(ForwarderConnectionMode::Internet)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let active_lan_ip = if is_live {
+        match live_status.selected_path {
+            Some(rt_iroh::SelectedPath::LocalIp(addr)) => Some(addr.ip().to_string()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let local_ip = active_lan_ip.or_else(|| {
+        discovered.and_then(|fwd| {
+            fwd.direct_addrs
+                .iter()
+                .find(|addr| rt_iroh::is_lan_ip(addr.ip(), true))
+                .map(|addr| addr.ip().to_string())
+        })
+    });
+
+    (connection_mode, local_ip)
+}
 const FORWARDER_PENDING_GRACE: Duration = Duration::from_secs(5);
 
 pub(crate) fn derive_forwarder_state(
@@ -963,6 +1035,50 @@ impl AppState {
         .await;
     }
 
+    pub async fn merge_discovered_forwarder(
+        &self,
+        endpoint_id: String,
+        display_name: Option<String>,
+        new_addrs: Vec<SocketAddr>,
+    ) -> bool {
+        let mut discovered = self.forwarders.discovered_forwarders.write().await;
+        let clean_name = display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned);
+        let changed = match discovered.get_mut(&endpoint_id) {
+            Some(existing) => {
+                let merged_addrs = merge_priority_addrs(&new_addrs, &existing.direct_addrs);
+                let next_name = clean_name.or_else(|| existing.display_name.clone());
+                if existing.direct_addrs == merged_addrs && existing.display_name == next_name {
+                    false
+                } else {
+                    existing.direct_addrs = merged_addrs;
+                    existing.display_name = next_name;
+                    true
+                }
+            }
+            None => {
+                discovered.insert(
+                    endpoint_id,
+                    DiscoveredForwarder {
+                        display_name: clean_name,
+                        direct_addrs: merge_priority_addrs(&new_addrs, &[]),
+                        streams: Vec::new(),
+                    },
+                );
+                true
+            }
+        };
+        drop(discovered);
+        if changed {
+            self.recompute_aggregate_connection_state().await;
+            self.emit_streams_snapshot().await;
+        }
+        changed
+    }
+
     pub(crate) async fn store_forwarder_catalog(&self, endpoint_id: &str, catalog: &StreamCatalog) {
         let mut discovered = self.forwarders.discovered_forwarders.write().await;
         let forwarder =
@@ -973,6 +1089,14 @@ impl AppState {
                     direct_addrs: Vec::new(),
                     streams: Vec::new(),
                 });
+        if let Some(name) = catalog
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            forwarder.display_name = Some(name.to_owned());
+        }
         let existing = forwarder
             .streams
             .iter()
@@ -1655,6 +1779,20 @@ impl AppState {
         None
     }
 
+    pub(crate) fn update_forwarder_selected_path(
+        &self,
+        endpoint_id: &str,
+        selected_path: Option<rt_iroh::SelectedPath>,
+    ) -> bool {
+        let mut live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
+        let entry = live_statuses.entry(endpoint_id.to_owned()).or_default();
+        if entry.selected_path == selected_path {
+            return false;
+        }
+        entry.selected_path = selected_path;
+        true
+    }
+
     pub(crate) async fn clear_forwarder_live_status(&self, endpoint_id: &str) {
         self.record_forwarder_last_seen(endpoint_id);
         {
@@ -1666,7 +1804,6 @@ impl AppState {
         }
         self.recompute_aggregate_connection_state().await;
     }
-
     pub(crate) fn recompute_aggregate_connection_state_sync_default_trying(&self) {
         let statuses = self.forwarders.forwarder_runtime.lock().unwrap().clone();
         let any_connected = statuses
@@ -1821,6 +1958,11 @@ impl AppState {
                 let snapshot = derive_forwarder_state(runtime, intent);
                 let discovered_forwarder = discovered.get(&endpoint_id);
                 let live_status = live_statuses.get(&endpoint_id).cloned().unwrap_or_default();
+                let (connection_mode, local_ip) = derive_forwarder_network_info(
+                    snapshot.state,
+                    discovered_forwarder,
+                    &live_status,
+                );
                 ForwarderConnectionsFingerprint {
                     endpoint_id: endpoint_id.clone(),
                     state: snapshot.state,
@@ -1829,6 +1971,8 @@ impl AppState {
                     discovered: discovered_forwarder.is_some(),
                     display_name: discovered_forwarder
                         .and_then(|forwarder| forwarder.display_name.clone()),
+                    connection_mode,
+                    local_ip,
                     remote_config_available: config_endpoints.contains(&endpoint_id),
                     reader_control_available: reader_control_endpoints.contains(&endpoint_id),
                     wifi_control_available: wifi_control_endpoints.contains(&endpoint_id),
@@ -2458,6 +2602,7 @@ macro_rules! receiver_command_list {
             get_status() -> "StatusResponse",
             get_connections() -> "ConnectionsResponse",
             reconnect_server() -> "()",
+            add_forwarder_by_host(host: "String") -> "String",
             connect_forwarder(endpoint_id: "String") -> "()",
             disconnect_forwarder(endpoint_id: "String") -> "()",
             reconnect_forwarder(endpoint_id: "String") -> "()",
@@ -4160,6 +4305,7 @@ mod tests {
                             },
                         ],
                     }],
+                    display_name: None,
                 },
             )
             .await;
@@ -4262,6 +4408,7 @@ mod tests {
                             name: Some("Stale Catalog Name".to_owned()),
                         }],
                     }],
+                    display_name: None,
                 },
             )
             .await;
@@ -4314,6 +4461,7 @@ mod tests {
                             },
                         ],
                     }],
+                    display_name: None,
                 },
             )
             .await;

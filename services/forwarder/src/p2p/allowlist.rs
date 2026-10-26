@@ -35,6 +35,12 @@ use rt_iroh::{Connection, EndpointId};
 /// connection after it is removed from the allow-list.
 const REVOKED_ERROR_CODE: u32 = 3;
 
+#[derive(Debug)]
+struct TrackedConnection {
+    connection: Connection,
+    lan_exempt: bool,
+}
+
 /// Shared, mutable allow-list state guarded by a single mutex.
 #[derive(Debug, Default)]
 struct State {
@@ -43,10 +49,15 @@ struct State {
     /// Operator-pinned (static config) receivers. Always allowed; never
     /// revoked or persisted by server snapshots.
     pinned: HashSet<EndpointId>,
+    /// Whether direct local-network IP connections are admitted automatically.
+    allow_lan: bool,
+    /// Whether loopback (`127.0.0.1` / `::1`) counts as a LAN address when
+    /// `allow_lan` is enabled.
+    allow_loopback_as_lan: bool,
     /// Open admitted connections, keyed by remote endpoint id then a per-connection
     /// registration id so multiple connections from one peer are tracked
     /// independently.
-    connections: HashMap<EndpointId, HashMap<u64, Connection>>,
+    connections: HashMap<EndpointId, HashMap<u64, TrackedConnection>>,
     /// Monotonic id allocator for connection registrations.
     next_conn_id: u64,
 }
@@ -106,6 +117,13 @@ impl AllowList {
         self.lock().allowed.contains(endpoint_id)
     }
 
+    /// Configures automatic admission for direct local-network IP connections.
+    pub fn set_allow_lan(&self, allow_lan: bool, allow_loopback_as_lan: bool) {
+        let mut state = self.lock();
+        state.allow_lan = allow_lan;
+        state.allow_loopback_as_lan = allow_loopback_as_lan;
+    }
+
     /// Pins operator-configured receivers: always allowed, never revoked by
     /// [`AllowList::apply_update`], never persisted to the server-snapshot
     /// cache. Intended to be called once at startup; the pinned set itself is
@@ -120,7 +138,7 @@ impl AllowList {
 
     /// Atomically replaces the allowed set with `allowed` ∪ the pinned set,
     /// persisting the server snapshot (`allowed` only, never pinned) and
-    /// force-closing every open connection whose endpoint id was removed.
+    /// force-closing every open non-LAN connection whose endpoint id was removed.
     ///
     /// Returns the revoked endpoint ids; pinned endpoints are never revoked.
     /// Persistence happens before the in-memory swap: if the cache cannot be
@@ -151,8 +169,20 @@ impl AllowList {
             state.allowed = effective;
             let mut connections_to_close = Vec::new();
             for endpoint_id in &revoked {
-                if let Some(connections) = state.connections.remove(endpoint_id) {
-                    connections_to_close.extend(connections.into_values());
+                let mut remove_peer = false;
+                if let Some(connections) = state.connections.get_mut(endpoint_id) {
+                    connections.retain(|_, tracked| {
+                        if tracked.lan_exempt {
+                            true
+                        } else {
+                            connections_to_close.push(tracked.connection.clone());
+                            false
+                        }
+                    });
+                    remove_peer = connections.is_empty();
+                }
+                if remove_peer {
+                    state.connections.remove(endpoint_id);
                 }
             }
             (revoked, connections_to_close)
@@ -164,8 +194,9 @@ impl AllowList {
         Ok(revoked)
     }
 
-    /// Registers `connection` only if `endpoint_id` is still allowed, returning a
-    /// guard that deregisters the connection when dropped.
+    /// Registers `connection` if `endpoint_id` is allowed or arrives over an
+    /// admitted LAN path, returning a guard that deregisters the connection
+    /// when dropped.
     #[must_use]
     pub(crate) fn try_register_connection(
         &self,
@@ -173,23 +204,26 @@ impl AllowList {
         connection: Connection,
     ) -> Option<ConnectionGuard> {
         let mut state = self.lock();
-        if !state.allowed.contains(&endpoint_id) {
+        let is_lan =
+            state.allow_lan && rt_iroh::is_lan_connection(&connection, state.allow_loopback_as_lan);
+        if !state.allowed.contains(&endpoint_id) && !is_lan {
             return None;
         }
         let id = state.next_conn_id;
         state.next_conn_id += 1;
-        state
-            .connections
-            .entry(endpoint_id)
-            .or_default()
-            .insert(id, connection);
+        state.connections.entry(endpoint_id).or_default().insert(
+            id,
+            TrackedConnection {
+                connection,
+                lan_exempt: is_lan,
+            },
+        );
         Some(ConnectionGuard {
             allow_list: self.clone(),
             endpoint_id,
             id,
         })
     }
-
     fn deregister(&self, endpoint_id: EndpointId, id: u64) {
         let mut state = self.lock();
         if let Some(connections) = state.connections.get_mut(&endpoint_id) {
@@ -557,6 +591,39 @@ mod tests {
 
         pinned.close().await;
         server_only.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lan_admission_allows_unknown_local_peer_and_survives_server_update() -> TestResult {
+        let receiver = EndpointBuilder::test([78; 32]).bind().await?;
+        let forwarder = EndpointBuilder::test([79; 32]).bind().await?;
+        let forwarder_addr = forwarder.endpoint_addr().await;
+
+        let allow = AllowList::new(vec![]);
+        allow.set_allow_lan(true, true);
+        let server = tokio::spawn(admission_server(forwarder.clone(), allow.clone()));
+
+        let (connection, reply) =
+            tokio::time::timeout(Duration::from_secs(5), subscribe(&receiver, forwarder_addr))
+                .await??;
+        assert_eq!(&reply, SUBSCRIBE_OK);
+
+        // Even if the peer was temporarily in the server snapshot and then
+        // removed, a LAN-admitted connection must not be force-closed.
+        allow.apply_update([receiver.endpoint_id()])?;
+        allow.apply_update([])?;
+
+        let (mut send, mut recv) = connection.open_bi().await?;
+        send.write_all(SUBSCRIBE).await?;
+        send.finish()?;
+        let mut buf = [0u8; SUBSCRIBE_OK.len()];
+        tokio::time::timeout(Duration::from_secs(5), recv.read_exact(&mut buf)).await??;
+        assert_eq!(&buf, SUBSCRIBE_OK);
+
+        server.abort();
+        receiver.close().await;
+        forwarder.close().await;
         Ok(())
     }
 }

@@ -869,4 +869,52 @@ describe("ConnectionsTab", () => {
       "https://server.example.com/admin",
     );
   });
+
+  it("renders LAN/Internet connection mode and local IP above the endpoint ID", () => {
+    mockState.store.connections.forwarders = [
+      {
+        endpoint_id: "endpoint-lan",
+        display_name: "Finish Forwarder",
+        state: "subscribed",
+        pending: false,
+        connection_mode: "lan",
+        local_ip: "192.168.1.50",
+        subscribed_count: 1,
+        available_count: 1,
+        readers: [],
+        ups: null,
+        restart_needed: null,
+        remote_config_available: true,
+      },
+      {
+        endpoint_id: "endpoint-wan",
+        display_name: "Split Forwarder",
+        state: "connected",
+        pending: false,
+        connection_mode: "internet",
+        local_ip: null,
+        subscribed_count: 0,
+        available_count: 1,
+        readers: [],
+        ups: null,
+        restart_needed: null,
+        remote_config_available: true,
+      },
+    ];
+
+    render(ConnectionsTab);
+
+    expect(
+      screen.getByTestId("forwarder-connection-mode-endpoint-lan"),
+    ).toHaveTextContent("LAN");
+    expect(
+      screen.getByTestId("forwarder-local-ip-endpoint-lan"),
+    ).toHaveTextContent("192.168.1.50");
+    expect(
+      screen.getByTestId("forwarder-connection-mode-endpoint-wan"),
+    ).toHaveTextContent("Internet");
+    expect(
+      screen.queryByTestId("forwarder-local-ip-endpoint-wan"),
+    ).not.toBeInTheDocument();
+  });
 });

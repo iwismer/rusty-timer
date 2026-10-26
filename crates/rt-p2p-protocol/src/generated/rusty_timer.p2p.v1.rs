@@ -88,6 +88,9 @@ pub struct StreamCatalog {
     pub generation: u64,
     #[prost(message, repeated, tag = "2")]
     pub entries: ::prost::alloc::vec::Vec<StreamEntry>,
+    /// Optional operator display name for the forwarder itself.
+    #[prost(string, optional, tag = "3")]
+    pub display_name: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Request to perform a control action against a reader.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

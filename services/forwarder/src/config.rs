@@ -123,6 +123,8 @@ pub struct P2pConfig {
     pub relay_disabled: bool,
     pub discovery_disabled: bool,
     pub max_concurrent_bidi_streams: Option<u32>,
+    pub allow_lan_receivers: bool,
+    pub allow_loopback_as_lan: bool,
     pub static_allowed_receivers: Vec<String>,
     pub allowlist_cache_path: Option<String>,
     pub server_url: Option<String>,
@@ -229,6 +231,7 @@ pub struct RawP2pConfig {
     pub relay_disabled: Option<bool>,
     pub discovery_disabled: Option<bool>,
     pub max_concurrent_bidi_streams: Option<u32>,
+    pub allow_lan_receivers: Option<bool>,
     pub static_allowed_receivers: Option<Vec<String>>,
     pub allowlist_cache_path: Option<String>,
     pub server_url: Option<String>,
@@ -461,14 +464,21 @@ pub fn load_config_from_str(
                         .to_owned(),
                 ));
             }
+            let discovery_disabled = p.discovery_disabled.unwrap_or(false);
+            let allow_lan_receivers = p.allow_lan_receivers.unwrap_or(true);
+            let allow_loopback_as_lan = p.allow_lan_receivers == Some(true)
+                || !discovery_disabled
+                || p.server_url.is_none();
             P2pConfig {
                 enabled,
                 secret_key_path: p.secret_key_path,
                 secret_key_seed_hex: p.secret_key_seed_hex,
                 bind_addr_v4: p.bind_addr_v4.unwrap_or_else(|| "0.0.0.0:0".to_owned()),
                 relay_disabled: p.relay_disabled.unwrap_or(false),
-                discovery_disabled: p.discovery_disabled.unwrap_or(false),
+                discovery_disabled,
                 max_concurrent_bidi_streams: p.max_concurrent_bidi_streams,
+                allow_lan_receivers,
+                allow_loopback_as_lan,
                 static_allowed_receivers: p.static_allowed_receivers.unwrap_or_default(),
                 allowlist_cache_path: p.allowlist_cache_path,
                 server_url: p.server_url,
@@ -486,6 +496,8 @@ pub fn load_config_from_str(
             relay_disabled: false,
             discovery_disabled: false,
             max_concurrent_bidi_streams: None,
+            allow_lan_receivers: true,
+            allow_loopback_as_lan: true,
             static_allowed_receivers: Vec::new(),
             allowlist_cache_path: None,
             server_url: None,

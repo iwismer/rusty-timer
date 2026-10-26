@@ -214,4 +214,18 @@ describe("getOverallHealth", () => {
     };
     expect(getOverallHealth()).toBe("warn");
   });
+
+  it("returns ok when no server is configured but local LAN forwarders are connected", async () => {
+    const { getOverallHealth, store } = await import("./store.svelte");
+
+    store.connections = {
+      server: server({
+        configured: false,
+        reachable: null,
+        approval_state: null,
+      }),
+      forwarders: [forwarder({ endpoint_id: "fwd-lan", state: "subscribed" })],
+    };
+    expect(getOverallHealth()).toBe("ok");
+  });
 });

@@ -228,11 +228,15 @@ export interface UpsStatusPayload {
   runtime_seconds: number;
 }
 
+export type ForwarderConnectionMode = "lan" | "internet";
+
 export interface ForwarderConnectionStatus {
   endpoint_id: string;
   display_name: string | null;
   state: ForwarderConnState;
   pending: boolean;
+  connection_mode?: ForwarderConnectionMode | null;
+  local_ip?: string | null;
   subscribed_count: number;
   available_count: number;
   epoch_reads?: number | null;
@@ -442,6 +446,10 @@ export async function reconnectServer(): Promise<void> {
 
 export async function getConnections(): Promise<ConnectionsResponse> {
   return invoke<ConnectionsResponse>("get_connections");
+}
+
+export async function addForwarderByHost(host: string): Promise<string> {
+  return invoke<string>("add_forwarder_by_host", { host });
 }
 
 export async function connectForwarder(endpointId: string): Promise<void> {

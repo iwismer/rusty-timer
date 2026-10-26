@@ -188,3 +188,14 @@ CREATE INDEX IF NOT EXISTS idx_bib_chips_bib ON bib_chips (bib);
 CREATE TABLE IF NOT EXISTS announcer_publish_streams (
     stream_id TEXT PRIMARY KEY
 );
+
+-- Unified cache of discovered forwarders (learned from server, LAN discovery,
+-- or manual IP/hostname entry), keyed by endpoint_id so offline startups and
+-- hybrid server+LAN operation share a single forwarder identity without
+-- duplicates.
+CREATE TABLE IF NOT EXISTS known_forwarders (
+    endpoint_id       TEXT PRIMARY KEY,
+    display_name      TEXT,
+    direct_addrs_json TEXT NOT NULL DEFAULT '[]',
+    manual_host       TEXT
+);

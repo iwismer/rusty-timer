@@ -76,6 +76,8 @@ message StreamCatalog {
   // Monotonic generation; matches HelloOk.catalog_generation at open time.
   uint64 generation = 1;
   repeated StreamEntry entries = 2;
+  // Optional operator display name for the forwarder itself.
+  optional string display_name = 3;
 }
 
 // Request to perform a control action against a reader.

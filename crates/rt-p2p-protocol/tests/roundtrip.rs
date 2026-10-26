@@ -83,6 +83,7 @@ fn stream_catalog_with_epoch_summaries_round_trips() {
                 },
             ],
         }],
+        display_name: Some("Main Forwarder".to_owned()),
     };
 
     let mut buf = Vec::new();

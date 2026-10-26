@@ -106,6 +106,14 @@ pub struct Profile {
     pub receiver_id: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownForwarderRecord {
+    pub endpoint_id: String,
+    pub display_name: Option<String>,
+    pub direct_addrs: Vec<String>,
+    pub manual_host: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamSubscription {
     pub forwarder_endpoint_id: String,
     pub stream_id: String,
@@ -114,7 +122,6 @@ pub struct StreamSubscription {
     pub forwarder_id: Option<String>,
     pub reader_ip: Option<String>,
 }
-
 /// Canonical earliest-epoch override keyed by `stream_id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamEarliestEpoch {
@@ -1680,6 +1687,106 @@ impl Db {
         Ok(map)
     }
 
+    pub fn load_known_forwarders(&self) -> DbResult<Vec<KnownForwarderRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT endpoint_id, display_name, direct_addrs_json, manual_host
+             FROM known_forwarders
+             ORDER BY endpoint_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let endpoint_id: String = row.get(0)?;
+            let display_name: Option<String> = row.get(1)?;
+            let direct_addrs_json: String = row.get(2)?;
+            let manual_host: Option<String> = row.get(3)?;
+            let direct_addrs: Vec<String> =
+                serde_json::from_str(&direct_addrs_json).unwrap_or_default();
+            Ok(KnownForwarderRecord {
+                endpoint_id,
+                display_name,
+                direct_addrs,
+                manual_host,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn upsert_known_forwarder(&self, record: &KnownForwarderRecord) -> DbResult<()> {
+        let existing: Option<(Option<String>, String, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT display_name, direct_addrs_json, manual_host
+                 FROM known_forwarders
+                 WHERE endpoint_id = ?1",
+                [&record.endpoint_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+
+        let (prev_display, prev_addrs_json, prev_host) =
+            existing.unwrap_or_else(|| (None, "[]".to_owned(), None));
+        let prev_addrs: Vec<String> = serde_json::from_str(&prev_addrs_json).unwrap_or_default();
+        let mut merged_addrs = Vec::new();
+        for addr in record.direct_addrs.iter().chain(prev_addrs.iter()) {
+            let trimmed = addr.trim();
+            if !trimmed.is_empty() && !merged_addrs.iter().any(|a| a == trimmed) {
+                merged_addrs.push(trimmed.to_owned());
+            }
+        }
+        let display_name = record
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+            .or(prev_display);
+        let manual_host = record
+            .manual_host
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+            .or(prev_host);
+        let addrs_json = serde_json::to_string(&merged_addrs)?;
+
+        self.conn.execute(
+            "INSERT INTO known_forwarders (endpoint_id, display_name, direct_addrs_json, manual_host)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(endpoint_id) DO UPDATE SET
+                 display_name = excluded.display_name,
+                 direct_addrs_json = excluded.direct_addrs_json,
+                 manual_host = excluded.manual_host",
+            rusqlite::params![record.endpoint_id, display_name, addrs_json, manual_host],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_known_forwarder(&self, endpoint_id: &str) -> DbResult<bool> {
+        let count = self.conn.execute(
+            "DELETE FROM known_forwarders WHERE endpoint_id = ?1",
+            [endpoint_id],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn clear_known_forwarder_manual_host(&self, endpoint_id: &str) -> DbResult<bool> {
+        let count = self.conn.execute(
+            "UPDATE known_forwarders SET manual_host = NULL WHERE endpoint_id = ?1",
+            [endpoint_id],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn reassign_known_forwarder_manual_host(
+        &self,
+        manual_host: &str,
+        new_endpoint_id: &str,
+    ) -> DbResult<usize> {
+        let count = self.conn.execute(
+            "UPDATE known_forwarders SET manual_host = NULL WHERE manual_host = ?1 AND endpoint_id != ?2",
+            [manual_host, new_endpoint_id],
+        )?;
+        Ok(count)
+    }
     pub fn delete_all_cursors(&self) -> DbResult<usize> {
         let count = self.conn.execute("DELETE FROM cursors", [])?;
         Ok(count)
@@ -1768,6 +1875,7 @@ impl Db {
         tx.execute_batch("DELETE FROM subscriptions")?;
         tx.execute_batch("DELETE FROM stream_event_types")?;
         tx.execute_batch("DELETE FROM forwarder_intent")?;
+        tx.execute_batch("DELETE FROM known_forwarders")?;
         tx.execute_batch("DELETE FROM announcer_publish_streams")?;
         tx.execute_batch("DELETE FROM participants")?;
         tx.execute_batch("DELETE FROM bib_chips")?;
@@ -4299,6 +4407,55 @@ mod tests {
             .load_raw_export_events_for_stream_epochs(&filter)
             .unwrap();
         assert_eq!(multi_events.len(), 3); // 2 rows from s1 with epoch 1, 1 row from s2 (all epochs)
+    }
+
+    #[test]
+    fn known_forwarders_crud_and_manual_host_reassignment() {
+        let db = Db::open_in_memory().unwrap();
+        let record1 = KnownForwarderRecord {
+            endpoint_id: "endpoint-1".to_owned(),
+            display_name: Some("Finish Box".to_owned()),
+            direct_addrs: vec!["192.168.1.50:7447".to_owned()],
+            manual_host: Some("192.168.1.50:8080".to_owned()),
+        };
+        db.upsert_known_forwarder(&record1).unwrap();
+
+        let list = db.load_known_forwarders().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].endpoint_id, "endpoint-1");
+        assert_eq!(list[0].manual_host.as_deref(), Some("192.168.1.50:8080"));
+
+        // Reassigning the same manual host to endpoint-2 clears it on endpoint-1
+        let reassigned = db
+            .reassign_known_forwarder_manual_host("192.168.1.50:8080", "endpoint-2")
+            .unwrap();
+        assert_eq!(reassigned, 1);
+
+        let record2 = KnownForwarderRecord {
+            endpoint_id: "endpoint-2".to_owned(),
+            display_name: Some("Replaced Box".to_owned()),
+            direct_addrs: vec!["192.168.1.50:7447".to_owned()],
+            manual_host: Some("192.168.1.50:8080".to_owned()),
+        };
+        db.upsert_known_forwarder(&record2).unwrap();
+
+        let list = db.load_known_forwarders().unwrap();
+        assert_eq!(list.len(), 2);
+        let ep1 = list.iter().find(|r| r.endpoint_id == "endpoint-1").unwrap();
+        let ep2 = list.iter().find(|r| r.endpoint_id == "endpoint-2").unwrap();
+        assert_eq!(ep1.manual_host, None);
+        assert_eq!(ep2.manual_host.as_deref(), Some("192.168.1.50:8080"));
+
+        // Explicitly clearing manual_host on endpoint-2
+        assert!(db.clear_known_forwarder_manual_host("endpoint-2").unwrap());
+        let list = db.load_known_forwarders().unwrap();
+        let ep2_cleared = list.iter().find(|r| r.endpoint_id == "endpoint-2").unwrap();
+        assert_eq!(ep2_cleared.manual_host, None);
+
+        // Removal
+        assert!(db.remove_known_forwarder("endpoint-1").unwrap());
+        assert!(!db.remove_known_forwarder("endpoint-1").unwrap());
+        assert_eq!(db.load_known_forwarders().unwrap().len(), 1);
     }
 
     #[test]

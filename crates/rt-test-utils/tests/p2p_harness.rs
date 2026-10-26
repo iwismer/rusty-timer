@@ -42,6 +42,7 @@ async fn run_harness_self_test() {
             hardware_reader_id: "R1".to_owned(),
             epoch_summaries: Vec::new(),
         }],
+        display_name: None,
     };
     let subscribe_ok = SubscribeOk {
         stream_id: stream_id.clone(),
@@ -182,6 +183,7 @@ async fn p2p_harness_data_fault_drop_outbound_suppresses_subscribe_response() {
                 hardware_reader_id: "R2".to_owned(),
                 epoch_summaries: Vec::new(),
             }],
+            display_name: None,
         },
         subscribe_ok: SubscribeOk {
             stream_id: stream_id.clone(),
@@ -280,6 +282,7 @@ async fn run_partition_ack_test() {
                 hardware_reader_id: "R3".to_owned(),
                 epoch_summaries: Vec::new(),
             }],
+            display_name: None,
         },
         subscribe_ok: SubscribeOk {
             stream_id: stream_id.clone(),
