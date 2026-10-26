@@ -228,11 +228,15 @@ export interface UpsStatusPayload {
   runtime_seconds: number;
 }
 
+export type ForwarderConnectionMode = "lan" | "internet";
+
 export interface ForwarderConnectionStatus {
   endpoint_id: string;
   display_name: string | null;
   state: ForwarderConnState;
   pending: boolean;
+  connection_mode?: ForwarderConnectionMode | null;
+  local_ip?: string | null;
   subscribed_count: number;
   available_count: number;
   epoch_reads?: number | null;

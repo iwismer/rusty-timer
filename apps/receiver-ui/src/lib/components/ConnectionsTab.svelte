@@ -691,10 +691,33 @@
                 {/if}
               {/snippet}
 
+              {#if forwarder.connection_mode || forwarder.local_ip}
+                <div
+                  data-testid={`forwarder-network-info-${forwarder.endpoint_id}`}
+                  class="mb-1 flex flex-wrap items-center gap-2 text-xs"
+                >
+                  {#if forwarder.connection_mode}
+                    <span
+                      data-testid={`forwarder-connection-mode-${forwarder.endpoint_id}`}
+                      class="inline-flex items-center rounded border border-border bg-surface-2 px-1.5 py-0.5 text-[11px] font-medium text-text-secondary"
+                    >
+                      {forwarder.connection_mode === "lan" ? "LAN" : "Internet"}
+                    </span>
+                  {/if}
+                  {#if forwarder.local_ip}
+                    <span
+                      data-testid={`forwarder-local-ip-${forwarder.endpoint_id}`}
+                      class="font-mono text-text-secondary"
+                    >
+                      {forwarder.local_ip}
+                    </span>
+                  {/if}
+                </div>
+              {/if}
+
               <p class="truncate font-mono text-xs text-text-muted">
                 {forwarder.endpoint_id}
               </p>
-
               {#if forwarder.remote_config_available === true || forwarder.wifi_control_available === true || showConnect(forwarder) || showDisconnect(forwarder) || showReconnect(forwarder)}
                 <div class="mt-3 flex flex-wrap items-center gap-2">
                   {#if forwarder.remote_config_available === true}

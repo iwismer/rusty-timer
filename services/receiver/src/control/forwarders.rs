@@ -3,9 +3,10 @@
 
 use crate::control_api::{
     AppState, ConfigCommand, DiscoveredForwarders, FORWARDER_CONFIG_TIMEOUT,
-    FORWARDER_WIFI_TIMEOUT, ForwarderConnState, ForwarderLiveStatus, ForwarderRuntimeStatus,
-    ReaderCommand, ReaderLiveStatus, UpsStatusPayload, WifiCommand, derive_forwarder_state,
-    optional_non_empty, sorted_reader_statuses, subscription_local_ports,
+    FORWARDER_WIFI_TIMEOUT, ForwarderConnState, ForwarderConnectionMode, ForwarderLiveStatus,
+    ForwarderRuntimeStatus, ReaderCommand, ReaderLiveStatus, UpsStatusPayload, WifiCommand,
+    derive_forwarder_network_info, derive_forwarder_state, optional_non_empty,
+    sorted_reader_statuses, subscription_local_ports,
 };
 use crate::error::ReceiverError;
 use rt_p2p_protocol::{ReaderControlResponse, ReaderInfo, WifiControlRequest, WifiControlResponse};
@@ -22,6 +23,10 @@ pub struct ForwarderConnectionStatus {
     pub display_name: Option<String>,
     pub state: ForwarderConnState,
     pub pending: bool,
+    #[serde(default)]
+    pub connection_mode: Option<ForwarderConnectionMode>,
+    #[serde(default)]
+    pub local_ip: Option<String>,
     pub subscribed_count: usize,
     pub available_count: usize,
     pub epoch_reads: Option<i64>,
@@ -216,11 +221,15 @@ pub(crate) fn assemble_forwarder_connection_statuses(
                 .get(&endpoint_id)
                 .map(|last_seen| last_seen.elapsed().as_secs())
         };
+        let (connection_mode, local_ip) =
+            derive_forwarder_network_info(snapshot.state, discovered_forwarder, &live_status);
         forwarders.push(ForwarderConnectionStatus {
             endpoint_id: endpoint_id.clone(),
             display_name: discovered_forwarder.and_then(|forwarder| forwarder.display_name.clone()),
             state: snapshot.state,
             pending: snapshot.pending,
+            connection_mode,
+            local_ip,
             subscribed_count: subscribed_counts.get(&endpoint_id).copied().unwrap_or(0),
             available_count: discovered_forwarder.map_or(0, |forwarder| forwarder.streams.len()),
             epoch_reads,

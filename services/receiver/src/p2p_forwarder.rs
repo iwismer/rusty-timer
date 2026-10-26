@@ -293,6 +293,17 @@ async fn run_connected_forwarder(
     synced_generation: &AtomicU64,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) {
+    let crate::p2p_session::ControlSession {
+        connection,
+        hello_ok,
+        catalog,
+        mut control_send,
+        control_recv,
+        ..
+    } = session;
+    reporter
+        .app_state()
+        .update_forwarder_selected_path(endpoint_id, rt_iroh::selected_transport_path(&connection));
     let _control_guard = reporter.on_control_connected(endpoint_id).await;
     let mut data_tasks = HashMap::new();
     // Streams whose data task ended with a terminal (non-retryable) error on
@@ -307,16 +318,6 @@ async fn run_connected_forwarder(
     // Wire stream ids currently held by an unresolvable earliest-epoch
     // override on THIS connection (fail closed; see sync_data_tasks).
     let mut held_overrides = HashSet::new();
-
-    let crate::p2p_session::ControlSession {
-        connection,
-        hello_ok,
-        catalog,
-        mut control_send,
-        control_recv,
-        ..
-    } = session;
-
     // Remote-config bridge: when the negotiated session advertises
     // `CAP_REMOTE_CONFIG`, register an mpsc sender so `&AppState` control-API
     // commands can reach this live session. The request write happens in the
@@ -533,6 +534,12 @@ async fn run_connected_forwarder(
                 prune_expired_pending_config(&mut pending_config, now);
                 prune_expired_pending_reader(&mut pending_reader, now);
                 prune_expired_pending_wifi(&mut pending_wifi, now);
+                if reporter.app_state().update_forwarder_selected_path(
+                    endpoint_id,
+                    rt_iroh::selected_transport_path(&connection),
+                ) {
+                    recompute_notify.notify_one();
+                }
                 // Re-attempt held override streams: a ReaderStatus frame may
                 // have made the override's epoch resolvable since the last
                 // sync (the catalog itself is fixed per connection). Also

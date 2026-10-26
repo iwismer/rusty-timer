@@ -166,6 +166,12 @@ pub enum ForwarderConnState {
     Disconnected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForwarderConnectionMode {
+    Lan,
+    Internet,
+}
 /// A point-in-time view of one forwarder's connection state.
 ///
 /// Contract for consumers (notably the UI): while `pending == true` the
@@ -211,6 +217,8 @@ struct ForwarderConnectionsFingerprint {
     intent: bool,
     discovered: bool,
     display_name: Option<String>,
+    connection_mode: Option<ForwarderConnectionMode>,
+    local_ip: Option<String>,
     remote_config_available: bool,
     reader_control_available: bool,
     wifi_control_available: bool,
@@ -225,6 +233,7 @@ struct ForwarderConnectionsFingerprint {
 pub(crate) struct ForwarderLiveStatus {
     readers: HashMap<String, ReaderLiveStatus>,
     pub(crate) ups: Option<UpsStatusPayload>,
+    pub(crate) selected_path: Option<rt_iroh::SelectedPath>,
     /// Wire stream ids whose data subscription failed terminally on the live
     /// connection (protocol/data-integrity error), with the failure detail.
     /// Set by [`AppState::mark_forwarder_stream_failed`]; cleared on control
@@ -238,6 +247,44 @@ pub(crate) struct ForwarderLiveStatus {
     pub(crate) override_held_streams: BTreeSet<String>,
 }
 
+pub(crate) fn derive_forwarder_network_info(
+    state: ForwarderConnState,
+    discovered: Option<&DiscoveredForwarder>,
+    live_status: &ForwarderLiveStatus,
+) -> (Option<ForwarderConnectionMode>, Option<String>) {
+    let is_live = state == ForwarderConnState::Connected || state == ForwarderConnState::Subscribed;
+    let connection_mode = if is_live {
+        match live_status.selected_path {
+            Some(rt_iroh::SelectedPath::LocalIp(_)) => Some(ForwarderConnectionMode::Lan),
+            Some(rt_iroh::SelectedPath::PublicIp(_) | rt_iroh::SelectedPath::Relay(_)) => {
+                Some(ForwarderConnectionMode::Internet)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let active_lan_ip = if is_live {
+        match live_status.selected_path {
+            Some(rt_iroh::SelectedPath::LocalIp(addr)) => Some(addr.ip().to_string()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let local_ip = active_lan_ip.or_else(|| {
+        discovered.and_then(|fwd| {
+            fwd.direct_addrs
+                .iter()
+                .find(|addr| rt_iroh::is_lan_ip(addr.ip(), true))
+                .map(|addr| addr.ip().to_string())
+        })
+    });
+
+    (connection_mode, local_ip)
+}
 const FORWARDER_PENDING_GRACE: Duration = Duration::from_secs(5);
 
 pub(crate) fn derive_forwarder_state(
@@ -1732,6 +1779,20 @@ impl AppState {
         None
     }
 
+    pub(crate) fn update_forwarder_selected_path(
+        &self,
+        endpoint_id: &str,
+        selected_path: Option<rt_iroh::SelectedPath>,
+    ) -> bool {
+        let mut live_statuses = self.forwarders.forwarder_live_status.lock().unwrap();
+        let entry = live_statuses.entry(endpoint_id.to_owned()).or_default();
+        if entry.selected_path == selected_path {
+            return false;
+        }
+        entry.selected_path = selected_path;
+        true
+    }
+
     pub(crate) async fn clear_forwarder_live_status(&self, endpoint_id: &str) {
         self.record_forwarder_last_seen(endpoint_id);
         {
@@ -1743,7 +1804,6 @@ impl AppState {
         }
         self.recompute_aggregate_connection_state().await;
     }
-
     pub(crate) fn recompute_aggregate_connection_state_sync_default_trying(&self) {
         let statuses = self.forwarders.forwarder_runtime.lock().unwrap().clone();
         let any_connected = statuses
@@ -1898,6 +1958,11 @@ impl AppState {
                 let snapshot = derive_forwarder_state(runtime, intent);
                 let discovered_forwarder = discovered.get(&endpoint_id);
                 let live_status = live_statuses.get(&endpoint_id).cloned().unwrap_or_default();
+                let (connection_mode, local_ip) = derive_forwarder_network_info(
+                    snapshot.state,
+                    discovered_forwarder,
+                    &live_status,
+                );
                 ForwarderConnectionsFingerprint {
                     endpoint_id: endpoint_id.clone(),
                     state: snapshot.state,
@@ -1906,6 +1971,8 @@ impl AppState {
                     discovered: discovered_forwarder.is_some(),
                     display_name: discovered_forwarder
                         .and_then(|forwarder| forwarder.display_name.clone()),
+                    connection_mode,
+                    local_ip,
                     remote_config_available: config_endpoints.contains(&endpoint_id),
                     reader_control_available: reader_control_endpoints.contains(&endpoint_id),
                     wifi_control_available: wifi_control_endpoints.contains(&endpoint_id),
