@@ -4506,7 +4506,15 @@ mod tests {
         let elapsed_chips = start.elapsed();
 
         eprintln!("REMAINDER_BENCHMARK_RESULTS (999 items x 100 iterations):");
-        eprintln!("replace_participants total: {:?}, avg per call: {:?}", elapsed_participants, elapsed_participants / iterations);
-        eprintln!("replace_bib_chips total: {:?}, avg per call: {:?}", elapsed_chips, elapsed_chips / iterations);
+        eprintln!(
+            "replace_participants total: {:?}, avg per call: {:?}",
+            elapsed_participants,
+            elapsed_participants / iterations
+        );
+        eprintln!(
+            "replace_bib_chips total: {:?}, avg per call: {:?}",
+            elapsed_chips,
+            elapsed_chips / iterations
+        );
     }
 }
