@@ -543,10 +543,7 @@ fn handle_get_date_time(state: &EmulatedReaderState, reader_id: u8) -> Vec<Strin
             // During the ~500ms window before rollover, the reader shows the pre-SET second
             // with centiseconds counting up from ~52 (0x34).
             let cs = (52 + elapsed_ms / 10).min(99) as u8;
-            (
-                pending.pre_set_local_time + chrono::Duration::milliseconds(elapsed_ms),
-                cs,
-            )
+            (pending.pre_set_local_time, cs)
         }
         _ => {
             let now = Local::now() + chrono::Duration::milliseconds(state.clock_offset_ms);
@@ -812,9 +809,15 @@ fn handle_pattern_query_or_write(
     if is_query {
         vec![build_response_frame(reader_id, instruction, pattern)]
     } else {
-        if data.len() >= 8 {
-            pattern.copy_from_slice(&data[..8]);
+        if data.len() < 8 {
+            eprintln!(
+                "[emulator] instruction 0x{:02x}: insufficient data ({} bytes, need 8)",
+                instruction,
+                data.len()
+            );
+            return vec![];
         }
+        pattern.copy_from_slice(&data[..8]);
         vec![build_response_frame(reader_id, instruction, &[])]
     }
 }
@@ -1065,14 +1068,24 @@ mod tests {
     #[test]
     fn handle_get_tag_message_format_reflects_tto() {
         let mut state = make_test_state();
-        state.set_tto_enabled(true);
+
+        // 1. TTO disabled (default)
         let frame = cmd_to_frame(&Command::GetTagMessageFormat);
         let responses = handle_control_frame(&mut state, &frame);
         assert_eq!(responses.len(), 1);
         let parsed = parse_response(responses[0].trim_end().as_bytes()).unwrap();
         let fmt = decode_tag_message_format(&parsed).unwrap();
-        assert!(fmt.tto_enabled());
-        assert_eq!(fmt.field_mask & 0x80, 0x80);
+        assert!(!fmt.tto_enabled());
+        assert_eq!(fmt.field_mask, 0x7f);
+
+        // 2. TTO enabled
+        state.set_tto_enabled(true);
+        let responses_tto = handle_control_frame(&mut state, &frame);
+        assert_eq!(responses_tto.len(), 1);
+        let parsed_tto = parse_response(responses_tto[0].trim_end().as_bytes()).unwrap();
+        let fmt_tto = decode_tag_message_format(&parsed_tto).unwrap();
+        assert!(fmt_tto.tto_enabled());
+        assert_eq!(fmt_tto.field_mask, 0xff);
     }
 
     #[test]
