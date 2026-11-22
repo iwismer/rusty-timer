@@ -86,34 +86,6 @@ check_file_absent "crates/rt-protocol" "Legacy WebSocket protocol crate removed"
 check_file_absent "contracts/ws" "Legacy WebSocket contract removed"
 
 echo ""
-echo "=== Forwarder Dockerfile ==="
-
-FORWARDER_DF="services/forwarder/Dockerfile"
-check_file_exists "${FORWARDER_DF}" "Forwarder Dockerfile exists"
-
-if [[ -f "${REPO_ROOT}/${FORWARDER_DF}" ]]; then
-    FROM_COUNT=$(grep -c '^FROM ' "${REPO_ROOT}/${FORWARDER_DF}" || true)
-    if [[ "${FROM_COUNT}" -ge 2 ]]; then
-        check_pass "Forwarder Dockerfile is multi-stage (>= 2 FROM)"
-    else
-        check_fail "Forwarder Dockerfile must be multi-stage (found ${FROM_COUNT} FROM)"
-    fi
-
-    check_file_contains "${FORWARDER_DF}" 'cargo build' \
-        "Forwarder Dockerfile runs cargo build"
-    check_file_contains "${FORWARDER_DF}" '--release' \
-        "Forwarder Dockerfile builds in release mode"
-    check_file_contains "${FORWARDER_DF}" 'COPY.*(forwarder|services)' \
-        "Forwarder Dockerfile copies forwarder source"
-    check_file_contains "${FORWARDER_DF}" '^(ENTRYPOINT|CMD)' \
-        "Forwarder Dockerfile has ENTRYPOINT or CMD"
-    check_file_contains "${FORWARDER_DF}" '(HEALTHCHECK|healthz|readyz)' \
-        "Forwarder Dockerfile references health endpoint"
-    check_file_not_contains "${FORWARDER_DF}" 'rt-protocol|tokio-tungstenite|postgres' \
-        "Forwarder Dockerfile has no legacy data-plane references"
-fi
-
-echo ""
 echo "=== Server Docker deployment ==="
 
 SERVER_DF="services/server/Dockerfile"

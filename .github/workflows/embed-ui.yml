@@ -5,8 +5,10 @@ on:
     branches: [main]
     paths:
       - "apps/forwarder-ui/**"
+      - "apps/server-ui/**"
       - "apps/shared-ui/**"
       - "services/forwarder/**"
+      - "services/server/**"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/embed-ui.yml"
@@ -16,8 +18,10 @@ on:
     branches: [main]
     paths:
       - "apps/forwarder-ui/**"
+      - "apps/server-ui/**"
       - "apps/shared-ui/**"
       - "services/forwarder/**"
+      - "services/server/**"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/embed-ui.yml"
@@ -37,6 +41,7 @@ jobs:
     runs-on: self-hosted
     outputs:
       forwarder: ${{ steps.filter.outputs.forwarder }}
+      server: ${{ steps.filter.outputs.server }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -50,6 +55,12 @@ jobs:
               - "apps/forwarder-ui/**"
               - "apps/shared-ui/**"
               - "services/forwarder/**"
+              - "package.json"
+              - "package-lock.json"
+            server:
+              - "apps/server-ui/**"
+              - "apps/shared-ui/**"
+              - "services/server/**"
               - "package.json"
               - "package-lock.json"
 
@@ -84,3 +95,38 @@ jobs:
 
       - name: Build and test forwarder with embedded UI
         run: cargo test -p forwarder --features embed-ui --test ui_embed_fallback
+
+  server-embed-ui:
+    name: Server embed-ui build
+    needs: changes
+    if: needs.changes.outputs.server == 'true'
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Install Rollup Linux optional dependency workaround
+        if: runner.os == 'Linux'
+        run: npm install --no-save @rollup/rollup-linux-x64-gnu lightningcss-linux-x64-gnu @tailwindcss/oxide-linux-x64-gnu
+
+      - name: Build server UI assets
+        run: npm run build --workspace apps/server-ui
+
+      - name: Build and test server with embedded UI
+        run: cargo test -p server --features embed-ui --lib
